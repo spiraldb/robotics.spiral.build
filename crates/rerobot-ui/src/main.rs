@@ -12,11 +12,14 @@
 
 mod api;
 mod app;
-mod armview;
 mod cameras;
 mod control;
+mod icons;
+mod modes;
+mod scene;
 mod setup;
 mod state;
+mod viewport;
 
 fn main() {
     dioxus::launch(app::App);

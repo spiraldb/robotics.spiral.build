@@ -152,6 +152,12 @@ pub struct TelemetryFrame {
     pub sequence: u64,
     /// Measured rate of the hardware control loop.
     pub loop_hz: f64,
+    /// Requested rate of the hardware control loop.
+    ///
+    /// Keeping the target beside the measurement lets operators distinguish a
+    /// deliberately slow configuration from a loop that cannot keep up with
+    /// its motor buses.
+    pub target_hz: f64,
     pub robots: Vec<RobotTelemetry>,
 }
 
@@ -179,6 +185,13 @@ pub struct JointTelemetry {
     pub normalized: Option<f64>,
     /// Last raw position commanded to this joint, when it is being driven.
     pub goal_raw: Option<i64>,
+    /// Final calibrated target before the controller's safety ramp.
+    pub target_raw: Option<i64>,
+    /// Final target in degrees from the calibrated center.
+    ///
+    /// This is carried explicitly because encoder direction is part of the
+    /// calibration and cannot be reconstructed from [`JointRange`] alone.
+    pub target_degrees: Option<f64>,
     pub range: Option<JointRange>,
 }
 

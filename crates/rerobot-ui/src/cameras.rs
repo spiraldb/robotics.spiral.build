@@ -1,70 +1,50 @@
-//! Live camera previews.
+//! Camera feeds are first-class views in the central workspace.
 
 use dioxus::prelude::*;
 use rerobot_core::api::CameraStatus;
 
 use crate::api;
-use crate::state::studio;
+use crate::icons::Expand;
+use crate::state::{Selection, studio};
 
+/// Live views from every camera assigned to the focused robot.
 #[component]
-pub fn CamerasTab() -> Element {
+pub fn CameraWorkspace() -> Element {
     let studio = studio();
-    let cameras = studio.snapshot.read().cameras.clone();
-    let mut refreshing = use_signal(|| false);
+    let Some(robot) = studio.focused() else {
+        return rsx! {};
+    };
+    if robot.cameras.is_empty() {
+        return rsx! {};
+    }
 
-    // Which robots use which camera, so a preview says what it is looking at.
-    let assignments = studio
-        .snapshot
-        .read()
-        .robots
-        .iter()
-        .flat_map(|robot| {
-            robot
-                .cameras
-                .iter()
-                .map(|camera| (camera.id.clone(), format!("{}: {}", robot.id, camera.name)))
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
+    let known = studio.snapshot.read().cameras.clone();
+    let mut maximized = use_signal(|| None::<String>);
+    let robot_id = robot.id.clone();
 
     rsx! {
-        div { class: "flex flex-col gap-4",
-            div { class: "flex flex-wrap items-center gap-3",
-                h2 { class: "text-base font-semibold", "Cameras" }
-                p { class: "flex-1 text-sm text-slate-500 dark:text-slate-400",
-                    "Streams start when a preview is on screen and stop shortly after it leaves."
-                }
-                button {
-                    r#type: "button",
-                    class: "btn btn-ghost",
-                    disabled: refreshing(),
-                    onclick: move |_| {
-                        refreshing.set(true);
-                        spawn(async move {
-                            if let Err(error) = api::post("/api/cameras/refresh").await {
-                                studio.report(error);
+        section {
+            class: if maximized.read().is_some() { "camera-workspace camera-workspace-maximized" } else { "camera-workspace" },
+            "aria-label": "Camera views for {robot.id}",
+            for binding in robot.cameras.clone() {
+                if maximized.read().as_ref().is_none_or(|role| role == &binding.name) {
+                    CameraView {
+                        key: "{binding.name}",
+                        robot: robot_id.clone(),
+                        role: binding.name.clone(),
+                        device: binding.id.clone(),
+                        status: known.iter().find(|camera| camera.id == binding.id).cloned(),
+                        maximized: maximized.read().as_ref() == Some(&binding.name),
+                        on_maximize: {
+                            let role = binding.name.clone();
+                            move |_| {
+                                if maximized.read().as_ref() == Some(&role) {
+                                    maximized.set(None);
+                                } else {
+                                    maximized.set(Some(role.clone()));
+                                }
                             }
-                            refreshing.set(false);
-                        });
-                    },
-                    {if refreshing() { "Scanning…" } else { "Rescan" }}
-                }
-            }
-
-            if cameras.is_empty() {
-                p { class: "card p-8 text-center text-sm text-slate-500 dark:text-slate-400",
-                    "No cameras detected. Plug one in and rescan."
-                }
-            }
-            div { class: "grid gap-4 md:grid-cols-2 xl:grid-cols-3",
-                for camera in cameras {
-                    CameraCard {
-                        key: "{camera.id}",
-                        assigned: assignments.iter()
-                            .filter(|(id, _)| *id == camera.id)
-                            .map(|(_, label)| label.clone())
-                            .collect::<Vec<_>>(),
-                        camera,
+                        }
                     }
                 }
             }
@@ -73,43 +53,84 @@ pub fn CamerasTab() -> Element {
 }
 
 #[component]
-fn CameraCard(camera: CameraStatus, assigned: Vec<String>) -> Element {
+fn CameraView(
+    robot: String,
+    role: String,
+    device: String,
+    status: Option<CameraStatus>,
+    maximized: bool,
+    on_maximize: EventHandler<()>,
+) -> Element {
+    let mut studio = studio();
+    let selected = studio
+        .selected
+        .read()
+        .as_ref()
+        .is_some_and(|selection| selection.matches_camera(&robot, &role));
+    let trouble = match &status {
+        None => Some("Not detected. Rescan devices or assign another camera.".to_owned()),
+        Some(camera) => camera.error.clone(),
+    };
+    let (frames, resolution) = status.as_ref().map_or((0, None), |camera| {
+        (
+            camera.frames,
+            Some(format!("{}×{}", camera.width, camera.height)),
+        )
+    });
+
     rsx! {
-        figure { class: "card overflow-hidden",
-            div { class: "aspect-video bg-slate-900",
-                img {
-                    class: "h-full w-full object-contain",
-                    src: api::camera_stream_url(&camera.id),
-                    alt: "Live preview from {camera.name}",
-                    loading: "lazy",
+        article {
+            class: if selected { "camera-tile camera-tile-selected" } else { "camera-tile" },
+            onclick: {
+                let (robot, role) = (robot.clone(), role.clone());
+                move |_| studio.selected.set(Some(Selection::Camera {
+                    robot: robot.clone(),
+                    role: role.clone(),
+                }))
+            },
+            header { class: "camera-tile-header",
+                span { class: "camera-tile-title", "{role}" }
+                if trouble.is_none() {
+                    span { class: "camera-live-state",
+                        span { class: "status-dot" }
+                        if frames > 0 { "Live" } else { "Opening" }
+                    }
+                } else {
+                    span { class: "chip chip-danger", "Unavailable" }
+                }
+                if let Some(resolution) = resolution {
+                    span { class: "camera-resolution", "{resolution}" }
+                }
+                button {
+                    r#type: "button",
+                    class: "icon-button",
+                    "aria-label": if maximized { "Restore camera grid" } else { "Maximize {role} camera" },
+                    title: if maximized { "Restore camera grid" } else { "Maximize camera" },
+                    onclick: move |event| {
+                        event.stop_propagation();
+                        on_maximize.call(());
+                    },
+                    Expand { contract: maximized }
                 }
             }
-            figcaption { class: "flex flex-col gap-1 p-3",
-                div { class: "flex items-center gap-2",
-                    span { class: "flex-1 truncate text-sm font-medium", "{camera.name}" }
-                    span { class: "font-mono text-xs text-slate-400",
-                        "{camera.width}×{camera.height} @ {camera.fps}"
+            div { class: "camera-frame",
+                if trouble.is_none() {
+                    img {
+                        class: "camera-image",
+                        src: api::camera_stream_url(&device),
+                        alt: "Live view from the {role} camera on {robot}",
+                    }
+                } else {
+                    div { class: "camera-unavailable",
+                        span { class: "camera-placeholder-icon", "×" }
+                        span { "Camera unavailable" }
                     }
                 }
-                p { class: "truncate font-mono text-xs text-slate-400", "{camera.id}" }
-                if !assigned.is_empty() {
-                    div { class: "flex flex-wrap gap-1",
-                        for label in assigned {
-                            span {
-                                key: "{label}",
-                                class: "chip bg-sky-100 text-sky-800 dark:bg-sky-500/15 dark:text-sky-300",
-                                "{label}"
-                            }
-                        }
-                    }
-                }
-                if let Some(error) = &camera.error {
-                    p { class: "text-xs text-rose-600 dark:text-rose-400", "{error}" }
-                } else if camera.streaming && camera.frames == 0 {
-                    p { class: "text-xs text-slate-400",
-                        "Opened, but no frame has arrived yet."
-                    }
-                }
+            }
+            if let Some(trouble) = trouble {
+                p { class: "camera-trouble", "{trouble}" }
+            } else if frames == 0 {
+                p { class: "camera-trouble text-ink-faint", "Opened; waiting for the first frame." }
             }
         }
     }

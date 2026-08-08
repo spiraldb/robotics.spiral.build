@@ -6,64 +6,723 @@
    written in Rust rather than the templates it looks at by default. */
 @source "./src/**/*.rs";
 
-@theme {
+/*
+  One palette, named by role rather than by hue.
+
+  Panels say `bg-surface` and `text-ink`, never `bg-white dark:bg-slate-900`,
+  so the two themes cannot drift apart one component at a time — and a colour
+  is only ever spelled out here. The scale is warm and nearly neutral: colour
+  in this interface is reserved for things that mean something, which is why
+  there are exactly four accents and they all belong to a robot.
+*/
+:root {
+  color-scheme: light dark;
+
+  --tone-canvas: #ffffff;
+  --tone-surface: #ffffff;
+  --tone-sunken: #f7f7f5;
+  --tone-hover: rgb(55 53 47 / 0.06);
+  --tone-line: #e8e8e6;
+
+  --tone-ink: #37352f;
+  --tone-ink-soft: #65645f;
+  --tone-ink-faint: #767570;
+
+  --tone-accent: #0868b8;
+  --tone-accent-ink: #ffffff;
+  --tone-selected: rgb(8 104 184 / 0.1);
+
+  --tone-danger: #c4443f;
+  --tone-danger-soft: rgb(196 68 63 / 0.1);
+  --tone-caution: #7d6a41;
+  --tone-caution-soft: #fbf3db;
+  --tone-good: #448361;
+
+  /* The viewport stays dark in both themes. The arm's own shells are the pale
+     grey of printed SO-101 parts, and they only read against something darker
+     than they are. Neutral, so it is a panel rather than a blue slab. */
+  --tone-viewport: #1f1f1f;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --tone-canvas: #191919;
+    --tone-surface: #1f1f1f;
+    --tone-sunken: #252525;
+    --tone-hover: rgb(255 255 255 / 0.055);
+    --tone-line: #303030;
+
+    --tone-ink: #d4d4d4;
+    --tone-ink-soft: #b0b0b0;
+    --tone-ink-faint: #919191;
+
+    --tone-accent: #0b67b2;
+    --tone-accent-ink: #ffffff;
+    --tone-selected: rgb(40 140 225 / 0.16);
+
+    --tone-danger: #ff7369;
+    --tone-danger-soft: rgb(255 115 105 / 0.12);
+    --tone-caution: #e5c07b;
+    --tone-caution-soft: rgb(229 192 123 / 0.11);
+    --tone-good: #4dab9a;
+  }
+}
+
+@theme inline {
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+
+  --color-canvas: var(--tone-canvas);
+  --color-surface: var(--tone-surface);
+  --color-sunken: var(--tone-sunken);
+  --color-hover: var(--tone-hover);
+  --color-line: var(--tone-line);
+
+  --color-ink: var(--tone-ink);
+  --color-ink-soft: var(--tone-ink-soft);
+  --color-ink-faint: var(--tone-ink-faint);
+
+  --color-accent: var(--tone-accent);
+  --color-accent-ink: var(--tone-accent-ink);
+  --color-selected: var(--tone-selected);
+
+  --color-danger: var(--tone-danger);
+  --color-danger-soft: var(--tone-danger-soft);
+  --color-caution: var(--tone-caution);
+  --color-caution-soft: var(--tone-caution-soft);
+  --color-good: var(--tone-good);
+
+  --color-viewport: var(--tone-viewport);
+}
+
+@layer base {
+  html,
+  body,
+  #main {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background: var(--tone-canvas);
+    font-family:
+      -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  button,
+  input,
+  select {
+    font: inherit;
+  }
+
+  ::selection {
+    background: var(--tone-selected);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--tone-accent);
+    outline-offset: 2px;
+  }
+
+  * {
+    scrollbar-color: var(--tone-line) transparent;
+    scrollbar-width: thin;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      scroll-behavior: auto !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
 }
 
 @layer components {
-  /* Controls that appear on nearly every panel, kept here so a button looks
-     the same everywhere without repeating a dozen utilities per call site. */
+  .studio-shell {
+    @apply flex h-screen flex-col overflow-hidden bg-canvas text-[13px] text-ink;
+  }
+
+  .studio-body {
+    @apply relative flex min-h-0 flex-1 overflow-hidden;
+  }
+
+  .studio-panel {
+    @apply relative flex shrink-0 flex-col overflow-y-auto bg-surface;
+  }
+
+  .studio-panel-left {
+    @apply border-r border-line;
+  }
+
+  .studio-panel-right {
+    @apply border-l border-line;
+  }
+
+  .studio-panel > header:first-child,
+  .studio-panel > div > header:first-child {
+    @apply sticky top-0 z-10 bg-surface;
+  }
+
+  .studio-workspace {
+    @apply flex min-w-0 flex-1 flex-col gap-px overflow-y-auto bg-line;
+  }
+
+  .viewport-tile {
+    @apply min-h-72 flex-[3_1_55%] bg-viewport;
+  }
+
+  .pane-splitter {
+    @apply relative z-20 w-1 shrink-0 cursor-col-resize touch-none bg-transparent;
+  }
+
+  .pane-splitter::after {
+    content: "";
+    @apply absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors;
+  }
+
+  .pane-splitter:hover::after,
+  .pane-splitter:focus-visible::after {
+    background: var(--tone-accent);
+  }
+
+  .studio-header {
+    @apply flex min-h-11 shrink-0 items-center gap-2 border-b border-line bg-surface px-3 py-1;
+  }
+
+  .studio-brand {
+    @apply shrink-0 text-[13px] font-semibold tracking-[-0.01em] whitespace-nowrap;
+  }
+
+  .studio-header-rule {
+    @apply h-4 w-px shrink-0 bg-line;
+  }
+
+  .studio-status {
+    @apply ml-auto flex shrink-0 items-center gap-1.5 text-[11px] text-ink-soft;
+  }
+
+  .pane-toggle-group {
+    @apply flex items-center gap-0.5;
+  }
+
+  .icon-button {
+    @apply inline-flex min-h-8 min-w-8 cursor-pointer items-center justify-center rounded text-[13px]
+      text-ink-soft transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed
+      disabled:opacity-40;
+  }
+
+  .icon-button[aria-pressed="true"] {
+    @apply bg-selected text-accent;
+  }
+
+  .ui-icon {
+    width: 1rem;
+    height: 1rem;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.35;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .chevron-open {
+    transform: rotate(90deg);
+  }
+
+  .mobile-surface-switcher {
+    @apply hidden;
+  }
+
+  .status-dot {
+    @apply h-1.5 w-1.5 shrink-0 rounded-full;
+    background: var(--tone-good);
+  }
+
+  .connection-status,
+  .control-rate {
+    @apply flex items-center gap-1.5 whitespace-nowrap;
+  }
+
+  .control-rate-slow {
+    color: var(--tone-caution);
+  }
+
+  .control-rate-slow .status-dot {
+    background: var(--tone-caution);
+  }
+
+  .mode-bar {
+    @apply flex min-w-0 flex-nowrap items-center gap-1 overflow-x-auto;
+  }
+
+  .mode-group {
+    @apply flex min-h-8 items-center gap-1 rounded border border-line pr-0.5 pl-2 transition-colors;
+  }
+
+  .mode-group-active,
+  .mode-button-active {
+    @apply border-accent font-medium;
+    background: var(--tone-selected);
+  }
+
+  .mode-description {
+    @apply max-w-72 truncate text-[11px] text-ink-faint;
+  }
+
+  .mode-group-fault {
+    @apply border-danger;
+    background: var(--tone-danger-soft);
+  }
+
+  .mode-description-fault {
+    @apply text-danger;
+  }
+
+  .teleop-consequence {
+    @apply max-w-40 truncate px-1 text-[10px] text-ink-faint;
+  }
+
+  .joint-row {
+    @apply -mx-1 flex min-h-8 items-center gap-2 rounded px-1 transition-colors;
+  }
+
+  .joint-row:hover,
+  .joint-row-selected {
+    @apply bg-selected;
+  }
+
+  .joint-label {
+    @apply inline-flex min-h-8 w-24 shrink-0 cursor-pointer items-center truncate text-left text-[12px] text-ink-soft;
+  }
+
+  .viewport-help {
+    @apply pointer-events-none absolute bottom-2 left-3 text-[11px] text-white/35;
+  }
+
+  .viewport-button {
+    @apply inline-flex min-h-8 cursor-pointer items-center rounded px-2 text-[11px] text-white/60
+      transition-colors hover:bg-white/10 hover:text-white focus-visible:text-white;
+  }
+
+  .viewport-button[aria-pressed="true"] {
+    @apply bg-white/10 text-white;
+  }
+
+  .viewport-legend-row {
+    @apply flex min-h-7 cursor-pointer items-center gap-1.5 rounded px-1.5 text-[11px] text-white/70
+      transition-colors hover:bg-white/10 hover:text-white;
+  }
+
+  .viewport-legend-selected {
+    @apply bg-white/10 text-white ring-1 ring-white/25;
+  }
+
+  .view-cube {
+    @apply absolute right-3 bottom-3 flex w-14 flex-col gap-px overflow-hidden rounded border border-white/15 bg-black/20 text-[9px] text-white/65 shadow-sm backdrop-blur-sm;
+  }
+
+  .view-cube button {
+    @apply min-h-7 cursor-pointer transition-colors hover:bg-white/15 hover:text-white focus-visible:text-white;
+  }
+
+  .view-cube-row {
+    @apply grid grid-cols-2 gap-px border-t border-white/10;
+  }
+
+  .viewport-axis-key {
+    @apply pointer-events-none absolute right-20 bottom-3 flex gap-1.5 rounded bg-black/20 px-2 py-1 font-mono text-[10px] backdrop-blur-sm;
+  }
+
+  .axis-x { color: #ef7770; }
+  .axis-y { color: #71c994; }
+  .axis-z { color: #75aef0; }
+
+  .camera-placeholder-icon {
+    @apply flex h-7 w-7 items-center justify-center rounded-full border border-white/10 text-lg font-light text-white/35;
+  }
+
+  .camera-workspace {
+    @apply grid min-h-40 flex-[2_1_35%] grid-cols-[repeat(auto-fit,minmax(16rem,1fr))] gap-px bg-line;
+  }
+
+  .camera-workspace-maximized {
+    @apply flex-[4_1_70%] grid-cols-1;
+  }
+
+  .camera-tile {
+    @apply flex min-h-0 min-w-0 flex-col bg-surface outline outline-1 -outline-offset-1 outline-transparent;
+  }
+
+  .camera-tile:hover {
+    @apply outline-line;
+  }
+
+  .camera-tile-selected {
+    outline-color: var(--tone-accent);
+  }
+
+  .camera-tile-header {
+    @apply flex min-h-9 items-center gap-2 border-b border-line px-2.5 text-[11px];
+  }
+
+  .camera-tile-title {
+    @apply truncate font-medium;
+  }
+
+  .camera-live-state {
+    @apply ml-auto inline-flex items-center gap-1 text-ink-soft;
+  }
+
+  .camera-resolution {
+    @apply font-mono text-[10px] text-ink-faint;
+  }
+
+  .camera-frame {
+    @apply relative min-h-0 flex-1 overflow-hidden bg-viewport;
+  }
+
+  .camera-image {
+    @apply h-full w-full object-contain;
+  }
+
+  .camera-unavailable {
+    @apply absolute inset-0 flex flex-col items-center justify-center gap-2 text-[11px] text-white/60;
+  }
+
+  .camera-trouble {
+    @apply border-t border-line px-2.5 py-1.5 text-[11px] text-danger;
+  }
+
+  .reconnect-guard {
+    @apply absolute inset-0 z-30 flex items-start justify-center bg-surface/70 pt-12 backdrop-blur-[1px];
+  }
+
+  .reconnect-card {
+    @apply flex items-center gap-2 rounded border border-line bg-surface px-3 py-2 text-[12px] text-ink shadow-sm;
+  }
+
+  .issue-strip {
+    @apply flex min-h-9 shrink-0 items-start gap-2 border-b border-line bg-caution-soft px-3 text-[11px] text-caution;
+  }
+
+  .issue-details {
+    @apply min-w-0 flex-1;
+  }
+
+  .issue-summary {
+    @apply flex min-h-9 cursor-pointer items-center gap-2;
+  }
+
+  .issue-icon {
+    @apply inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-current text-[10px] font-bold;
+  }
+
+  .issue-preview {
+    @apply truncate text-ink-soft;
+  }
+
+  .issue-list {
+    @apply max-h-28 list-disc space-y-1 overflow-y-auto pb-2 pl-8 text-ink-soft;
+  }
+
+  .issue-dismiss {
+    @apply min-h-9 shrink-0;
+  }
+
+  .notice-positioner {
+    @apply pointer-events-none fixed inset-x-0 bottom-0 z-50 flex justify-center p-4;
+  }
+
+  .notice-card {
+    @apply pointer-events-auto flex max-w-2xl items-center gap-3 rounded-md border border-line bg-surface px-3 py-2 shadow-lg;
+  }
+
+  /*
+    Buttons are quiet by default: text on a hover tint, the way a Notion menu
+    item behaves. Weight is spent only where it carries meaning — one filled
+    accent for the action a panel exists to perform, and red for the one that
+    destroys something.
+  */
   .btn {
-    @apply inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-md border
-      border-transparent px-3 py-1.5 text-sm font-medium whitespace-nowrap transition-colors
-      disabled:cursor-not-allowed disabled:opacity-40;
+    @apply inline-flex cursor-pointer items-center justify-center gap-1.5 rounded border
+      min-h-8 border-transparent px-2 py-1 text-[13px] whitespace-nowrap text-ink transition-colors
+      hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent;
   }
 
   .btn-primary {
-    @apply bg-sky-600 text-white hover:bg-sky-500 disabled:hover:bg-sky-600;
+    @apply bg-accent text-accent-ink hover:bg-accent hover:brightness-110
+      disabled:hover:brightness-100;
+  }
+
+  .btn-outline {
+    @apply border-line;
   }
 
   .btn-danger {
-    @apply bg-rose-600 text-white hover:bg-rose-500 disabled:hover:bg-rose-600;
+    @apply text-danger hover:bg-danger-soft;
   }
 
-  .btn-ghost {
-    @apply border-slate-300 bg-white text-slate-700 hover:bg-slate-100
-      dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800;
-  }
-
-  .card {
-    @apply rounded-xl border border-slate-200 bg-white shadow-sm
-      dark:border-slate-800 dark:bg-slate-900;
+  /* A quiet text action: rescan, identify, remove. */
+  .link {
+    @apply inline-flex min-h-8 cursor-pointer items-center text-[12px] text-ink-soft transition-colors hover:text-ink
+      disabled:cursor-not-allowed disabled:text-ink-faint disabled:hover:text-ink-faint;
   }
 
   .field {
-    @apply w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-sm
-      text-slate-900 outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500
-      dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100;
+    @apply min-h-8 w-full rounded border border-line bg-surface px-2 py-1 text-[13px] text-ink
+      focus:border-accent disabled:cursor-not-allowed disabled:text-ink-faint;
+  }
+
+  /* A picker inside a toolbar: no border of its own, because the group around
+     it already has one. */
+  .field-inline {
+    @apply min-h-7 cursor-pointer rounded border-0 bg-transparent px-1 py-0.5 text-[13px] text-ink
+      hover:bg-hover disabled:cursor-not-allowed
+      disabled:text-ink-faint disabled:hover:bg-transparent;
   }
 
   .label {
-    @apply mb-1 block text-xs font-medium tracking-wide text-slate-500 uppercase
-      dark:text-slate-400;
+    @apply mb-1 block text-[11px] font-medium text-ink-faint;
   }
 
+  /* One neutral tag. A state worth colouring says so with a dot beside it
+     rather than by turning the whole tag red. */
   .chip {
-    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium;
+    @apply inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-soft;
+    background-color: var(--tone-hover);
+  }
+
+  .chip-danger {
+    @apply text-danger;
+    background-color: var(--tone-danger-soft);
+  }
+
+  .chip-active {
+    @apply text-accent;
+    background: var(--tone-selected);
+  }
+
+  .chip-physical {
+    @apply font-medium text-caution;
+    background: var(--tone-caution-soft);
+  }
+
+  .chip-caution {
+    @apply text-caution;
+    background-color: var(--tone-caution-soft);
   }
 
   /* One consistent slider, since the browser default differs per platform and
      the thumb needs to stay visible against both themes. */
   .joint-slider {
-    @apply h-1.5 w-full cursor-pointer appearance-none rounded-full bg-slate-200
-      disabled:cursor-not-allowed disabled:opacity-50 dark:bg-slate-700;
+    @apply h-7 w-full cursor-pointer appearance-none bg-transparent
+      disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .joint-slider::-webkit-slider-runnable-track {
+    height: 3px;
+    border-radius: 999px;
+    background: var(--tone-line);
   }
 
   .joint-slider::-webkit-slider-thumb {
-    @apply h-4 w-4 appearance-none rounded-full bg-sky-600 shadow;
+    @apply h-3.5 w-3.5 appearance-none rounded-full border-2 border-surface bg-ink-soft shadow-sm;
+    margin-top: -5.5px;
+  }
+
+  .joint-slider::-moz-range-track {
+    height: 3px;
+    border-radius: 999px;
+    background: var(--tone-line);
   }
 
   .joint-slider::-moz-range-thumb {
-    @apply h-4 w-4 rounded-full border-0 bg-sky-600 shadow;
+    @apply h-3.5 w-3.5 rounded-full border-2 border-surface bg-ink-soft shadow-sm;
+  }
+
+  .studio-panel button[aria-expanded] {
+    @apply min-h-8 min-w-8;
+  }
+}
+
+@media (max-width: 1180px) {
+  .mode-description {
+    display: none;
+  }
+
+  .studio-header {
+    gap: 0.5rem;
+  }
+
+  .control-rate-label {
+    display: none;
+  }
+}
+
+@media (max-width: 1450px) {
+  .mode-description,
+  .teleop-consequence {
+    display: none;
+  }
+
+  .studio-status {
+    gap: 0.25rem;
+  }
+}
+
+@media (max-width: 900px) {
+  .studio-header {
+    flex-wrap: wrap;
+  }
+
+  .studio-header-rule {
+    display: none;
+  }
+
+  .mode-bar {
+    order: 3;
+    width: 100%;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+  }
+
+  .studio-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: minmax(18rem, 54%) minmax(0, 46%);
+  }
+
+  .studio-workspace {
+    grid-column: 1 / -1;
+    grid-row: 1;
+  }
+
+  .studio-panel {
+    width: auto !important;
+    min-width: 0;
+  }
+
+  .studio-panel-left {
+    grid-column: 1;
+    grid-row: 2;
+    border-top: 1px solid var(--tone-line);
+  }
+
+  .studio-panel-right {
+    grid-column: 2;
+    grid-row: 2;
+    border-top: 1px solid var(--tone-line);
+  }
+
+  .pane-splitter {
+    display: none;
+  }
+
+  .camera-workspace {
+    display: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .studio-shell {
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .studio-header {
+    z-index: 40;
+  }
+
+  .studio-brand {
+    font-size: 0.75rem;
+  }
+
+  .studio-status {
+    gap: 0.5rem;
+  }
+
+  .studio-status > :not(.connection-status):not(.chip-physical):not(.chip-caution) {
+    display: none;
+  }
+
+  .mode-bar {
+    flex-wrap: wrap;
+    overflow: visible;
+  }
+
+  .studio-body {
+    display: flex;
+    min-height: 0;
+  }
+
+  .studio-workspace,
+  .studio-panel {
+    width: 100% !important;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .studio-panel {
+    overflow-y: auto;
+    border-right: 0;
+    border-left: 0;
+  }
+
+  .surface-hidden-mobile {
+    display: none;
+  }
+
+  .surface-active-mobile {
+    display: flex;
+  }
+
+  .viewport-tile {
+    min-height: 0;
+    flex: 1;
+  }
+
+  .camera-workspace {
+    display: none;
+  }
+
+  .desktop-pane-toggle,
+  .studio-header-rule,
+  .studio-brand {
+    display: none;
+  }
+
+  .mobile-surface-switcher {
+    display: grid;
+    order: 4;
+    width: 100%;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 2px;
+    border-radius: 0.45rem;
+    background: var(--tone-sunken);
+    padding: 2px;
+  }
+
+  .mobile-surface-switcher button {
+    min-height: 2rem;
+    border-radius: 0.35rem;
+    color: var(--tone-ink-soft);
+  }
+
+  .mobile-surface-switcher .mobile-surface-active {
+    color: var(--tone-ink);
+    background: var(--tone-surface);
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.12);
+  }
+
+  .issue-preview {
+    display: none;
+  }
+
+  .viewport-help {
+    display: none;
   }
 }

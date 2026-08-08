@@ -1,7 +1,7 @@
 //! Serving the compiled web UI.
 //!
-//! The UI is a WebAssembly bundle built separately by `scripts/build-ui.sh`, so
-//! the server may legitimately start before it exists. When it does not, every
+//! The UI is a WebAssembly bundle built separately by the Dioxus CLI, so the
+//! server may legitimately start before it exists. When it does not, every
 //! non-API route explains how to build it rather than returning a bare 404.
 
 use std::path::{Path, PathBuf};

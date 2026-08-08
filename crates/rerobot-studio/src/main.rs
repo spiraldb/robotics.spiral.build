@@ -9,7 +9,9 @@ use axum::Router;
 use clap::Parser;
 use rerobot::cameras;
 use rerobot_studio::camera_manager::CameraManager;
-use rerobot_studio::hardware::{ControlSettings, DEFAULT_MAX_STEP_COUNTS, HardwareHandle};
+use rerobot_studio::hardware::{
+    ControlSettings, DEFAULT_MAX_STEP_COUNTS, DEFAULT_TELEOP_MAX_STEP_COUNTS, HardwareHandle,
+};
 use rerobot_studio::routes::{self, AppState};
 use rerobot_studio::ui;
 use rerobot_studio::workspace::RobotWorkspace;
@@ -51,6 +53,10 @@ struct Args {
     /// Largest change, in encoder counts, applied to a joint per control cycle.
     #[arg(long, default_value_t = DEFAULT_MAX_STEP_COUNTS, value_name = "COUNTS")]
     max_step: i64,
+
+    /// Largest per-cycle change used by the teleoperation follower.
+    #[arg(long, default_value_t = DEFAULT_TELEOP_MAX_STEP_COUNTS, value_name = "COUNTS")]
+    teleop_max_step: i64,
 }
 
 fn main() -> ExitCode {
@@ -83,6 +89,10 @@ fn main() -> ExitCode {
 
     if args.max_step <= 0 {
         eprintln!("error: --max-step must be greater than zero");
+        return ExitCode::FAILURE;
+    }
+    if args.teleop_max_step <= 0 {
+        eprintln!("error: --teleop-max-step must be greater than zero");
         return ExitCode::FAILURE;
     }
 
@@ -121,6 +131,7 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
     let workspace = Arc::new(RobotWorkspace::open(args.workspace.clone())?);
     let hardware = Arc::new(HardwareHandle::spawn(ControlSettings {
         max_step_counts: args.max_step,
+        teleop_max_step_counts: args.teleop_max_step,
         simulated: args.simulate,
         ..ControlSettings::default()
     }));
@@ -176,7 +187,9 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
     tracing::info!("robot workspace: {}", workspace.directory().display());
     match &ui_dir {
         Some(directory) => tracing::info!("serving the web UI from {}", directory.display()),
-        None => tracing::warn!("the web UI has not been built; run ./scripts/build-ui.sh"),
+        None => tracing::warn!(
+            "the web UI has not been built; run `dx build --release` in crates/rerobot-ui"
+        ),
     }
     if args.simulate {
         tracing::warn!("simulation mode: motors are emulated, no serial port is opened");

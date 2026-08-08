@@ -14,7 +14,7 @@ sidecars and no hidden state directories.
 | Crate | What it is |
 | --- | --- |
 | `rerobot` | Hardware: the Feetech motor bus, camera capture, serial discovery, and the three CLIs |
-| `crates/rerobot-core` | Hardware-free domain types shared by everything: calibration, the SO-101 joint model, and the studio's wire format |
+| `crates/rerobot-core` | Hardware-free domain types shared by everything: calibration, the SO-101 joint model, the robot description it is drawn from, and the studio's wire format |
 | `crates/rerobot-studio` | The web studio's backend: an HTTP server that owns the arms and the cameras |
 | `crates/rerobot-ui` | The web studio's interface, a Dioxus app compiled to WebAssembly |
 
@@ -48,7 +48,7 @@ cd crates/rerobot-ui && dx build --release
 ```
 
 ```console
-cargo run --bin rerobot-studio
+cargo run -p rerobot-studio
 ```
 
 `dx` compiles the crate to WebAssembly and runs the Tailwind CLI over
@@ -71,7 +71,7 @@ is listed with the reason attached rather than quietly ignored.
 To try the interface without hardware, run it against emulated motors:
 
 ```console
-cargo run --bin rerobot-studio -- --simulate
+cargo run -p rerobot-studio -- --simulate
 ```
 
 Simulated arms drift slowly through their travel, so calibration sweeps and
@@ -79,25 +79,55 @@ teleoperation both work end to end with nothing plugged in.
 
 ### What the studio does
 
-**Setup** creates robot instances and prepares them. Assign a serial port from
-the detected list, or use *Identify by unplugging*: the studio records the
-ports, you pull the arm's USB cable, and it reports the one that disappeared.
-Assign cameras by role — `wrist`, `top`, whatever you like. Then calibrate: the
-studio releases torque, you move every joint to both of its limits while a bar
-per joint fills in, and saving writes the measured ranges into the robot's file.
+The studio is one screen, not a stack of tabs. The arms and their setup sit on
+the left, the 3D scene and the camera feeds in the middle, and the joints of
+whichever arm is selected on the right — so nothing an operator needs while
+driving a robot is hidden behind a tab they have to leave.
 
-**Control** draws each arm live from its measured joint angles — a side view of
-the shoulder, elbow, and wrist chain plus a plan view of the base rotation —
-and offers three modes:
+**The arm list and its setup**, on the left, creates robot instances and
+prepares them. Assign a serial port from the detected list, or use *Identify*:
+the studio records the ports, you pull the arm's USB cable, and it reports the
+one that disappeared. Assign cameras by role — `wrist`, `top`, whatever you
+like — with a live preview of the chosen device before it is bound, so a
+camera is identified by what it sees rather than by a device path. Then
+calibrate: the studio releases torque, you move every joint to both of its
+limits while a bar per joint fills in, and saving writes the measured ranges
+into the robot's file.
+
+**The 3D scene** draws every configured arm live from its measured joint
+angles. It is a real 3D view — drag to orbit, shift-drag or right-drag to pan,
+scroll to zoom — and every shape in it comes from a URDF robot description
+rather than from drawing code, so teaching the studio a new arm means adding a
+description rather than a renderer. Arms that are offline or uncalibrated stand
+at their rest pose, faded, rather than vanishing.
+
+**The mode selector**, in the header, decides what the studio does with the
+motors:
 
 - **Idle** reads the motors but never drives them.
-- **Manual** commands one arm's joints from sliders.
+- **Manual** commands one arm's joints from the sliders on the right.
 - **Teleoperation** mirrors a hand-guided leader arm onto a follower arm,
   mapping through each arm's own calibration so two differently built arms
   still agree on what "halfway" means.
 
-**Cameras** previews every detected camera as an MJPEG stream. Streams start
-when a preview is on screen and release the device shortly after it leaves.
+**The camera strip**, under the scene, previews every detected camera as an
+MJPEG stream. Streams start when a preview is on screen and release the device
+shortly after it leaves.
+
+### The robot description
+
+The arm the viewport draws is read from
+[`crates/rerobot-core/assets/so101.urdf`](crates/rerobot-core/assets/so101.urdf),
+a standard URDF built from primitive shapes so it needs no mesh files. The
+parser behind it is general — links, joints, origins, axes, limits, and
+materials — and the studio's forward kinematics walks whatever tree it finds.
+Only the shipped description is SO-101 specific.
+
+Its joint names are the motor names, so a measured angle drives the model with
+no translation table. Two things follow from keeping the description as the
+single source of truth: the link lengths exist in exactly one place, and the
+reach and height readouts beside the sliders are solved from the same file that
+draws the picture rather than from a second copy of the geometry.
 
 Cameras are recorded by the identifier the operating system reports —
 `/dev/videoN` on Linux, the capture index on macOS and Windows — which is the
@@ -115,19 +145,35 @@ leaving an unexplained black preview.
 The rules are enforced by the server, not by the interface, so they hold for
 anything that talks to the API:
 
-- Torque is never enabled implicitly, and enabling it copies each motor's
-  present position into its goal register first, so an arm cannot snap to a
-  target left over from an earlier session.
+- Torque is enabled without being asked for in exactly one place: starting
+  teleoperation releases the leader and holds the follower, because the mode
+  does nothing at all otherwise. Everywhere else it takes a deliberate click.
+  Either way, enabling it copies each motor's present position into its goal
+  register first, so an arm cannot snap to a target left over from an earlier
+  session. Stopping teleoperation does not release the follower — torque is
+  what keeps an arm from falling, so dropping it is always the operator's call.
 - Joints can only be commanded in normalized units, which are meaningless
   without a calibration — so an uncalibrated arm cannot be driven at all, and a
   command can never leave the travel that was actually measured.
-- Commanded positions ramp toward their target at a bounded rate
-  (`--max-step`, in encoder counts per control cycle), so neither a slider jump
-  nor a teleoperation transient can throw an arm across its workspace.
+- Commanded positions ramp toward their target at a bounded rate. Manual moves
+  use `--max-step`; the follower uses the faster but still bounded
+  `--teleop-max-step` so ordinary hand motion does not build up a large pose
+  error. Both are measured in encoder counts per control cycle.
 - If an arm's motor bus stops responding, it is dropped and any mode that
   depended on it stops with the reason attached.
 
 Releasing torque lets an arm fall under its own weight. Support it first.
+
+### Control rate
+
+`Control 60/60 Hz` in the header is the measured and requested rate of the
+hardware loop that reads motor positions, maps teleoperation, and writes new
+goals. It is not the screen refresh rate; browser telemetry is delivered at up
+to 20 Hz. The default hardware target is 60 Hz. A sustained measurement below
+the target means the serial transactions cannot finish within the 16.7 ms
+cycle and may add follow latency. The studio marks that readout as a warning
+below 90% of target and shows the follower's largest target error as
+`Follow Δ`.
 
 ### Developing the interface
 

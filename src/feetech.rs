@@ -26,6 +26,8 @@ const PRESENT_POSITION_ADDRESS: u8 = 56;
 const IO_TIMEOUT: Duration = Duration::from_millis(20);
 const RESPONSE_TIMEOUT: Duration = Duration::from_millis(100);
 const RETRIES: usize = 3;
+/// Consecutive failed sync-read probes before falling back for this bus.
+const SYNC_READ_PROBES: u8 = 2;
 
 /// Highest goal position an STS-series servo accepts on its 12-bit encoder.
 pub const MAX_GOAL_POSITION: i64 = 4095;
@@ -43,11 +45,11 @@ const SUPPORTED_MODELS: &[&str] = &["sts3215", "sts3250", "sts_series", "sms_ser
 ///
 /// Sync read collects every motor in one transaction, which matters at control
 /// rates, but not all Feetech firmware implements instruction `0x82`. The bus
-/// tries it once and remembers the answer instead of paying for a failed
+/// probes it briefly and remembers the answer instead of paying for a failed
 /// transaction on every cycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SyncRead {
-    Untested,
+    Untested(u8),
     Supported,
     Unsupported,
 }
@@ -194,7 +196,7 @@ impl FeetechBus {
         Ok(Self {
             port,
             motors,
-            sync_read: SyncRead::Untested,
+            sync_read: SyncRead::Untested(0),
         })
     }
 
@@ -205,9 +207,9 @@ impl FeetechBus {
 
     /// Read every configured motor once, failing with the motor name and ID.
     ///
-    /// The first call attempts a single sync-read transaction. If the servos do
-    /// not implement it, the bus falls back to one read per motor for the rest
-    /// of its life rather than retrying an unsupported instruction forever.
+    /// The first calls probe sync-read support. If the servos do not implement
+    /// it, the bus falls back to one read per motor for the rest of its life
+    /// rather than retrying an unsupported instruction forever.
     pub fn read_positions(&mut self) -> Result<BTreeMap<String, i64>, FeetechError> {
         if self.sync_read != SyncRead::Unsupported {
             match self.sync_read_positions() {
@@ -216,7 +218,22 @@ impl FeetechBus {
                     return Ok(positions);
                 }
                 Err(error) if self.sync_read == SyncRead::Supported => return Err(error),
-                Err(_) => self.sync_read = SyncRead::Unsupported,
+                Err(_) => {
+                    // A noisy first transaction is not proof that firmware
+                    // lacks sync-read support. Giving it one more probe avoids
+                    // permanently falling back to six sequential reads — a
+                    // common cause of the control loop settling well below
+                    // its target rate.
+                    let failures = match self.sync_read {
+                        SyncRead::Untested(failures) => failures.saturating_add(1),
+                        SyncRead::Supported | SyncRead::Unsupported => unreachable!(),
+                    };
+                    self.sync_read = if failures >= SYNC_READ_PROBES {
+                        SyncRead::Unsupported
+                    } else {
+                        SyncRead::Untested(failures)
+                    };
+                }
             }
         }
 

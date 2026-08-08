@@ -1,193 +1,45 @@
-//! Driving the arms: picking a mode, watching the pose, moving joints.
+//! The joints of whichever arm is selected: what they read, and how to move them.
 
 use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use rerobot_core::api::{GoalRequest, JointTelemetry, ModeSelection, RobotSummary, RobotTelemetry};
-use rerobot_core::arm;
+use rerobot_core::api::{GoalRequest, JointTelemetry, RobotSummary, RobotTelemetry};
+use rerobot_core::arm::{self, JointAngles};
 
 use crate::api;
-use crate::armview::ArmView;
 use crate::setup::set_torque;
-use crate::state::{Studio, studio};
+use crate::state::{Selection, studio};
+use crate::viewport::{accent_css, tool_position};
 
-#[component]
-pub fn ControlTab() -> Element {
-    let studio = studio();
-    let robots = studio.snapshot.read().robots.clone();
-    let connected = studio.connected_robots();
+#[derive(Default)]
+struct PendingGoals(BTreeMap<String, f64>);
 
-    rsx! {
-        div { class: "flex flex-col gap-6",
-            ModePanel { connected: connected.clone() }
+impl PendingGoals {
+    fn replace(&mut self, joint: String, value: f64) {
+        self.0.insert(joint, value);
+    }
 
-            if robots.is_empty() {
-                p { class: "card p-8 text-center text-sm text-slate-500 dark:text-slate-400",
-                    "Add a robot on the Setup tab to control it here."
-                }
-            }
-            div { class: "grid gap-6 xl:grid-cols-2",
-                for robot in robots {
-                    RobotPanel { key: "{robot.id}", robot }
-                }
-            }
-        }
+    fn take(&mut self) -> BTreeMap<String, f64> {
+        std::mem::take(&mut self.0)
+    }
+
+    fn clear(&mut self) {
+        self.0.clear();
     }
 }
 
 #[component]
-fn ModePanel(connected: Vec<RobotSummary>) -> Element {
+pub fn JointPanel() -> Element {
     let studio = studio();
-    let mode = studio.mode();
-    let calibrated = connected
-        .iter()
-        .filter(|robot| robot.calibrated)
-        .cloned()
-        .collect::<Vec<_>>();
-
-    let select = move |selection: ModeSelection| {
-        studio.run("", async move {
-            api::send(Method::POST, "/api/mode", Some(&selection)).await
-        });
+    let Some(robot) = studio.focused() else {
+        return rsx! {
+            p { class: "p-3 text-ink-faint", "Add an arm to see its joints." }
+        };
     };
 
-    // Teleoperation needs a distinct pair, so the pickers default to the first
-    // two calibrated arms and never offer the same arm twice.
-    //
-    // Only the operator's explicit choice is stored; the effective pair is
-    // derived here on every render and falls back to the defaults whenever a
-    // choice stops naming an available arm. Deriving rather than keeping two
-    // signals in step with an effect matters: an effect that both reads and
-    // writes a signal retriggers itself, and `Signal::set` marks a signal dirty
-    // even when the value is unchanged, so the "keep them in step" version spun
-    // forever whenever fewer than two arms were available.
-    let mut chosen_leader = use_signal(|| Option::<String>::None);
-    let mut chosen_follower = use_signal(|| Option::<String>::None);
-    let names = calibrated
-        .iter()
-        .map(|robot| robot.id.clone())
-        .collect::<Vec<_>>();
-    let leader = chosen_leader()
-        .filter(|name| names.contains(name))
-        .or_else(|| names.first().cloned())
-        .unwrap_or_default();
-    let follower = chosen_follower()
-        .filter(|name| names.contains(name) && *name != leader)
-        .or_else(|| names.iter().find(|name| **name != leader).cloned())
-        .unwrap_or_default();
-    let can_teleoperate = !leader.is_empty() && !follower.is_empty();
-
-    rsx! {
-        section { class: "card p-4",
-            h2 { class: "mb-3 text-base font-semibold", "Mode" }
-            div { class: "flex flex-wrap items-end gap-3",
-                button {
-                    r#type: "button",
-                    class: if matches!(mode, ModeSelection::Idle) { "btn btn-primary" } else { "btn btn-ghost" },
-                    onclick: move |_| select(ModeSelection::Idle),
-                    "Idle"
-                }
-
-                div { class: "flex items-end gap-2",
-                    div {
-                        label { class: "label", "Manual control" }
-                        select {
-                            class: "field min-w-40",
-                            onchange: move |event| {
-                                let value = event.value();
-                                if !value.is_empty() {
-                                    select(ModeSelection::Manual { robot: value });
-                                }
-                            },
-                            option {
-                                value: "",
-                                selected: !matches!(mode, ModeSelection::Manual { .. }),
-                                "Choose an arm…"
-                            }
-                            for robot in calibrated.clone() {
-                                option {
-                                    key: "{robot.id}",
-                                    value: "{robot.id}",
-                                    selected: matches!(&mode, ModeSelection::Manual { robot: chosen } if *chosen == robot.id),
-                                    "{robot.id}"
-                                }
-                            }
-                        }
-                    }
-                }
-
-                div { class: "flex items-end gap-2",
-                    div {
-                        label { class: "label", "Teleoperation" }
-                        div { class: "flex items-center gap-1.5",
-                            select {
-                                class: "field min-w-32",
-                                disabled: !can_teleoperate,
-                                onchange: move |event| chosen_leader.set(Some(event.value())),
-                                for robot in calibrated.clone() {
-                                    option {
-                                        key: "{robot.id}",
-                                        value: "{robot.id}",
-                                        selected: leader == robot.id,
-                                        "{robot.id}"
-                                    }
-                                }
-                            }
-                            span { class: "text-slate-400", "→" }
-                            select {
-                                class: "field min-w-32",
-                                disabled: !can_teleoperate,
-                                onchange: move |event| chosen_follower.set(Some(event.value())),
-                                for robot in calibrated.clone().into_iter().filter(|robot| robot.id != leader) {
-                                    option {
-                                        key: "{robot.id}",
-                                        value: "{robot.id}",
-                                        selected: follower == robot.id,
-                                        "{robot.id}"
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    button {
-                        r#type: "button",
-                        class: if matches!(mode, ModeSelection::Teleoperate { .. }) { "btn btn-primary" } else { "btn btn-ghost" },
-                        disabled: !can_teleoperate,
-                        onclick: {
-                            let (leader, follower) = (leader.clone(), follower.clone());
-                            move |_| select(ModeSelection::Teleoperate {
-                                leader: leader.clone(),
-                                follower: follower.clone(),
-                            })
-                        },
-                        "Start"
-                    }
-                }
-            }
-
-            p { class: "mt-3 text-sm text-slate-500 dark:text-slate-400",
-                match &mode {
-                    ModeSelection::Idle =>
-                        "Motors are read but never driven. Pick a mode to move an arm.".to_owned(),
-                    ModeSelection::Manual { robot } =>
-                        format!("Sliders on {robot} command its joints. Enable torque to make it move."),
-                    ModeSelection::Teleoperate { leader, follower } =>
-                        format!("{follower} follows {leader}. Enable torque on {follower}; leave it off on {leader} so it can be moved by hand."),
-                }
-            }
-            if !can_teleoperate {
-                p { class: "mt-1 text-xs text-slate-400",
-                    "Teleoperation needs two connected, calibrated arms."
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn RobotPanel(robot: RobotSummary) -> Element {
-    let studio = studio();
     let telemetry = studio.robot_telemetry(&robot.id);
     let torque = telemetry.as_ref().is_some_and(|robot| robot.torque);
     // The arm has to stay free to move by hand during a sweep, so the server
@@ -196,56 +48,136 @@ fn RobotPanel(robot: RobotSummary) -> Element {
         .as_ref()
         .is_some_and(|robot| robot.calibration.is_some());
     let drivable = studio.is_manual_target(&robot.id) && torque && robot.calibrated;
+    let role = studio.teleoperation_role(&robot.id);
+    let accent = accent_css(studio.position_of(&robot.id));
     let id = robot.id.clone();
 
     rsx! {
-        section { class: "card flex flex-col gap-4 p-4",
-            header { class: "flex flex-wrap items-center gap-2",
-                h3 { class: "text-base font-semibold", "{robot.id}" }
-                if telemetry.is_some() {
-                    span { class: "chip bg-emerald-100 text-emerald-800 dark:bg-emerald-500/15 dark:text-emerald-300",
-                        "Connected"
-                    }
-                } else {
-                    span { class: "chip bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400",
-                        "Offline"
-                    }
+        div { class: "flex flex-col",
+            header { class: "flex flex-wrap items-center gap-1.5 border-b border-line px-3 py-2",
+                span {
+                    class: "h-2 w-2 shrink-0 rounded-full",
+                    style: "background: {accent}",
                 }
+                h2 { class: "text-[13px] font-medium", "{robot.id}" }
+                if telemetry.is_none() {
+                    span { class: "chip", "offline" }
+                }
+                if let Some(role) = role {
+                    span { class: "chip", "{role}" }
+                }
+                // Torque is the one state where a wrong assumption moves an
+                // arm, so it is the one state on this panel worth colouring.
                 if torque {
-                    span { class: "chip bg-rose-100 text-rose-800 dark:bg-rose-500/15 dark:text-rose-300",
-                        "Torque on"
-                    }
-                }
-                if calibrating {
-                    span { class: "chip bg-sky-100 text-sky-800 dark:bg-sky-500/15 dark:text-sky-300",
-                        "Calibrating"
-                    }
+                    span { class: "chip chip-danger", "torque on" }
                 }
                 button {
                     r#type: "button",
-                    class: if torque { "btn btn-danger ml-auto" } else { "btn btn-ghost ml-auto" },
+                    class: if torque { "btn btn-danger ml-auto" } else { "btn btn-outline ml-auto" },
                     disabled: telemetry.is_none() || (calibrating && !torque),
-                    title: if calibrating && !torque { "Finish or cancel calibration first" } else { "" },
+                    title: match (calibrating && !torque, torque, role) {
+                        (true, _, _) => "Finish or cancel calibration first",
+                        (_, true, Some("follower")) => "Releasing now stops this arm following the leader",
+                        (_, true, _) => "The arm will go limp — support it first",
+                        _ => "Energize the motors so the arm holds its position",
+                    },
                     onclick: move |_| set_torque(studio, &id, !torque),
-                    {if torque { "Release torque" } else { "Hold position" }}
+                    {if torque { "Release" } else { "Hold" }}
                 }
             }
 
             if let Some(error) = telemetry.as_ref().and_then(|robot| robot.error.clone()) {
-                p { class: "rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-800 dark:bg-rose-500/10 dark:text-rose-300",
+                p { class: "mx-3 mt-2 rounded bg-danger-soft px-2 py-1.5 text-[12px] text-danger",
                     "{error}"
                 }
             }
 
-            ArmView { telemetry: telemetry.clone(), calibrated: robot.calibrated }
+            ToolReadout {
+                telemetry: telemetry.clone(),
+                calibrated: robot.calibrated,
+                following: role == Some("follower"),
+            }
 
             JointControls {
                 robot: robot.clone(),
                 telemetry: telemetry.clone(),
                 drivable,
+                role,
+            }
+
+        }
+    }
+}
+
+/// Where the arm is holding its gripper, solved from the robot description.
+#[component]
+fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool, following: bool) -> Element {
+    let description = crate::state::description();
+    let Ok(urdf) = description.as_ref() else {
+        return rsx! {};
+    };
+    let angles = telemetry
+        .as_ref()
+        .filter(|_| calibrated)
+        .map(|robot| measured_angles(&robot.joints));
+    let tip = angles
+        .as_ref()
+        .and_then(|angles| tool_position(urdf, angles));
+    let tracking_error = telemetry.as_ref().and_then(|robot| {
+        robot
+            .joints
+            .iter()
+            .filter_map(|joint| Some((joint.degrees? - joint.target_degrees?).abs()))
+            .filter(|error| error.is_finite())
+            .reduce(f64::max)
+    });
+
+    rsx! {
+        dl { class: "grid grid-cols-4 gap-1.5 px-3 py-2",
+            Readout {
+                label: "Reach",
+                value: tip.map(|tip| format!("{:.0} mm", tip.truncate().length())),
+            }
+            Readout { label: "Height", value: tip.map(|tip| format!("{:.0} mm", tip.z)) }
+            Readout {
+                label: "Gripper",
+                value: angles.map(|angles| format!("{:.0}%", angles.gripper * 100.0)),
+            }
+            Readout {
+                label: if following { "Follow Δ" } else { "Target Δ" },
+                value: tracking_error.map(|error| format!("{error:.0}°")),
+                caution: tracking_error.is_some_and(|error| error > 5.0),
             }
         }
     }
+}
+
+#[component]
+fn Readout(label: String, value: Option<String>, #[props(default)] caution: bool) -> Element {
+    rsx! {
+        div {
+            class: if caution { "rounded bg-caution-soft px-2 py-1" } else { "rounded bg-sunken px-2 py-1" },
+            title: if label.contains('Δ') { "Largest difference between measured and final target joint angle" } else { "" },
+            dt { class: "truncate text-[10px] text-ink-faint", "{label}" }
+            dd { class: if caution { "font-mono text-[12px] text-caution" } else { "font-mono text-[12px]" },
+                {value.unwrap_or_else(|| "—".to_owned())}
+            }
+        }
+    }
+}
+
+/// Collect an arm's calibrated joint angles out of its telemetry.
+pub fn measured_angles(joints: &[JointTelemetry]) -> JointAngles {
+    let degrees = joints
+        .iter()
+        .filter_map(|joint| Some((joint.name.clone(), joint.degrees?)))
+        .collect::<BTreeMap<_, _>>();
+    let gripper = joints
+        .iter()
+        .find(|joint| joint.name == "gripper")
+        .and_then(|joint| joint.normalized)
+        .unwrap_or(0.0);
+    JointAngles::from_named_degrees(&degrees).with_gripper_normalized(gripper)
 }
 
 #[component]
@@ -253,15 +185,59 @@ fn JointControls(
     robot: RobotSummary,
     telemetry: Option<RobotTelemetry>,
     drivable: bool,
+    role: Option<&'static str>,
 ) -> Element {
-    let studio = studio();
+    let mut studio = studio();
     // While a slider is being dragged the arm is still catching up, so the
     // commanded value is shown until the measurement agrees with it. That echo
     // is only meaningful for as long as this arm is actually being driven, so
     // it is dropped the moment it is not — otherwise the next drive session
     // would open showing targets from the previous one.
     let mut commanded = use_signal(BTreeMap::<String, f64>::new);
+    // One sender owns this robot's goal endpoint. Slider input only replaces
+    // the latest value in this map; the sender drains every changed joint into
+    // one ordered request at most once per render frame. Requests can never
+    // overtake one another, and the final value is always sent after an
+    // in-flight request completes.
+    let pending = use_hook(|| Rc::new(RefCell::new(PendingGoals::default())));
+    let command_robot = robot.id.clone();
+    use_future({
+        let pending = pending.clone();
+        move || {
+            let pending = pending.clone();
+            let command_robot = command_robot.clone();
+            async move {
+                loop {
+                    gloo_timers::future::TimeoutFuture::new(32).await;
+                    let may_drive = studio.controls_available()
+                        && studio.is_manual_target(&command_robot)
+                        && studio
+                            .robot_telemetry(&command_robot)
+                            .is_some_and(|robot| robot.torque);
+                    if !may_drive {
+                        pending.borrow_mut().clear();
+                        continue;
+                    }
+                    let normalized = pending.borrow_mut().take();
+                    if normalized.is_empty() {
+                        continue;
+                    }
+                    let request = GoalRequest { normalized };
+                    if let Err(error) = api::send(
+                        Method::POST,
+                        &format!("/api/robots/{command_robot}/goal"),
+                        Some(&request),
+                    )
+                    .await
+                    {
+                        studio.report(error);
+                    }
+                }
+            }
+        }
+    });
     let watched = robot.id.clone();
+    let clear_pending = pending.clone();
     use_effect(move || {
         let driving = studio
             .telemetry
@@ -276,28 +252,33 @@ fn JointControls(
         if !driving && !commanded.peek().is_empty() {
             commanded.write().clear();
         }
+        if !driving {
+            clear_pending.borrow_mut().clear();
+        }
     });
 
     let Some(telemetry) = telemetry else {
         return rsx! {
-            p { class: "text-sm text-slate-500 dark:text-slate-400",
-                "Connect this robot to see its joints."
-            }
+            p { class: "px-3 text-[11px] text-ink-faint", "Connect this arm to see its joints." }
         };
     };
 
     let id = robot.id.clone();
 
     rsx! {
-        div { class: "flex flex-col gap-2",
+        div { class: "flex flex-col gap-1 px-3 pb-3",
+            // Say what would actually make the sliders work — and, while
+            // teleoperation is running, say that they are not supposed to,
+            // rather than inviting the operator to break the mode they are in.
             if !drivable {
-                p { class: "text-xs text-slate-400",
-                    if !robot.calibrated {
-                        "Calibrate this arm to command its joints."
-                    } else if !studio.is_manual_target(&robot.id) {
-                        "Switch to manual control for this arm to move its joints."
-                    } else {
-                        "Enable torque to move the joints."
+                p { class: "mb-1 text-[11px] text-ink-faint",
+                    match role {
+                        Some("leader") => "Move this arm by hand; the follower copies it.".to_owned(),
+                        Some(_) => "Following the leader. Stop teleoperation to drive it by hand.".to_owned(),
+                        None if !robot.calibrated => "Calibrate this arm to command its joints.".to_owned(),
+                        None if !studio.is_manual_target(&robot.id) =>
+                            format!("Set Manual to {} in the header to move its joints.", robot.id),
+                        None => "Press Hold to energize the motors, then drag.".to_owned(),
                     }
                 }
             }
@@ -306,13 +287,26 @@ fn JointControls(
                     key: "{joint.name}",
                     joint: joint.clone(),
                     drivable,
+                    selected: studio
+                        .selected
+                        .read()
+                        .as_ref()
+                        .is_some_and(|selection| selection.matches_joint(&robot.id, &joint.name)),
                     value: drivable
                         .then(|| commanded.read().get(&joint.name).copied())
                         .flatten(),
                     on_change: {
-                        let (id, name) = (id.clone(), joint.name.clone());
-                        move |value| command_joint(studio, commanded, id.clone(), name.clone(), value)
+                        let name = joint.name.clone();
+                        let pending = pending.clone();
+                        move |value| command_joint(commanded, pending.clone(), name.clone(), value)
                     },
+                    on_select: {
+                        let (robot_id, joint_name) = (id.clone(), joint.name.clone());
+                        move |_| studio.selected.set(Some(Selection::Joint {
+                            robot: robot_id.clone(),
+                            joint: joint_name.clone(),
+                        }))
+                    }
                 }
             }
         }
@@ -324,40 +318,56 @@ fn JointControls(
 /// The commanded value is kept locally so the slider stays where the operator
 /// put it while the arm ramps toward it.
 fn command_joint(
-    studio: Studio,
     mut commanded: Signal<BTreeMap<String, f64>>,
-    id: String,
+    pending: Rc<RefCell<PendingGoals>>,
     joint: String,
     value: f64,
 ) {
     commanded.write().insert(joint.clone(), value);
-    let request = GoalRequest {
-        normalized: BTreeMap::from([(joint, value)]),
-    };
-    studio.run("", async move {
-        api::send(
-            Method::POST,
-            &format!("/api/robots/{id}/goal"),
-            Some(&request),
-        )
-        .await
-    });
+    pending.borrow_mut().replace(joint, value);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PendingGoals;
+
+    #[test]
+    fn pending_goals_keep_only_the_latest_value_per_joint() {
+        let mut pending = PendingGoals::default();
+        pending.replace("elbow".into(), -0.4);
+        pending.replace("wrist".into(), 0.2);
+        pending.replace("elbow".into(), 0.7);
+
+        let batch = pending.take();
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch["elbow"], 0.7);
+        assert_eq!(batch["wrist"], 0.2);
+        assert!(pending.take().is_empty());
+    }
 }
 
 #[component]
 fn JointRow(
     joint: JointTelemetry,
     drivable: bool,
+    selected: bool,
     value: Option<f64>,
     on_change: EventHandler<f64>,
+    on_select: EventHandler<()>,
 ) -> Element {
     let label = arm::so101_joint(&joint.name).map_or(joint.name.clone(), |j| j.label.to_owned());
     let measured = joint.normalized.unwrap_or(0.0);
     let shown = value.unwrap_or(measured);
 
     rsx! {
-        div { class: "flex items-center gap-3",
-            span { class: "w-28 shrink-0 truncate text-sm", "{label}" }
+        div { class: if selected { "joint-row joint-row-selected" } else { "joint-row" },
+            button {
+                r#type: "button",
+                class: "joint-label",
+                title: "Select {label}",
+                onclick: move |_| on_select.call(()),
+                "{label}"
+            }
             input {
                 r#type: "range",
                 class: "joint-slider",
@@ -367,13 +377,17 @@ fn JointRow(
                 step: "0.005",
                 disabled: !drivable || joint.range.is_none(),
                 value: "{shown}",
+                title: match joint.target_degrees {
+                    Some(target) => format!("Measured joint angle; current target {target:+.0}°"),
+                    None => "Measured joint angle".to_owned(),
+                },
                 oninput: move |event| {
                     if let Ok(value) = event.value().parse::<f64>() {
                         on_change.call(value);
                     }
                 },
             }
-            span { class: "w-16 shrink-0 text-right font-mono text-xs text-slate-500 dark:text-slate-400",
+            output { class: "w-14 shrink-0 text-right font-mono text-[11px] text-ink-soft",
                 match joint.degrees {
                     Some(degrees) => format!("{degrees:+.0}°"),
                     None => format!("{}", joint.raw),

@@ -6,5 +6,9 @@ description = "Hardware-free domain types shared by the rerobot tools, server, a
 publish = false
 
 [dependencies]
+# The viewer's matrices. Default features pull in integer and f64 vector types
+# the studio never uses and would only add to the WebAssembly bundle.
+glam = { workspace = true }
+roxmltree.workspace = true
 serde.workspace = true
 serde_json.workspace = true

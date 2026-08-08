@@ -18,8 +18,10 @@
 - User select the robot type, the port, and the cameras. When they select cameras, they should be able to see the camera feed in the web ui.
 
 ### UI design
+- Design language: notion style.
 - Try to make the ui rerun style, where you have a studio like layout. Don't make many tabs that user needs to switch between.
 - Make ui compact and information dense.
+- Camera feeds are properties of the robot instance, it should be in the properties panel, rather than the main ui.
 
 ### 3D viewer
 - Because we know the robot is a pair of so-arm-101, we can visualize the robot in the web ui. 

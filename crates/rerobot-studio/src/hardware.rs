@@ -35,13 +35,21 @@ use rerobot_core::calibration::{
 use tokio::sync::{oneshot, watch};
 
 /// How often the control loop runs.
-pub const CONTROL_PERIOD: Duration = Duration::from_millis(20);
+pub const CONTROL_HZ: u64 = 60;
+pub const CONTROL_PERIOD: Duration = Duration::from_nanos(1_000_000_000 / CONTROL_HZ);
 
 /// Default ceiling on how far one joint may be commanded to move per cycle.
 ///
 /// At the control rate above this is roughly 100 degrees per second, which is
 /// brisk enough for teleoperation and slow enough to stay in front of.
-pub const DEFAULT_MAX_STEP_COUNTS: i64 = 24;
+pub const DEFAULT_MAX_STEP_COUNTS: i64 = 20;
+
+/// Default teleoperation ceiling on follower movement per control cycle.
+///
+/// Manual slider moves stay deliberately gentle. A follower has to keep up
+/// with ordinary hand motion, so it gets a faster, still-bounded ramp instead
+/// of accumulating a large pose error behind the leader.
+pub const DEFAULT_TELEOP_MAX_STEP_COUNTS: i64 = 40;
 
 /// Consecutive failed transfers before a bus is considered lost.
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
@@ -63,6 +71,8 @@ pub struct ControlSettings {
     pub period: Duration,
     /// Largest change in encoder counts applied to a joint in one cycle.
     pub max_step_counts: i64,
+    /// Largest per-cycle change while an arm is the teleoperation follower.
+    pub teleop_max_step_counts: i64,
     /// Drive simulated motors instead of opening serial ports.
     pub simulated: bool,
 }
@@ -72,6 +82,7 @@ impl Default for ControlSettings {
         Self {
             period: CONTROL_PERIOD,
             max_step_counts: DEFAULT_MAX_STEP_COUNTS,
+            teleop_max_step_counts: DEFAULT_TELEOP_MAX_STEP_COUNTS,
             simulated: false,
         }
     }
@@ -375,6 +386,10 @@ impl ConnectedRobot {
             .map(|(name, spec)| {
                 let raw = self.positions.get(name).copied().unwrap_or_default();
                 let motor = calibration.and_then(|calibration| calibration.motors.get(name));
+                let target_raw = self
+                    .torque
+                    .then(|| self.target.get(name).copied())
+                    .flatten();
                 JointTelemetry {
                     name: name.clone(),
                     id: spec.id,
@@ -385,6 +400,10 @@ impl ConnectedRobot {
                         .torque
                         .then(|| self.commanded.get(name).copied())
                         .flatten(),
+                    target_raw,
+                    target_degrees: target_raw
+                        .zip(motor)
+                        .map(|(target, motor)| joint_degrees(motor, target)),
                     range: motor.map(|motor| JointRange {
                         min: motor.range_min,
                         center: motor.center,
@@ -453,13 +472,26 @@ impl Controller {
 
     fn run(mut self, requests: &mpsc::Receiver<Command>) {
         let mut previous_tick: Option<Instant> = None;
+        // Use an absolute schedule. Sleeping for `period - work` every time
+        // permanently adds the platform's sleep overshoot to every cycle (on
+        // macOS that made an empty fixed-rate loop run noticeably slow).
+        // Carrying the deadline forward lets the following sleep absorb that
+        // overshoot.
+        let mut next_tick = Instant::now() + self.settings.period;
         loop {
             let started = Instant::now();
             if let Some(previous) = previous_tick.replace(started) {
                 let elapsed = started.duration_since(previous).as_secs_f64();
                 if elapsed > 0.0 {
-                    // Smooth the measured rate so the readout is legible.
-                    self.loop_hz = 0.9 * self.loop_hz + 0.1 / elapsed;
+                    // Smooth cycle duration and invert it afterwards. Averaging
+                    // instantaneous rates biases the result high when an
+                    // absolute schedule alternates a slightly long cycle with
+                    // a slightly short one.
+                    self.loop_hz = if self.loop_hz == 0.0 {
+                        1.0 / elapsed
+                    } else {
+                        1.0 / (0.9 / self.loop_hz + 0.1 * elapsed)
+                    };
                 }
             }
 
@@ -475,18 +507,33 @@ impl Controller {
                 }
             }
 
-            self.poll_robots();
-            self.apply_mode();
-            let max_step = self.settings.max_step_counts;
-            for robot in self.robots.values_mut() {
-                robot.drive(max_step);
+            // In teleoperation the critical path is leader read -> follower
+            // write. Reading every other arm between those two adds visible
+            // latency for no control benefit, so service that path first and
+            // collect the remaining telemetry immediately afterwards.
+            if let ModeSelection::Teleoperate { leader, .. } = self.mode.selection.clone() {
+                self.poll_robot(&leader);
+                self.apply_mode();
+                self.drive_robots();
+                self.poll_robots_except(&leader);
+            } else {
+                self.poll_robots();
+                self.apply_mode();
+                self.drive_robots();
             }
             self.drop_failed_robots();
             self.publish();
 
-            if let Some(remaining) = self.settings.period.checked_sub(started.elapsed()) {
+            let now = Instant::now();
+            if let Some(remaining) = next_tick.checked_duration_since(now) {
                 thread::sleep(remaining);
+            } else {
+                // The hardware work itself exceeded the period. Do not run a
+                // burst of catch-up cycles; resume from reality and report the
+                // lower measured rate honestly.
+                next_tick = now;
             }
+            next_tick += self.settings.period;
         }
     }
 
@@ -745,6 +792,24 @@ impl Controller {
         for robot in self.robots.values_mut() {
             robot.follow_measured_positions();
         }
+
+        // Teleoperation only means anything with the follower holding and the
+        // leader loose, so entering it puts the pair into that state instead of
+        // leaving the operator to work out why nothing moved. This is the one
+        // place torque is enabled without being asked for, and it goes through
+        // the same path as the button: each goal is seeded from the measured
+        // position first, so the follower holds where it stands rather than
+        // snapping to wherever it was last sent.
+        //
+        // The order matters. Releasing the leader first means a failure part
+        // way through leaves an arm loose rather than an arm driving toward
+        // something with nobody in the mode that was supposed to steer it.
+        if let ModeSelection::Teleoperate { leader, follower } = &selection {
+            let (leader, follower) = (leader.clone(), follower.clone());
+            self.set_torque(&leader, false)?;
+            self.set_torque(&follower, true)?;
+        }
+
         self.mode = ModeStatus {
             active: !matches!(selection, ModeSelection::Idle),
             selection,
@@ -827,26 +892,59 @@ impl Controller {
 
     fn poll_robots(&mut self) {
         for robot in self.robots.values_mut() {
-            match robot.bus.read_positions() {
-                Ok(positions) => {
-                    robot.failures = 0;
-                    robot.error = None;
-                    if let Some(sweep) = robot.sweep.as_mut()
-                        && let Err(error) = sweep.observe(&positions)
-                    {
-                        robot.error = Some(error.to_string());
-                        robot.sweep = None;
-                    }
-                    robot.positions = positions;
-                    if !robot.torque {
-                        robot.follow_measured_positions();
-                    }
-                }
-                Err(error) => {
-                    robot.failures += 1;
+            Self::poll(robot);
+        }
+    }
+
+    fn poll_robot(&mut self, id: &str) {
+        if let Some(robot) = self.robots.get_mut(id) {
+            Self::poll(robot);
+        }
+    }
+
+    fn poll_robots_except(&mut self, excluded: &str) {
+        for (id, robot) in &mut self.robots {
+            if id != excluded {
+                Self::poll(robot);
+            }
+        }
+    }
+
+    fn poll(robot: &mut ConnectedRobot) {
+        match robot.bus.read_positions() {
+            Ok(positions) => {
+                robot.failures = 0;
+                robot.error = None;
+                if let Some(sweep) = robot.sweep.as_mut()
+                    && let Err(error) = sweep.observe(&positions)
+                {
                     robot.error = Some(error.to_string());
+                    robot.sweep = None;
+                }
+                robot.positions = positions;
+                if !robot.torque {
+                    robot.follow_measured_positions();
                 }
             }
+            Err(error) => {
+                robot.failures += 1;
+                robot.error = Some(error.to_string());
+            }
+        }
+    }
+
+    fn drive_robots(&mut self) {
+        let follower = match &self.mode.selection {
+            ModeSelection::Teleoperate { follower, .. } => Some(follower.as_str()),
+            _ => None,
+        };
+        for (id, robot) in &mut self.robots {
+            let max_step = if follower == Some(id.as_str()) {
+                self.settings.teleop_max_step_counts
+            } else {
+                self.settings.max_step_counts
+            };
+            robot.drive(max_step);
         }
     }
 
@@ -944,6 +1042,7 @@ impl Controller {
             telemetry: TelemetryFrame {
                 sequence: self.sequence,
                 loop_hz: self.loop_hz,
+                target_hz: 1.0 / self.settings.period.as_secs_f64(),
                 robots: self
                     .robots
                     .values()
@@ -1112,6 +1211,38 @@ mod tests {
     }
 
     #[test]
+    fn teleoperation_uses_the_faster_bounded_follower_step() {
+        let mut controller = controller();
+        controller
+            .connect(spec("leader", Some(calibration(2048, 500))))
+            .expect("connect leader");
+        controller
+            .connect(spec("follower", Some(calibration(2048, 500))))
+            .expect("connect follower");
+        controller
+            .set_mode(ModeSelection::Teleoperate {
+                leader: "leader".to_owned(),
+                follower: "follower".to_owned(),
+            })
+            .expect("teleoperation");
+
+        let robot = controller.robots.get_mut("follower").unwrap();
+        robot.positions.insert("gripper".to_owned(), 2048);
+        robot.commanded.insert("gripper".to_owned(), 2048);
+        robot.target.insert("gripper".to_owned(), 3048);
+        controller.drive_robots();
+
+        assert_eq!(
+            controller.robots["follower"].commanded["gripper"] - 2048,
+            controller.settings.teleop_max_step_counts
+        );
+        assert!(
+            controller.settings.teleop_max_step_counts > controller.settings.max_step_counts,
+            "teleoperation should catch up faster than a manual slider move"
+        );
+    }
+
+    #[test]
     fn an_idle_robot_keeps_its_target_pinned_to_reality() {
         let mut controller = controller();
         controller
@@ -1143,7 +1274,6 @@ mod tests {
                 follower: "follower".to_owned(),
             })
             .expect("teleop");
-        controller.set_torque("follower", true).expect("torque on");
 
         // Put the leader at the top of its travel and let the mode map it.
         let leader = controller.robots.get_mut("leader").unwrap();
@@ -1155,6 +1285,43 @@ mod tests {
             controller.robots["follower"].target["gripper"], 2300,
             "the follower's own range, not the leader's counts"
         );
+    }
+
+    #[test]
+    fn entering_teleoperation_holds_the_follower_and_frees_the_leader() {
+        let mut controller = controller();
+        controller
+            .connect(spec("leader", Some(calibration(2048, 400))))
+            .expect("connect leader");
+        controller
+            .connect(spec("follower", Some(calibration(2048, 400))))
+            .expect("connect follower");
+        // Start from the worst case: exactly backwards.
+        controller.set_torque("leader", true).expect("torque on");
+
+        controller
+            .set_mode(ModeSelection::Teleoperate {
+                leader: "leader".to_owned(),
+                follower: "follower".to_owned(),
+            })
+            .expect("teleop");
+
+        assert!(
+            !controller.robots["leader"].torque,
+            "the leader has to be free to move by hand"
+        );
+        assert!(
+            controller.robots["follower"].torque,
+            "the follower has to hold, or the mode does nothing"
+        );
+        // Holding means holding where it stands, not where it was last sent.
+        let follower = &controller.robots["follower"];
+        assert_eq!(follower.target, follower.positions);
+
+        // Leaving the mode does not release the follower: torque is what keeps
+        // an arm from falling, so dropping it is always the operator's call.
+        controller.set_mode(ModeSelection::Idle).expect("idle");
+        assert!(controller.robots["follower"].torque);
     }
 
     #[test]
@@ -1338,5 +1505,11 @@ mod tests {
         );
         assert!(raw.joints.iter().all(|joint| joint.degrees.is_none()));
         assert!(raw.joints.iter().all(|joint| joint.goal_raw.is_none()));
+        assert!(raw.joints.iter().all(|joint| joint.target_raw.is_none()));
+        assert!(
+            raw.joints
+                .iter()
+                .all(|joint| joint.target_degrees.is_none())
+        );
     }
 }

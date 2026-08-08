@@ -1,16 +1,20 @@
-//! The SO-ARM101 joint model and the planar geometry the web UI draws.
+//! The SO-ARM101 joint model.
 //!
-//! Everything here is display- and mapping-level knowledge: which motors an
-//! SO-101 has, how a raw encoder count becomes an angle, and where the links
-//! land once the angles are known. The module deliberately holds no dynamics
-//! and no inverse kinematics; the UI drives joints directly and only needs a
+//! Everything here is mapping-level knowledge: which motors an SO-101 has, how
+//! a raw encoder count becomes an angle, and how a measured angle lands on the
+//! joint of a robot description. The module deliberately holds no dynamics and
+//! no inverse kinematics; the UI drives joints directly and only needs a
 //! faithful picture of where they currently are.
+//!
+//! Where the links actually are is [`crate::urdf`]'s job — the shapes and the
+//! lengths of an SO-101 are stated once, in its description file.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
 use crate::calibration::{Direction, MotorSpec};
+use crate::urdf::Urdf;
 
 /// Encoder counts in one full turn of an STS3215 output shaft.
 pub const ENCODER_COUNTS_PER_TURN: i64 = 4096;
@@ -128,39 +132,8 @@ pub fn degrees_to_counts(degrees: f64) -> i64 {
     }
 }
 
-/// Nominal link lengths, in millimetres, used to draw the arm.
-///
-/// These are approximate SO-101 proportions chosen so the rendered arm matches
-/// the real one closely enough to read a pose at a glance. They affect the
-/// picture only: no command sent to a motor depends on them.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ArmGeometry {
-    /// Mounting plate to the shoulder-lift pivot.
-    pub base_height_mm: f64,
-    /// Horizontal offset of the shoulder-lift pivot from the pan axis.
-    pub shoulder_offset_mm: f64,
-    /// Shoulder-lift pivot to the elbow pivot.
-    pub upper_arm_mm: f64,
-    /// Elbow pivot to the wrist pivot.
-    pub forearm_mm: f64,
-    /// Wrist pivot to the gripper tip.
-    pub wrist_mm: f64,
-    /// Full opening of the gripper jaws.
-    pub gripper_span_mm: f64,
-}
-
-/// Nominal geometry of a stock SO-ARM101.
-pub const SO101_GEOMETRY: ArmGeometry = ArmGeometry {
-    base_height_mm: 55.0,
-    shoulder_offset_mm: 0.0,
-    upper_arm_mm: 117.0,
-    forearm_mm: 135.0,
-    wrist_mm: 75.0,
-    gripper_span_mm: 45.0,
-};
-
-/// The side-view link angles that correspond to every joint sitting at its
-/// calibrated center.
+/// The link angles that correspond to every joint sitting at its calibrated
+/// center.
 ///
 /// Calibration records the midpoint of each joint's observed travel, which is
 /// not a pose the robot knows anything about. Anchoring mid-travel to a natural
@@ -182,6 +155,46 @@ pub const SO101_REST_POSE: RestPose = RestPose {
     elbow_deg: 60.0,
     wrist_flex_deg: 30.0,
 };
+
+/// Place a description's joints from measured SO-101 angles.
+///
+/// The description's own zero is the mechanical one — every joint centered,
+/// arm straight up — while a calibration's zero is the middle of whatever
+/// travel the operator happened to sweep. [`SO101_REST_POSE`] is what bridges
+/// the two, and applying it here keeps the description a statement about the
+/// hardware rather than about how this studio calibrates it.
+///
+/// The gripper is the one joint given as a fraction rather than an angle, so
+/// it is scaled to whatever opening the description says the jaw has; nothing
+/// here needs to know that number.
+pub fn so101_joint_positions(urdf: &Urdf, angles: &JointAngles) -> BTreeMap<String, f32> {
+    let rest = SO101_REST_POSE;
+    let open = urdf
+        .joint("gripper")
+        .and_then(|joint| joint.limit)
+        .map_or(0.0, |(_, upper)| upper);
+
+    [
+        ("shoulder_pan", angles.pan_deg.to_radians() as f32),
+        (
+            "shoulder_lift",
+            (rest.lift_deg + angles.lift_deg).to_radians() as f32,
+        ),
+        (
+            "elbow_flex",
+            (rest.elbow_deg + angles.elbow_deg).to_radians() as f32,
+        ),
+        (
+            "wrist_flex",
+            (rest.wrist_flex_deg + angles.wrist_flex_deg).to_radians() as f32,
+        ),
+        ("wrist_roll", angles.wrist_roll_deg.to_radians() as f32),
+        ("gripper", angles.gripper.clamp(0.0, 1.0) as f32 * open),
+    ]
+    .into_iter()
+    .map(|(name, position)| (name.to_owned(), position))
+    .collect()
+}
 
 /// Joint angles relative to each joint's calibrated center, in degrees.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -230,93 +243,6 @@ impl JointAngles {
         }
         .clamp(0.0, 1.0);
         self
-    }
-}
-
-/// A point in the arm's vertical working plane, in millimetres.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct Point {
-    /// Horizontal distance in front of the pan axis.
-    pub x: f64,
-    /// Height above the mounting plate.
-    pub y: f64,
-}
-
-/// Where every link of the arm sits for a given set of joint angles.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct ArmPose {
-    /// Pan axis at the mounting plate.
-    pub base: Point,
-    /// Shoulder-lift pivot.
-    pub shoulder: Point,
-    /// Elbow pivot.
-    pub elbow: Point,
-    /// Wrist pivot.
-    pub wrist: Point,
-    /// Gripper tip.
-    pub tool: Point,
-    /// Absolute tool direction in the side view, degrees from vertical.
-    pub tool_deg: f64,
-    /// Rotation of the whole arm about the base, degrees.
-    pub pan_deg: f64,
-    /// Roll of the tool about the forearm axis, degrees.
-    pub wrist_roll_deg: f64,
-    /// Gripper opening from `0.0` (closed) to `1.0` (fully open).
-    pub gripper: f64,
-}
-
-impl ArmPose {
-    /// Solve the side-view link positions for `angles`.
-    pub fn solve(geometry: &ArmGeometry, rest: &RestPose, angles: &JointAngles) -> Self {
-        let lift = rest.lift_deg + angles.lift_deg;
-        let elbow = rest.elbow_deg + angles.elbow_deg;
-        let wrist = rest.wrist_flex_deg + angles.wrist_flex_deg;
-
-        // Link angles accumulate down the chain: each joint bends its link
-        // relative to the one before it.
-        let upper_arm_deg = lift;
-        let forearm_deg = upper_arm_deg + elbow;
-        let tool_deg = forearm_deg + wrist;
-
-        let base = Point { x: 0.0, y: 0.0 };
-        let shoulder = Point {
-            x: geometry.shoulder_offset_mm,
-            y: geometry.base_height_mm,
-        };
-        let elbow_point = extend(shoulder, upper_arm_deg, geometry.upper_arm_mm);
-        let wrist_point = extend(elbow_point, forearm_deg, geometry.forearm_mm);
-        let tool = extend(wrist_point, tool_deg, geometry.wrist_mm);
-
-        Self {
-            base,
-            shoulder,
-            elbow: elbow_point,
-            wrist: wrist_point,
-            tool,
-            tool_deg,
-            pan_deg: angles.pan_deg,
-            wrist_roll_deg: angles.wrist_roll_deg,
-            gripper: angles.gripper.clamp(0.0, 1.0),
-        }
-    }
-
-    /// Solve using the stock SO-101 geometry and rest pose.
-    pub fn solve_so101(angles: &JointAngles) -> Self {
-        Self::solve(&SO101_GEOMETRY, &SO101_REST_POSE, angles)
-    }
-
-    /// Horizontal distance from the pan axis to the gripper tip.
-    pub fn reach_mm(&self) -> f64 {
-        self.tool.x
-    }
-}
-
-/// Advance `from` by `length` in the direction `degrees` measured from vertical.
-fn extend(from: Point, degrees: f64, length: f64) -> Point {
-    let radians = degrees.to_radians();
-    Point {
-        x: from.x + length * radians.sin(),
-        y: from.y + length * radians.cos(),
     }
 }
 
@@ -396,50 +322,137 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_centered_arm_rests_in_a_reaching_pose() {
-        let pose = ArmPose::solve_so101(&JointAngles::default());
-
-        assert_eq!(pose.base, Point { x: 0.0, y: 0.0 });
-        assert_eq!(pose.shoulder.y, SO101_GEOMETRY.base_height_mm);
-        // Rest angles put the forearm horizontal and the tool angled downward.
-        assert!((pose.wrist.y - pose.elbow.y).abs() < 1e-9);
-        assert!(pose.tool.x > pose.wrist.x);
-        assert!(pose.tool.y < pose.wrist.y);
-        assert_eq!(pose.tool_deg, 120.0);
+    /// Where each pivot of the shipped description lands for `angles`.
+    fn pivots(angles: &JointAngles) -> BTreeMap<&'static str, glam::Vec3> {
+        let urdf = Urdf::parse(crate::urdf::SO101_URDF).unwrap();
+        let transforms = urdf.pose(&so101_joint_positions(&urdf, angles));
+        [
+            "upper_arm_link",
+            "forearm_link",
+            "wrist_link",
+            "gripper_link",
+        ]
+        .into_iter()
+        .map(|name| {
+            let index = urdf.link_index(name).unwrap();
+            (name, transforms[index].transform_point3(glam::Vec3::ZERO))
+        })
+        .collect()
     }
 
     #[test]
-    fn link_lengths_are_preserved_for_every_pose() {
-        let angles = JointAngles {
+    fn a_centered_arm_rests_in_a_reaching_pose() {
+        let at = pivots(&JointAngles::default());
+
+        // The rest pose puts the forearm horizontal and the tool angled down
+        // and forward, which is what makes a mid-travel calibration read as a
+        // recognizable arm rather than a stick pointing at the ceiling.
+        assert!((at["wrist_link"].z - at["forearm_link"].z).abs() < 1e-6);
+        assert!(at["forearm_link"].x > at["upper_arm_link"].x);
+        assert!(at["gripper_link"].x > at["wrist_link"].x);
+        assert!(at["gripper_link"].z < at["wrist_link"].z);
+    }
+
+    #[test]
+    fn lifting_the_shoulder_raises_the_tool() {
+        let lowered = pivots(&JointAngles {
+            lift_deg: 20.0,
+            ..JointAngles::default()
+        });
+        let raised = pivots(&JointAngles {
+            lift_deg: -20.0,
+            ..JointAngles::default()
+        });
+
+        assert!(raised["forearm_link"].z > lowered["forearm_link"].z);
+    }
+
+    #[test]
+    fn panning_swings_the_arm_about_the_vertical_axis() {
+        let ahead = pivots(&JointAngles::default());
+        let turned = pivots(&JointAngles {
+            pan_deg: 90.0,
+            ..JointAngles::default()
+        });
+
+        // A quarter turn about the vertical takes the reach from +X onto +Y
+        // without changing how far out or how high the arm is holding it.
+        assert!(turned["gripper_link"].x.abs() < 1e-6);
+        assert!((turned["gripper_link"].y - ahead["gripper_link"].x).abs() < 1e-6);
+        assert!((turned["gripper_link"].z - ahead["gripper_link"].z).abs() < 1e-6);
+    }
+
+    #[test]
+    fn link_lengths_come_from_the_description_for_every_pose() {
+        let urdf = Urdf::parse(crate::urdf::SO101_URDF).unwrap();
+        let reference = pivots(&JointAngles::default());
+        let bent = pivots(&JointAngles {
             pan_deg: 45.0,
             lift_deg: -35.0,
             elbow_deg: 80.0,
             wrist_flex_deg: -70.0,
             wrist_roll_deg: 10.0,
             gripper: 0.25,
-        };
-        let pose = ArmPose::solve_so101(&angles);
+        });
 
-        let distance = |a: Point, b: Point| ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
-        assert!((distance(pose.shoulder, pose.elbow) - SO101_GEOMETRY.upper_arm_mm).abs() < 1e-9);
-        assert!((distance(pose.elbow, pose.wrist) - SO101_GEOMETRY.forearm_mm).abs() < 1e-9);
-        assert!((distance(pose.wrist, pose.tool) - SO101_GEOMETRY.wrist_mm).abs() < 1e-9);
-        assert_eq!(pose.pan_deg, 45.0);
-        assert_eq!(pose.reach_mm(), pose.tool.x);
+        // Bending the arm moves the pivots but cannot stretch the links, and
+        // the lengths it preserves are the ones the description states.
+        for (child, parent) in [
+            ("forearm_link", "upper_arm_link"),
+            ("wrist_link", "forearm_link"),
+            ("gripper_link", "wrist_link"),
+        ] {
+            let stated = urdf
+                .joint_between(parent, child)
+                .unwrap()
+                .origin
+                .translation
+                .length();
+            for placed in [&reference, &bent] {
+                assert!(
+                    ((placed[child] - placed[parent]).length() - stated).abs() < 1e-6,
+                    "{parent} to {child} should stay {stated} m apart"
+                );
+            }
+        }
     }
 
     #[test]
-    fn lifting_the_shoulder_raises_the_tool() {
-        let lowered = ArmPose::solve_so101(&JointAngles {
-            lift_deg: 20.0,
-            ..JointAngles::default()
-        });
-        let raised = ArmPose::solve_so101(&JointAngles {
-            lift_deg: -20.0,
-            ..JointAngles::default()
-        });
+    fn the_gripper_fraction_opens_the_jaw_the_description_describes() {
+        let urdf = Urdf::parse(crate::urdf::SO101_URDF).unwrap();
+        let (_, open) = urdf.joint("gripper").unwrap().limit.unwrap();
 
-        assert!(raised.elbow.y > lowered.elbow.y);
+        let jaw = |gripper| {
+            so101_joint_positions(
+                &urdf,
+                &JointAngles {
+                    gripper,
+                    ..JointAngles::default()
+                },
+            )["gripper"]
+        };
+
+        assert_eq!(jaw(0.0), 0.0);
+        assert_eq!(jaw(1.0), open);
+        assert!((jaw(0.5) - open / 2.0).abs() < 1e-6);
+        // A reading that escaped its calibrated range must not fold the jaw
+        // through the other one.
+        assert_eq!(jaw(4.0), open);
+        assert_eq!(jaw(-1.0), 0.0);
+    }
+
+    #[test]
+    fn every_motor_places_a_joint_of_the_description() {
+        let urdf = Urdf::parse(crate::urdf::SO101_URDF).unwrap();
+        let positions = so101_joint_positions(&urdf, &JointAngles::default());
+
+        for joint in SO101_JOINTS {
+            assert!(
+                positions.contains_key(joint.name),
+                "{} places nothing",
+                joint.name
+            );
+        }
+        assert_eq!(positions.len(), SO101_JOINTS.len());
     }
 }
