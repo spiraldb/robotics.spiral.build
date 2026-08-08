@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "robot_id": "my_follower",
+  "robot_type": "so101_follower",
+  "port": {
+    "path": "/dev/ttyACM0",
+    "baud_rate": 1000000
+  },
+  "cameras": {
+    "wrist": {
+      "type": "opencv",
+      "id": "/dev/video0",
+      "width": 640,
+      "height": 480,
+      "fps": 30
+    }
+  },
+  "motors": {
+    "shoulder_pan": {
+      "id": 1,
+      "direction": "normal",
+      "model": "sts3215"
+    },
+    "shoulder_lift": {
+      "id": 2,
+      "direction": "reversed",
+      "model": "sts3215"
+    },
+    "elbow_flex": {
+      "id": 3,
+      "direction": "normal",
+      "model": "sts3215"
+    },
+    "wrist_flex": {
+      "id": 4,
+      "direction": "normal",
+      "model": "sts3215"
+    },
+    "wrist_roll": {
+      "id": 5,
+      "direction": "normal",
+      "model": "sts3215"
+    },
+    "gripper": {
+      "id": 6,
+      "direction": "normal",
+      "model": "sts3215"
+    }
+  }
+}

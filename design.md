@@ -7,3 +7,7 @@
 
 - `rerobot-find-port`
 - `rerobot-find-cameras`
+- `rerobot-calibrate`
+
+Unlike lerobot, we should write everything about this robot in a single file, in json or yaml format.
+For example, the port, cameras, the calibration, etc, should be written in a single file.

@@ -32,7 +32,7 @@
             overlays = [ (import rust-overlay) ];
           };
           llvmPackages = pkgs.llvmPackages_latest;
-          # Pin the complete Rust toolchain so builds and development stay aligned.
+          # Pin the complete Rust toolchain so development stays aligned.
           rustToolchain = pkgs.rust-bin.nightly."2026-05-17".default.override {
             extensions = [
               "rust-src"
@@ -42,52 +42,15 @@
               "llvm-tools-preview"
             ];
           };
-          rustPlatform = pkgs.makeRustPlatform {
-            cargo = rustToolchain;
-            rustc = rustToolchain;
-          };
           linuxNativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [
             llvmPackages.libclang
           ];
           linuxBuildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [
             pkgs.v4l-utils
           ];
-          rerobot = rustPlatform.buildRustPackage {
-            pname = "rerobot";
-            version = "0.1.0";
-            src = pkgs.lib.cleanSource ./.;
-
-            cargoLock.lockFile = ./Cargo.lock;
-
-            nativeBuildInputs = [ pkgs.pkg-config ] ++ linuxNativeBuildInputs;
-            buildInputs = linuxBuildInputs;
-
-            LIBCLANG_PATH = pkgs.lib.optionalString pkgs.stdenv.isLinux "${llvmPackages.libclang.lib}/lib";
-          };
         in
         {
-          packages = {
-            inherit rerobot;
-            default = rerobot;
-          };
-
-          apps = {
-            rerobot-find-port = {
-              type = "app";
-              program = "${rerobot}/bin/rerobot-find-port";
-              meta.description = "Identify a robot controller's serial port";
-            };
-            rerobot-find-cameras = {
-              type = "app";
-              program = "${rerobot}/bin/rerobot-find-cameras";
-              meta.description = "Find native cameras and capture test images";
-            };
-          };
-
-          checks.default = rerobot;
-
           devShells.default = pkgs.mkShell {
-            inputsFrom = [ rerobot ];
             packages =
               [
                 rustToolchain
