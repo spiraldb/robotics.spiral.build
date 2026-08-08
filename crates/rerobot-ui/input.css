@@ -1,0 +1,68 @@
+@import "tailwindcss";
+
+/* Tailwind discovers utility classes by scanning source text, and the UI is
+   written in Rust rather than the templates it looks at by default. */
+@source "./src/**/*.rs";
+@source "./index.html";
+
+@theme {
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+}
+
+@layer components {
+  /* Controls that appear on nearly every panel, kept here so a button looks
+     the same everywhere without repeating a dozen utilities per call site. */
+  .btn {
+    @apply inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-md border
+      border-transparent px-3 py-1.5 text-sm font-medium whitespace-nowrap transition-colors
+      disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .btn-primary {
+    @apply bg-sky-600 text-white hover:bg-sky-500 disabled:hover:bg-sky-600;
+  }
+
+  .btn-danger {
+    @apply bg-rose-600 text-white hover:bg-rose-500 disabled:hover:bg-rose-600;
+  }
+
+  .btn-ghost {
+    @apply border-slate-300 bg-white text-slate-700 hover:bg-slate-100
+      dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800;
+  }
+
+  .card {
+    @apply rounded-xl border border-slate-200 bg-white shadow-sm
+      dark:border-slate-800 dark:bg-slate-900;
+  }
+
+  .field {
+    @apply w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-sm
+      text-slate-900 outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500
+      dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100;
+  }
+
+  .label {
+    @apply mb-1 block text-xs font-medium tracking-wide text-slate-500 uppercase
+      dark:text-slate-400;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium;
+  }
+
+  /* One consistent slider, since the browser default differs per platform and
+     the thumb needs to stay visible against both themes. */
+  .joint-slider {
+    @apply h-1.5 w-full cursor-pointer appearance-none rounded-full bg-slate-200
+      disabled:cursor-not-allowed disabled:opacity-50 dark:bg-slate-700;
+  }
+
+  .joint-slider::-webkit-slider-thumb {
+    @apply h-4 w-4 appearance-none rounded-full bg-sky-600 shadow;
+  }
+
+  .joint-slider::-moz-range-thumb {
+    @apply h-4 w-4 rounded-full border-0 bg-sky-600 shadow;
+  }
+}

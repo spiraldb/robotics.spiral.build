@@ -1,13 +1,27 @@
 # rerobot
 
 `rerobot` is a Rust-native robotics toolkit inspired by
-[LeRobot](https://github.com/huggingface/lerobot). The utilities map connected
-motor controllers and cameras and record motor calibration without requiring
+[LeRobot](https://github.com/huggingface/lerobot). It sets up, calibrates, and
+drives SO-ARM101 arms — from a browser or from the terminal — without requiring
 Python.
+
+One arm is one robot instance is one JSON file. That file holds the arm's
+serial port, its cameras, its motors, and its calibration; there are no
+sidecars and no hidden state directories.
+
+## Layout
+
+| Crate | What it is |
+| --- | --- |
+| `rerobot` | Hardware: the Feetech motor bus, camera capture, serial discovery, and the three CLIs |
+| `crates/rerobot-core` | Hardware-free domain types shared by everything: calibration, the SO-101 joint model, and the studio's wire format |
+| `crates/rerobot-studio` | The web studio's backend: an HTTP server that owns the arms and the cameras |
+| `crates/rerobot-ui` | The web studio's interface, a Dioxus app compiled to WebAssembly |
 
 ## Development
 
-Enter the pinned Nix development environment:
+Enter the pinned Nix development environment, which provides the Rust
+toolchain, `wasm-pack`, the Tailwind CLI, and `dx`:
 
 ```console
 nix develop path:.
@@ -23,6 +37,95 @@ cargo test --all-targets
 The flake provides a pinned development shell for Apple Silicon macOS and
 x86-64/AArch64 Linux. Cargo builds remain available on other platforms
 supported by the Rust dependencies.
+
+## Web studio
+
+Build the interface once, then start the server:
+
+```console
+./scripts/build-ui.sh
+```
+
+```console
+cargo run --bin rerobot-studio
+```
+
+The studio opens on <http://127.0.0.1:8080> and reads and writes robot files in
+`./robots`. Pass `--workspace PATH` to keep them somewhere else, `--bind
+ADDR:PORT` to serve on a different address, and `--no-cameras` to skip camera
+discovery entirely.
+
+To try the interface without hardware, run it against emulated motors:
+
+```console
+cargo run --bin rerobot-studio -- --simulate
+```
+
+Simulated arms drift slowly through their travel, so calibration sweeps and
+teleoperation both work end to end with nothing plugged in.
+
+### What the studio does
+
+**Setup** creates robot instances and prepares them. Assign a serial port from
+the detected list, or use *Identify by unplugging*: the studio records the
+ports, you pull the arm's USB cable, and it reports the one that disappeared.
+Assign cameras by role — `wrist`, `top`, whatever you like. Then calibrate: the
+studio releases torque, you move every joint to both of its limits while a bar
+per joint fills in, and saving writes the measured ranges into the robot's file.
+
+**Control** draws each arm live from its measured joint angles — a side view of
+the shoulder, elbow, and wrist chain plus a plan view of the base rotation —
+and offers three modes:
+
+- **Idle** reads the motors but never drives them.
+- **Manual** commands one arm's joints from sliders.
+- **Teleoperation** mirrors a hand-guided leader arm onto a follower arm,
+  mapping through each arm's own calibration so two differently built arms
+  still agree on what "halfway" means.
+
+**Cameras** previews every detected camera as an MJPEG stream. Streams start
+when a preview is on screen and release the device shortly after it leaves.
+
+Cameras are recorded by the identifier the operating system reports —
+`/dev/videoN` on Linux, the capture index on macOS and Windows — which is the
+same scheme `rerobot-find-cameras` prints. Those identifiers are not guaranteed
+to survive a replug or a reboot, so if a preview goes blank after moving a
+cable, rescan and reassign the camera.
+
+On macOS the studio must be allowed to use the camera. Discovery and stream
+setup both succeed without that permission and simply never deliver a frame, so
+the studio checks at startup and says so in the warnings strip rather than
+leaving an unexplained black preview.
+
+### Safety
+
+The rules are enforced by the server, not by the interface, so they hold for
+anything that talks to the API:
+
+- Torque is never enabled implicitly, and enabling it copies each motor's
+  present position into its goal register first, so an arm cannot snap to a
+  target left over from an earlier session.
+- Joints can only be commanded in normalized units, which are meaningless
+  without a calibration — so an uncalibrated arm cannot be driven at all, and a
+  command can never leave the travel that was actually measured.
+- Commanded positions ramp toward their target at a bounded rate
+  (`--max-step`, in encoder counts per control cycle), so neither a slider jump
+  nor a teleoperation transient can throw an arm across its workspace.
+- If an arm's motor bus stops responding, it is dropped and any mode that
+  depended on it stops with the reason attached.
+
+Releasing torque lets an arm fall under its own weight. Support it first.
+
+### Developing the interface
+
+`scripts/build-ui.sh --dev` skips optimization for a much faster rebuild. The
+server reads the bundle from disk on every request, so a rebuild plus a browser
+reload is enough — the server does not need restarting.
+
+## Command-line tools
+
+The three CLIs cover the same ground as the studio's setup screens, for
+scripting and for machines without a browser.
 
 ## Find a serial port
 

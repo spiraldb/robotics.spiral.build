@@ -41,7 +41,18 @@
               "clippy"
               "llvm-tools-preview"
             ];
+            # The studio's web interface compiles to WebAssembly.
+            targets = [ "wasm32-unknown-unknown" ];
           };
+          # nixpkgs kept Tailwind 3 under the unsuffixed name for a while.
+          tailwind = pkgs.tailwindcss_4 or pkgs.tailwindcss;
+          webBuildInputs = [
+            pkgs.wasm-pack # compiles and bundles crates/rerobot-ui
+            pkgs.binaryen # wasm-opt, used by wasm-pack for release builds
+            tailwind # generates the stylesheet from the Rust sources
+            pkgs.dioxus-cli # `dx serve` for hot-reloading UI development
+            pkgs.nodejs # fallback path for the Tailwind CLI
+          ];
           linuxNativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [
             llvmPackages.libclang
           ];
@@ -59,6 +70,7 @@
                 llvmPackages.llvm
                 pkgs.cargo-binutils
               ]
+              ++ webBuildInputs
               ++ linuxNativeBuildInputs
               ++ linuxBuildInputs;
 

@@ -2,6 +2,60 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serialport::{SerialPortInfo, SerialPortType};
+
+/// List the serial ports that could carry a motor bus, in a stable order.
+///
+/// On macOS the paired `/dev/cu.*` and `/dev/tty.*` names for one device are
+/// collapsed to the `/dev/tty.*` form that LeRobot and the calibration CLI use.
+pub fn available_ports() -> Result<Vec<SerialPortInfo>, serialport::Error> {
+    let mut ports = serialport::available_ports()?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let preferred_names = collapse_macos_aliases(port_names(&ports));
+        ports.retain(|port| preferred_names.binary_search(&port.port_name).is_ok());
+    }
+
+    ports.sort_by(|left, right| left.port_name.cmp(&right.port_name));
+    ports.dedup_by(|left, right| left.port_name == right.port_name);
+    Ok(ports)
+}
+
+/// Collect just the device paths from a port listing.
+pub fn port_names(ports: &[SerialPortInfo]) -> Vec<String> {
+    ports.iter().map(|port| port.port_name.clone()).collect()
+}
+
+/// A one-word transport category, for grouping ports in a UI.
+pub fn port_kind(port_type: &SerialPortType) -> &'static str {
+    match port_type {
+        SerialPortType::UsbPort(_) => "usb",
+        SerialPortType::BluetoothPort => "bluetooth",
+        SerialPortType::PciPort => "pci",
+        SerialPortType::Unknown => "unknown",
+    }
+}
+
+/// Describe a port's hardware, or return `None` when nothing is known.
+pub fn port_description(port_type: &SerialPortType) -> Option<String> {
+    match port_type {
+        SerialPortType::UsbPort(info) => {
+            let mut details = vec![format!("USB {:04x}:{:04x}", info.vid, info.pid)];
+            if let Some(product) = &info.product {
+                details.push(product.clone());
+            }
+            if let Some(serial) = &info.serial_number {
+                details.push(format!("serial {serial}"));
+            }
+            Some(details.join(", "))
+        }
+        SerialPortType::BluetoothPort => Some("Bluetooth".to_owned()),
+        SerialPortType::PciPort => Some("PCI".to_owned()),
+        SerialPortType::Unknown => None,
+    }
+}
+
 /// Return the ports that were present in `before` but not in `after`.
 ///
 /// Results are sorted and duplicate input entries are ignored. This keeps the

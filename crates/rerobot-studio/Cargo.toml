@@ -1,0 +1,29 @@
+[package]
+name = "rerobot-studio"
+version.workspace = true
+edition.workspace = true
+description = "Web studio for setting up, calibrating, and operating SO-ARM101 arms"
+publish = false
+
+[dependencies]
+rerobot.workspace = true
+rerobot-core.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+axum = { version = "0.8", features = ["macros"] }
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "time"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tower-http = { version = "0.7", features = ["fs", "set-header", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-stream = "0.3"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "rerobot-studio"
+path = "src/main.rs"

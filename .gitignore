@@ -2,3 +2,7 @@
 .direnv
 /outputs
 /result
+/robots
+crates/rerobot-ui/dist
+crates/rerobot-ui/node_modules
+crates/rerobot-ui/target

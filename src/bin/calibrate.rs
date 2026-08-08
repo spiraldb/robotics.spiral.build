@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use rerobot::calibration::{
-    Calibration, CalibrationInput, Direction, MotorReading, MotorSpec, build_calibration,
+    Calibration, CalibrationInput, Direction, MotorSpec, RangeTracker, build_calibration,
     validate_motor_specs,
 };
 use rerobot::feetech::FeetechBus;
@@ -392,93 +392,6 @@ fn parse_calibration_input(contents: &str, origin: &str) -> Result<CalibrationIn
     })
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct LiveRange {
-    minimum: i64,
-    position: i64,
-    maximum: i64,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RangeTracker {
-    ranges: BTreeMap<String, LiveRange>,
-}
-
-impl RangeTracker {
-    fn new(positions: BTreeMap<String, i64>) -> Result<Self> {
-        if positions.is_empty() {
-            return Err("the motor bus returned no positions".into());
-        }
-        Ok(Self {
-            ranges: positions
-                .into_iter()
-                .map(|(name, position)| {
-                    (
-                        name,
-                        LiveRange {
-                            minimum: position,
-                            position,
-                            maximum: position,
-                        },
-                    )
-                })
-                .collect(),
-        })
-    }
-
-    fn observe(&mut self, positions: &BTreeMap<String, i64>) -> Result<()> {
-        let expected = self.ranges.keys().collect::<BTreeSet<_>>();
-        let actual = positions.keys().collect::<BTreeSet<_>>();
-        if expected != actual {
-            return Err("the motor set changed while calibration was running".into());
-        }
-        for (name, position) in positions {
-            let range = self
-                .ranges
-                .get_mut(name)
-                .expect("validated position must have a range");
-            range.position = *position;
-            range.minimum = range.minimum.min(*position);
-            range.maximum = range.maximum.max(*position);
-        }
-        Ok(())
-    }
-
-    fn into_input(self) -> Result<CalibrationInput> {
-        let insufficient = self
-            .ranges
-            .iter()
-            .filter(|(_, range)| i128::from(range.maximum) - i128::from(range.minimum) < 2)
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>();
-        if !insufficient.is_empty() {
-            return Err(format!(
-                "these motors did not move far enough to calibrate: {}; move every joint through its full range before pressing Enter",
-                insufficient.join(", ")
-            )
-            .into());
-        }
-
-        let motors = self
-            .ranges
-            .into_iter()
-            .map(|(name, range)| {
-                let center = (i128::from(range.minimum) + i128::from(range.maximum)) / 2;
-                (
-                    name,
-                    MotorReading {
-                        center: i64::try_from(center)
-                            .expect("the midpoint of two i64 values must fit in i64"),
-                        range_min: range.minimum,
-                        range_max: range.maximum,
-                    },
-                )
-            })
-            .collect();
-        Ok(CalibrationInput::Direct { motors })
-    }
-}
-
 fn collect_live<W>(
     motors: &BTreeMap<String, MotorSpec>,
     serial: &SerialSettings,
@@ -561,7 +474,7 @@ where
 
     render_live_table(output, &ordered_motors, &tracker, true)?;
     writeln!(output)?;
-    tracker.into_input()
+    Ok(tracker.into_input()?)
 }
 
 fn render_live_table<W: Write>(
@@ -581,14 +494,17 @@ fn render_live_table<W: Write>(
     writeln!(output, "\r\x1b[2K{}", "-".repeat(64))?;
     for (name, motor) in motors {
         let range = tracker
-            .ranges
+            .ranges()
             .get(*name)
             .expect("every configured motor must have a live range");
-        let span = i128::from(range.maximum) - i128::from(range.minimum);
         writeln!(
             output,
             "\r\x1b[2K{name:<20} {:>4} {:>9} {:>9} {:>9} {:>9}",
-            motor.id, range.minimum, range.position, range.maximum, span
+            motor.id,
+            range.minimum,
+            range.position,
+            range.maximum,
+            range.span()
         )?;
     }
     output.flush()
@@ -743,66 +659,6 @@ mod tests {
         .expect_err("duplicate update must fail");
 
         assert!(error.to_string().contains("more than once"));
-    }
-
-    #[test]
-    fn range_tracker_records_extrema_and_derives_the_midpoint() {
-        let mut tracker = RangeTracker::new(BTreeMap::from([
-            ("shoulder".to_owned(), 100),
-            ("elbow".to_owned(), -5),
-        ]))
-        .unwrap();
-        tracker
-            .observe(&BTreeMap::from([
-                ("shoulder".to_owned(), 40),
-                ("elbow".to_owned(), 15),
-            ]))
-            .unwrap();
-        tracker
-            .observe(&BTreeMap::from([
-                ("shoulder".to_owned(), 180),
-                ("elbow".to_owned(), -25),
-            ]))
-            .unwrap();
-
-        let CalibrationInput::Direct { motors } = tracker.into_input().unwrap() else {
-            panic!("live range should become direct calibration input");
-        };
-        assert_eq!(
-            motors["shoulder"],
-            MotorReading {
-                center: 110,
-                range_min: 40,
-                range_max: 180
-            }
-        );
-        assert_eq!(
-            motors["elbow"],
-            MotorReading {
-                center: -5,
-                range_min: -25,
-                range_max: 15
-            }
-        );
-    }
-
-    #[test]
-    fn range_tracker_requires_every_motor_to_move() {
-        let mut tracker = RangeTracker::new(BTreeMap::from([
-            ("moving".to_owned(), 10),
-            ("still".to_owned(), 20),
-        ]))
-        .unwrap();
-        tracker
-            .observe(&BTreeMap::from([
-                ("moving".to_owned(), 30),
-                ("still".to_owned(), 20),
-            ]))
-            .unwrap();
-
-        let error = tracker.into_input().expect_err("still motor must fail");
-        assert!(error.to_string().contains("still"));
-        assert!(error.to_string().contains("full range"));
     }
 
     #[test]

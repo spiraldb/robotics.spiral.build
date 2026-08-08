@@ -176,6 +176,14 @@ pub enum CalibrationError {
         unexpected: Vec<String>,
     },
     EmptySamples,
+    NoPositions,
+    MotorSetChanged {
+        missing: Vec<String>,
+        unexpected: Vec<String>,
+    },
+    InsufficientTravel {
+        motors: Vec<String>,
+    },
     InvalidRange {
         motor: String,
         range_min: i64,
@@ -223,6 +231,25 @@ impl fmt::Display for CalibrationError {
             Self::EmptySamples => {
                 formatter.write_str("a calibration sweep must contain at least one sample")
             }
+            Self::NoPositions => formatter.write_str("the motor bus returned no positions"),
+            Self::MotorSetChanged {
+                missing,
+                unexpected,
+            } => {
+                formatter.write_str("the motor set changed while calibration was running")?;
+                if !missing.is_empty() {
+                    write!(formatter, "; stopped reporting: {}", missing.join(", "))?;
+                }
+                if !unexpected.is_empty() {
+                    write!(formatter, "; started reporting: {}", unexpected.join(", "))?;
+                }
+                Ok(())
+            }
+            Self::InsufficientTravel { motors } => write!(
+                formatter,
+                "these motors did not move far enough to calibrate: {}; move every joint through its full range",
+                motors.join(", ")
+            ),
             Self::InvalidRange {
                 motor,
                 range_min,
@@ -444,6 +471,182 @@ pub fn normalize_centered_raw(
     Ok(match calibration.direction {
         Direction::Normal => normalized,
         Direction::Reversed => -normalized,
+    })
+}
+
+/// The travel one motor has shown so far during a live calibration sweep.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LiveRange {
+    pub minimum: i64,
+    pub position: i64,
+    pub maximum: i64,
+}
+
+impl LiveRange {
+    /// Travel observed so far, saturating rather than overflowing.
+    pub fn span(&self) -> i64 {
+        self.maximum.saturating_sub(self.minimum)
+    }
+}
+
+/// Accumulates the extrema of every motor while an operator sweeps the arm.
+///
+/// The terminal calibration command and the studio's control loop both feed
+/// this the same way, so "did this joint move far enough" has exactly one
+/// definition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RangeTracker {
+    ranges: BTreeMap<String, LiveRange>,
+}
+
+/// Encoder counts a joint must travel before its range is considered usable.
+///
+/// Two counts is the smallest span that leaves the center strictly inside the
+/// range, which [`build_calibration`] requires.
+pub const MINIMUM_CALIBRATION_TRAVEL: i64 = 2;
+
+impl RangeTracker {
+    /// Start tracking from an initial reading of every motor.
+    pub fn new(positions: BTreeMap<String, i64>) -> Result<Self, CalibrationError> {
+        if positions.is_empty() {
+            return Err(CalibrationError::NoPositions);
+        }
+        Ok(Self {
+            ranges: positions
+                .into_iter()
+                .map(|(name, position)| {
+                    (
+                        name,
+                        LiveRange {
+                            minimum: position,
+                            position,
+                            maximum: position,
+                        },
+                    )
+                })
+                .collect(),
+        })
+    }
+
+    /// Fold one fresh reading of every motor into the tracked extrema.
+    pub fn observe(&mut self, positions: &BTreeMap<String, i64>) -> Result<(), CalibrationError> {
+        let expected = self.ranges.keys().cloned().collect::<BTreeSet<_>>();
+        let actual = positions.keys().cloned().collect::<BTreeSet<_>>();
+        if expected != actual {
+            return Err(CalibrationError::MotorSetChanged {
+                missing: expected.difference(&actual).cloned().collect(),
+                unexpected: actual.difference(&expected).cloned().collect(),
+            });
+        }
+
+        for (name, position) in positions {
+            let range = self
+                .ranges
+                .get_mut(name)
+                .expect("validated position must have a range");
+            range.position = *position;
+            range.minimum = range.minimum.min(*position);
+            range.maximum = range.maximum.max(*position);
+        }
+        Ok(())
+    }
+
+    /// Borrow the tracked travel of every motor.
+    pub fn ranges(&self) -> &BTreeMap<String, LiveRange> {
+        &self.ranges
+    }
+
+    /// Motors that have not yet moved far enough to produce a valid range.
+    pub fn insufficient_travel(&self) -> Vec<String> {
+        self.ranges
+            .iter()
+            .filter(|(_, range)| range.span() < MINIMUM_CALIBRATION_TRAVEL)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// True once every motor has swept a usable range.
+    pub fn is_ready(&self) -> bool {
+        self.insufficient_travel().is_empty()
+    }
+
+    /// Reduce the sweep to calibration input, centering each motor on the
+    /// midpoint of its observed travel.
+    pub fn into_input(self) -> Result<CalibrationInput, CalibrationError> {
+        let insufficient = self.insufficient_travel();
+        if !insufficient.is_empty() {
+            return Err(CalibrationError::InsufficientTravel {
+                motors: insufficient,
+            });
+        }
+
+        let motors = self
+            .ranges
+            .into_iter()
+            .map(|(name, range)| {
+                let center = (i128::from(range.minimum) + i128::from(range.maximum)) / 2;
+                (
+                    name,
+                    MotorReading {
+                        center: i64::try_from(center)
+                            .expect("the midpoint of two i64 values must fit in i64"),
+                        range_min: range.minimum,
+                        range_max: range.maximum,
+                    },
+                )
+            })
+            .collect();
+        Ok(CalibrationInput::Direct { motors })
+    }
+}
+
+/// Map a normalized `[-1.0, 1.0]` command back to an unhomed raw position.
+///
+/// This is the exact inverse of [`normalize_centered_raw`] up to rounding: the
+/// command is clamped to `[-1.0, 1.0]`, the direction is undone, each side of
+/// the center is scaled by its own half-range, and the result is clamped to the
+/// calibrated range so a caller can never command a joint past a limit it was
+/// calibrated against. A non-finite command resolves to the center rather than
+/// producing an arbitrary position.
+pub fn denormalize_centered_raw(
+    calibration: &MotorCalibration,
+    normalized: f64,
+) -> Result<i64, CalibrationError> {
+    validate_range(
+        &format!("id {}", calibration.id),
+        MotorReading {
+            center: calibration.center,
+            range_min: calibration.range_min,
+            range_max: calibration.range_max,
+        },
+    )?;
+
+    let command = if normalized.is_finite() {
+        normalized
+    } else {
+        0.0
+    };
+    let command = command.clamp(-1.0, 1.0);
+    let command = match calibration.direction {
+        Direction::Normal => command,
+        Direction::Reversed => -command,
+    };
+
+    let half_range = if command < 0.0 {
+        i128::from(calibration.center) - i128::from(calibration.range_min)
+    } else {
+        i128::from(calibration.range_max) - i128::from(calibration.center)
+    };
+    let offset = command * half_range as f64;
+    let raw = (calibration.center as f64 + offset).round();
+
+    // f64 cannot represent every i64, so clamp in float space before casting.
+    Ok(if raw <= calibration.range_min as f64 {
+        calibration.range_min
+    } else if raw >= calibration.range_max as f64 {
+        calibration.range_max
+    } else {
+        (raw as i64).clamp(calibration.range_min, calibration.range_max)
     })
 }
 
@@ -790,6 +993,178 @@ mod tests {
         };
         assert_eq!(normalize_centered_raw(&reversed, 0).unwrap(), 1.0);
         assert_eq!(normalize_centered_raw(&reversed, 100).unwrap(), -1.0);
+    }
+
+    #[test]
+    fn range_tracker_records_extrema_and_derives_the_midpoint() {
+        let mut tracker = RangeTracker::new(BTreeMap::from([
+            ("shoulder".to_owned(), 100),
+            ("elbow".to_owned(), -5),
+        ]))
+        .unwrap();
+        tracker
+            .observe(&BTreeMap::from([
+                ("shoulder".to_owned(), 40),
+                ("elbow".to_owned(), 15),
+            ]))
+            .unwrap();
+        tracker
+            .observe(&BTreeMap::from([
+                ("shoulder".to_owned(), 180),
+                ("elbow".to_owned(), -25),
+            ]))
+            .unwrap();
+
+        assert!(tracker.is_ready());
+        assert_eq!(tracker.ranges()["shoulder"].position, 180);
+        assert_eq!(tracker.ranges()["shoulder"].span(), 140);
+
+        let CalibrationInput::Direct { motors } = tracker.into_input().unwrap() else {
+            panic!("live range should become direct calibration input");
+        };
+        assert_eq!(
+            motors["shoulder"],
+            MotorReading {
+                center: 110,
+                range_min: 40,
+                range_max: 180
+            }
+        );
+        assert_eq!(
+            motors["elbow"],
+            MotorReading {
+                center: -5,
+                range_min: -25,
+                range_max: 15
+            }
+        );
+    }
+
+    #[test]
+    fn range_tracker_requires_every_motor_to_move() {
+        let mut tracker = RangeTracker::new(BTreeMap::from([
+            ("moving".to_owned(), 10),
+            ("still".to_owned(), 20),
+        ]))
+        .unwrap();
+        tracker
+            .observe(&BTreeMap::from([
+                ("moving".to_owned(), 30),
+                ("still".to_owned(), 20),
+            ]))
+            .unwrap();
+
+        assert!(!tracker.is_ready());
+        assert_eq!(tracker.insufficient_travel(), ["still"]);
+        assert_eq!(
+            tracker.into_input(),
+            Err(CalibrationError::InsufficientTravel {
+                motors: vec!["still".to_owned()]
+            })
+        );
+    }
+
+    #[test]
+    fn range_tracker_rejects_an_empty_or_changing_motor_set() {
+        assert_eq!(
+            RangeTracker::new(BTreeMap::new()),
+            Err(CalibrationError::NoPositions)
+        );
+
+        let mut tracker = RangeTracker::new(BTreeMap::from([("joint".to_owned(), 1)])).unwrap();
+        let error = tracker
+            .observe(&BTreeMap::from([("other".to_owned(), 1)]))
+            .expect_err("a different motor set must fail");
+        assert_eq!(
+            error,
+            CalibrationError::MotorSetChanged {
+                missing: vec!["joint".to_owned()],
+                unexpected: vec!["other".to_owned()],
+            }
+        );
+        // The tracker keeps the ranges it already had.
+        assert_eq!(tracker.ranges()["joint"].position, 1);
+    }
+
+    #[test]
+    fn a_completed_sweep_builds_a_valid_calibration() {
+        let mut tracker = RangeTracker::new(BTreeMap::from([
+            ("shoulder".to_owned(), 2000),
+            ("elbow".to_owned(), 2000),
+        ]))
+        .unwrap();
+        tracker
+            .observe(&BTreeMap::from([
+                ("shoulder".to_owned(), 900),
+                ("elbow".to_owned(), 1200),
+            ]))
+            .unwrap();
+        tracker
+            .observe(&BTreeMap::from([
+                ("shoulder".to_owned(), 3300),
+                ("elbow".to_owned(), 2800),
+            ]))
+            .unwrap();
+
+        let calibration = build_calibration(&two_specs(), &tracker.into_input().unwrap()).unwrap();
+        assert_eq!(calibration.motors["shoulder"].range_min, 900);
+        assert_eq!(calibration.motors["shoulder"].center, 2100);
+        assert_eq!(calibration.motors["shoulder"].range_max, 3300);
+    }
+
+    #[test]
+    fn denormalization_inverts_normalization_and_respects_limits() {
+        let calibration = MotorCalibration {
+            id: 1,
+            direction: Direction::Normal,
+            range_min: 900,
+            center: 2048,
+            range_max: 3300,
+        };
+
+        for raw in [900, 1500, 2048, 2900, 3300] {
+            let normalized = normalize_centered_raw(&calibration, raw).unwrap();
+            assert_eq!(
+                denormalize_centered_raw(&calibration, normalized).unwrap(),
+                raw
+            );
+        }
+
+        // Commands beyond the calibrated travel stop at the limits.
+        assert_eq!(denormalize_centered_raw(&calibration, -5.0).unwrap(), 900);
+        assert_eq!(denormalize_centered_raw(&calibration, 5.0).unwrap(), 3300);
+        assert_eq!(
+            denormalize_centered_raw(&calibration, f64::NAN).unwrap(),
+            2048
+        );
+
+        let reversed = MotorCalibration {
+            direction: Direction::Reversed,
+            ..calibration
+        };
+        assert_eq!(denormalize_centered_raw(&reversed, 1.0).unwrap(), 900);
+        assert_eq!(denormalize_centered_raw(&reversed, -1.0).unwrap(), 3300);
+    }
+
+    #[test]
+    fn denormalization_stays_inside_an_extreme_range() {
+        let calibration = MotorCalibration {
+            id: 1,
+            direction: Direction::Normal,
+            range_min: i64::MIN,
+            center: 0,
+            range_max: i64::MAX,
+        };
+
+        assert_eq!(
+            denormalize_centered_raw(&calibration, -1.0).unwrap(),
+            i64::MIN
+        );
+        assert_eq!(
+            denormalize_centered_raw(&calibration, 1.0).unwrap(),
+            i64::MAX
+        );
+        assert_eq!(denormalize_centered_raw(&calibration, 0.0).unwrap(), 0);
     }
 
     #[test]

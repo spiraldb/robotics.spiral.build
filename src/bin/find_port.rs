@@ -5,10 +5,8 @@ use std::thread;
 use std::time::Duration;
 
 use clap::Parser;
-#[cfg(target_os = "macos")]
-use rerobot::serial_ports::collapse_macos_aliases;
-use rerobot::serial_ports::disconnected_ports;
-use serialport::{SerialPortInfo, SerialPortType};
+use rerobot::serial_ports::{available_ports, disconnected_ports, port_description, port_names};
+use serialport::SerialPortInfo;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -78,24 +76,6 @@ fn run(args: Args) -> Result<()> {
     }
 }
 
-fn available_ports() -> Result<Vec<SerialPortInfo>> {
-    let mut ports = serialport::available_ports()?;
-
-    #[cfg(target_os = "macos")]
-    {
-        let preferred_names = collapse_macos_aliases(port_names(&ports));
-        ports.retain(|port| preferred_names.binary_search(&port.port_name).is_ok());
-    }
-
-    ports.sort_by(|left, right| left.port_name.cmp(&right.port_name));
-    ports.dedup_by(|left, right| left.port_name == right.port_name);
-    Ok(ports)
-}
-
-fn port_names(ports: &[SerialPortInfo]) -> Vec<String> {
-    ports.iter().map(|port| port.port_name.clone()).collect()
-}
-
 fn print_ports(ports: &[SerialPortInfo]) {
     if ports.is_empty() {
         println!("  (none)");
@@ -103,24 +83,9 @@ fn print_ports(ports: &[SerialPortInfo]) {
     }
 
     for port in ports {
-        println!("  {}{}", port.port_name, port_details(&port.port_type));
-    }
-}
-
-fn port_details(port_type: &SerialPortType) -> String {
-    match port_type {
-        SerialPortType::UsbPort(info) => {
-            let mut details = vec![format!("USB {:04x}:{:04x}", info.vid, info.pid)];
-            if let Some(product) = &info.product {
-                details.push(product.clone());
-            }
-            if let Some(serial) = &info.serial_number {
-                details.push(format!("serial {serial}"));
-            }
-            format!(" ({})", details.join(", "))
+        match port_description(&port.port_type) {
+            Some(details) => println!("  {} ({details})", port.port_name),
+            None => println!("  {}", port.port_name),
         }
-        SerialPortType::BluetoothPort => " (Bluetooth)".to_owned(),
-        SerialPortType::PciPort => " (PCI)".to_owned(),
-        SerialPortType::Unknown => String::new(),
     }
 }
