@@ -46,12 +46,17 @@
           };
           # nixpkgs kept Tailwind 3 under the unsuffixed name for a while.
           tailwind = pkgs.tailwindcss_4 or pkgs.tailwindcss;
+          # `dx` builds crates/rerobot-ui: it compiles the crate to wasm, runs
+          # the Tailwind CLI on tailwind.css, and bundles the result. With
+          # NO_DOWNLOADS set it takes every one of those tools from PATH
+          # instead of fetching its own, so the whole toolchain is pinned here.
           webBuildInputs = [
-            pkgs.wasm-pack # compiles and bundles crates/rerobot-ui
-            pkgs.binaryen # wasm-opt, used by wasm-pack for release builds
-            tailwind # generates the stylesheet from the Rust sources
-            pkgs.dioxus-cli # `dx serve` for hot-reloading UI development
-            pkgs.nodejs # fallback path for the Tailwind CLI
+            pkgs.dioxus-cli # dx build / dx serve
+            tailwind # compiles tailwind.css
+            # Must match the `wasm-bindgen` version pinned in
+            # crates/rerobot-ui/Cargo.toml; wasm-bindgen refuses a mismatch.
+            pkgs.wasm-bindgen-cli_0_2_126
+            pkgs.binaryen # wasm-opt, used for release builds
           ];
           linuxNativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [
             llvmPackages.libclang
@@ -73,6 +78,10 @@
               ++ webBuildInputs
               ++ linuxNativeBuildInputs
               ++ linuxBuildInputs;
+
+            # Make `dx` use the tools declared above rather than downloading
+            # its own copies at build time.
+            NO_DOWNLOADS = "1";
 
             ASAN_SYMBOLIZER_PATH = "${llvmPackages.llvm}/bin/llvm-symbolizer";
             LIBCLANG_PATH = pkgs.lib.optionalString pkgs.stdenv.isLinux "${llvmPackages.libclang.lib}/lib";

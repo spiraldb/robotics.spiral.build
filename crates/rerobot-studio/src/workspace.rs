@@ -28,6 +28,9 @@ pub const DEFAULT_BAUD_RATE: u32 = 1_000_000;
 /// Longest robot ID accepted, which is also the longest file stem written.
 const MAX_ROBOT_ID_LENGTH: usize = 64;
 
+/// Longest human-visible label stored in a robot file.
+const MAX_LABEL_LENGTH: usize = 64;
+
 /// Something went wrong reading or writing the robot workspace.
 #[derive(Debug)]
 pub enum WorkspaceError {
@@ -164,7 +167,16 @@ impl RobotRecord {
     }
 
     /// Build the UI-facing summary, folding in live connection state.
+    ///
+    /// A file that parses but does not describe a usable robot still produces a
+    /// summary — with `problem` explaining what is wrong, because a card that
+    /// renders as an empty robot tells the operator nothing.
     pub fn summary(&self, connection: ConnectionStatus) -> RobotSummary {
+        let problem = self
+            .motors()
+            .err()
+            .or_else(|| self.calibration().err())
+            .map(|error| error.to_string());
         let motors = self.motors().unwrap_or_default();
         let calibration = self.calibration().ok().flatten();
         let calibrated = calibration.as_ref().is_some_and(|calibration| {
@@ -210,6 +222,7 @@ impl RobotRecord {
             motors,
             cameras: self.cameras(),
             calibrated,
+            problem,
             connection,
         }
     }
@@ -227,7 +240,15 @@ struct WorkspaceState {
     robots: BTreeMap<String, RobotRecord>,
     /// Files that look like robot files but could not be read.
     issues: Vec<String>,
+    /// What the directory looked like when it was last read.
+    fingerprint: DirectoryFingerprint,
 }
+
+/// Enough of each robot file's metadata to notice an outside edit.
+///
+/// The workspace is shared with the command-line tools and with the operator's
+/// editor, so the cache cannot assume it is the only writer.
+type DirectoryFingerprint = Vec<(PathBuf, u64, Option<std::time::SystemTime>)>;
 
 impl RobotWorkspace {
     /// Open `directory`, creating it if necessary, and load every robot file.
@@ -249,23 +270,30 @@ impl RobotWorkspace {
         &self.directory
     }
 
+    /// Re-read the directory only when something in it has changed.
+    ///
+    /// The studio is not the only writer: `rerobot-calibrate` edits the same
+    /// files, and an operator may drop one in by hand. Polling the metadata is
+    /// cheap for a handful of small files and keeps the cache honest without
+    /// making every reader touch the disk.
+    pub fn reload_if_changed(&self) -> Result<bool, WorkspaceError> {
+        let fingerprint = self.fingerprint()?;
+        if fingerprint == self.lock().fingerprint {
+            return Ok(false);
+        }
+        self.reload()?;
+        Ok(true)
+    }
+
     /// Re-read every robot file from disk.
     pub fn reload(&self) -> Result<(), WorkspaceError> {
-        let entries = fs::read_dir(&self.directory).map_err(|source| WorkspaceError::Io {
-            path: self.directory.clone(),
-            source,
-        })?;
+        let fingerprint = self.fingerprint()?;
+        let mut loaded = WorkspaceState {
+            fingerprint,
+            ..WorkspaceState::default()
+        };
 
-        let mut loaded = WorkspaceState::default();
-        for entry in entries {
-            let entry = entry.map_err(|source| WorkspaceError::Io {
-                path: self.directory.clone(),
-                source,
-            })?;
-            let path = entry.path();
-            if path.extension().is_none_or(|extension| extension != "json") {
-                continue;
-            }
+        for (path, _, _) in loaded.fingerprint.clone() {
             let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
@@ -296,6 +324,36 @@ impl RobotWorkspace {
 
         *self.lock() = loaded;
         Ok(())
+    }
+
+    /// List the workspace's `.json` files with the metadata a change shows up
+    /// in, in a stable order.
+    fn fingerprint(&self) -> Result<DirectoryFingerprint, WorkspaceError> {
+        let entries = fs::read_dir(&self.directory).map_err(|source| WorkspaceError::Io {
+            path: self.directory.clone(),
+            source,
+        })?;
+
+        let mut fingerprint = DirectoryFingerprint::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| WorkspaceError::Io {
+                path: self.directory.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            if path.extension().is_none_or(|extension| extension != "json") {
+                continue;
+            }
+            // A file that cannot be inspected still has to appear, so that it
+            // becomes a reported issue rather than vanishing from the listing.
+            let (length, modified) = entry.metadata().map_or((0, None), |metadata| {
+                (metadata.len(), metadata.modified().ok())
+            });
+            fingerprint.push((path, length, modified));
+        }
+
+        fingerprint.sort();
+        Ok(fingerprint)
     }
 
     /// Every robot, in ID order.
@@ -331,12 +389,10 @@ impl RobotWorkspace {
             return Err(WorkspaceError::AlreadyExists(id.to_owned()));
         }
 
+        let robot_type = clean_label("robot_type", robot_type.unwrap_or(DEFAULT_ROBOT_TYPE))?;
         let mut root = Map::new();
         root.insert("robot_id".to_owned(), Value::String(id.to_owned()));
-        root.insert(
-            "robot_type".to_owned(),
-            Value::String(robot_type.unwrap_or(DEFAULT_ROBOT_TYPE).to_owned()),
-        );
+        root.insert("robot_type".to_owned(), Value::String(robot_type));
         if let Some(port) = port.map(str::trim).filter(|port| !port.is_empty()) {
             root.insert("port".to_owned(), port_value(port, baud_rate));
         }
@@ -374,7 +430,7 @@ impl RobotWorkspace {
         if let Some(robot_type) = robot_type {
             root.insert(
                 "robot_type".to_owned(),
-                Value::String(robot_type.to_owned()),
+                Value::String(clean_label("robot_type", robot_type)?),
             );
         }
         if let Some(port) = port {
@@ -482,16 +538,47 @@ fn port_value(path: &str, baud_rate: Option<u32>) -> Value {
 
 /// Reject robot IDs that would escape the workspace or confuse the filesystem.
 pub fn validate_robot_id(id: &str) -> Result<(), WorkspaceError> {
-    let usable = !id.is_empty()
-        && id.len() <= MAX_ROBOT_ID_LENGTH
-        && id.chars().all(|character| {
-            character.is_ascii_alphanumeric() || character == '-' || character == '_'
-        });
-    if usable {
+    if is_plain_name(id, MAX_ROBOT_ID_LENGTH) {
         Ok(())
     } else {
         Err(WorkspaceError::InvalidId(id.to_owned()))
     }
+}
+
+/// Reject camera role names that are not plain identifiers.
+///
+/// A role is a key in the robot file and a label in the UI, so the same
+/// restraint that applies to a robot ID applies here.
+pub fn validate_camera_role(role: &str) -> Result<(), WorkspaceError> {
+    if is_plain_name(role, MAX_LABEL_LENGTH) {
+        Ok(())
+    } else {
+        Err(WorkspaceError::Invalid(format!(
+            "camera role {role:?} must be 1 to {MAX_LABEL_LENGTH} characters of letters, digits, '-', or '_'"
+        )))
+    }
+}
+
+fn is_plain_name(value: &str, maximum: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        })
+}
+
+/// Trim and check a free-text label such as a robot type.
+fn clean_label(field: &str, value: &str) -> Result<String, WorkspaceError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > MAX_LABEL_LENGTH
+        || trimmed.chars().any(char::is_control)
+    {
+        return Err(WorkspaceError::Invalid(format!(
+            "{field} must be 1 to {MAX_LABEL_LENGTH} characters and contain no control characters"
+        )));
+    }
+    Ok(trimmed.to_owned())
 }
 
 #[cfg(test)]
@@ -506,6 +593,111 @@ mod tests {
         let workspace =
             RobotWorkspace::open(directory.path().to_path_buf()).expect("open workspace");
         (directory, workspace)
+    }
+
+    #[test]
+    fn a_file_written_by_another_tool_is_picked_up() {
+        let (directory, workspace) = workspace();
+        assert!(workspace.list().is_empty());
+
+        // The calibration CLI writes to this same directory, so the studio
+        // cannot treat its in-memory cache as the whole truth.
+        fs::write(
+            directory.path().join("outside.json"),
+            r#"{"schema_version":1,"robot_id":"outside","motors":{"joint":{"id":1}}}"#,
+        )
+        .expect("write robot file");
+
+        assert!(workspace.reload_if_changed().expect("reload"));
+        assert_eq!(
+            workspace
+                .list()
+                .iter()
+                .map(|r| r.id.clone())
+                .collect::<Vec<_>>(),
+            ["outside"]
+        );
+        assert!(
+            !workspace.reload_if_changed().expect("second reload"),
+            "an unchanged directory must not be re-read"
+        );
+
+        fs::remove_file(directory.path().join("outside.json")).expect("remove");
+        assert!(workspace.reload_if_changed().expect("reload after delete"));
+        assert!(workspace.list().is_empty());
+    }
+
+    #[test]
+    fn an_edit_to_an_existing_file_is_noticed() {
+        let (directory, workspace) = workspace();
+        workspace.create("arm", None, None, None).expect("create");
+        workspace.reload_if_changed().expect("settle");
+
+        let path = directory.path().join("arm.json");
+        let mut document: Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        document["robot_type"] = Value::String("so101_leader".to_owned());
+        // A different length as well as a different mtime, so the test does not
+        // depend on filesystem timestamp resolution.
+        fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+
+        assert!(workspace.reload_if_changed().expect("reload"));
+        assert_eq!(
+            workspace.get("arm").unwrap().robot_type().as_deref(),
+            Some("so101_leader")
+        );
+    }
+
+    #[test]
+    fn a_structurally_invalid_robot_explains_itself_instead_of_looking_empty() {
+        let (directory, workspace) = workspace();
+        fs::write(
+            directory.path().join("clash.json"),
+            r#"{"schema_version":1,"motors":{"a":{"id":1},"b":{"id":1}}}"#,
+        )
+        .expect("write robot file");
+        workspace.reload().expect("reload");
+
+        let summary = workspace
+            .get("clash")
+            .expect("the robot is listed")
+            .summary(ConnectionStatus::default());
+
+        assert!(!summary.calibrated);
+        let problem = summary.problem.expect("the reason is carried to the UI");
+        assert!(problem.contains("invalid motors"), "{problem}");
+        assert!(problem.contains("ID 1"), "{problem}");
+    }
+
+    #[test]
+    fn labels_are_trimmed_and_control_characters_refused() {
+        let (_directory, workspace) = workspace();
+
+        workspace
+            .create("padded", Some("  so101_leader  "), None, None)
+            .expect("create");
+        assert_eq!(
+            workspace.get("padded").unwrap().robot_type().as_deref(),
+            Some("so101_leader"),
+            "surrounding whitespace never belongs in stored data"
+        );
+
+        assert!(
+            workspace
+                .create("bad", Some("so101\nleader"), None, None)
+                .is_err()
+        );
+        assert!(workspace.create("blank", Some("   "), None, None).is_err());
+    }
+
+    #[test]
+    fn camera_roles_must_be_plain_identifiers() {
+        for role in ["../../etc", "", "with space", "sneaky/slash"] {
+            assert!(validate_camera_role(role).is_err(), "accepted {role:?}");
+        }
+        for role in ["wrist", "top_down", "cam-2"] {
+            assert!(validate_camera_role(role).is_ok(), "rejected {role:?}");
+        }
     }
 
     #[test]

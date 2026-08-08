@@ -17,6 +17,9 @@ use tracing_subscriber::EnvFilter;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+/// How often the workspace directory is checked for outside changes.
+const WORKSPACE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Set up, calibrate, and drive SO-ARM101 arms from a browser.
 #[derive(Debug, Parser)]
 #[command(
@@ -133,6 +136,27 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
         let discovery = cameras.clone();
         tokio::task::spawn_blocking(move || discovery.refresh_blocking()).await?;
     }
+
+    // The workspace is shared with the command-line tools, so the studio has to
+    // re-read it rather than assume it is the only writer.
+    tokio::spawn({
+        let workspace = workspace.clone();
+        async move {
+            let mut ticker = tokio::time::interval(WORKSPACE_POLL_INTERVAL);
+            loop {
+                ticker.tick().await;
+                let workspace = workspace.clone();
+                let reloaded =
+                    tokio::task::spawn_blocking(move || workspace.reload_if_changed()).await;
+                match reloaded {
+                    Ok(Ok(true)) => tracing::info!("robot workspace changed on disk; reloaded"),
+                    Ok(Ok(false)) => {}
+                    Ok(Err(error)) => tracing::warn!("could not re-read the workspace: {error}"),
+                    Err(error) => tracing::warn!("workspace reload task failed: {error}"),
+                }
+            }
+        }
+    });
 
     let ui_dir = ui::resolve_ui_dir(args.ui_dir.clone());
     let state = AppState {

@@ -21,7 +21,8 @@ sidecars and no hidden state directories.
 ## Development
 
 Enter the pinned Nix development environment, which provides the Rust
-toolchain, `wasm-pack`, the Tailwind CLI, and `dx`:
+toolchain and the whole web toolchain — `dx`, the Tailwind CLI,
+`wasm-bindgen`, and `wasm-opt`:
 
 ```console
 nix develop path:.
@@ -43,17 +44,29 @@ supported by the Rust dependencies.
 Build the interface once, then start the server:
 
 ```console
-./scripts/build-ui.sh
+cd crates/rerobot-ui && dx build --release
 ```
 
 ```console
 cargo run --bin rerobot-studio
 ```
 
+`dx` compiles the crate to WebAssembly and runs the Tailwind CLI over
+`crates/rerobot-ui/tailwind.css` in the same step — there is no separate
+stylesheet build. The dev shell sets `NO_DOWNLOADS`, so `dx` uses the
+`tailwindcss`, `wasm-bindgen`, and `wasm-opt` the flake pins rather than
+fetching its own.
+
 The studio opens on <http://127.0.0.1:8080> and reads and writes robot files in
 `./robots`. Pass `--workspace PATH` to keep them somewhere else, `--bind
 ADDR:PORT` to serve on a different address, and `--no-cameras` to skip camera
 discovery entirely.
+
+The studio is not the only writer of those files, so it re-reads the directory
+whenever anything in it changes: a robot calibrated with `rerobot-calibrate`, or
+a file copied in by hand, shows up without restarting the server. A file that
+parses but does not describe a usable robot — two motors sharing a bus ID, say —
+is listed with the reason attached rather than quietly ignored.
 
 To try the interface without hardware, run it against emulated motors:
 
@@ -118,9 +131,12 @@ Releasing torque lets an arm fall under its own weight. Support it first.
 
 ### Developing the interface
 
-`scripts/build-ui.sh --dev` skips optimization for a much faster rebuild. The
-server reads the bundle from disk on every request, so a rebuild plus a browser
-reload is enough — the server does not need restarting.
+`dx build` without `--release` is much faster, and the studio prefers a release
+bundle when both exist. The server reads the bundle from disk on every request,
+so a rebuild plus a browser reload is enough — no restart needed.
+
+`dx serve` gives hot reloading instead, including for Tailwind classes. Run the
+studio separately for the API and point the served page at it.
 
 ## Command-line tools
 

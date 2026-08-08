@@ -114,9 +114,13 @@ enum Command {
         id: String,
         reply: Reply<()>,
     },
-    FinishCalibration {
+    CalibrationInputFor {
         id: String,
         reply: Reply<CalibrationInput>,
+    },
+    Forget {
+        id: String,
+        reply: Reply<()>,
     },
     CancelCalibration {
         id: String,
@@ -223,9 +227,23 @@ impl HardwareHandle {
         .await
     }
 
-    /// Stop the sweep and return the ranges it recorded.
-    pub async fn finish_calibration(&self, id: &str) -> Result<CalibrationInput, String> {
-        self.request(|reply| Command::FinishCalibration {
+    /// Read the ranges the sweep has recorded so far.
+    ///
+    /// This deliberately leaves the sweep running. The caller has to build,
+    /// validate, and store a calibration from the result, and any of those can
+    /// fail — discarding the operator's sweep before then would throw away
+    /// minutes of work that is still perfectly good.
+    pub async fn calibration_input(&self, id: &str) -> Result<CalibrationInput, String> {
+        self.request(|reply| Command::CalibrationInputFor {
+            id: id.to_owned(),
+            reply,
+        })
+        .await
+    }
+
+    /// Drop every trace of a robot, including why its bus was lost.
+    pub async fn forget(&self, id: &str) -> Result<(), String> {
+        self.request(|reply| Command::Forget {
             id: id.to_owned(),
             reply,
         })
@@ -506,8 +524,14 @@ impl Controller {
             Command::StartCalibration { id, reply } => {
                 let _ = reply.send(self.start_calibration(&id));
             }
-            Command::FinishCalibration { id, reply } => {
-                let _ = reply.send(self.finish_calibration(&id));
+            Command::CalibrationInputFor { id, reply } => {
+                let _ = reply.send(self.calibration_input(&id));
+            }
+            Command::Forget { id, reply } => {
+                self.robots.remove(&id);
+                self.connections.remove(&id);
+                self.leave_mode_involving(&id, "the robot was removed");
+                let _ = reply.send(Ok(()));
             }
             Command::CancelCalibration { id, reply } => {
                 let result = match self.robots.get_mut(&id) {
@@ -742,8 +766,18 @@ impl Controller {
     }
 
     fn start_calibration(&mut self, id: &str) -> Result<(), String> {
-        // A sweep is done by hand, so nothing may be driving anything.
-        self.mode = ModeStatus::default();
+        // A sweep is done by hand, so nothing may be driving anything. Say why
+        // the mode stopped rather than letting it silently flip to idle.
+        if !matches!(self.mode.selection, ModeSelection::Idle) {
+            self.mode = ModeStatus {
+                error: Some(format!(
+                    "stopped {} to calibrate {id}",
+                    self.mode.selection.label()
+                )),
+                selection: ModeSelection::Idle,
+                active: false,
+            };
+        }
 
         let robot = self
             .robots
@@ -766,17 +800,17 @@ impl Controller {
         Ok(())
     }
 
-    fn finish_calibration(&mut self, id: &str) -> Result<CalibrationInput, String> {
+    fn calibration_input(&self, id: &str) -> Result<CalibrationInput, String> {
         let robot = self
             .robots
-            .get_mut(id)
+            .get(id)
             .ok_or_else(|| format!("robot {id:?} is not connected"))?;
         let sweep = robot
             .sweep
             .as_ref()
             .ok_or_else(|| format!("no calibration is in progress for robot {id:?}"))?;
 
-        // Saving too early must not throw away the sweep so far: the operator
+        // Reading too early must not throw away the sweep so far: the operator
         // should be able to keep moving joints and try again.
         if !sweep.is_ready() {
             return Err(CalibrationError::InsufficientTravel {
@@ -785,10 +819,8 @@ impl Controller {
             .to_string());
         }
 
-        robot
-            .sweep
-            .take()
-            .expect("the sweep was just borrowed")
+        sweep
+            .clone()
             .into_input()
             .map_err(|error| error.to_string())
     }
@@ -1224,12 +1256,12 @@ mod tests {
 
         assert!(
             controller
-                .finish_calibration("arm")
+                .calibration_input("arm")
                 .expect_err("nothing has moved yet")
                 .contains("did not move far enough")
         );
 
-        // A refused save keeps the sweep, so the operator can keep going.
+        // A refused read keeps the sweep, so the operator can keep going.
         assert!(controller.robots["arm"].sweep.is_some());
 
         // The simulated arm drifts through its travel while torque is off.
@@ -1237,7 +1269,7 @@ mod tests {
             controller.poll_robots();
         }
 
-        let input = controller.finish_calibration("arm").expect("finish");
+        let input = controller.calibration_input("arm").expect("finish");
         let CalibrationInput::Direct { motors } = input else {
             panic!("a sweep produces direct readings");
         };
@@ -1247,7 +1279,18 @@ mod tests {
                 .values()
                 .all(|reading| reading.range_max > reading.range_min)
         );
-        assert!(controller.robots["arm"].sweep.is_none());
+
+        // Reading the ranges must not end the sweep: the caller still has to
+        // build and store a calibration, and either can fail.
+        assert!(
+            controller.robots["arm"].sweep.is_some(),
+            "the sweep survives until the caller clears it"
+        );
+        assert_eq!(
+            controller.calibration_input("arm").expect("read again"),
+            CalibrationInput::Direct { motors },
+            "reading twice gives the same answer"
+        );
     }
 
     #[test]

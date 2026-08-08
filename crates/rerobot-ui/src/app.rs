@@ -2,6 +2,12 @@
 
 use dioxus::prelude::*;
 
+/// The stylesheet the Dioxus CLI compiles from `tailwind.css`.
+const TAILWIND: Asset = asset!("/assets/tailwind.css");
+
+/// Inline so the tab icon needs no second request and no external host.
+const FAVICON: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230284c7'/%3E%3Cpath d='M9 23V13l7-5 7 5v10' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E";
+
 use crate::cameras::CamerasTab;
 use crate::control::ControlTab;
 use crate::setup::SetupTab;
@@ -24,6 +30,14 @@ impl Tab {
             Self::Cameras => "Cameras",
         }
     }
+
+    fn class(active: bool) -> &'static str {
+        if active {
+            "cursor-pointer border-b-2 border-sky-600 px-4 py-3 text-sm font-semibold text-sky-700 dark:text-sky-400"
+        } else {
+            "cursor-pointer border-b-2 border-transparent px-4 py-3 text-sm font-medium text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100"
+        }
+    }
 }
 
 #[component]
@@ -33,6 +47,13 @@ pub fn App() -> Element {
     let mut tab = use_signal(|| Tab::Setup);
 
     rsx! {
+        document::Stylesheet { href: TAILWIND }
+        document::Title { "rerobot studio" }
+        document::Link { rel: "icon", href: FAVICON }
+        // Without this the browser renders form controls in the light theme
+        // even when the page is dark.
+        document::Meta { name: "color-scheme", content: "light dark" }
+
         div { class: "min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100",
             Header {}
             nav { class: "sticky top-0 z-10 border-b border-slate-200 bg-slate-50/90 backdrop-blur dark:border-slate-800 dark:bg-slate-950/90",
@@ -41,11 +62,7 @@ pub fn App() -> Element {
                         button {
                             key: "{entry:?}",
                             r#type: "button",
-                            class: if tab() == entry {
-                                "cursor-pointer border-b-2 border-sky-600 px-4 py-3 text-sm font-semibold text-sky-700 dark:text-sky-400"
-                            } else {
-                                "cursor-pointer border-b-2 border-transparent px-4 py-3 text-sm font-medium text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100"
-                            },
+                            class: Tab::class(tab() == entry),
                             onclick: move |_| tab.set(entry),
                             "{entry.label()}"
                         }
@@ -81,11 +98,7 @@ fn Header() -> Element {
                     span { class: "text-sky-600 dark:text-sky-400", "studio" }
                 }
                 span {
-                    class: if mode.active {
-                        "chip bg-emerald-100 text-emerald-800 dark:bg-emerald-500/15 dark:text-emerald-300"
-                    } else {
-                        "chip bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"
-                    },
+                    class: if mode.active { "chip bg-emerald-100 text-emerald-800 dark:bg-emerald-500/15 dark:text-emerald-300" } else { "chip bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300" },
                     "{mode.selection.label()}"
                 }
                 if snapshot.simulated {
@@ -104,11 +117,7 @@ fn Header() -> Element {
                     }
                     span { class: "flex items-center gap-1.5",
                         span {
-                            class: if live() {
-                                "h-2 w-2 rounded-full bg-emerald-500"
-                            } else {
-                                "h-2 w-2 rounded-full bg-rose-500"
-                            },
+                            class: if live() { "h-2 w-2 rounded-full bg-emerald-500" } else { "h-2 w-2 rounded-full bg-rose-500" },
                         }
                         {if live() { "connected" } else { "reconnecting" }}
                     }
@@ -153,11 +162,7 @@ fn NoticeStrip() -> Element {
     rsx! {
         div { class: "fixed inset-x-0 bottom-0 z-20 flex justify-center p-4",
             div {
-                class: if current.failed {
-                    "flex max-w-2xl items-start gap-3 rounded-lg border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-900 shadow-lg dark:border-rose-500/30 dark:bg-rose-950 dark:text-rose-200"
-                } else {
-                    "flex max-w-2xl items-start gap-3 rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm text-emerald-900 shadow-lg dark:border-emerald-500/30 dark:bg-emerald-950 dark:text-emerald-200"
-                },
+                class: if current.failed { "flex max-w-2xl items-start gap-3 rounded-lg border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-900 shadow-lg dark:border-rose-500/30 dark:bg-rose-950 dark:text-rose-200" } else { "flex max-w-2xl items-start gap-3 rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm text-emerald-900 shadow-lg dark:border-emerald-500/30 dark:bg-emerald-950 dark:text-emerald-200" },
                 span { class: "flex-1", "{current.text}" }
                 button {
                     r#type: "button",

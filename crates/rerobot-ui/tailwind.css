@@ -1,9 +1,10 @@
+/* The Dioxus CLI compiles this file automatically: `dx` picks up a
+   `tailwind.css` at the crate root and writes the result to assets/. */
 @import "tailwindcss";
 
 /* Tailwind discovers utility classes by scanning source text, and the UI is
    written in Rust rather than the templates it looks at by default. */
 @source "./src/**/*.rs";
-@source "./index.html";
 
 @theme {
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;

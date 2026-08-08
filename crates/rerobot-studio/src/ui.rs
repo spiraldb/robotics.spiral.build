@@ -11,6 +11,15 @@ use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use tower_http::services::{ServeDir, ServeFile};
 
+/// Where the Dioxus CLI leaves a web bundle, relative to the UI crate root.
+///
+/// `dx build` writes `target/dx/<crate>/<profile>/web/public`. The release
+/// bundle is preferred so a stale debug build never shadows it.
+const DX_BUNDLES: [&str; 2] = [
+    "target/dx/rerobot-ui/release/web/public",
+    "target/dx/rerobot-ui/debug/web/public",
+];
+
 /// Locate the built UI, preferring an explicit path.
 ///
 /// Candidates cover the two ways the studio actually runs: from a checkout
@@ -20,9 +29,12 @@ pub fn resolve_ui_dir(explicit: Option<PathBuf>) -> Option<PathBuf> {
         return is_built(&explicit).then_some(explicit);
     }
 
+    let from_checkout = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../rerobot-ui");
+    let from_cwd = PathBuf::from("crates/rerobot-ui");
     let mut candidates = Vec::new();
-    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../rerobot-ui/dist"));
-    candidates.push(PathBuf::from("crates/rerobot-ui/dist"));
+    for root in [&from_checkout, &from_cwd] {
+        candidates.extend(DX_BUNDLES.iter().map(|bundle| root.join(bundle)));
+    }
     if let Ok(executable) = std::env::current_exe()
         && let Some(directory) = executable.parent()
     {
@@ -71,7 +83,8 @@ const MISSING_UI_PAGE: &str = r#"<!doctype html>
 <h1>The web UI has not been built yet</h1>
 <p>The studio server is running and its API is live, but the compiled
 WebAssembly bundle was not found.</p>
-<pre><code>./scripts/build-ui.sh</code></pre>
+<pre><code>nix develop path:.
+cd crates/rerobot-ui &amp;&amp; dx build --release</code></pre>
 <p>Then reload this page. Pass <code>--ui-dir PATH</code> if the bundle lives
 somewhere else.</p>
 <p>The API is available meanwhile, starting with <a href="/api/state">/api/state</a>.</p>

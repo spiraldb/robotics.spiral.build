@@ -33,7 +33,7 @@ use serde_json::{Map, Value};
 
 use crate::camera_manager::{CameraManager, Frame};
 use crate::hardware::{HardwareHandle, RobotSpec};
-use crate::workspace::{RobotWorkspace, WorkspaceError};
+use crate::workspace::{RobotWorkspace, WorkspaceError, validate_camera_role};
 
 /// Boundary marker separating parts of an MJPEG response.
 const MJPEG_BOUNDARY: &str = "rerobotframe";
@@ -143,7 +143,6 @@ pub fn build_snapshot(state: &AppState) -> StudioSnapshot {
         cameras: state.cameras.statuses(),
         mode: hardware.mode,
         issues,
-        revision: 0,
     }
 }
 
@@ -163,18 +162,15 @@ async fn events(
         let mut telemetry_timer = tokio::time::interval(TELEMETRY_INTERVAL);
         let mut last_snapshot: Option<StudioSnapshot> = None;
         let mut last_sequence = 0_u64;
-        let mut revision = 0_u64;
 
         loop {
             tokio::select! {
                 _ = snapshot_timer.tick() => {
-                    let mut snapshot = build_snapshot(&state);
+                    let snapshot = build_snapshot(&state);
                     if last_snapshot.as_ref() == Some(&snapshot) {
                         continue;
                     }
                     last_snapshot = Some(snapshot.clone());
-                    revision += 1;
-                    snapshot.revision = revision;
                     if let Ok(event) = Event::default().event("state").json_data(&snapshot) {
                         yield Ok(event);
                     }
@@ -424,12 +420,26 @@ async fn update_robot(
         .transpose()
         .map_err(Failure::bad_request)?;
 
-    if let Some(port) = &request.port
-        && (port.path.trim().is_empty() || port.path.contains('\0') || port.baud_rate == 0)
-    {
-        return Err(Failure::bad_request(
-            "a port needs a non-empty path without NUL bytes and a positive baud rate",
-        ));
+    if let Some(port) = &request.port {
+        if port.path.trim().is_empty() || port.path.contains('\0') || port.baud_rate == 0 {
+            return Err(Failure::bad_request(
+                "a port needs a non-empty path without NUL bytes and a positive baud rate",
+            ));
+        }
+        // The open bus was created from the stored port. Letting the file say
+        // one thing while the hardware does another is how a UI starts lying.
+        if state
+            .hardware
+            .state()
+            .connections
+            .get(&id)
+            .is_some_and(|connection| connection.connected)
+        {
+            return Err(Failure(
+                StatusCode::CONFLICT,
+                format!("disconnect robot {id:?} before changing its serial port"),
+            ));
+        }
     }
 
     let record = state.workspace.update(
@@ -463,12 +473,7 @@ fn build_camera_object(
 
     for binding in bindings {
         let name = binding.name.trim();
-        if name.is_empty() || name.chars().any(char::is_control) {
-            return Err(format!(
-                "camera role {:?} must be a non-empty name",
-                binding.name
-            ));
-        }
+        validate_camera_role(name).map_err(|error| error.to_string())?;
         if !seen.insert(name.to_owned()) {
             return Err(format!("camera role {name:?} is used more than once"));
         }
@@ -499,9 +504,12 @@ async fn delete_robot(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, Failure> {
-    // A robot being deleted must not stay open on the bus.
-    let _ = state.hardware.disconnect(&id).await;
+    // Refuse before releasing anything, so a failed delete leaves the robot
+    // exactly as it was.
     state.workspace.delete(&id)?;
+    // A deleted robot must not stay open on the bus, and its connection
+    // history must not outlive it.
+    let _ = state.hardware.forget(&id).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -569,16 +577,23 @@ async fn finish_calibration(
 ) -> Result<Json<RobotSummary>, Failure> {
     let record = state.workspace.get(&id)?;
     let motors = record.motors()?;
-    let input = state.hardware.finish_calibration(&id).await?;
+    // Every step up to the write can fail, and the sweep keeps running until
+    // one of them has actually succeeded. An operator who spent a minute
+    // moving joints should not have to redo it because the file was busy.
+    let input = state.hardware.calibration_input(&id).await?;
     let calibration = build_calibration(&motors, &input)
         .map_err(|error| Failure::bad_request(error.to_string()))?;
-
     let record = state
         .workspace
         .save_calibration(&id, &motors, &calibration)?;
-    // The running bus needs the new calibration to report angles and to accept
-    // normalized commands without a reconnect.
-    state.hardware.apply_calibration(&id, calibration).await?;
+
+    // Stored. Nothing after this point may report the operation as failed.
+    let _ = state.hardware.cancel_calibration(&id).await;
+    if let Err(error) = state.hardware.apply_calibration(&id, calibration).await {
+        // Only reachable if the arm went away between the sweep and the write;
+        // the file is correct and the next connect picks it up.
+        tracing::warn!("saved calibration for {id:?} but could not apply it live: {error}");
+    }
 
     let connection = state
         .hardware
@@ -694,11 +709,16 @@ mod tests {
             .expect_err("duplicate role")
             .contains("more than once")
         );
-        assert!(
-            build_camera_object(&Map::new(), &[binding("  ", "/dev/video0")], &[])
-                .expect_err("blank role")
-                .contains("non-empty")
-        );
+        // A role becomes a key in the robot file and a label in the UI, so it
+        // has to be a plain identifier rather than arbitrary text.
+        for role in ["  ", "../../etc", "wrist cam"] {
+            assert!(
+                build_camera_object(&Map::new(), &[binding(role, "/dev/video0")], &[])
+                    .expect_err("bad role")
+                    .contains("camera role"),
+                "accepted {role:?}"
+            );
+        }
         assert!(
             build_camera_object(&Map::new(), &[binding("wrist", " ")], &[])
                 .expect_err("blank device")

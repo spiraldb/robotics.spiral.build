@@ -11,6 +11,7 @@ use rerobot_core::api::{
     UpdateRobotRequest,
 };
 use rerobot_core::arm;
+use rerobot_core::calibration::MINIMUM_CALIBRATION_TRAVEL;
 
 use crate::api;
 use crate::state::{Studio, studio};
@@ -26,6 +27,11 @@ pub fn SetupTab() -> Element {
     let studio = studio();
     let robots = studio.snapshot.read().robots.clone();
     let workspace = studio.snapshot.read().workspace.clone();
+    // One scan shared by every card, so two cards can never disagree about
+    // which ports exist or which are already taken.
+    let mut ports =
+        use_resource(|| async { api::get::<Vec<SerialPortSummary>>("/api/ports").await });
+    let scan = ports.read_unchecked().clone();
 
     rsx! {
         div { class: "flex flex-col gap-6",
@@ -46,11 +52,19 @@ pub fn SetupTab() -> Element {
                 }
             }
             for robot in robots {
-                RobotCard { key: "{robot.id}", robot }
+                RobotCard {
+                    key: "{robot.id}",
+                    robot,
+                    scan: scan.clone(),
+                    on_rescan: move |()| ports.restart(),
+                }
             }
         }
     }
 }
+
+/// The result of the shared serial-port scan: still running, failed, or done.
+type PortScan = Option<Result<Vec<SerialPortSummary>, String>>;
 
 #[component]
 fn NewRobotForm() -> Element {
@@ -92,10 +106,14 @@ fn NewRobotForm() -> Element {
                 select {
                     id: "robot-type",
                     class: "field",
-                    value: "{robot_type}",
                     onchange: move |event| robot_type.set(event.value()),
                     for (value, label) in ROBOT_TYPES {
-                        option { key: "{value}", value: "{value}", "{label}" }
+                        option {
+                            key: "{value}",
+                            value: "{value}",
+                            selected: robot_type() == value,
+                            "{label}"
+                        }
                     }
                 }
             }
@@ -105,13 +123,17 @@ fn NewRobotForm() -> Element {
 }
 
 #[component]
-fn RobotCard(robot: RobotSummary) -> Element {
+fn RobotCard(robot: RobotSummary, scan: PortScan, on_rescan: EventHandler<()>) -> Element {
     let studio = studio();
     let telemetry = studio.robot_telemetry(&robot.id);
     let calibrating = telemetry
         .as_ref()
         .and_then(|robot| robot.calibration.clone());
     let connected = robot.connection.connected;
+    let sweeping = calibrating.is_some();
+    // Deleting a robot destroys its calibration, so it takes a second click
+    // rather than sitting one stray click away from an irreversible loss.
+    let mut confirming_delete = use_signal(|| false);
     let id = robot.id.clone();
 
     rsx! {
@@ -133,24 +155,48 @@ fn RobotCard(robot: RobotSummary) -> Element {
                 span { class: "font-mono text-xs text-slate-400", "{robot.file}" }
 
                 div { class: "ml-auto flex items-center gap-2",
-                    ConnectButton { robot: robot.clone() }
-                    button {
-                        r#type: "button",
-                        class: "btn btn-ghost",
-                        onclick: {
-                            let id = id.clone();
-                            move |_| {
+                    ConnectButton { robot: robot.clone(), sweeping }
+                    if confirming_delete() {
+                        span { class: "text-sm text-slate-600 dark:text-slate-300",
+                            "Delete {robot.id} and its calibration?"
+                        }
+                        button {
+                            r#type: "button",
+                            class: "btn btn-danger",
+                            onclick: {
                                 let id = id.clone();
-                                studio.run(format!("Deleted {id}."), async move {
-                                    api::send::<()>(Method::DELETE, &format!("/api/robots/{id}"), None).await
-                                });
-                            }
-                        },
-                        "Delete"
+                                move |_| {
+                                    let id = id.clone();
+                                    confirming_delete.set(false);
+                                    studio.run(format!("Deleted {id}."), async move {
+                                        api::send::<()>(Method::DELETE, &format!("/api/robots/{id}"), None).await
+                                    });
+                                }
+                            },
+                            "Delete"
+                        }
+                        button {
+                            r#type: "button",
+                            class: "btn btn-ghost",
+                            onclick: move |_| confirming_delete.set(false),
+                            "Keep"
+                        }
+                    } else {
+                        button {
+                            r#type: "button",
+                            class: "btn btn-ghost",
+                            onclick: move |_| confirming_delete.set(true),
+                            "Delete"
+                        }
                     }
                 }
             }
 
+            if let Some(problem) = &robot.problem {
+                p { class: "mb-4 rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-800 dark:bg-rose-500/10 dark:text-rose-300",
+                    "This robot's file cannot be used: {problem}"
+                }
+            }
             if let Some(error) = &robot.connection.error {
                 p { class: "mb-4 rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-800 dark:bg-rose-500/10 dark:text-rose-300",
                     "{error}"
@@ -158,7 +204,7 @@ fn RobotCard(robot: RobotSummary) -> Element {
             }
 
             div { class: "grid gap-6 lg:grid-cols-2",
-                PortSection { robot: robot.clone() }
+                PortSection { robot: robot.clone(), scan, on_rescan }
                 CameraSection { robot: robot.clone() }
             }
 
@@ -174,17 +220,29 @@ fn RobotCard(robot: RobotSummary) -> Element {
 }
 
 #[component]
-fn ConnectButton(robot: RobotSummary) -> Element {
+fn ConnectButton(robot: RobotSummary, sweeping: bool) -> Element {
     let studio = studio();
     let id = robot.id.clone();
     let connected = robot.connection.connected;
+    // Disconnecting mid-sweep throws the sweep away, so make the operator
+    // finish or cancel deliberately rather than lose it to one click.
+    let blocked = robot.port.is_none() || robot.problem.is_some() || (connected && sweeping);
+    let reason = if robot.port.is_none() {
+        "Assign a serial port first"
+    } else if robot.problem.is_some() {
+        "Fix this robot's file first"
+    } else if connected && sweeping {
+        "Finish or cancel calibration first"
+    } else {
+        ""
+    };
 
     rsx! {
         button {
             r#type: "button",
             class: if connected { "btn btn-ghost" } else { "btn btn-primary" },
-            disabled: robot.port.is_none(),
-            title: if robot.port.is_none() { "Assign a serial port first" } else { "" },
+            disabled: blocked,
+            title: "{reason}",
             onclick: move |_| {
                 let id = id.clone();
                 let action = if connected { "disconnect" } else { "connect" };
@@ -198,14 +256,22 @@ fn ConnectButton(robot: RobotSummary) -> Element {
 }
 
 #[component]
-fn PortSection(robot: RobotSummary) -> Element {
+fn PortSection(robot: RobotSummary, scan: PortScan, on_rescan: EventHandler<()>) -> Element {
     let studio = studio();
-    let mut ports =
-        use_resource(|| async { api::get::<Vec<SerialPortSummary>>("/api/ports").await });
     let mut identify_step = use_signal(|| IdentifyStep::Idle);
     let current = robot.port.clone().map(|port| port.path).unwrap_or_default();
     let baud = robot.port.as_ref().map_or(1_000_000, |port| port.baud_rate);
     let id = robot.id.clone();
+    // The port belongs to the open bus once connected; changing it would make
+    // the file disagree with the hardware, so the server refuses it too.
+    let locked = robot.connection.connected;
+    let found = match &scan {
+        Some(Ok(list)) => list.clone(),
+        _ => Vec::new(),
+    };
+    // A port recorded earlier but missing from the scan still has to appear,
+    // otherwise the field would silently look unset.
+    let missing = !current.is_empty() && !found.iter().any(|port| port.path == current);
 
     rsx! {
         div {
@@ -213,8 +279,7 @@ fn PortSection(robot: RobotSummary) -> Element {
             div { class: "flex flex-wrap items-center gap-2",
                 select {
                     class: "field flex-1",
-                    disabled: robot.connection.connected,
-                    value: "{current}",
+                    disabled: locked,
                     onchange: {
                         let id = id.clone();
                         move |event: Event<FormData>| {
@@ -224,35 +289,38 @@ fn PortSection(robot: RobotSummary) -> Element {
                             }
                         }
                     },
-                    option { value: "", "Choose a serial port…" }
-                    match &*ports.read_unchecked() {
-                        Some(Ok(list)) => rsx! {
-                            for port in list.clone() {
-                                option { key: "{port.path}", value: "{port.path}",
-                                    "{port.path}"
-                                    {port.description.as_ref().map(|text| format!(" — {text}")).unwrap_or_default()}
-                                    {port.used_by.as_ref().filter(|owner| **owner != robot.id)
-                                        .map(|owner| format!(" (in use by {owner})")).unwrap_or_default()}
-                                }
-                            }
-                        },
-                        Some(Err(error)) => rsx! { option { disabled: true, "{error}" } },
-                        None => rsx! { option { disabled: true, "Scanning…" } },
+                    option {
+                        value: "",
+                        selected: current.is_empty(),
+                        "Choose a serial port…"
                     }
-                    // A port already recorded but no longer present still needs
-                    // to be visible, otherwise the field would look unset.
-                    if !current.is_empty()
-                        && !matches!(&*ports.read_unchecked(), Some(Ok(list)) if list.iter().any(|port| port.path == current))
-                    {
-                        option { value: "{current}", "{current} (not connected)" }
+                    for port in found {
+                        PortOption {
+                            key: "{port.path}",
+                            selected: port.path == current,
+                            port,
+                            owner: robot.id.clone(),
+                        }
+                    }
+                    if missing {
+                        option { value: "{current}", selected: true, "{current} (not detected)" }
+                    }
+                    if matches!(scan, Some(Err(_))) {
+                        option { disabled: true, "Could not scan for ports" }
+                    }
+                    if scan.is_none() {
+                        option { disabled: true, "Scanning…" }
                     }
                 }
                 button {
                     r#type: "button",
                     class: "btn btn-ghost",
-                    onclick: move |_| ports.restart(),
+                    onclick: move |_| on_rescan.call(()),
                     "Rescan"
                 }
+            }
+            if let Some(Err(error)) = &scan {
+                p { class: "mt-1 text-xs text-rose-600 dark:text-rose-400", "{error}" }
             }
 
             IdentifyPort {
@@ -266,7 +334,8 @@ fn PortSection(robot: RobotSummary) -> Element {
             button {
                 r#type: "button",
                 class: "btn btn-ghost mt-2 w-full",
-                disabled: robot.connection.connected,
+                disabled: locked,
+                title: if locked { "Disconnect this robot before changing its port" } else { "" },
                 onclick: move |_| {
                     identify_step.set(IdentifyStep::Idle);
                     spawn(async move {
@@ -280,6 +349,32 @@ fn PortSection(robot: RobotSummary) -> Element {
                 },
                 "Identify by unplugging"
             }
+        }
+    }
+}
+
+/// One serial port in the picker.
+///
+/// A port another robot already holds open is shown but not selectable:
+/// choosing it would only produce a refusal at connect time.
+#[component]
+fn PortOption(port: SerialPortSummary, owner: String, selected: bool) -> Element {
+    let holder = port.used_by.as_ref().filter(|holder| **holder != owner);
+    let mut label = port.path.clone();
+    if let Some(description) = &port.description {
+        label.push_str(" — ");
+        label.push_str(description);
+    }
+    if let Some(holder) = holder {
+        label.push_str(&format!(" (in use by {holder})"));
+    }
+
+    rsx! {
+        option {
+            value: "{port.path}",
+            disabled: holder.is_some(),
+            selected,
+            "{label}"
         }
     }
 }
@@ -420,16 +515,19 @@ fn CameraSection(robot: RobotSummary) -> Element {
                 }
                 select {
                     class: "field flex-1",
-                    value: "{device}",
                     onchange: move |event| device.set(event.value()),
-                    option { value: "", "Choose a camera…" }
+                    option { value: "", selected: device().is_empty(), "Choose a camera…" }
                     for camera in available.clone() {
-                        CameraOption { key: "{camera.id}", camera }
+                        CameraOption {
+                            key: "{camera.id}",
+                            selected: device() == camera.id,
+                            camera,
+                        }
                     }
                 }
                 button {
                     r#type: "button",
-                    class: "btn btn-ghost",
+                    class: "btn btn-primary",
                     onclick: {
                         let id = id.clone();
                         let existing = robot.cameras.clone();
@@ -467,9 +565,9 @@ fn save_cameras(studio: Studio, id: String, bindings: Vec<CameraBinding>) {
 }
 
 #[component]
-fn CameraOption(camera: CameraStatus) -> Element {
+fn CameraOption(camera: CameraStatus, selected: bool) -> Element {
     rsx! {
-        option { value: "{camera.id}",
+        option { value: "{camera.id}", selected,
             "{camera.name} — {camera.width}×{camera.height} @ {camera.fps} fps"
         }
     }
@@ -567,11 +665,7 @@ fn CalibrationSection(
                             "{joint.span()}"
                         }
                         span {
-                            class: if joint.span() >= 2 {
-                                "w-4 shrink-0 text-emerald-600 dark:text-emerald-400"
-                            } else {
-                                "w-4 shrink-0 text-slate-300 dark:text-slate-600"
-                            },
+                            class: if joint.span() >= MINIMUM_CALIBRATION_TRAVEL { "w-4 shrink-0 text-emerald-600 dark:text-emerald-400" } else { "w-4 shrink-0 text-slate-300 dark:text-slate-600" },
                             "✓"
                         }
                     }

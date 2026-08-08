@@ -29,8 +29,6 @@ pub struct StudioSnapshot {
     /// Problems worth showing the operator: unreadable robot files, cameras
     /// that failed to probe, and similar non-fatal trouble.
     pub issues: Vec<String>,
-    /// Monotonic counter, bumped whenever any of the above changes.
-    pub revision: u64,
 }
 
 /// One robot instance: exactly one arm, stored in exactly one JSON file.
@@ -45,6 +43,12 @@ pub struct RobotSummary {
     pub cameras: Vec<CameraBinding>,
     /// True when every motor has a stored calibration.
     pub calibrated: bool,
+    /// Why this robot cannot be used, when its file is structurally wrong.
+    ///
+    /// A file that parses as JSON can still describe an unusable robot — two
+    /// motors sharing a bus ID, for instance. Carrying the reason here keeps
+    /// the card from silently rendering as an empty robot.
+    pub problem: Option<String>,
     pub connection: ConnectionStatus,
 }
 

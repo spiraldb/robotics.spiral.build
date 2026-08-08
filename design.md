@@ -11,10 +11,22 @@
 - use dioxus for the main web ui, backend connect to the robot.
 - in the web ui, we should be able to init a robot instance, assign the port, cameras, and do the calibration. Everything about this setup (robot) will be save in a single json file. Each arm is considered as a single robot instance. 
 - We should be able to preview the camera feed in the web ui.
-- Because we know the robot is a pair of so-arm-101, we can visualize the robot in the web ui. We should be able to control the arms, joints.
+- We should be able to control the arms, joints.
 - We should be able to choose different modes, like teleoperation, etc.
 
-### Binaries
+### Setup flow
+- User select the robot type, the port, and the cameras. When they select cameras, they should be able to see the camera feed in the web ui.
+
+### UI design
+- Try to make the ui rerun style, where you have a studio like layout. Don't make many tabs that user needs to switch between.
+- Make ui compact and information dense.
+
+### 3D viewer
+- Because we know the robot is a pair of so-arm-101, we can visualize the robot in the web ui. 
+- The robot visualization should be a 3D view, where you can drag/zoom/pan, just like any other 3D viewer.
+- For a more future proof design, we should be able to read urdf file, and use it to visualize the robot. Current design will still need to read from urdf file, but the file is hard-coded to support only so-arm-101.
+
+## Cli tools
 
 - `rerobot-find-port`
 - `rerobot-find-cameras`

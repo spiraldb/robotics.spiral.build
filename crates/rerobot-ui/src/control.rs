@@ -53,34 +53,30 @@ fn ModePanel(connected: Vec<RobotSummary>) -> Element {
     };
 
     // Teleoperation needs a distinct pair, so the pickers default to the first
-    // two calibrated arms and never offer the same arm twice. The effect reads
-    // the snapshot signal so it re-runs as arms connect and get calibrated,
-    // rather than only once with whatever was ready at first render.
-    let mut leader = use_signal(String::new);
-    let mut follower = use_signal(String::new);
-    use_effect(move || {
-        let names = studio
-            .snapshot
-            .read()
-            .robots
-            .iter()
-            .filter(|robot| robot.connection.connected && robot.calibrated)
-            .map(|robot| robot.id.clone())
-            .collect::<Vec<_>>();
-        if !names.contains(&leader()) {
-            leader.set(names.first().cloned().unwrap_or_default());
-        }
-        if !names.contains(&follower()) || follower() == leader() {
-            follower.set(
-                names
-                    .iter()
-                    .find(|name| **name != leader())
-                    .cloned()
-                    .unwrap_or_default(),
-            );
-        }
-    });
-    let can_teleoperate = calibrated.len() >= 2;
+    // two calibrated arms and never offer the same arm twice.
+    //
+    // Only the operator's explicit choice is stored; the effective pair is
+    // derived here on every render and falls back to the defaults whenever a
+    // choice stops naming an available arm. Deriving rather than keeping two
+    // signals in step with an effect matters: an effect that both reads and
+    // writes a signal retriggers itself, and `Signal::set` marks a signal dirty
+    // even when the value is unchanged, so the "keep them in step" version spun
+    // forever whenever fewer than two arms were available.
+    let mut chosen_leader = use_signal(|| Option::<String>::None);
+    let mut chosen_follower = use_signal(|| Option::<String>::None);
+    let names = calibrated
+        .iter()
+        .map(|robot| robot.id.clone())
+        .collect::<Vec<_>>();
+    let leader = chosen_leader()
+        .filter(|name| names.contains(name))
+        .or_else(|| names.first().cloned())
+        .unwrap_or_default();
+    let follower = chosen_follower()
+        .filter(|name| names.contains(name) && *name != leader)
+        .or_else(|| names.iter().find(|name| **name != leader).cloned())
+        .unwrap_or_default();
+    let can_teleoperate = !leader.is_empty() && !follower.is_empty();
 
     rsx! {
         section { class: "card p-4",
@@ -98,19 +94,24 @@ fn ModePanel(connected: Vec<RobotSummary>) -> Element {
                         label { class: "label", "Manual control" }
                         select {
                             class: "field min-w-40",
-                            value: match &mode {
-                                ModeSelection::Manual { robot } => robot.clone(),
-                                _ => String::new(),
-                            },
                             onchange: move |event| {
                                 let value = event.value();
                                 if !value.is_empty() {
                                     select(ModeSelection::Manual { robot: value });
                                 }
                             },
-                            option { value: "", "Choose an arm…" }
+                            option {
+                                value: "",
+                                selected: !matches!(mode, ModeSelection::Manual { .. }),
+                                "Choose an arm…"
+                            }
                             for robot in calibrated.clone() {
-                                option { key: "{robot.id}", value: "{robot.id}", "{robot.id}" }
+                                option {
+                                    key: "{robot.id}",
+                                    value: "{robot.id}",
+                                    selected: matches!(&mode, ModeSelection::Manual { robot: chosen } if *chosen == robot.id),
+                                    "{robot.id}"
+                                }
                             }
                         }
                     }
@@ -123,20 +124,28 @@ fn ModePanel(connected: Vec<RobotSummary>) -> Element {
                             select {
                                 class: "field min-w-32",
                                 disabled: !can_teleoperate,
-                                value: "{leader}",
-                                onchange: move |event| leader.set(event.value()),
+                                onchange: move |event| chosen_leader.set(Some(event.value())),
                                 for robot in calibrated.clone() {
-                                    option { key: "{robot.id}", value: "{robot.id}", "{robot.id}" }
+                                    option {
+                                        key: "{robot.id}",
+                                        value: "{robot.id}",
+                                        selected: leader == robot.id,
+                                        "{robot.id}"
+                                    }
                                 }
                             }
                             span { class: "text-slate-400", "→" }
                             select {
                                 class: "field min-w-32",
                                 disabled: !can_teleoperate,
-                                value: "{follower}",
-                                onchange: move |event| follower.set(event.value()),
-                                for robot in calibrated.clone().into_iter().filter(|robot| robot.id != leader()) {
-                                    option { key: "{robot.id}", value: "{robot.id}", "{robot.id}" }
+                                onchange: move |event| chosen_follower.set(Some(event.value())),
+                                for robot in calibrated.clone().into_iter().filter(|robot| robot.id != leader) {
+                                    option {
+                                        key: "{robot.id}",
+                                        value: "{robot.id}",
+                                        selected: follower == robot.id,
+                                        "{robot.id}"
+                                    }
                                 }
                             }
                         }
@@ -145,10 +154,13 @@ fn ModePanel(connected: Vec<RobotSummary>) -> Element {
                         r#type: "button",
                         class: if matches!(mode, ModeSelection::Teleoperate { .. }) { "btn btn-primary" } else { "btn btn-ghost" },
                         disabled: !can_teleoperate,
-                        onclick: move |_| select(ModeSelection::Teleoperate {
-                            leader: leader(),
-                            follower: follower(),
-                        }),
+                        onclick: {
+                            let (leader, follower) = (leader.clone(), follower.clone());
+                            move |_| select(ModeSelection::Teleoperate {
+                                leader: leader.clone(),
+                                follower: follower.clone(),
+                            })
+                        },
                         "Start"
                     }
                 }
@@ -178,6 +190,11 @@ fn RobotPanel(robot: RobotSummary) -> Element {
     let studio = studio();
     let telemetry = studio.robot_telemetry(&robot.id);
     let torque = telemetry.as_ref().is_some_and(|robot| robot.torque);
+    // The arm has to stay free to move by hand during a sweep, so the server
+    // refuses to energize it; do not offer a button that cannot work.
+    let calibrating = telemetry
+        .as_ref()
+        .is_some_and(|robot| robot.calibration.is_some());
     let drivable = studio.is_manual_target(&robot.id) && torque && robot.calibrated;
     let id = robot.id.clone();
 
@@ -199,10 +216,16 @@ fn RobotPanel(robot: RobotSummary) -> Element {
                         "Torque on"
                     }
                 }
+                if calibrating {
+                    span { class: "chip bg-sky-100 text-sky-800 dark:bg-sky-500/15 dark:text-sky-300",
+                        "Calibrating"
+                    }
+                }
                 button {
                     r#type: "button",
                     class: if torque { "btn btn-danger ml-auto" } else { "btn btn-ghost ml-auto" },
-                    disabled: telemetry.is_none(),
+                    disabled: telemetry.is_none() || (calibrating && !torque),
+                    title: if calibrating && !torque { "Finish or cancel calibration first" } else { "" },
                     onclick: move |_| set_torque(studio, &id, !torque),
                     {if torque { "Release torque" } else { "Hold position" }}
                 }
@@ -233,10 +256,27 @@ fn JointControls(
 ) -> Element {
     let studio = studio();
     // While a slider is being dragged the arm is still catching up, so the
-    // commanded value is shown until the measurement agrees with it. The
-    // overrides are ignored — rather than cleared — whenever the arm cannot be
-    // driven, so a stale target can never be shown as the current pose.
-    let commanded = use_signal(BTreeMap::<String, f64>::new);
+    // commanded value is shown until the measurement agrees with it. That echo
+    // is only meaningful for as long as this arm is actually being driven, so
+    // it is dropped the moment it is not — otherwise the next drive session
+    // would open showing targets from the previous one.
+    let mut commanded = use_signal(BTreeMap::<String, f64>::new);
+    let watched = robot.id.clone();
+    use_effect(move || {
+        let driving = studio
+            .telemetry
+            .read()
+            .robots
+            .iter()
+            .any(|robot| robot.id == watched && robot.torque)
+            && studio.is_manual_target(&watched);
+        // `peek` deliberately: an effect that subscribes to the signal it
+        // writes retriggers itself, and this one only needs to observe
+        // telemetry.
+        if !driving && !commanded.peek().is_empty() {
+            commanded.write().clear();
+        }
+    });
 
     let Some(telemetry) = telemetry else {
         return rsx! {
@@ -266,7 +306,9 @@ fn JointControls(
                     key: "{joint.name}",
                     joint: joint.clone(),
                     drivable,
-                    value: drivable.then(|| commanded.read().get(&joint.name).copied()).flatten(),
+                    value: drivable
+                        .then(|| commanded.read().get(&joint.name).copied())
+                        .flatten(),
                     on_change: {
                         let (id, name) = (id.clone(), joint.name.clone());
                         move |value| command_joint(studio, commanded, id.clone(), name.clone(), value)
