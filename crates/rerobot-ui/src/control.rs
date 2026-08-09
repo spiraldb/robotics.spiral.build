@@ -10,6 +10,7 @@ use rerobot_core::api::{GoalRequest, JointTelemetry, RobotSummary, RobotTelemetr
 use rerobot_core::arm::{self, JointAngles};
 
 use crate::api;
+use crate::cameras::RobotCameras;
 use crate::setup::set_torque;
 use crate::state::{Selection, studio};
 use crate::viewport::{accent_css, tool_position};
@@ -104,6 +105,8 @@ pub fn JointPanel() -> Element {
                 drivable,
                 role,
             }
+
+            RobotCameras { robot }
 
         }
     }

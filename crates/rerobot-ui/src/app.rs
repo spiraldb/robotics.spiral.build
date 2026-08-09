@@ -3,7 +3,6 @@
 use dioxus::prelude::*;
 use wasm_bindgen::JsCast;
 
-use crate::cameras::CameraWorkspace;
 use crate::control::JointPanel;
 use crate::icons::Panel;
 use crate::modes::ModeBar;
@@ -111,7 +110,6 @@ pub fn App() -> Element {
                 main {
                     class: if surface() == Surface::View { "studio-workspace surface-active-mobile" } else { "studio-workspace surface-hidden-mobile" },
                     section { class: "viewport-tile", Viewport {} }
-                    CameraWorkspace {}
                 }
                 if right_open() {
                     div {

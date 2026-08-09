@@ -167,11 +167,11 @@
   }
 
   .studio-workspace {
-    @apply flex min-w-0 flex-1 flex-col gap-px overflow-y-auto bg-line;
+    @apply flex min-w-0 flex-1 flex-col overflow-hidden bg-viewport;
   }
 
   .viewport-tile {
-    @apply min-h-72 flex-[3_1_55%] bg-viewport;
+    @apply min-h-0 flex-1 bg-viewport;
   }
 
   .pane-splitter {
@@ -344,32 +344,45 @@
     @apply flex h-7 w-7 items-center justify-center rounded-full border border-white/10 text-lg font-light text-white/35;
   }
 
-  .camera-workspace {
-    @apply grid min-h-40 flex-[2_1_35%] grid-cols-[repeat(auto-fit,minmax(16rem,1fr))] gap-px bg-line;
+  .camera-properties {
+    @apply mt-1 border-t border-line;
   }
 
-  .camera-workspace-maximized {
-    @apply flex-[4_1_70%] grid-cols-1;
+  .property-section-toggle {
+    @apply flex min-h-10 w-full cursor-pointer items-center gap-2 px-3 text-left transition-colors hover:bg-hover;
   }
 
-  .camera-tile {
-    @apply flex min-h-0 min-w-0 flex-col bg-surface outline outline-1 -outline-offset-1 outline-transparent;
+  .property-section-title {
+    @apply text-[12px] font-medium;
   }
 
-  .camera-tile:hover {
-    @apply outline-line;
+  .property-section-count {
+    @apply ml-auto inline-flex min-w-5 items-center justify-center rounded bg-sunken px-1.5 py-0.5 font-mono text-[10px] text-ink-faint;
   }
 
-  .camera-tile-selected {
+  .property-camera-list {
+    @apply flex flex-col gap-2 px-3 pb-3;
+  }
+
+  .property-camera-empty {
+    @apply rounded bg-sunken px-2.5 py-2 text-[11px] text-ink-faint;
+  }
+
+  .camera-property {
+    @apply min-w-0 cursor-pointer overflow-hidden rounded border border-line bg-surface outline outline-1 -outline-offset-1 outline-transparent transition-colors hover:border-ink-faint;
+  }
+
+  .camera-property-selected {
+    border-color: var(--tone-accent);
     outline-color: var(--tone-accent);
   }
 
-  .camera-tile-header {
+  .camera-property-header {
     @apply flex min-h-9 items-center gap-2 border-b border-line px-2.5 text-[11px];
   }
 
-  .camera-tile-title {
-    @apply truncate font-medium;
+  .camera-property-name {
+    @apply min-w-0 flex-1 truncate font-medium;
   }
 
   .camera-live-state {
@@ -380,8 +393,8 @@
     @apply font-mono text-[10px] text-ink-faint;
   }
 
-  .camera-frame {
-    @apply relative min-h-0 flex-1 overflow-hidden bg-viewport;
+  .camera-property-frame {
+    @apply relative aspect-video overflow-hidden bg-viewport;
   }
 
   .camera-image {
@@ -621,9 +634,6 @@
     display: none;
   }
 
-  .camera-workspace {
-    display: none;
-  }
 }
 
 @media (max-width: 640px) {
@@ -683,10 +693,6 @@
   .viewport-tile {
     min-height: 0;
     flex: 1;
-  }
-
-  .camera-workspace {
-    display: none;
   }
 
   .desktop-pane-toggle,

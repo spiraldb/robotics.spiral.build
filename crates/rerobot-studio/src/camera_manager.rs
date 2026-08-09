@@ -22,6 +22,9 @@ use tokio::sync::watch;
 
 /// How long a stream runs with nobody watching before it releases the camera.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+/// A healthy capture loop observes `stop` between frames. A driver that blocks
+/// forever inside `frame()` must not make the whole studio ignore Ctrl+C.
+const STREAM_SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
 /// One encoded frame, ready to be written to an HTTP response.
 #[derive(Clone, Debug)]
@@ -52,8 +55,20 @@ impl Stream {
     /// Ask the capture thread to stop and wait for it to release the device.
     fn shutdown(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        if let Some(handle) = self.thread.take() {
+            let deadline = Instant::now() + STREAM_SHUTDOWN_GRACE;
+            while !handle.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
+            } else {
+                // Dropping a JoinHandle detaches the thread. During process
+                // shutdown the OS releases the camera; during a normal close
+                // this is still preferable to freezing the server forever on
+                // a misbehaving platform driver.
+                tracing::warn!("camera capture thread did not stop; detaching it");
+            }
         }
     }
 }
@@ -340,5 +355,26 @@ mod tests {
             .clone()
             .expect("a frame is available");
         assert_eq!(frame.sequence, 5);
+    }
+
+    #[test]
+    fn a_stuck_camera_thread_cannot_block_shutdown_forever() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (frames, receiver) = watch::channel(None::<Arc<Frame>>);
+        drop(receiver);
+        let status = Arc::new(Mutex::new(StreamStatus::default()));
+        let handle = thread::spawn(|| thread::sleep(STREAM_SHUTDOWN_GRACE * 4));
+        let mut stream = Stream {
+            stop: stop.clone(),
+            frames: Arc::new(frames),
+            status,
+            thread: Some(handle),
+        };
+
+        let started = Instant::now();
+        stream.shutdown();
+
+        assert!(stop.load(Ordering::Relaxed));
+        assert!(started.elapsed() < STREAM_SHUTDOWN_GRACE * 3);
     }
 }

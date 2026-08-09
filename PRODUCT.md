@@ -100,7 +100,7 @@ playback/inference.
 
 **Constraints**
 
-- **Hardware:** SO-ARM101 only, leader and follower, recorded in `design.md` as
+- **Hardware:** SO-ARM101 only, leader and follower, recorded in `notes.md` as
   a current tradeoff rather than a permanent limit. Live calibration supports
   Feetech protocol-0 motors such as the STS3215.
 - **No Python dependencies.** This is a defining constraint, not a preference.
@@ -128,7 +128,7 @@ JSON files), *studio* (the web interface).
 
 - The name is **rerobot**; the web interface is **rerobot studio**, styled
   lowercase.
-- **`design.md` is the single source of truth for conflicting changes, and must
+- **`notes.md` is the single source of truth for conflicting changes, and must
   not be edited unless explicitly asked.** This is recorded in `AGENTS.md` and
   is binding. It holds the committed visual direction; this file does not
   restate or extend it.

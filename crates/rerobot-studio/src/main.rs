@@ -1,5 +1,6 @@
 //! `rerobot-studio`: the web UI's backend.
 
+use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -21,6 +22,11 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 
 /// How often the workspace directory is checked for outside changes.
 const WORKSPACE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+/// Browser event streams are intentionally long lived, so graceful draining
+/// gets a short deadline instead of being allowed to hold process exit open.
+const SERVER_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
+/// Motor and camera cleanup normally completes within one control/frame cycle.
+const RESOURCE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1_500);
 
 /// Set up, calibrate, and drive SO-ARM101 arms from a browser.
 #[derive(Debug, Parser)]
@@ -196,21 +202,106 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
     }
     println!("rerobot studio is running at http://{address}");
 
-    let shutdown = {
-        let hardware = hardware.clone();
-        let cameras = cameras.clone();
-        async move {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("shutting down");
-            // Release the cameras and stop the control loop before the process
-            // exits, so devices are not left held open.
-            cameras.shutdown();
-            hardware.shutdown().await;
+    // Both the server and this task observe the same edge. The server begins
+    // graceful draining immediately; this task enforces a deadline because
+    // SSE connections are designed not to finish on their own.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let signal_task = tokio::spawn(shutdown_signals(shutdown_tx));
+    let server_result = {
+        let server = axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_requested(shutdown_rx.clone()))
+            .into_future();
+        tokio::pin!(server);
+
+        tokio::select! {
+            result = &mut server => Some(result),
+            () = shutdown_requested(shutdown_rx) => {
+                match tokio::time::timeout(SERVER_DRAIN_TIMEOUT, &mut server).await {
+                    Ok(result) => Some(result),
+                    Err(_) => {
+                        tracing::warn!("server drain timed out; closing remaining connections");
+                        None
+                    }
+                }
+            }
         }
     };
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await?;
+    tracing::info!("releasing motors and cameras");
+    let camera_cleanup = tokio::task::spawn_blocking({
+        let cameras = cameras.clone();
+        move || cameras.shutdown()
+    });
+    let cleanup = async {
+        let ((), camera_result) = tokio::join!(hardware.shutdown(), camera_cleanup);
+        if let Err(error) = camera_result {
+            tracing::warn!("camera cleanup task failed: {error}");
+        }
+    };
+    if tokio::time::timeout(RESOURCE_SHUTDOWN_TIMEOUT, cleanup)
+        .await
+        .is_err()
+    {
+        tracing::warn!("resource cleanup timed out; the operating system will release devices");
+    }
+    signal_task.abort();
+    if let Some(result) = server_result {
+        result?;
+    }
     Ok(())
+}
+
+/// Notify every shutdown waiter on the first Ctrl+C and make the second press
+/// an unconditional escape hatch. Once Tokio installs its signal handler the
+/// operating system's default second-press behavior no longer applies, so it
+/// has to be restored explicitly.
+async fn shutdown_signals(shutdown: tokio::sync::watch::Sender<bool>) {
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        tracing::warn!("could not listen for Ctrl+C: {error}");
+    }
+    eprintln!("shutdown requested; press Ctrl+C again to force exit");
+    let _ = shutdown.send(true);
+
+    if tokio::signal::ctrl_c().await.is_ok() {
+        eprintln!("forcing exit");
+        std::process::exit(130);
+    }
+}
+
+async fn shutdown_requested(mut shutdown: tokio::sync::watch::Receiver<bool>) {
+    if *shutdown.borrow() {
+        return;
+    }
+    while shutdown.changed().await.is_ok() {
+        if *shutdown.borrow() {
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shutdown_waiters_release_when_the_signal_is_published() {
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        let waiter = tokio::spawn(shutdown_requested(receiver));
+
+        sender.send(true).expect("the waiter is listening");
+        tokio::time::timeout(std::time::Duration::from_millis(100), waiter)
+            .await
+            .expect("the waiter must not hang")
+            .expect("the waiter task must finish");
+    }
+
+    #[tokio::test]
+    async fn an_already_published_shutdown_does_not_wait_for_another_change() {
+        let (_sender, receiver) = tokio::sync::watch::channel(true);
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            shutdown_requested(receiver),
+        )
+        .await
+        .expect("an existing shutdown request is immediately visible");
+    }
 }

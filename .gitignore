@@ -7,3 +7,4 @@
 crates/rerobot-ui/assets
 crates/rerobot-ui/target
 /.agents
+/.impeccable

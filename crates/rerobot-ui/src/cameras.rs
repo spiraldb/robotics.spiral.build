@@ -1,49 +1,48 @@
-//! Camera feeds are first-class views in the central workspace.
+//! Live camera properties of the selected robot instance.
 
 use dioxus::prelude::*;
-use rerobot_core::api::CameraStatus;
+use rerobot_core::api::{CameraStatus, RobotSummary};
 
 use crate::api;
-use crate::icons::Expand;
+use crate::icons::Chevron;
 use crate::state::{Selection, studio};
 
-/// Live views from every camera assigned to the focused robot.
+/// The selected robot's assigned camera feeds, grouped in its properties panel.
 #[component]
-pub fn CameraWorkspace() -> Element {
+pub fn RobotCameras(robot: RobotSummary) -> Element {
     let studio = studio();
-    let Some(robot) = studio.focused() else {
-        return rsx! {};
-    };
-    if robot.cameras.is_empty() {
-        return rsx! {};
-    }
-
     let known = studio.snapshot.read().cameras.clone();
-    let mut maximized = use_signal(|| None::<String>);
-    let robot_id = robot.id.clone();
+    let mut open = use_signal(|| true);
+    let count = robot.cameras.len();
+    let region_id = format!("robot-cameras-{}", robot.id);
 
     rsx! {
-        section {
-            class: if maximized.read().is_some() { "camera-workspace camera-workspace-maximized" } else { "camera-workspace" },
-            "aria-label": "Camera views for {robot.id}",
-            for binding in robot.cameras.clone() {
-                if maximized.read().as_ref().is_none_or(|role| role == &binding.name) {
-                    CameraView {
-                        key: "{binding.name}",
-                        robot: robot_id.clone(),
-                        role: binding.name.clone(),
-                        device: binding.id.clone(),
-                        status: known.iter().find(|camera| camera.id == binding.id).cloned(),
-                        maximized: maximized.read().as_ref() == Some(&binding.name),
-                        on_maximize: {
-                            let role = binding.name.clone();
-                            move |_| {
-                                if maximized.read().as_ref() == Some(&role) {
-                                    maximized.set(None);
-                                } else {
-                                    maximized.set(Some(role.clone()));
-                                }
-                            }
+        section { class: "camera-properties",
+            button {
+                r#type: "button",
+                class: "property-section-toggle",
+                "aria-expanded": open(),
+                "aria-controls": "{region_id}",
+                title: if open() { "Hide camera properties" } else { "Show camera properties" },
+                onclick: move |_| open.toggle(),
+                Chevron { open: open() }
+                span { class: "property-section-title", "Cameras" }
+                span { class: "property-section-count", "{count}" }
+            }
+            if open() {
+                div { id: "{region_id}", class: "property-camera-list",
+                    if robot.cameras.is_empty() {
+                        p { class: "property-camera-empty",
+                            "No cameras assigned. Add one in this robot's setup."
+                        }
+                    }
+                    for binding in robot.cameras.clone() {
+                        CameraProperty {
+                            key: "{binding.name}",
+                            robot: robot.id.clone(),
+                            role: binding.name.clone(),
+                            device: binding.id.clone(),
+                            status: known.iter().find(|camera| camera.id == binding.id).cloned(),
                         }
                     }
                 }
@@ -53,13 +52,11 @@ pub fn CameraWorkspace() -> Element {
 }
 
 #[component]
-fn CameraView(
+fn CameraProperty(
     robot: String,
     role: String,
     device: String,
     status: Option<CameraStatus>,
-    maximized: bool,
-    on_maximize: EventHandler<()>,
 ) -> Element {
     let mut studio = studio();
     let selected = studio
@@ -80,7 +77,10 @@ fn CameraView(
 
     rsx! {
         article {
-            class: if selected { "camera-tile camera-tile-selected" } else { "camera-tile" },
+            class: if selected { "camera-property camera-property-selected" } else { "camera-property" },
+            role: "button",
+            tabindex: "0",
+            "aria-label": "Select the {role} camera on {robot}",
             onclick: {
                 let (robot, role) = (robot.clone(), role.clone());
                 move |_| studio.selected.set(Some(Selection::Camera {
@@ -88,8 +88,22 @@ fn CameraView(
                     role: role.clone(),
                 }))
             },
-            header { class: "camera-tile-header",
-                span { class: "camera-tile-title", "{role}" }
+            onkeydown: {
+                let (robot, role) = (robot.clone(), role.clone());
+                move |event| {
+                    if matches!(event.key(), Key::Enter)
+                        || matches!(event.key(), Key::Character(value) if value == " ")
+                    {
+                        event.prevent_default();
+                        studio.selected.set(Some(Selection::Camera {
+                            robot: robot.clone(),
+                            role: role.clone(),
+                        }));
+                    }
+                }
+            },
+            header { class: "camera-property-header",
+                span { class: "camera-property-name", "{role}" }
                 if trouble.is_none() {
                     span { class: "camera-live-state",
                         span { class: "status-dot" }
@@ -101,19 +115,8 @@ fn CameraView(
                 if let Some(resolution) = resolution {
                     span { class: "camera-resolution", "{resolution}" }
                 }
-                button {
-                    r#type: "button",
-                    class: "icon-button",
-                    "aria-label": if maximized { "Restore camera grid" } else { "Maximize {role} camera" },
-                    title: if maximized { "Restore camera grid" } else { "Maximize camera" },
-                    onclick: move |event| {
-                        event.stop_propagation();
-                        on_maximize.call(());
-                    },
-                    Expand { contract: maximized }
-                }
             }
-            div { class: "camera-frame",
+            div { class: "camera-property-frame",
                 if trouble.is_none() {
                     img {
                         class: "camera-image",
