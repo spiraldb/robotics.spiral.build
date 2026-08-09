@@ -96,15 +96,6 @@ pub fn ModeBar() -> Element {
     let has_fault = status.error.is_some();
     let replay = studio.replay();
     let replaying = matches!(mode, ModeSelection::Replay { .. });
-    // Stopping commands does not release motors, so the narration needs to know
-    // whether anything is still energized before it calls the studio quiet.
-    let holding = studio
-        .telemetry
-        .read()
-        .robots
-        .iter()
-        .filter(|robot| robot.torque)
-        .count();
 
     rsx! {
         // Teleoperation is the only mode the header configures, because it is
@@ -179,64 +170,43 @@ pub fn ModeBar() -> Element {
                     role: "status",
                     "Faulted — {error}"
                 }
-            } else if let Some(narration) = narrate(&mode, status.active, holding, &replay) {
+            } else if let Some(narration) = narrate(&mode, status.active, &replay) {
                 // The narration takes a line of its own rather than competing
-                // with the controls for whatever space is left over: it is the
-                // only place a replay reports its progress, and the only place
-                // a studio that has stopped commanding still-energized arms
-                // says so.
+                // with the controls for whatever space is left over. It only
+                // renders for a replay, which is the one mode started from
+                // somewhere else and the one whose progress lives nowhere in
+                // the header — so the strip is a single row at rest.
                 span { class: "mode-description", role: "status", "{narration}" }
             }
         }
     }
 }
 
-/// What the studio is doing, when that is worth a sentence.
+/// What the studio is doing, in the one case nothing else on screen says it.
 ///
-/// An idle studio with every motor released is already described by the mode
-/// controls and the status chips, so it says nothing: a permanent line
-/// restating the resting state is what teaches an operator to stop reading it.
-/// Everything else is news — including a studio that has stopped commanding
-/// arms which are still holding position, which is the one case where the
-/// resting state is not the safe one.
-fn narrate(
-    mode: &ModeSelection,
-    active: bool,
-    holding: usize,
-    replay: &Option<ReplayProgress>,
-) -> Option<String> {
-    match mode {
-        ModeSelection::Idle if holding == 0 => None,
-        ModeSelection::Idle => Some(format!(
-            "No motion commands, but {} still holding position. Stopping commands is not a safety-rated stop.",
-            match holding {
-                1 => "one arm is".to_owned(),
-                many => format!("{many} arms are"),
-            },
+/// Every other mode is already legible from the control that set it: the
+/// teleoperation group lights up and its button becomes a stop, manual control
+/// is a pressed button on the arm's own panel, and torque still held after
+/// commands stop is the red count in the status cluster. A line restating any
+/// of those is a sentence an operator learns to skip — and, at the foot of a
+/// wrapping header, a whole row that appears and disappears under the controls
+/// above it.
+///
+/// A replay is the exception: it is started from the session rail, so with the
+/// rail collapsed this is the only place its progress exists.
+fn narrate(mode: &ModeSelection, active: bool, replay: &Option<ReplayProgress>) -> Option<String> {
+    let ModeSelection::Replay { robot, episode } = mode else {
+        return None;
+    };
+    match replay {
+        Some(progress) if progress.frame == 0 => {
+            Some(format!("Moving {robot} to the start of {episode}."))
+        }
+        Some(progress) => Some(format!(
+            "Replaying {episode} on {robot} — {}/{}",
+            progress.frame, progress.frames,
         )),
-        ModeSelection::Manual { robot } => Some(if active {
-            format!("Manual target: {robot}. Enable Hold to energize it.")
-        } else {
-            format!("Manual target {robot} is configured but inactive.")
-        }),
-        ModeSelection::Teleoperate { leader, follower } => Some(if active {
-            format!("{leader} is released; {follower} is energized and copying it.")
-        } else {
-            format!("{leader} → {follower} is configured but not active.")
-        }),
-        // Replay is started from the session timeline, not from here, but it is
-        // a mode like any other and the header is where the studio says what it
-        // is doing.
-        ModeSelection::Replay { robot, episode } => Some(match replay {
-            Some(progress) if progress.frame == 0 => {
-                format!("{robot} is moving to the start of {episode}.")
-            }
-            Some(progress) => format!(
-                "{robot} is replaying {episode} — frame {} of {}.",
-                progress.frame, progress.frames,
-            ),
-            None if active => format!("{robot} is replaying {episode}."),
-            None => format!("Replay of {episode} on {robot} has stopped."),
-        }),
+        None if active => Some(format!("Replaying {episode} on {robot}.")),
+        None => None,
     }
 }

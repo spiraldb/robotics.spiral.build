@@ -320,20 +320,54 @@ fn Header(
             ModeBar {}
             div { class: "studio-status",
                 Warnings {}
-                span {
-                    class: if !controls_available { "chip" } else if snapshot.simulated { "chip chip-caution" } else { "chip chip-physical" },
-                    title: if !controls_available { "The environment cannot be verified while telemetry is unavailable or delayed" } else if snapshot.simulated { "Commands affect simulated arms only" } else { "Commands can affect physical hardware" },
-                    {if !controls_available { "Environment unknown" } else if snapshot.simulated { "Simulation" } else { "Physical hardware" }}
+                // Only the exceptional environment is worth a coloured tag.
+                // Physical hardware is the ordinary case, and a permanent ochre
+                // badge announcing the ordinary case is what teaches an operator
+                // to stop reading this cluster — so it says the word quietly and
+                // spends the tag on simulation and on not knowing.
+                if !controls_available {
+                    span {
+                        class: "chip chip-caution",
+                        title: "The environment cannot be verified while telemetry is unavailable or delayed",
+                        "Environment unknown"
+                    }
+                } else if snapshot.simulated {
+                    span {
+                        class: "chip chip-caution",
+                        title: "Commands affect simulated arms only",
+                        "Simulation"
+                    }
+                } else {
+                    span {
+                        class: "status-environment",
+                        title: "Commands can affect physical hardware",
+                        "Physical"
+                    }
                 }
-                span {
-                    class: if snapshot.mode.error.is_some() { "chip status-mode chip-danger" } else if snapshot.mode.active { "chip status-mode chip-active" } else { "chip status-mode" },
-                    title: "Backend-reported command lifecycle",
-                    "{mode_state}"
+                // A chip that spends every idle minute saying "Stopped" is not
+                // reporting anything; the mode only appears once it is running
+                // or has faulted.
+                if snapshot.mode.error.is_some() || snapshot.mode.active {
+                    span {
+                        class: if snapshot.mode.error.is_some() { "chip status-mode chip-danger" } else { "chip status-mode chip-active" },
+                        title: "Backend-reported command lifecycle",
+                        "{mode_state}"
+                    }
                 }
-                span {
-                    class: if !controls_available { "chip status-hold" } else if holding > 0 { "chip status-hold chip-danger" } else { "chip status-hold" },
-                    title: if !controls_available { "Holding state is unknown while telemetry is unavailable or delayed" } else if holding > 0 { "Motor torque is enabled. An arm may resist motion or keep holding after commands stop." } else { "No robot currently reports motor torque" },
-                    if !controls_available { "Hold unknown" } else if holding == 0 { "Torque released" } else { "{holding} holding" }
+                // Likewise for torque: an energized arm is news, a released one
+                // is the resting state every other signal already implies.
+                if !controls_available {
+                    span {
+                        class: "chip status-hold",
+                        title: "Holding state is unknown while telemetry is unavailable or delayed",
+                        "Hold unknown"
+                    }
+                } else if holding > 0 {
+                    span {
+                        class: "chip status-hold chip-danger",
+                        title: "Motor torque is enabled. An arm may resist motion or keep holding after commands stop.",
+                        "{holding} holding"
+                    }
                 }
                 if controls_available && loop_hz > 0.0 {
                     span {
@@ -342,14 +376,19 @@ fn Header(
                         "aria-label": "Control loop {loop_hz:.0} hertz, target {target_hz:.0} hertz",
                         span { class: "status-dot" }
                         span { class: "control-rate-label", "Control" }
-                        span { class: "font-mono", "{loop_hz:.0}/{target_hz:.0} Hz" }
+                        // Fixed width and tabular figures: this number changes
+                        // twice a second, and a cluster that reflows every time
+                        // a digit drops reads as the interface twitching.
+                        span { class: "control-rate-value", "{loop_hz:.0}/{target_hz:.0} Hz" }
                     }
                 }
                 span {
                     class: "connection-status",
                     title: if controls_available { "Receiving recent live state from the studio server" } else if live() { "The event stream is open, but recent telemetry has not arrived; normal controls are paused" } else { "Telemetry is reconnecting; normal controls are paused" },
                     span { class: "status-dot", style: if controls_available { "background: var(--tone-good)" } else { "background: var(--tone-danger)" } }
-                    {if controls_available { "Live".to_owned() } else if live() && telemetry_age.is_finite() { format!("Delayed {:.1}s", telemetry_age) } else { "Reconnecting".to_owned() }}
+                    span { class: "connection-label",
+                        {if controls_available { "Live".to_owned() } else if live() && telemetry_age.is_finite() { format!("Delayed {telemetry_age:.1}s") } else { "Reconnecting".to_owned() }}
+                    }
                 }
             }
             nav { class: "mobile-surface-switcher", "aria-label": "Workspace view",
@@ -420,6 +459,8 @@ fn Warnings() -> Element {
     }
 }
 
+/// A notice floats over the shell until it ages out — see [`crate::state::Notice`],
+/// which carries its own deadline, and the studio clock, which enforces it.
 #[component]
 fn NoticeStrip() -> Element {
     let studio = crate::state::studio();

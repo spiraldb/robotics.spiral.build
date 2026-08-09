@@ -12,7 +12,7 @@ use rerobot_core::arm::{self, JointAngles};
 use crate::api;
 use crate::cameras::RobotCameras;
 use crate::setup::set_torque;
-use crate::state::{Selection, Studio, studio};
+use crate::state::{Selection, studio};
 use crate::viewport::{accent_css, tool_position};
 
 #[derive(Default)]
@@ -89,8 +89,16 @@ pub fn JointPanel() -> Element {
                 if telemetry.is_none() {
                     span { class: "chip", "offline" }
                 }
+                // What this arm is doing in the running pair, not what it is
+                // called: on a bench whose arms are named `leader` and
+                // `follower`, a chip repeating the name beside the name is a
+                // word printed twice.
                 if let Some(role) = role {
-                    span { class: "chip", "{role}" }
+                    span {
+                        class: "chip",
+                        title: if role == "leader" { "Hand-guided; the follower copies it" } else { "Energized and copying the leader" },
+                        {if role == "leader" { "leading" } else { "following" }}
+                    }
                 }
                 // Torque is the one state where a wrong assumption moves an
                 // arm, so it is the one state on this panel worth colouring.
@@ -186,7 +194,6 @@ pub fn JointPanel() -> Element {
                 robot: robot.clone(),
                 telemetry: telemetry.clone(),
                 drivable,
-                role,
             }
 
             RobotCameras { robot }
@@ -243,9 +250,14 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
                 unit: "%",
             }
             // One name for one number, in every mode. This is the same quantity
-            // the session timeline records for a whole take and plots as a
-            // trace; calling it `Target Δ` here and `Follow Δ` there would make
-            // two readings of the same measurement look like two measurements.
+            // the session timeline records for a whole take; calling it
+            // `Target Δ` here and `Follow Δ` there would make two readings of
+            // the same measurement look like two measurements.
+            //
+            // Going out of range tints the cell and nothing else. It used to
+            // also unfold a two-line definition between the readouts and the
+            // sliders, which meant the whole joint stack jumped down a row and
+            // back every time a joint caught up with its target.
             Readout {
                 label: "Follow Δ",
                 // One decimal, matching the session timeline: the same number
@@ -253,13 +265,7 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
                 value: tracking_error.map(|error| format!("{error:.1}")),
                 unit: "°",
                 caution: lagging,
-            }
-        }
-        // What the measurement means belongs on the page, not in a tooltip, and
-        // the moment it is worth explaining is the moment it goes out of range.
-        if lagging {
-            p { class: "px-2 pb-1 text-[11px] leading-tight text-caution",
-                "Follow Δ is the largest gap between where a joint is and where it was told to be."
+                hint: "The largest gap between where a joint is and where it was told to be",
             }
         }
     }
@@ -269,21 +275,25 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
 ///
 /// The unit is a separate faint glyph rather than part of the string, so four
 /// of these side by side line their digits up instead of each starting wherever
-/// its own label happened to end.
+/// its own label happened to end. The digits also hold a fixed width: these
+/// numbers change twenty times a second, and a unit that slides left every time
+/// a hundreds digit drops is the whole strip shimmering.
 #[component]
 fn Readout(
     label: String,
     value: Option<String>,
     unit: &'static str,
     #[props(default)] caution: bool,
+    #[props(default)] hint: &'static str,
 ) -> Element {
     let known = value.is_some();
     rsx! {
         div {
             class: if caution { "readout readout-caution" } else { "readout" },
+            title: "{hint}",
             dt { class: "readout-label", "{label}" }
             dd { class: "readout-value",
-                span { {value.unwrap_or_else(|| "—".to_owned())} }
+                span { class: "readout-number", {value.unwrap_or_else(|| "—".to_owned())} }
                 if known { span { class: "readout-unit", "{unit}" } }
             }
         }
@@ -309,7 +319,6 @@ fn JointControls(
     robot: RobotSummary,
     telemetry: Option<RobotTelemetry>,
     drivable: bool,
-    role: Option<&'static str>,
 ) -> Element {
     let mut studio = studio();
     // While a slider is being dragged the arm is still catching up, so the
@@ -391,13 +400,16 @@ fn JointControls(
 
     rsx! {
         div { class: "flex flex-col px-2 pb-1.5",
-            // Say what would actually make the sliders work. The follower during
-            // teleoperation is the one case with nothing to add: the header is
-            // already narrating that it is energized and copying the leader, so
-            // a second line under the sliders repeated the mode back at an
-            // operator who had just set it.
-            if let Some(reason) = undrivable_reason(&robot, role, drivable, studio) {
-                p { class: "mb-0.5 text-[11px] text-ink-faint", "{reason}" }
+            // The one blocker this panel cannot answer for itself: an
+            // uncalibrated arm refuses every command, and the control that fixes
+            // it lives in the robot explorer. "Press Manual", "press Hold" and
+            // "stop the teleoperation you just started" were sentences pointing
+            // at buttons forty pixels above them — and each one appeared and
+            // vanished under the sliders as the mode changed.
+            if !robot.calibrated {
+                p { class: "joint-blocked",
+                    "Calibrate this arm in the robot explorer to command its joints."
+                }
             }
             for joint in telemetry.joints.clone() {
                 JointRow {
@@ -427,32 +439,6 @@ fn JointControls(
                 }
             }
         }
-    }
-}
-
-/// Why these sliders will not move the arm, when that is worth saying.
-///
-/// A drivable arm needs no explanation, and neither does a follower mid-
-/// teleoperation: the mode bar is already saying that it is energized and
-/// copying the leader, and stopping teleoperation is not something the joint
-/// panel should be suggesting while the pair is running.
-fn undrivable_reason(
-    robot: &RobotSummary,
-    role: Option<&'static str>,
-    drivable: bool,
-    studio: Studio,
-) -> Option<String> {
-    if drivable {
-        return None;
-    }
-    match role {
-        Some("leader") => Some("Move this arm by hand; the follower copies it.".to_owned()),
-        Some(_) => None,
-        None if !robot.calibrated => Some("Calibrate this arm to command its joints.".to_owned()),
-        None if !studio.is_manual_target(&robot.id) => {
-            Some("Press Manual above to drive these joints.".to_owned())
-        }
-        None => Some("Press Hold to energize the motors, then drag.".to_owned()),
     }
 }
 

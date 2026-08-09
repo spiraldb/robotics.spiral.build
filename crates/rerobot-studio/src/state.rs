@@ -32,10 +32,59 @@ pub fn description() -> Description {
 }
 
 /// A short message shown to the operator after an action.
+///
+/// A notice carries its own expiry rather than leaving one to whoever renders
+/// it: every one of these used to sit on the bench until it was dismissed by
+/// hand, and "Episode saved." was still on screen forty takes later. Putting
+/// the deadline in the value means a notice cannot be created without one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Notice {
     pub text: String,
     pub failed: bool,
+    /// Wall-clock milliseconds after which this notice comes off the page.
+    pub until_ms: f64,
+}
+
+impl Notice {
+    pub fn new(text: impl Into<String>, failed: bool) -> Self {
+        let text = text.into();
+        let until_ms = now_ms() + f64::from(linger_ms(&text, failed));
+        Self {
+            text,
+            failed,
+            until_ms,
+        }
+    }
+
+    /// True once `now` has passed this notice's deadline.
+    ///
+    /// Only the browser's clock loop asks; the server build never raises a
+    /// notice, so it never has one to age out.
+    #[cfg_attr(not(feature = "web"), allow(dead_code))]
+    fn expired(&self, now: f64) -> bool {
+        now >= self.until_ms
+    }
+}
+
+/// How long a notice stays up, scaled to how much there is to read.
+///
+/// A confirmation the operator glances at should not outlive the glance, and a
+/// failure they have to act on should not vanish mid-sentence — so the floor
+/// differs and the length is paid for either way.
+fn linger_ms(text: &str, failed: bool) -> u32 {
+    let reading = 3_500 + (text.chars().count() as u32) * 55;
+    reading.clamp(if failed { 8_000 } else { 4_000 }, 14_000)
+}
+
+fn now_ms() -> f64 {
+    #[cfg(feature = "web")]
+    {
+        js_sys::Date::now()
+    }
+    #[cfg(not(feature = "web"))]
+    {
+        0.0
+    }
 }
 
 /// The one selection shared by the hierarchy, viewport, cameras, and inspector.
@@ -149,11 +198,24 @@ impl Studio {
             }
         });
 
+        // The clock the studio measures staleness against, and the one place a
+        // notice is taken back off the page. Expiring it here rather than from
+        // the component that draws it means every notice ages the same way, no
+        // matter which panel raised it.
         #[cfg(feature = "web")]
         use_future(move || async move {
+            let mut notice = studio.notice;
             loop {
-                gloo_timers::future::TimeoutFuture::new(500).await;
-                studio.clock_ms.set(js_sys::Date::now());
+                gloo_timers::future::TimeoutFuture::new(250).await;
+                let now = js_sys::Date::now();
+                studio.clock_ms.set(now);
+                if notice
+                    .peek()
+                    .as_ref()
+                    .is_some_and(|current| current.expired(now))
+                {
+                    notice.set(None);
+                }
             }
         });
 
@@ -355,14 +417,8 @@ impl Studio {
         spawn(async move {
             match future.await {
                 Ok(()) if success.is_empty() => {}
-                Ok(()) => notice.set(Some(Notice {
-                    text: success,
-                    failed: false,
-                })),
-                Err(error) => notice.set(Some(Notice {
-                    text: error,
-                    failed: true,
-                })),
+                Ok(()) => notice.set(Some(Notice::new(success, false))),
+                Err(error) => notice.set(Some(Notice::new(error, true))),
             }
         });
     }
@@ -370,10 +426,7 @@ impl Studio {
     /// Report a problem the UI detected on its own.
     pub fn report(&self, message: impl Into<String>) {
         let mut notice = self.notice;
-        notice.set(Some(Notice {
-            text: message.into(),
-            failed: true,
-        }));
+        notice.set(Some(Notice::new(message, true)));
     }
 }
 
@@ -384,7 +437,34 @@ pub fn studio() -> Studio {
 
 #[cfg(test)]
 mod tests {
-    use super::Selection;
+    use super::{Notice, Selection, linger_ms};
+
+    #[test]
+    fn a_notice_stays_up_long_enough_to_read_and_no_longer() {
+        let glance = linger_ms("Episode saved.", false);
+        let sentence = linger_ms(
+            "Recording cancelled. The episode remains on disk but will not be exported.",
+            false,
+        );
+
+        assert!((4_000..=5_000).contains(&glance), "{glance}");
+        assert!(sentence > glance, "longer messages get longer to read");
+        // A failure asks for a decision, so it gets a floor of its own even
+        // when it is short.
+        assert!(linger_ms("Failed.", true) >= 8_000);
+        // And nothing sits on the bench forever, which is what having no
+        // deadline at all amounted to.
+        assert_eq!(linger_ms(&"x".repeat(400), false), 14_000);
+    }
+
+    #[test]
+    fn a_notice_comes_off_the_page_on_its_own() {
+        let notice = Notice::new("Episode saved.", false);
+
+        assert!(!notice.expired(0.0), "it is up the moment it is raised");
+        assert!(!notice.expired(notice.until_ms - 1.0));
+        assert!(notice.expired(notice.until_ms));
+    }
 
     #[test]
     fn canonical_selection_keeps_robot_context() {

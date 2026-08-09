@@ -361,7 +361,7 @@ fn EpisodeDetail(selected: Option<EpisodeSummary>) -> Element {
                 Fact { label: "Duration", value: format!("{}s", format_seconds(episode.duration_seconds)) }
                 Fact { label: "Frames", value: episode.frames.to_string() }
                 Fact { label: "Rate", value: format!("{:.0} Hz", episode.sample_hz) }
-                Fact { label: "Recorded in", value: episode.source.clone() }
+                Fact { label: "Source", value: episode.source.clone() }
             }
             div { class: "episode-actions",
                 // While this take is the one driving an arm, the rail stops
@@ -369,11 +369,14 @@ fn EpisodeDetail(selected: Option<EpisodeSummary>) -> Element {
                 // began: the escape belongs where the action was, not in a
                 // header button that has quietly relabelled itself.
                 if let Some(progress) = playing {
+                    // Fixed width: this counts up sixty times a second, and a
+                    // label that grows a character at frame 10, 100 and 1000
+                    // walks the Stop button along with it.
                     span { class: "episode-progress", role: "status",
                         if progress.frame == 0 {
                             "Moving to the first pose…"
                         } else {
-                            {format!("Frame {} of {}", progress.frame, progress.frames)}
+                            {format!("Frame {}/{}", progress.frame, progress.frames)}
                         }
                     }
                     button {
@@ -517,15 +520,15 @@ fn SessionSummary(episodes: Vec<EpisodeSummary>) -> Element {
                                     if let Some(id) = result.first_episode.clone() {
                                         selected.set(Some(id));
                                     }
-                                    notice.set(Some(crate::state::Notice {
-                                        text: format!(
+                                    notice.set(Some(crate::state::Notice::new(
+                                        format!(
                                             "Imported {} {} ({} frames).",
                                             result.episodes,
                                             if result.episodes == 1 { "episode" } else { "episodes" },
                                             result.frames,
                                         ),
-                                        failed: false,
-                                    }));
+                                        false,
+                                    )));
                                     Ok(())
                                 }
                                 Err(error) => Err(error),

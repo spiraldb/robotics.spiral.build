@@ -15,7 +15,7 @@ use rerobot_core::api::{
 };
 
 use crate::api;
-use crate::icons::Chevron;
+use crate::icons::{Chevron, Trash};
 use crate::state::{Selection, Studio, studio};
 use crate::viewport::accent_css;
 
@@ -44,9 +44,12 @@ pub fn RobotPanel() -> Element {
 
     rsx! {
         div { class: "flex flex-col",
+            // No count badge: the list is directly underneath and two rows long
+            // on the bench this is built for. The directory earns its place
+            // because it is the only thing on the panel that says where these
+            // files live.
             header { class: "device-panel-header",
                 h2 { "Robots" }
-                span { class: "device-count", "{robots.len()}" }
                 span {
                     class: "device-workspace",
                     title: "Robot files are read and written in {workspace}",
@@ -65,8 +68,10 @@ pub fn RobotPanel() -> Element {
                 }
             }
 
-            NewRobotForm {}
-            ImportRobotConfiguration {}
+            div { class: "device-list-actions",
+                NewRobotForm {}
+                ImportRobotConfiguration {}
+            }
         }
     }
 }
@@ -189,7 +194,7 @@ fn NewRobotForm() -> Element {
     }
 
     rsx! {
-        div { class: "flex flex-col gap-1 px-2 py-1.5",
+        div { class: "flex w-full flex-col gap-1 py-1",
             input {
                 class: "field",
                 "aria-label": "New arm name",
@@ -274,10 +279,10 @@ fn ImportRobotConfiguration() -> Element {
                         match result {
                             Ok(robot) => {
                                 chosen.set(Some(Selection::Robot(robot.id.clone())));
-                                notice.set(Some(crate::state::Notice {
-                                    text: format!("Imported {}.", robot.id),
-                                    failed: false,
-                                }));
+                                notice.set(Some(crate::state::Notice::new(
+                                    format!("Imported {}.", robot.id),
+                                    false,
+                                )));
                                 Ok(())
                             }
                             Err(error) => Err(error),
@@ -285,7 +290,7 @@ fn ImportRobotConfiguration() -> Element {
                     });
                 }
             }
-            if importing() { "Importing configuration…" } else { "+ Import configuration" }
+            if importing() { "Importing…" } else { "Import configuration" }
         }
     }
 }
@@ -305,25 +310,24 @@ fn RobotSetup(robot: RobotSummary) -> Element {
 
     rsx! {
         div { class: "device-setup",
-            div { class: "device-primary-row",
-                span { class: "status-dot", style: if connected { "background: var(--tone-good)" } else { "background: var(--tone-line)" } }
-                span { class: "device-primary-status", if connected { "Motor bus connected" } else { "Motor bus disconnected" } }
-                ConnectButton { robot: robot.clone(), sweeping: progress.is_some() }
-            }
-
+            // The connection used to get a row of its own reading "Motor bus
+            // connected" above a section headed "Motor bus" — the same two words
+            // twice, plus a dot and a state the arm's own row already carries in
+            // its readiness label and its connection dot. Connect now sits
+            // beside the port it opens, which is also the order the work happens
+            // in.
             if let Some(problem) = &robot.problem {
-                p { class: "mb-1 rounded bg-danger-soft px-1.5 py-1 text-[11px] text-danger",
-                    "This arm's file cannot be used: {problem}"
-                }
+                p { class: "device-setup-alarm", "This arm's file cannot be used: {problem}" }
             }
             if let Some(error) = &robot.connection.error {
-                p { class: "mb-1 rounded bg-danger-soft px-1.5 py-1 text-[11px] text-danger", "{error}" }
+                p { class: "device-setup-alarm", "{error}" }
             }
 
             div { class: "device-setup-section",
                 PortSection {
                     robot: robot.clone(),
                     scan,
+                    sweeping: progress.is_some(),
                     on_rescan: move |()| ports.restart(),
                 }
             }
@@ -394,7 +398,12 @@ fn ConnectButton(robot: RobotSummary, sweeping: bool) -> Element {
 }
 
 #[component]
-fn PortSection(robot: RobotSummary, scan: PortScan, on_rescan: EventHandler<()>) -> Element {
+fn PortSection(
+    robot: RobotSummary,
+    scan: PortScan,
+    sweeping: bool,
+    on_rescan: EventHandler<()>,
+) -> Element {
     let studio = studio();
     let mut identify_step = use_signal(|| IdentifyStep::Idle);
     let current = robot.port.clone().map(|port| port.path).unwrap_or_default();
@@ -413,7 +422,7 @@ fn PortSection(robot: RobotSummary, scan: PortScan, on_rescan: EventHandler<()>)
 
     rsx! {
         section { class: "device-section-content",
-            div { class: "mb-0.5 flex items-center gap-1.5",
+            div { class: "device-section-head",
                 h3 { class: "label mb-0", "Motor bus" }
                 button {
                     r#type: "button",
@@ -444,37 +453,44 @@ fn PortSection(robot: RobotSummary, scan: PortScan, on_rescan: EventHandler<()>)
                     "Identify"
                 }
             }
-            select {
-                class: "field",
-                "aria-label": "Serial port",
-                disabled: locked,
-                onchange: {
-                    let id = id.clone();
-                    move |event: Event<FormData>| {
-                        let value = event.value();
-                        if !value.is_empty() {
-                            assign_port(studio, id.clone(), baud, value);
+            // The port and the button that opens it share a line: choosing one
+            // and connecting to it is a single piece of work, and the button's
+            // own label is the only place the connection state needs saying
+            // inside the setup.
+            div { class: "device-port-row",
+                select {
+                    class: "field",
+                    "aria-label": "Serial port",
+                    disabled: locked,
+                    onchange: {
+                        let id = id.clone();
+                        move |event: Event<FormData>| {
+                            let value = event.value();
+                            if !value.is_empty() {
+                                assign_port(studio, id.clone(), baud, value);
+                            }
+                        }
+                    },
+                    option { value: "", selected: current.is_empty(), "Choose a serial port…" }
+                    for port in found {
+                        PortOption {
+                            key: "{port.path}",
+                            selected: port.path == current,
+                            port,
+                            owner: robot.id.clone(),
                         }
                     }
-                },
-                option { value: "", selected: current.is_empty(), "Choose a serial port…" }
-                for port in found {
-                    PortOption {
-                        key: "{port.path}",
-                        selected: port.path == current,
-                        port,
-                        owner: robot.id.clone(),
+                    if missing {
+                        option { value: "{current}", selected: true, "{current} (not detected)" }
+                    }
+                    if matches!(scan, Some(Err(_))) {
+                        option { disabled: true, "Could not scan for ports" }
+                    }
+                    if scan.is_none() {
+                        option { disabled: true, "Scanning…" }
                     }
                 }
-                if missing {
-                    option { value: "{current}", selected: true, "{current} (not detected)" }
-                }
-                if matches!(scan, Some(Err(_))) {
-                    option { disabled: true, "Could not scan for ports" }
-                }
-                if scan.is_none() {
-                    option { disabled: true, "Scanning…" }
-                }
+                ConnectButton { robot: robot.clone(), sweeping }
             }
             if let Some(Err(error)) = &scan {
                 p { class: "mt-0.5 text-[11px] text-danger", "{error}" }
@@ -631,7 +647,7 @@ fn CameraSection(robot: RobotSummary) -> Element {
 
     rsx! {
         section { class: "device-section-content",
-            div { class: "mb-0.5 flex items-center gap-1.5",
+            div { class: "device-section-head",
                 h3 { class: "label mb-0 flex-1", "Cameras" }
                 button {
                     r#type: "button",
@@ -654,18 +670,22 @@ fn CameraSection(robot: RobotSummary) -> Element {
                     {if scanning() { "Scanning…" } else { "Rescan" }}
                 }
             }
+            // Unassigning a camera is rare and reversible in one click, so it
+            // does not hold a permanent word on every row the way it used to —
+            // the same treatment an episode card already gives its delete. It
+            // stays visible on touch, where there is no hover to reveal it.
             ul { class: "mb-1 flex flex-col gap-0.5",
                 for binding in robot.cameras.clone() {
-                    li {
-                        key: "{binding.name}",
-                        class: "flex min-h-6 items-center gap-1.5 rounded bg-surface px-1.5 text-[11px]",
-                        span { "{binding.name}" }
+                    li { key: "{binding.name}", class: "device-camera-row",
+                        span { class: "shrink-0", "{binding.name}" }
                         span { class: "min-w-0 flex-1 truncate font-mono text-[10px] text-ink-faint",
                             "{binding.id}"
                         }
                         button {
                             r#type: "button",
-                            class: "link",
+                            class: "device-camera-remove",
+                            "aria-label": "Unassign the {binding.name} camera",
+                            title: "Unassign the {binding.name} camera",
                             onclick: {
                                 let id = id.clone();
                                 let remaining = robot.cameras.iter()
@@ -674,7 +694,7 @@ fn CameraSection(robot: RobotSummary) -> Element {
                                     .collect::<Vec<_>>();
                                 move |_| save_cameras(studio, id.clone(), remaining.clone())
                             },
-                            "Remove"
+                            Trash {}
                         }
                     }
                 }

@@ -274,6 +274,29 @@
     @apply flex items-center gap-1.5 whitespace-nowrap;
   }
 
+  /* The ordinary environment, stated without a badge. Simulation and "unknown"
+     keep their chips, because those are the states worth a colour; physical
+     hardware is the default, and a permanent ochre pill announcing the default
+     is how a status cluster teaches an operator to stop reading it. */
+  .status-environment {
+    @apply whitespace-nowrap text-ink-faint;
+  }
+
+  .connection-label {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /*
+    A live rate redrawn twice a second cannot also be allowed to resize: the
+    whole status cluster is pushed by `ml-auto`, so one dropped digit slid every
+    chip beside it sideways. Fixed box, tabular figures, right-aligned so the
+    Hz never moves.
+  */
+  .control-rate-value {
+    @apply inline-block min-w-16 text-right font-mono;
+    font-variant-numeric: tabular-nums;
+  }
+
   .control-rate-slow {
     color: var(--tone-caution);
   }
@@ -365,6 +388,13 @@
     font-variant-numeric: tabular-nums;
   }
 
+  /* Tabular figures keep each digit the same width; this keeps the *count* of
+     them from moving the unit. Reach falling from 142 to 46 used to drag the
+     "mm" fourteen pixels left, four cells at once, twenty times a second. */
+  .readout-number {
+    min-width: 3.5ch;
+  }
+
   .readout-caution .readout-value {
     @apply text-caution;
   }
@@ -375,6 +405,13 @@
 
   .readout-caution .readout-unit {
     @apply text-caution;
+  }
+
+  /* The one thing standing between these sliders and the arm that the panel
+     cannot itself fix. It changes once, when the arm is calibrated, so it is
+     not a line that comes and goes under the joints as the mode changes. */
+  .joint-blocked {
+    @apply mb-0.5 text-[11px] leading-tight text-caution;
   }
 
   .joint-row {
@@ -475,14 +512,14 @@
   }
 
   /*
-    Cameras sit side by side once there is room for two. Stacked full-width
-    16:9 previews cost about 190px each, so a two-camera bench pushed the second
-    one off the bottom of the inspector — on the panel whose job is to show you
-    what the arm is looking at. One camera still fills the width.
+    One column. Two cameras side by side in a 320px inspector gave each a
+    150px-wide picture — small enough that the preview stopped answering the
+    question it exists for, which is whether the gripper is actually over the
+    thing. Full width costs a scroll and is worth it: this panel is where you
+    look to see what the arm sees.
   */
   .property-camera-list {
-    @apply grid gap-1 px-2 pb-2;
-    grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+    @apply flex flex-col gap-1 px-2 pb-2;
   }
 
   .property-camera-empty {
@@ -642,11 +679,6 @@
     background: var(--tone-selected);
   }
 
-  .chip-physical {
-    @apply font-medium text-caution;
-    background: var(--tone-caution-soft);
-  }
-
   .chip-caution {
     @apply text-caution;
     background-color: var(--tone-caution-soft);
@@ -787,14 +819,22 @@
     justify-content: flex-end;
   }
 
-  /* The cluster sheds what is merely informative — the loop rate and a mode
-     chip that is only reporting "stopped". Anything that would let the operator
-     start a mode without knowing an arm is powered, a mode faulted, or an issue
-     is outstanding stays on the page, because the control that energizes an arm
-     is still right there and still enabled. */
-  .studio-status > .control-rate,
-  .studio-status > .status-mode:not(.chip-danger) {
+  /* The cluster sheds what is merely informative — the loop rate. Everything
+     else it still renders is already exceptional: the mode chip now only exists
+     while a mode is running or faulted, and the hold count only while an arm is
+     energized. Anything that would let the operator start a mode without knowing
+     an arm is powered, a mode faulted, or an issue is outstanding stays on the
+     page, because the control that energizes an arm is still right there and
+     still enabled. */
+  .studio-status > .control-rate {
     display: none;
+  }
+
+  /* No hover here, so the way to unassign a camera cannot wait for one. */
+  .device-camera-remove {
+    opacity: 1;
+    height: 1.75rem;
+    width: 1.75rem;
   }
 
   /* The pair and start/stop action stay together as one control row. The
@@ -976,10 +1016,6 @@
     @apply text-[12px] font-semibold tracking-[-0.01em];
   }
 
-  .device-count {
-    @apply inline-flex min-w-4 items-center justify-center rounded bg-sunken px-1 font-mono text-[10px] text-ink-faint;
-  }
-
   .device-workspace {
     @apply ml-auto max-w-28 truncate font-mono text-[10px] text-ink-faint;
   }
@@ -988,8 +1024,15 @@
     @apply border-b border-line;
   }
 
+  /* Adding an arm and importing one are the same kind of thing and now share a
+     row, so the foot of the list is one 24px line rather than two stacked
+     full-width bars that read as two more robots. */
+  .device-list-actions {
+    @apply flex flex-wrap items-center gap-1 px-2 py-0.5;
+  }
+
   .device-list-action {
-    @apply flex min-h-6 cursor-pointer items-center px-2 text-left text-[11px] text-ink-faint transition-colors hover:bg-hover hover:text-ink;
+    @apply flex min-h-6 cursor-pointer items-center rounded px-1 text-left text-[11px] text-ink-faint transition-colors hover:bg-hover hover:text-ink;
   }
 
   .device-list-action:focus-within {
@@ -1057,14 +1100,6 @@
     @apply flex flex-col bg-sunken px-2 pb-1.5;
   }
 
-  .device-primary-row {
-    @apply flex min-h-6 items-center gap-1.5 border-b border-line py-1;
-  }
-
-  .device-primary-status {
-    @apply min-w-0 flex-1 truncate text-[11px] text-ink-soft;
-  }
-
   .device-setup-section {
     @apply border-b border-line py-1.5;
   }
@@ -1073,8 +1108,66 @@
     @apply min-w-0;
   }
 
+  /* Every section opens the same way: its name on the left, its quiet actions
+     packed to the right, one 24px line. */
+  .device-section-head {
+    @apply mb-0.5 flex min-h-6 items-center gap-1.5;
+  }
+
+  /* Instructions, only where there is still something to do. */
+  .device-section-note {
+    @apply mt-0.5 text-[11px] leading-tight text-ink-faint;
+  }
+
+  .device-section-note-live {
+    @apply mb-1 text-ink-soft;
+  }
+
+  .device-setup-alarm {
+    @apply mb-1 rounded bg-danger-soft px-1.5 py-1 text-[11px] leading-tight text-danger;
+  }
+
+  /* The port and the button that opens it, on one line. */
+  .device-port-row {
+    @apply flex items-center gap-1;
+  }
+
+  .device-port-row .field {
+    @apply min-w-0 flex-1;
+  }
+
+  .device-camera-row {
+    @apply flex min-h-6 items-center gap-1.5 rounded bg-surface px-1.5 pr-0.5 text-[11px];
+  }
+
+  /* Same bargain the episode card strikes: the row's own labels keep the full
+     width, and the way to undo the assignment appears when the pointer or the
+     keyboard reaches it. Touch has no hover, so it is always visible there.
+     Faded rather than `visibility: hidden` on purpose — a hidden element cannot
+     take focus, and unlike an episode card this row has no other focusable
+     child to reveal it, so hiding it outright put the control beyond the reach
+     of a keyboard entirely. */
+  .device-camera-remove {
+    @apply inline-flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center rounded text-ink-faint opacity-0 transition-[color,background-color,opacity] hover:bg-danger-soft hover:text-danger;
+  }
+
+  /* `:focus` as well as `:focus-visible` — whatever put focus here, a control
+     that currently holds it has to be something the operator can see. */
+  .device-camera-row:hover .device-camera-remove,
+  .device-camera-remove:focus {
+    @apply text-danger opacity-100;
+  }
+
+  .device-camera-remove .ui-icon {
+    @apply h-3 w-3;
+  }
+
   .device-file-row {
     @apply flex min-h-6 items-center gap-1.5 pt-1;
+  }
+
+  .device-delete:hover {
+    @apply text-danger;
   }
 
   /* Light, compact dataset workflow. */
@@ -1142,9 +1235,12 @@
     min-width: 0;
   }
 
-  /* Progress for the take currently driving an arm, beside its stop control. */
+  /* Progress for the take currently driving an arm, beside its stop control.
+     Fixed width, because it counts to four digits while the operator is
+     watching the arm rather than the number, and Stop must not walk. */
   .episode-progress {
-    @apply font-mono text-[11px] whitespace-nowrap text-ink-soft;
+    @apply inline-block min-w-24 font-mono text-[11px] whitespace-nowrap text-ink-soft;
+    font-variant-numeric: tabular-nums;
   }
 
   .timeline-summary {

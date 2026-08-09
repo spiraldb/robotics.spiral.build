@@ -12,10 +12,14 @@ pub(super) fn DeleteButton(robot: RobotSummary) -> Element {
     let mut confirming = use_signal(|| false);
     let id = robot.id.clone();
 
+    // Resting, this is the quietest thing in the file row: it is the rarest
+    // action on the panel and the only destructive one, and it used to be the
+    // boldest text in the row purely because it was a button and its neighbour
+    // was not.
     if !confirming() {
         return rsx! {
             button {
-                r#type: "button", class: "btn", title: "Delete {robot.id}",
+                r#type: "button", class: "link device-delete", title: "Delete {robot.id}",
                 onclick: move |_| confirming.set(true), "Delete"
             }
         };

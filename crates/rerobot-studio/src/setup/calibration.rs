@@ -18,11 +18,17 @@ pub(super) fn CalibrationSection(
     let Some(progress) = progress else {
         return rsx! {
             section {
-                div { class: "flex items-center gap-1.5",
+                div { class: "device-section-head",
                     h3 { class: "label mb-0 flex-1", "Calibration" }
                     button {
                         r#type: "button", class: "btn btn-outline", disabled: !connected,
-                        title: if connected { "" } else { "Connect the arm first" },
+                        title: if !connected {
+                            "Connect the arm first"
+                        } else if robot.calibrated {
+                            "Every joint already has a recorded range. Recalibrate after rebuilding the arm or moving a horn."
+                        } else {
+                            ""
+                        },
                         onclick: move |_| {
                             let id = id.clone();
                             studio.run("", async move { api::post(&format!("/api/robots/{id}/calibration/start")).await });
@@ -30,10 +36,11 @@ pub(super) fn CalibrationSection(
                         {if robot.calibrated { "Recalibrate" } else { "Calibrate" }}
                     }
                 }
-                p { class: "mt-0.5 text-[11px] leading-tight text-ink-faint",
-                    if robot.calibrated {
-                        "Every joint has a recorded range. Recalibrate after rebuilding the arm or moving a horn."
-                    } else {
+                // Instructions only where there is still work to do. On a
+                // calibrated arm the paragraph said nothing the button did not,
+                // and it said it once per arm, forever.
+                if !robot.calibrated {
+                    p { class: "device-section-note",
                         "Record each joint's travel so the studio can command it safely."
                     }
                 }
@@ -69,8 +76,8 @@ pub(super) fn CalibrationSection(
                     "Cancel"
                 }
             }
-            p { class: "mt-0.5 mb-1 text-[11px] leading-tight text-ink-soft",
-                "Torque is off. Move every joint through its full range — to both ends — then save."
+            p { class: "device-section-note device-section-note-live",
+                "Torque is off. Move every joint to both ends, then save."
             }
             ul { class: "flex flex-col gap-0.5",
                 for joint in progress.joints.clone() {

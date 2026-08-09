@@ -78,7 +78,10 @@ pub fn Viewport() -> Element {
     let mut touches = use_signal(BTreeMap::<i32, (f64, f64)>::new);
     let mut pinch = use_signal(|| None::<Pinch>);
     let mut trouble = use_signal(|| Option::<String>::None);
-    let mut show_grid = use_signal(|| false);
+    // On by default: the bench is a physical workspace and the 20cm rhythm is
+    // how an operator reads reach and clearance off the screen. It stays a
+    // control, so a scene that only needs the arms can still shed it.
+    let mut show_grid = use_signal(|| true);
     // Bumped by the window resize listener: the draw below reads it purely so
     // that a resize redraws even when no telemetry is arriving.
     let resized = use_signal(|| 0_u32);
