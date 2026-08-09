@@ -71,7 +71,10 @@ pub fn ModeBar() -> Element {
         _ => None,
     };
     let teleoperating = status.active && configured_pair.is_some();
-    let pair_locked = teleoperating;
+    // A replay is a running mode with an energized arm tracking a trajectory.
+    // Nudging a picker should not end it, for exactly the reason teleoperation
+    // locks these too.
+    let pair_locked = teleoperating || matches!(mode, ModeSelection::Replay { .. });
     let (leader, follower) = configured_pair.unwrap_or_else(|| {
         let leader = chosen_leader()
             .filter(|name| arms.contains(name))
@@ -88,6 +91,8 @@ pub fn ModeBar() -> Element {
     let can_teleoperate = !leader.is_empty() && !follower.is_empty();
     let controls_paused = !studio.controls_available();
     let has_fault = status.error.is_some();
+    let replay = studio.replay();
+    let replaying = matches!(mode, ModeSelection::Replay { .. });
 
     rsx! {
         div { class: "mode-bar", role: "group", "aria-label": "Operating mode",
@@ -104,7 +109,7 @@ pub fn ModeBar() -> Element {
                 class: if matches!(mode, ModeSelection::Manual { .. }) { "mode-group mode-group-active" } else { "mode-group" },
                 // Teleoperation is a running process with an arm energized at
                 // the end of it. Nudging a dropdown should not end it.
-                title: if pair_locked { "Stop teleoperation first" } else if controls_paused { "Controls are paused while reconnecting" } else { "Drive one arm's joints from the sliders" },
+                title: if replaying { "Stop the replay first" } else if pair_locked { "Stop teleoperation first" } else if controls_paused { "Controls are paused while reconnecting" } else { "Drive one arm's joints from the sliders" },
                 span { class: "text-[11px] text-ink-faint", "Manual" }
                 select {
                     class: "field-inline",
@@ -136,9 +141,10 @@ pub fn ModeBar() -> Element {
 
             div {
                 class: if teleoperating { "mode-group mode-group-active" } else if has_fault { "mode-group mode-group-fault" } else { "mode-group" },
-                title: match (teleoperating, can_teleoperate) {
-                    (true, _) => "Stop teleoperation to change the pair",
-                    (_, false) => "Teleoperation needs two connected, calibrated arms",
+                title: match (teleoperating, replaying, can_teleoperate) {
+                    (true, _, _) => "Stop teleoperation to change the pair",
+                    (_, true, _) => "Stop the replay first",
+                    (_, _, false) => "Teleoperation needs two connected, calibrated arms",
                     _ => "Mirror a hand-guided arm onto a driven one",
                 },
                 span { class: "text-[11px] text-ink-faint", "Teleop" }
@@ -201,6 +207,19 @@ pub fn ModeBar() -> Element {
                             if status.active { format!("Manual target: {robot}. Enable Hold to energize it.") } else { format!("Manual target {robot} is configured but inactive.") },
                         ModeSelection::Teleoperate { leader, follower } =>
                             if status.active { format!("{leader} is released; {follower} is energized and copying it.") } else { format!("{leader} → {follower} is configured but not active.") },
+                        // Replay is started from the session timeline, not from
+                        // here, but it is a mode like any other and the header
+                        // is where the studio says what it is doing.
+                        ModeSelection::Replay { robot, episode } => match &replay {
+                            Some(progress) if progress.frame == 0 =>
+                                format!("{robot} is moving to the start of {episode}."),
+                            Some(progress) => format!(
+                                "{robot} is replaying {episode} — frame {} of {}.",
+                                progress.frame, progress.frames,
+                            ),
+                            None if status.active => format!("{robot} is replaying {episode}."),
+                            None => format!("Replay of {episode} on {robot} has stopped."),
+                        },
                     }
                 }
             }

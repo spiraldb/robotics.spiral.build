@@ -4,10 +4,11 @@ use dioxus::prelude::*;
 use wasm_bindgen::JsCast;
 
 use crate::control::JointPanel;
-use crate::icons::Panel;
+use crate::icons::{Panel, Rail};
 use crate::modes::ModeBar;
 use crate::setup::RobotPanel;
 use crate::state::Studio;
+use crate::timeline::TimelineRail;
 use crate::viewport::Viewport;
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
@@ -33,6 +34,7 @@ pub fn App() -> Element {
 
     let mut left_open = use_signal(|| stored_bool("rerobot.pane.left", true));
     let mut right_open = use_signal(|| stored_bool("rerobot.pane.right", true));
+    let mut rail_open = use_signal(|| stored_bool("rerobot.pane.rail", true));
     let mut left_width = use_signal(|| stored_number("rerobot.pane.left.width", 272.0));
     let mut right_width = use_signal(|| stored_number("rerobot.pane.right.width", 320.0));
     let mut dragging = use_signal(|| None::<PaneDrag>);
@@ -43,12 +45,46 @@ pub fn App() -> Element {
         document::Stylesheet { href: TAILWIND }
         document::Title { "rerobot studio" }
         document::Link { rel: "icon", href: FAVICON }
-        document::Meta { name: "color-scheme", content: "light dark" }
+        document::Meta { name: "color-scheme", content: "light" }
 
-        div { class: "studio-shell",
+        div {
+            class: "studio-shell",
+            tabindex: "-1",
+            // The record loop is forty to sixty repetitions in a sitting with
+            // one hand on the arm, so it gets keys. Bound on the shell rather
+            // than on the document so they only fire while the studio has focus,
+            // and ignored while a field is focused so a letter stays a letter.
+            onkeydown: move |event| {
+                if event.modifiers().ctrl() || event.modifiers().meta() || event.modifiers().alt() {
+                    return;
+                }
+                if !crate::timeline::shortcuts_enabled() {
+                    return;
+                }
+                let recording = studio.recording();
+                match event.key() {
+                    Key::Character(pressed) if pressed.eq_ignore_ascii_case("r") => {
+                        event.prevent_default();
+                        match recording {
+                            Some(_) => crate::timeline::stop_recording(studio, true),
+                            None => crate::timeline::start_recording(studio),
+                        }
+                    }
+                    // Only meaningful mid-take: this is the "that one was bad"
+                    // key, pressed while the arm is still moving.
+                    Key::Character(pressed)
+                        if pressed.eq_ignore_ascii_case("x") && recording.is_some() =>
+                    {
+                        event.prevent_default();
+                        crate::timeline::stop_recording(studio, false);
+                    }
+                    _ => {}
+                }
+            },
             Header {
                 left_open: left_open(),
                 right_open: right_open(),
+                rail_open: rail_open(),
                 surface: surface(),
                 on_left: move |_| {
                     let next = !left_open();
@@ -60,9 +96,13 @@ pub fn App() -> Element {
                     right_open.set(next);
                     store_bool("rerobot.pane.right", next);
                 },
+                on_rail: move |_| {
+                    let next = !rail_open();
+                    rail_open.set(next);
+                    store_bool("rerobot.pane.rail", next);
+                },
                 on_surface: move |next| surface.set(next),
             }
-            Warnings {}
             div {
                 class: "studio-body",
                 onpointermove: move |event| {
@@ -131,6 +171,20 @@ pub fn App() -> Element {
                     }
                 }
             }
+            // Below the panes rather than inside the viewport column, and
+            // outside the surface switcher's reach. A take is a span of time
+            // that belongs to the whole session, and a running recording has to
+            // stay visible at every width and on every surface — including the
+            // narrow layout where only one pane is on screen at a time.
+            //
+            // Collapsing the rail during a take leaves the transport behind
+            // rather than hiding it: whether an arm is being recorded is not a
+            // thing a preference gets to switch off.
+            if rail_open() {
+                TimelineRail { compact: false }
+            } else if studio.recording().is_some() {
+                TimelineRail { compact: true }
+            }
             NoticeStrip {}
         }
     }
@@ -140,9 +194,11 @@ pub fn App() -> Element {
 fn Header(
     left_open: bool,
     right_open: bool,
+    rail_open: bool,
     surface: Surface,
     on_left: EventHandler<()>,
     on_right: EventHandler<()>,
+    on_rail: EventHandler<()>,
     on_surface: EventHandler<Surface>,
 ) -> Element {
     let studio = crate::state::studio();
@@ -180,10 +236,19 @@ fn Header(
                     "aria-pressed": right_open, "aria-label": "Toggle joint inspector", title: "Toggle joint inspector",
                     onclick: move |_| on_right.call(()), Panel { left: false }
                 }
+                // Not a `desktop-pane-toggle`: the rail is the only region that
+                // reports a running take, so the way to collapse it has to exist
+                // at every width, including the one where the panes do not.
+                button {
+                    r#type: "button", class: "icon-button rail-toggle",
+                    "aria-pressed": rail_open, "aria-label": "Toggle session timeline", title: "Toggle session timeline",
+                    onclick: move |_| on_rail.call(()), Rail {}
+                }
             }
             div { class: "studio-header-rule" }
             ModeBar {}
             div { class: "studio-status",
+                Warnings {}
                 span {
                     class: if !controls_available { "chip" } else if snapshot.simulated { "chip chip-caution" } else { "chip chip-physical" },
                     title: if !controls_available { "The environment cannot be verified while telemetry is unavailable or delayed" } else if snapshot.simulated { "Commands affect simulated arms only" } else { "Commands can affect physical hardware" },
@@ -257,25 +322,22 @@ fn Warnings() -> Element {
         return rsx! {};
     }
     let count = showing.len();
-    let preview = issue_preview(&showing[0]);
-
     rsx! {
-        div { class: "issue-strip", role: "status",
-            details { class: "issue-details",
-                summary { class: "issue-summary",
-                    span { class: "issue-icon", "!" }
-                    strong { if count == 1 { "1 issue" } else { "{count} issues" } }
-                    span { class: "issue-preview", "{preview}" }
-                }
+        details { class: "issue-details", role: "status",
+            summary { class: "issue-summary",
+                span { class: "issue-icon", "!" }
+                span { if count == 1 { "1 issue" } else { "{count} issues" } }
+            }
+            div { class: "issue-popover",
                 ul { class: "issue-list",
                     for issue in showing { li { key: "{issue}", "{issue}" } }
                 }
-            }
-            button {
-                r#type: "button", class: "link issue-dismiss",
-                title: "Hide these issues until something changes",
-                onclick: move |_| dismissed.set(issues.clone()),
-                "Dismiss"
+                button {
+                    r#type: "button", class: "link issue-dismiss",
+                    title: "Hide these issues until something changes",
+                    onclick: move |_| dismissed.set(issues.clone()),
+                    "Dismiss"
+                }
             }
         }
     }
@@ -285,7 +347,9 @@ fn Warnings() -> Element {
 fn NoticeStrip() -> Element {
     let studio = crate::state::studio();
     let mut notice = studio.notice;
-    let Some(current) = notice.read().clone() else { return rsx! {}; };
+    let Some(current) = notice.read().clone() else {
+        return rsx! {};
+    };
 
     rsx! {
         div { class: "notice-positioner",
@@ -301,8 +365,13 @@ fn NoticeStrip() -> Element {
 }
 
 fn capture(event: &Event<PointerData>) {
-    let Some(raw) = event.downcast::<web_sys::PointerEvent>() else { return };
-    if let Some(target) = raw.target().and_then(|target| target.dyn_into::<web_sys::Element>().ok()) {
+    let Some(raw) = event.downcast::<web_sys::PointerEvent>() else {
+        return;
+    };
+    if let Some(target) = raw
+        .target()
+        .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+    {
         let _ = target.set_pointer_capture(raw.pointer_id());
     }
 }
@@ -337,29 +406,11 @@ fn store_number(key: &str, value: f64) {
     }
 }
 
-fn issue_preview(issue: &str) -> String {
-    let topic = issue.split(':').next().unwrap_or(issue).trim();
-    if topic.is_empty() {
-        "Open for details".to_owned()
-    } else {
-        format!("{topic}. Open for details.")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
     fn pane_defaults_stay_inside_supported_ranges() {
         assert!((220.0..=380.0).contains(&272.0));
         assert!((280.0..=440.0).contains(&320.0));
-    }
-
-
-    #[test]
-    fn issue_preview_hides_driver_noise() {
-        assert_eq!(
-            super::issue_preview("camera unavailable: driver returned a very long message"),
-            "camera unavailable. Open for details."
-        );
     }
 }

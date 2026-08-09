@@ -116,19 +116,14 @@ impl Camera {
 
 const FIELD_OF_VIEW: f32 = 0.9;
 
-/// The viewport's background, matching `--tone-viewport` in the stylesheet.
-///
-/// The arm's shells are the pale grey of printed SO-101 parts and only read
-/// against something darker than they are, so the viewport stays dark in both
-/// themes. It is a neutral dark rather than a tinted one: the scene should look
-/// like a panel, not like a second accent colour.
-const BACKGROUND: [f32; 4] = [0.122, 0.122, 0.122, 1.0];
+/// A light neutral bench matching `--tone-viewport` in the stylesheet.
+const BACKGROUND: [f32; 4] = [0.965, 0.965, 0.955, 1.0];
 
-/// The bench, drawn dark enough to sit behind the arm rather than beside it.
-const GRID_MINOR: [f32; 4] = [0.19, 0.19, 0.19, 1.0];
-const GRID_MAJOR: [f32; 4] = [0.29, 0.29, 0.29, 1.0];
-const AXIS_X: [f32; 4] = [0.58, 0.25, 0.24, 1.0];
-const AXIS_Y: [f32; 4] = [0.24, 0.52, 0.34, 1.0];
+/// A sparse 20 cm grid. The axes remain identifiable without dominating the
+/// robot geometry or turning the viewer into graph paper.
+const GRID_MAJOR: [f32; 4] = [0.84, 0.84, 0.82, 1.0];
+const AXIS_X: [f32; 4] = [0.78, 0.50, 0.49, 1.0];
+const AXIS_Y: [f32; 4] = [0.48, 0.68, 0.56, 1.0];
 
 const VERTEX_SHADER: &str = r#"#version 300 es
 in vec3 position;
@@ -152,12 +147,12 @@ uniform vec4 color;
 uniform float shaded;
 out vec4 fragment;
 void main() {
-    // A key light high and to the front, a dim fill opposite it, and enough
-    // ambient that a surface facing away is still legible rather than black.
+    // A broad bench light keeps white printed shells distinct from the pale
+    // stage without the high-contrast facets of a dramatic product render.
     vec3 n = normalize(world_normal);
     float key = max(dot(n, normalize(vec3(0.45, -0.8, 0.9))), 0.0);
     float fill = max(dot(n, normalize(vec3(-0.7, 0.4, 0.2))), 0.0);
-    vec3 lit = color.rgb * (0.42 + 0.62 * key + 0.18 * fill);
+    vec3 lit = color.rgb * (0.70 + 0.26 * key + 0.08 * fill);
     fragment = vec4(mix(color.rgb, lit, shaded), color.a);
 }
 "#;
@@ -183,7 +178,6 @@ pub struct Renderer {
     cube: Mesh,
     cylinder: Mesh,
     sphere: Mesh,
-    grid_minor: Mesh,
     grid_major: Mesh,
     axis_x: Mesh,
     axis_y: Mesh,
@@ -213,8 +207,7 @@ impl Renderer {
         let cube = mesh(&gl, &program, &cube_vertices())?;
         let cylinder = mesh(&gl, &program, &cylinder_vertices(28))?;
         let sphere = mesh(&gl, &program, &sphere_vertices(12, 18))?;
-        let grid_minor = mesh(&gl, &program, &grid_vertices(false))?;
-        let grid_major = mesh(&gl, &program, &grid_vertices(true))?;
+        let grid_major = mesh(&gl, &program, &grid_vertices())?;
         let axis_x = mesh(&gl, &program, &axis_vertices(true))?;
         let axis_y = mesh(&gl, &program, &axis_vertices(false))?;
 
@@ -228,7 +221,6 @@ impl Renderer {
             cube,
             cylinder,
             sphere,
-            grid_minor,
             grid_major,
             axis_x,
             axis_y,
@@ -269,9 +261,8 @@ impl Renderer {
         );
 
         if show_grid {
-            // Minor lines disappear as the camera pulls back. Major spacing
-            // remains constant, so the grid communicates scale without
-            // turning into a high-frequency texture.
+            // One sparse grid rhythm communicates scale without turning the
+            // largest surface in the studio into a high-frequency texture.
             gl.uniform1f(self.uniforms.shaded.as_ref(), 0.0);
             gl.uniform_matrix4fv_with_f32_array(
                 self.uniforms.model.as_ref(),
@@ -283,9 +274,6 @@ impl Renderer {
                 gl.bind_vertex_array(Some(&mesh.array));
                 gl.draw_arrays(Gl::LINES, 0, mesh.vertices);
             };
-            if camera.distance < 1.25 {
-                draw_lines(&self.grid_minor, &GRID_MINOR);
-            }
             draw_lines(&self.grid_major, &GRID_MAJOR);
             draw_lines(&self.axis_x, &AXIS_X);
             draw_lines(&self.axis_y, &AXIS_Y);
@@ -486,14 +474,14 @@ fn sphere_vertices(rings: usize, segments: usize) -> Vec<f32> {
     data
 }
 
-/// The bench the arms stand on: quiet minor lines and a stronger 10 cm rhythm.
-fn grid_vertices(major: bool) -> Vec<f32> {
+/// The bench the arms stand on: one quiet 20 cm rhythm.
+fn grid_vertices() -> Vec<f32> {
     const HALF: f32 = 0.75;
     const STEP: f32 = 0.05;
     let mut data = Vec::new();
     let lines = (HALF / STEP) as i32;
     for index in -lines..=lines {
-        if index == 0 || (index % 4 == 0) != major {
+        if index == 0 || index % 4 != 0 {
             continue;
         }
         let offset = index as f32 * STEP;

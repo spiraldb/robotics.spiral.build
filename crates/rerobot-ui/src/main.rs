@@ -19,6 +19,7 @@ mod modes;
 mod scene;
 mod setup;
 mod state;
+mod timeline;
 mod viewport;
 
 fn main() {

@@ -26,6 +26,14 @@ pub struct StudioSnapshot {
     pub cameras: Vec<CameraStatus>,
     /// The currently selected operating mode.
     pub mode: ModeStatus,
+    /// Every episode found in the episode directory, oldest first.
+    ///
+    /// Takes live here rather than in telemetry because the list only changes
+    /// when a recording finishes or a take is judged, while the counters of a
+    /// take in progress change sixty times a second.
+    pub episodes: Vec<EpisodeSummary>,
+    /// Directory the server reads and writes episode files in.
+    pub episode_directory: String,
     /// Problems worth showing the operator: unreadable robot files, cameras
     /// that failed to probe, and similar non-fatal trouble.
     pub issues: Vec<String>,
@@ -124,6 +132,14 @@ pub enum ModeSelection {
     Manual { robot: String },
     /// A leader arm's measured pose is mirrored onto a follower arm.
     Teleoperate { leader: String, follower: String },
+    /// A recorded episode's joint targets are played back onto one arm.
+    ///
+    /// The trajectory itself is not carried here: this type is the *published*
+    /// mode, and a mode the browser can post is a mode the browser could post
+    /// a hundred megabytes into. Replay is started through its own endpoint,
+    /// which loads the episode server-side and hands the samples to the
+    /// control thread directly.
+    Replay { robot: String, episode: String },
 }
 
 impl ModeSelection {
@@ -133,6 +149,7 @@ impl ModeSelection {
             Self::Idle => "Idle",
             Self::Manual { .. } => "Manual",
             Self::Teleoperate { .. } => "Teleoperation",
+            Self::Replay { .. } => "Replay",
         }
     }
 }
@@ -159,6 +176,10 @@ pub struct TelemetryFrame {
     /// its motor buses.
     pub target_hz: f64,
     pub robots: Vec<RobotTelemetry>,
+    /// Present only while a take is being captured.
+    pub recording: Option<RecordingProgress>,
+    /// Present only while an episode is being played back.
+    pub replay: Option<ReplayProgress>,
 }
 
 /// One robot's live state.
@@ -228,6 +249,163 @@ impl CalibrationJointProgress {
     pub fn span(&self) -> i64 {
         self.max.saturating_sub(self.min)
     }
+}
+
+/// Degrees of `Follow Δ` at which a joint stops tracking acceptably.
+///
+/// Lives on the wire contract because both ends need the same number: the
+/// control thread uses it to decide when a take has settled and its measurement
+/// can start, and the interface uses it to colour a reading. Two copies of this
+/// constant would let the studio call a take clean that the recorder called
+/// caution.
+pub const CAUTION_FOLLOW_ERROR_DEGREES: f64 = 5.0;
+
+/// One recorded episode, as summarised from its file.
+///
+/// An episode is one take: the operator arms the recorder, performs the task
+/// once, and stops. Unlike a robot, an episode is immutable except for the one
+/// judgement the operator makes about it afterwards.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EpisodeSummary {
+    /// Stable identifier, also the file's stem.
+    pub id: String,
+    /// Name of the episode's file inside the episode directory.
+    pub file: String,
+    /// Arms sampled in this take, in the order their joints appear in a frame.
+    pub arms: Vec<EpisodeArm>,
+    pub frames: u64,
+    pub duration_seconds: f64,
+    /// Rate the take was captured at, so a replay can honour its timing.
+    pub sample_hz: f64,
+    /// When the take started, as milliseconds since the Unix epoch.
+    ///
+    /// Carried as a number rather than a formatted string so the client can
+    /// render it in the operator's own locale and timezone.
+    pub started_ms: i64,
+    /// The mode that produced the take, in the studio's own words.
+    pub source: String,
+    /// Largest gap between a measured and a commanded joint angle during the
+    /// take, in degrees — the same quantity the inspector shows live as
+    /// `Follow Δ`, kept for the whole take instead of for one instant.
+    pub max_follow_error_degrees: Option<f64>,
+    /// True once the operator has judged this take unusable.
+    ///
+    /// A discarded take is kept on disk and excluded from an export, because
+    /// the judgement is the operator's and deleting on their behalf is not.
+    pub discarded: bool,
+    /// Why this take cannot be replayed or exported.
+    ///
+    /// A take whose recording never finished — the server was killed mid-take,
+    /// say — is still listed, with the reason attached, rather than silently
+    /// omitted or silently offered as if it were whole.
+    pub problem: Option<String>,
+}
+
+impl EpisodeSummary {
+    /// True when the take is complete enough to replay or export.
+    pub fn usable(&self) -> bool {
+        self.problem.is_none() && self.frames > 0
+    }
+
+    /// The joints of the arm named, when this take sampled it.
+    pub fn arm(&self, id: &str) -> Option<&EpisodeArm> {
+        self.arms.iter().find(|arm| arm.id == id)
+    }
+}
+
+/// One arm's presence in a take.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EpisodeArm {
+    pub id: String,
+    /// Joint names, in the order their values appear in every frame.
+    pub joints: Vec<String>,
+}
+
+/// A take being captured right now.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct RecordingProgress {
+    /// Identifier the finished take will have.
+    pub episode: String,
+    pub frames: u64,
+    pub elapsed_seconds: f64,
+    /// Arms being sampled.
+    pub arms: Vec<String>,
+    /// Largest `Follow Δ` seen so far in this take, in degrees.
+    pub max_follow_error_degrees: Option<f64>,
+    /// Set when the capture stopped itself — a full disk, or an arm that went
+    /// away mid-take.
+    pub error: Option<String>,
+}
+
+/// An episode being played back right now.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ReplayProgress {
+    pub episode: String,
+    /// The arm being driven.
+    pub robot: String,
+    /// Frames played so far.
+    pub frame: u64,
+    pub frames: u64,
+    pub elapsed_seconds: f64,
+    pub duration_seconds: f64,
+}
+
+/// Begin capturing a take.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StartRecordingRequest {
+    /// Arms to sample. Empty means every connected arm, which is the useful
+    /// default: a take is a record of the whole scene, not of one arm.
+    #[serde(default)]
+    pub arms: Vec<String>,
+    /// A short operator note stored with the take.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// Finish the take in progress.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StopRecordingRequest {
+    /// False marks the finished take discarded in the same gesture that ends
+    /// it, for the common case of knowing the take was bad while it ran.
+    pub keep: bool,
+}
+
+/// Change the operator's judgement of a stored take.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct JudgeEpisodeRequest {
+    pub discarded: bool,
+}
+
+/// Play a stored episode back onto one arm.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StartReplayRequest {
+    pub episode: String,
+    /// The arm to drive. It must be connected and calibrated.
+    pub robot: String,
+    /// Which recorded arm's trajectory to play, when the take holds more than
+    /// one. Defaults to the arm being driven, then to the take's only arm.
+    #[serde(default)]
+    pub source_arm: Option<String>,
+}
+
+/// Write the kept takes out as a dataset.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ExportRequest {
+    /// Directory to write. Relative paths resolve against the episode
+    /// directory's parent; an existing directory is refused rather than merged
+    /// into, so an export is always exactly one session's decision.
+    pub directory: String,
+}
+
+/// What an export produced.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ExportResponse {
+    /// Absolute path actually written.
+    pub directory: String,
+    pub episodes: u64,
+    pub frames: u64,
+    /// Takes left out because the operator discarded them or they are unusable.
+    pub skipped: u64,
 }
 
 /// Create a new robot instance and its JSON file.
@@ -325,6 +503,13 @@ mod tests {
                 },
                 r#"{"mode":"teleoperate","leader":"left","follower":"right"}"#,
             ),
+            (
+                ModeSelection::Replay {
+                    robot: "right".to_owned(),
+                    episode: "episode_000007".to_owned(),
+                },
+                r#"{"mode":"replay","robot":"right","episode":"episode_000007"}"#,
+            ),
         ];
 
         for (mode, json) in cases {
@@ -345,6 +530,38 @@ mod tests {
 
         let update: UpdateRobotRequest = serde_json::from_str("{}").unwrap();
         assert_eq!(update, UpdateRobotRequest::default());
+    }
+
+    #[test]
+    fn an_unfinished_take_is_listed_but_not_offered() {
+        let mut episode = EpisodeSummary {
+            id: "episode_000001".to_owned(),
+            file: "episode_000001.jsonl".to_owned(),
+            arms: vec![EpisodeArm {
+                id: "follower".to_owned(),
+                joints: vec!["shoulder_pan".to_owned()],
+            }],
+            frames: 120,
+            duration_seconds: 2.0,
+            sample_hz: 60.0,
+            started_ms: 1_770_000_000_000,
+            source: "Teleoperation".to_owned(),
+            max_follow_error_degrees: Some(3.5),
+            discarded: false,
+            problem: None,
+        };
+        assert!(episode.usable());
+        assert_eq!(episode.arm("follower").map(|arm| arm.joints.len()), Some(1));
+        assert_eq!(episode.arm("leader"), None);
+
+        episode.problem = Some("recording did not finish".to_owned());
+        assert!(!episode.usable(), "a truncated take must not be offered");
+
+        // An empty take is unusable even without a recorded reason: there is
+        // nothing in it to replay.
+        episode.problem = None;
+        episode.frames = 0;
+        assert!(!episode.usable());
     }
 
     #[test]

@@ -1,5 +1,8 @@
-/* The Dioxus CLI compiles this file automatically: `dx` picks up a
-   `tailwind.css` at the crate root and writes the result to assets/. */
+/* `dx serve` watches this file and recompiles it. `dx build` does not: it
+   bundles whatever `assets/tailwind.css` already contains, so an explicit build
+   has to run the Tailwind CLI first or new classes ship with no styles.
+
+     tailwindcss -i tailwind.css -o assets/tailwind.css --minify */
 @import "tailwindcss";
 
 /* Tailwind discovers utility classes by scanning source text, and the UI is
@@ -16,7 +19,7 @@
   there are exactly four accents and they all belong to a robot.
 */
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
 
   --tone-canvas: #ffffff;
   --tone-surface: #ffffff;
@@ -38,34 +41,11 @@
   --tone-caution-soft: #fbf3db;
   --tone-good: #448361;
 
-  /* The viewport stays dark in both themes. The arm's own shells are the pale
-     grey of printed SO-101 parts, and they only read against something darker
-     than they are. Neutral, so it is a panel rather than a blue slab. */
-  --tone-viewport: #1f1f1f;
-}
+  /* The 3D stage is part of the light workspace. Camera pixels keep their own
+     dark mat so letterboxing still reads as image rather than empty UI. */
+  --tone-viewport: #f5f5f3;
+  --tone-camera: #1f1f1f;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --tone-canvas: #191919;
-    --tone-surface: #1f1f1f;
-    --tone-sunken: #252525;
-    --tone-hover: rgb(255 255 255 / 0.055);
-    --tone-line: #303030;
-
-    --tone-ink: #d4d4d4;
-    --tone-ink-soft: #b0b0b0;
-    --tone-ink-faint: #919191;
-
-    --tone-accent: #0b67b2;
-    --tone-accent-ink: #ffffff;
-    --tone-selected: rgb(40 140 225 / 0.16);
-
-    --tone-danger: #ff7369;
-    --tone-danger-soft: rgb(255 115 105 / 0.12);
-    --tone-caution: #e5c07b;
-    --tone-caution-soft: rgb(229 192 123 / 0.11);
-    --tone-good: #4dab9a;
-  }
 }
 
 @theme inline {
@@ -92,6 +72,7 @@
   --color-good: var(--tone-good);
 
   --color-viewport: var(--tone-viewport);
+  --color-camera: var(--tone-camera);
 }
 
 @layer base {
@@ -394,7 +375,7 @@
   }
 
   .camera-property-frame {
-    @apply relative aspect-video overflow-hidden bg-viewport;
+    @apply relative aspect-video overflow-hidden bg-camera;
   }
 
   .camera-image {
@@ -559,6 +540,7 @@
   .studio-panel button[aria-expanded] {
     @apply min-h-8 min-w-8;
   }
+
 }
 
 @media (max-width: 1180px) {
@@ -584,6 +566,7 @@
   .studio-status {
     gap: 0.25rem;
   }
+
 }
 
 @media (max-width: 900px) {
@@ -730,5 +713,427 @@
 
   .viewport-help {
     display: none;
+  }
+}
+
+/*
+  2026 session workflow: one light workspace.
+
+  Recording is a transport, episodes are a compact selectable strip, replay is
+  the selected episode's primary action, and export belongs to the session. The
+  UI intentionally does not promote tracking diagnostics or operator judgement
+  into parallel workflows.
+*/
+@layer components {
+  /* Light 3D stage chrome. */
+  .viewport-help {
+    @apply text-ink-faint;
+  }
+
+  .viewport-button {
+    @apply border border-transparent text-ink-soft hover:border-line hover:bg-surface hover:text-ink focus-visible:text-ink;
+  }
+
+  .viewport-button[aria-pressed="true"] {
+    @apply border-line bg-surface text-accent;
+  }
+
+  .viewport-legend-row {
+    @apply text-ink-soft hover:bg-surface hover:text-ink;
+  }
+
+  .viewport-legend-selected {
+    @apply bg-surface text-ink ring-1 ring-line;
+  }
+
+  .view-cube {
+    @apply border-line bg-surface/90 text-ink-soft backdrop-blur-none;
+  }
+
+  .view-cube button {
+    @apply hover:bg-hover hover:text-ink focus-visible:text-ink;
+  }
+
+  .view-cube-row {
+    @apply border-line;
+  }
+
+  .viewport-axis-key {
+    @apply border border-line bg-surface/90 backdrop-blur-none;
+  }
+
+  /* Issues belong to the status cluster, not between the operator and the
+     workspace. Details remain one click away in a small anchored popover. */
+  .issue-details {
+    @apply relative shrink-0;
+  }
+
+  .issue-summary {
+    @apply flex min-h-7 cursor-pointer list-none items-center gap-1.5 rounded px-1.5 text-[11px] text-caution hover:bg-caution-soft;
+  }
+
+  .issue-summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .issue-icon {
+    @apply inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border border-current text-[10px] font-semibold;
+  }
+
+  .issue-popover {
+    @apply absolute top-[calc(100%+6px)] right-0 z-50 w-80 rounded border border-line bg-surface p-2 text-[11px] text-ink-soft shadow-lg;
+  }
+
+  .issue-list {
+    @apply max-h-36 list-disc space-y-1 overflow-y-auto px-2 pb-1 pl-5;
+  }
+
+  .issue-dismiss {
+    @apply mt-1 min-h-7;
+  }
+
+  /* Device hierarchy: identity and readiness first, setup details second, file
+     maintenance last. */
+  .device-panel-header {
+    @apply sticky top-0 z-10 flex min-h-10 items-center gap-2 border-b border-line bg-surface px-3;
+  }
+
+  .device-panel-header h2 {
+    @apply text-[13px] font-semibold tracking-[-0.01em];
+  }
+
+  .device-count {
+    @apply inline-flex min-w-5 items-center justify-center rounded bg-sunken px-1.5 py-0.5 font-mono text-[10px] text-ink-faint;
+  }
+
+  .device-workspace {
+    @apply ml-auto max-w-32 truncate font-mono text-[10px] text-ink-faint;
+  }
+
+  .device-entry {
+    @apply border-b border-line;
+  }
+
+  .device-entry-row {
+    @apply flex min-h-12 items-center gap-1 pr-2 transition-colors hover:bg-hover;
+  }
+
+  .device-entry-selected {
+    @apply bg-selected;
+  }
+
+  .device-chevron {
+    @apply flex min-h-10 w-7 cursor-pointer items-center justify-center text-ink-faint hover:text-ink;
+  }
+
+  .device-main {
+    @apply flex min-w-0 flex-1 cursor-pointer items-center gap-2 py-1.5 text-left;
+  }
+
+  .device-accent {
+    @apply h-2 w-2 shrink-0 rounded-full;
+  }
+
+  .device-copy {
+    @apply flex min-w-0 flex-1 flex-col;
+  }
+
+  .device-copy strong {
+    @apply truncate text-[13px] font-medium text-ink;
+  }
+
+  .device-copy > span {
+    @apply truncate text-[10px] text-ink-faint;
+  }
+
+  .device-state {
+    @apply shrink-0 text-[10px] text-ink-soft;
+  }
+
+  .device-state-needed {
+    @apply text-caution;
+  }
+
+  .device-connection-dot {
+    @apply h-1.5 w-1.5 shrink-0 rounded-full;
+  }
+
+  .device-setup {
+    @apply flex flex-col bg-sunken px-3 pb-2;
+  }
+
+  .device-primary-row {
+    @apply flex min-h-11 items-center gap-2 border-b border-line;
+  }
+
+  .device-primary-status {
+    @apply min-w-0 flex-1 truncate text-[11px] text-ink-soft;
+  }
+
+  .device-setup-section {
+    @apply border-b border-line py-2.5;
+  }
+
+  .device-section-content {
+    @apply min-w-0;
+  }
+
+  .device-file-row {
+    @apply flex min-h-9 items-center gap-2 pt-1.5;
+  }
+
+  /* Light, compact dataset workflow. */
+  .timeline-rail {
+    @apply flex shrink-0 flex-col border-t border-line bg-surface text-ink-soft;
+  }
+
+  .timeline-toolbar {
+    @apply flex min-h-12 items-center gap-4 border-b border-line px-3 py-1.5;
+  }
+
+  .timeline-transport {
+    @apply flex min-w-0 flex-row items-center gap-2;
+    width: auto;
+    max-width: none;
+    flex: 0 0 auto;
+    justify-content: flex-start;
+  }
+
+  .take-button {
+    @apply inline-flex min-h-8 cursor-pointer items-center justify-center gap-1.5 rounded bg-accent px-3 text-[12px] font-medium text-accent-ink transition-colors hover:brightness-110 disabled:cursor-not-allowed;
+  }
+
+  .take-button:disabled {
+    @apply bg-sunken text-ink-faint;
+    box-shadow: inset 0 0 0 1px var(--tone-line);
+  }
+
+  .take-button-live {
+    @apply bg-danger text-white;
+  }
+
+  .timeline-clock {
+    @apply flex min-w-20 flex-col;
+  }
+
+  .timeline-elapsed {
+    @apply block font-mono text-[22px] leading-none font-medium tracking-[-0.02em] text-ink;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .timeline-readout-label {
+    @apply mt-0.5 text-[10px] text-ink-faint;
+  }
+
+  .take-cancel {
+    @apply inline-flex min-h-8 cursor-pointer items-center rounded px-2 text-[11px] text-ink-soft hover:bg-hover hover:text-danger;
+  }
+
+  .take-blocked {
+    @apply text-[10px] leading-snug text-ink-faint;
+    min-width: 0;
+    white-space: nowrap;
+  }
+
+  .timeline-summary {
+    @apply ml-auto flex min-w-0 flex-row items-center gap-3;
+  }
+
+  .session-count {
+    @apply flex items-baseline gap-1 whitespace-nowrap text-[11px] text-ink-soft;
+  }
+
+  .session-count strong {
+    @apply font-mono text-[13px] font-medium text-ink;
+  }
+
+  .session-duration {
+    @apply ml-2 font-mono text-[10px] text-ink-faint;
+  }
+
+  .session-excluded {
+    @apply ml-2 text-[10px] text-caution;
+  }
+
+  .export-form {
+    @apply flex items-center gap-1;
+  }
+
+  .export-field {
+    @apply min-h-8 w-36 bg-surface text-ink;
+  }
+
+  .episode-strip-wrap {
+    @apply border-b border-line px-3 py-1.5;
+  }
+
+  .episode-strip-heading {
+    @apply flex min-h-6 items-center gap-2 text-[10px] text-ink-faint;
+  }
+
+  .episode-strip-heading strong {
+    @apply text-[11px] font-medium text-ink-soft;
+  }
+
+  .episode-strip {
+    @apply flex min-h-14 gap-1 overflow-x-auto pb-1;
+    scrollbar-color: var(--tone-line) transparent;
+  }
+
+  .episode-strip > li {
+    @apply shrink-0;
+  }
+
+  .episode-strip-empty {
+    @apply min-h-16 items-center px-3 text-[11px] text-ink-faint;
+  }
+
+  .episode-strip-empty strong {
+    @apply mr-2 font-medium text-ink;
+  }
+
+  .episode-item {
+    @apply flex h-12 w-[5.5rem] cursor-pointer flex-col justify-center rounded border border-line bg-canvas px-2 text-left transition-colors hover:border-ink-faint hover:bg-hover;
+  }
+
+  .episode-item-selected {
+    @apply border-accent bg-selected;
+    box-shadow: inset 0 0 0 1px var(--tone-accent);
+  }
+
+  .episode-item-live {
+    @apply cursor-default border-danger bg-danger-soft;
+    animation: take-pulse 1.6s ease-in-out infinite;
+  }
+
+  .episode-item-problem {
+    @apply border-danger text-danger;
+  }
+
+  .episode-item-cancelled {
+    @apply bg-sunken text-ink-faint;
+  }
+
+  .episode-index {
+    @apply truncate font-mono text-[12px] font-medium text-ink;
+  }
+
+  .episode-duration {
+    @apply font-mono text-[10px] text-ink-soft;
+  }
+
+  .episode-state {
+    @apply truncate text-[10px] text-ink-faint;
+  }
+
+  .episode-detail {
+    @apply flex min-h-14 items-center gap-4 px-3 py-1.5;
+  }
+
+  .episode-detail-empty {
+    @apply text-[11px] text-ink-faint;
+  }
+
+  .episode-detail-title {
+    @apply flex min-w-44 items-center gap-2;
+  }
+
+  .episode-detail-title strong {
+    @apply font-mono text-[12px] font-medium text-ink;
+  }
+
+  .episode-facts {
+    @apply flex min-w-0 flex-1 flex-wrap items-baseline gap-x-4 gap-y-0.5;
+  }
+
+  .episode-fact {
+    @apply flex items-baseline gap-1.5 whitespace-nowrap;
+  }
+
+  .episode-fact dt {
+    @apply text-[10px] text-ink-faint;
+  }
+
+  .episode-fact dd {
+    @apply text-[11px] text-ink-soft;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .episode-actions,
+  .take-confirm {
+    @apply flex shrink-0 flex-wrap items-center gap-1;
+  }
+
+  .episode-replay {
+    @apply min-w-32;
+  }
+
+  .episode-problem {
+    @apply text-[10px] text-danger;
+  }
+
+  .timeline-collapsed-note {
+    @apply text-[11px] text-ink-faint;
+  }
+
+  .timeline-rail .btn-primary {
+    @apply text-accent-ink;
+  }
+}
+
+@media (max-width: 900px) {
+  .timeline-toolbar,
+  .episode-detail {
+    flex-wrap: wrap;
+  }
+
+  .timeline-summary {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .episode-actions {
+    width: 100%;
+  }
+}
+
+@media (max-width: 640px) {
+  .timeline-rail {
+    max-height: 42vh;
+    overflow-y: auto;
+  }
+
+  .timeline-toolbar {
+    gap: 0.5rem;
+  }
+
+  .timeline-transport {
+    width: 100%;
+  }
+
+  .take-button {
+    min-height: 2.75rem;
+  }
+
+  .timeline-summary {
+    justify-content: space-between;
+  }
+
+  .episode-detail-title,
+  .episode-facts,
+  .episode-actions {
+    width: 100%;
+  }
+
+  .episode-detail-title {
+    min-width: 0;
+  }
+
+  .issue-popover {
+    position: fixed;
+    top: 3rem;
+    right: 0.5rem;
+    left: 0.5rem;
+    width: auto;
   }
 }

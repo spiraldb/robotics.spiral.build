@@ -28,9 +28,10 @@ workflow available to people who do not want a Python stack between them and
 their motors.
 
 The durable scope is the **full LeRobot loop**: episode recording, dataset
-export, and policy playback/inference are all in scope, not just the setup and
-teleoperation that exist today. Future work should assume a record → train →
-replay lifecycle exists, even where it is not yet built.
+export, and policy playback/inference are all in scope. Recording, export, and
+trajectory replay exist today; policy inference does not. Future work should
+assume a record → train → replay lifecycle exists, even where it is not yet
+built.
 
 Success is an ML engineer collecting a usable dataset and replaying a policy on
 real arms without writing glue code and without installing Python.
@@ -45,6 +46,12 @@ real arms without writing glue code and without installing Python.
   motors, and calibration live in a single versioned file. No sidecars, no
   hidden state directory, no calibration cache to invalidate. Any other tool
   can read or write that file, and the studio notices when one does.
+- **One take is one file that says everything about itself.** The same property,
+  applied to recordings: an episode's first line names its arms and their joints,
+  its middle lines are the samples, its last line carries the totals and the
+  operator's judgement. No index, no database, no manifest to fall out of step —
+  a reader needs the file and nothing else, and the studio re-reads the directory
+  rather than assuming it is the only writer.
 - **The robot description is the single source of truth.** Geometry, joint
   limits, and the drawn model all come from a URDF file rather than from
   drawing code, so link lengths and reach exist in exactly one place.
@@ -88,15 +95,24 @@ Releasing torque lets an arm fall under its own weight.
   (including *Identify* by unplugging), camera assignment by role with live
   preview, and a guided calibration sweep that writes measured ranges into the
   robot's file.
-- Three modes: **Idle** (read only), **Manual** (command one arm's joints),
+- Four modes: **Idle** (read only), **Manual** (command one arm's joints),
   **Teleoperation** (mirror a hand-guided leader onto a follower, mapped
-  through each arm's own calibration).
+  through each arm's own calibration), and **Replay** (play a recorded take back
+  onto one arm, ramping it to the take's first pose before playing).
 - A live 3D scene drawn from URDF, and MJPEG camera previews.
-- A `--simulate` mode with emulated motors, so calibration and teleoperation
-  work end to end with no hardware attached.
+- **Episode recording and dataset export**, on a session timeline across the foot
+  of the studio. Recording samples every connected arm at the control rate; one
+  take is one self-describing file in the episode directory (`--episodes`,
+  default `./episodes`), carrying its arms and joints, normalized positions, raw
+  encoder counts, and per-frame tracking error. A take can be judged in or out,
+  replayed, or deleted; export writes the kept takes plus a manifest into a new
+  directory. Recording is deliberately not a mode: a take is captured *during*
+  teleoperation, manual control, or an idle arm moved by hand.
+- A `--simulate` mode with emulated motors, so calibration, teleoperation,
+  recording, and replay all work end to end with no hardware attached.
 
-**Not yet built, but in scope:** episode recording, dataset export, and policy
-playback/inference.
+**Not yet built, but in scope:** policy inference — running a trained model to
+produce actions. Replaying a recorded trajectory exists; deciding one does not.
 
 **Constraints**
 
@@ -107,12 +123,16 @@ playback/inference.
 - **Nix flake** provides the dev environment, including the whole web toolchain
   (`dx`, Tailwind CLI, `wasm-bindgen`, `wasm-opt`).
 - **Safety rules are enforced by the server, not the interface,** so they hold
-  for anything that talks to the API: torque is only enabled deliberately
-  (teleoperation start is the sole exception, and it copies present position
-  into goal first); joints can only be commanded in normalized units, so an
-  uncalibrated arm cannot be driven at all; commanded positions ramp at a
-  bounded rate; a non-responsive motor bus drops the arm and stops the mode
-  with a reason attached.
+  for anything that talks to the API: torque is only enabled deliberately —
+  starting teleoperation and starting a replay are the two exceptions, and both
+  copy present position into goal first, so the arm holds where it stands rather
+  than snapping; joints can only be commanded in normalized units, so an
+  uncalibrated arm cannot be driven at all, and a take recorded from an
+  uncalibrated arm cannot be turned back into motion; commanded positions ramp at
+  a bounded rate, and a replay walks to its take's first pose on the gentle manual
+  ramp before playing, giving up with a reason if a joint is obstructed; a
+  non-responsive motor bus drops the arm and stops the mode with a reason
+  attached, and ends any take in progress rather than recording a hole in it.
 - **Camera identity is not stable.** Cameras are recorded by the identifier the
   OS reports, which may not survive a replug or reboot. On macOS the studio
   must be granted camera permission, and reports its absence rather than
@@ -122,7 +142,10 @@ playback/inference.
 
 **Terminology:** *robot instance* (one arm), *leader* / *follower*, *joint*,
 *calibration*, *travel*, *torque*, *mode*, *workspace* (the directory of robot
-JSON files), *studio* (the web interface).
+JSON files), *studio* (the web interface), *take* / *episode* (one recording, used
+interchangeably — *take* in the interface, *episode* in file names and on the
+wire), *Follow Δ* (the one name for the gap between where a joint is and where it
+was told to be, in degrees, live in the inspector and per-take on the timeline).
 
 ## Brand Commitments
 

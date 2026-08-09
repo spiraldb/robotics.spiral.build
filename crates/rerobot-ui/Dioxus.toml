@@ -1,0 +1,9 @@
+# The Dioxus CLI injects its own title into whatever `<title>` it finds in
+# index.html, so the static title is configured here rather than written there.
+# The app also sets it at runtime; this is what the tab says before the bundle
+# has loaded.
+[application]
+name = "rerobot-ui"
+
+[web.app]
+title = "rerobot studio"

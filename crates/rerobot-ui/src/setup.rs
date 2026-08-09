@@ -10,9 +10,8 @@
 use dioxus::prelude::*;
 use gloo_net::http::Method;
 use rerobot_core::api::{
-    CameraBinding, CameraStatus, CreateRobotRequest, IdentifyPortRequest,
-    IdentifyPortResponse, PortSettings, RobotSummary, SerialPortSummary, TorqueRequest,
-    UpdateRobotRequest,
+    CameraBinding, CameraStatus, CreateRobotRequest, IdentifyPortRequest, IdentifyPortResponse,
+    PortSettings, RobotSummary, SerialPortSummary, TorqueRequest, UpdateRobotRequest,
 };
 
 use crate::api;
@@ -20,8 +19,8 @@ use crate::icons::Chevron;
 use crate::state::{Selection, Studio, studio};
 use crate::viewport::accent_css;
 
-mod delete;
 mod calibration;
+mod delete;
 use calibration::CalibrationSection;
 use delete::DeleteButton;
 
@@ -45,10 +44,11 @@ pub fn RobotPanel() -> Element {
 
     rsx! {
         div { class: "flex flex-col",
-            header { class: "flex items-center gap-2 border-b border-line px-3 py-2",
-                h2 { class: "text-[13px] font-medium", "Arms" }
+            header { class: "device-panel-header",
+                h2 { "Robots" }
+                span { class: "device-count", "{robots.len()}" }
                 span {
-                    class: "ml-auto max-w-40 truncate font-mono text-[10px] text-ink-faint",
+                    class: "device-workspace",
                     title: "Robot files are read and written in {workspace}",
                     "{workspace_name}"
                 }
@@ -86,14 +86,26 @@ fn RobotEntry(robot: RobotSummary, focused: bool, accent: &'static str) -> Eleme
     let ready = robot.problem.is_none() && robot.port.is_some() && robot.calibrated;
     let mut open = use_signal(|| !ready);
     let id = robot.id.clone();
+    let role = robot_role(robot.robot_type.as_deref());
+    let state = if robot.problem.is_some() {
+        "Needs attention"
+    } else if robot.port.is_none() {
+        "Port needed"
+    } else if !robot.calibrated {
+        "Calibration needed"
+    } else if robot.connection.connected {
+        "Connected"
+    } else {
+        "Ready to connect"
+    };
 
     rsx! {
-        li { class: "border-b border-line",
+        li { class: "device-entry",
             div {
-                class: if focused { "flex items-center gap-1 bg-selected pr-2" } else { "flex items-center gap-1 pr-2 hover:bg-hover" },
+                class: if focused { "device-entry-row device-entry-selected" } else { "device-entry-row" },
                 button {
                     r#type: "button",
-                    class: "cursor-pointer px-1.5 py-1.5 text-ink-faint hover:text-ink",
+                    class: "device-chevron",
                     "aria-expanded": open(),
                     "aria-label": if open() { "Hide setup for {robot.id}" } else { "Show setup for {robot.id}" },
                     title: if open() { "Hide this arm's setup" } else { "Show this arm's setup" },
@@ -102,23 +114,20 @@ fn RobotEntry(robot: RobotSummary, focused: bool, accent: &'static str) -> Eleme
                 }
                 button {
                     r#type: "button",
-                    class: "flex flex-1 cursor-pointer items-center gap-2 py-1.5 text-left",
+                    class: "device-main",
                     title: "Show {robot.id} in the joints panel",
                     onclick: move |_| chosen.set(Some(Selection::Robot(id.clone()))),
                     span {
-                        class: "h-2 w-2 shrink-0 rounded-full",
+                        class: "device-accent",
                         style: "background: {accent}",
                     }
-                    span { class: "flex-1 truncate", "{robot.id}" }
-                    if robot.problem.is_some() {
-                        span { class: "chip chip-danger", "broken" }
-                    } else if robot.port.is_none() {
-                        span { class: "chip", "no port" }
-                    } else if !robot.calibrated {
-                        span { class: "chip", "uncalibrated" }
+                    span { class: "device-copy",
+                        strong { "{robot.id}" }
+                        span { "{role}" }
                     }
+                    span { class: if ready { "device-state" } else { "device-state device-state-needed" }, "{state}" }
                     span {
-                        class: "h-1.5 w-1.5 shrink-0 rounded-full",
+                        class: "device-connection-dot",
                         style: if robot.connection.connected { "background: var(--tone-good)" } else { "background: var(--tone-line)" },
                         title: if robot.connection.connected { "Connected" } else { "Not connected" },
                     }
@@ -236,11 +245,11 @@ fn RobotSetup(robot: RobotSummary) -> Element {
     let scan = ports.read_unchecked().clone();
 
     rsx! {
-        div { class: "flex flex-col gap-3 bg-sunken px-3 py-2",
-            div { class: "flex items-center gap-1.5",
-                span { class: "flex-1 truncate font-mono text-[10px] text-ink-faint", "{robot.file}" }
+        div { class: "device-setup",
+            div { class: "device-primary-row",
+                span { class: "status-dot", style: if connected { "background: var(--tone-good)" } else { "background: var(--tone-line)" } }
+                span { class: "device-primary-status", if connected { "Motor bus connected" } else { "Motor bus disconnected" } }
                 ConnectButton { robot: robot.clone(), sweeping: progress.is_some() }
-                DeleteButton { robot: robot.clone() }
             }
 
             if let Some(problem) = &robot.problem {
@@ -252,14 +261,32 @@ fn RobotSetup(robot: RobotSummary) -> Element {
                 p { class: "rounded bg-danger-soft px-2 py-1.5 text-[12px] text-danger", "{error}" }
             }
 
-            PortSection {
-                robot: robot.clone(),
-                scan,
-                on_rescan: move |()| ports.restart(),
+            div { class: "device-setup-section",
+                PortSection {
+                    robot: robot.clone(),
+                    scan,
+                    on_rescan: move |()| ports.restart(),
+                }
             }
-            CameraSection { robot: robot.clone() }
-            CalibrationSection { robot, connected, progress }
+            div { class: "device-setup-section",
+                CameraSection { robot: robot.clone() }
+            }
+            div { class: "device-setup-section",
+                CalibrationSection { robot: robot.clone(), connected, progress }
+            }
+            div { class: "device-file-row",
+                span { class: "flex-1 truncate font-mono text-[10px] text-ink-faint", "{robot.file}" }
+                DeleteButton { robot }
+            }
         }
+    }
+}
+
+fn robot_role(robot_type: Option<&str>) -> &'static str {
+    match robot_type {
+        Some(kind) if kind.contains("leader") => "Leader · hand-guided",
+        Some(kind) if kind.contains("follower") => "Follower · driven",
+        _ => "Robot arm",
     }
 }
 
@@ -319,7 +346,7 @@ fn PortSection(robot: RobotSummary, scan: PortScan, on_rescan: EventHandler<()>)
     let missing = !current.is_empty() && !found.iter().any(|port| port.path == current);
 
     rsx! {
-        section {
+        section { class: "device-section-content",
             div { class: "mb-1 flex items-center gap-2",
                 h3 { class: "label mb-0", "Motor bus" }
                 button {
@@ -537,7 +564,7 @@ fn CameraSection(robot: RobotSummary) -> Element {
     };
 
     rsx! {
-        section {
+        section { class: "device-section-content",
             div { class: "mb-1 flex items-center gap-2",
                 h3 { class: "label mb-0 flex-1", "Cameras" }
                 button {
@@ -608,7 +635,7 @@ fn CameraSection(robot: RobotSummary) -> Element {
             if let Some(camera) = chosen {
                 div { class: "mt-1.5 overflow-hidden rounded border border-line",
                     img {
-                        class: "aspect-video w-full bg-viewport object-contain",
+                        class: "aspect-video w-full bg-camera object-contain",
                         src: api::camera_stream_url(&camera.id),
                         alt: "Live preview from {camera.name}",
                     }

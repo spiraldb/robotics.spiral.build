@@ -96,7 +96,6 @@ pub fn JointPanel() -> Element {
             ToolReadout {
                 telemetry: telemetry.clone(),
                 calibrated: robot.calibrated,
-                following: role == Some("follower"),
             }
 
             JointControls {
@@ -114,7 +113,7 @@ pub fn JointPanel() -> Element {
 
 /// Where the arm is holding its gripper, solved from the robot description.
 #[component]
-fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool, following: bool) -> Element {
+fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
     let description = crate::state::description();
     let Ok(urdf) = description.as_ref() else {
         return rsx! {};
@@ -146,10 +145,17 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool, following: b
                 label: "Gripper",
                 value: angles.map(|angles| format!("{:.0}%", angles.gripper * 100.0)),
             }
+            // One name for one number, in every mode. This is the same quantity
+            // the session timeline records for a whole take and plots as a
+            // trace; calling it `Target Δ` here and `Follow Δ` there would make
+            // two readings of the same measurement look like two measurements.
             Readout {
-                label: if following { "Follow Δ" } else { "Target Δ" },
-                value: tracking_error.map(|error| format!("{error:.0}°")),
-                caution: tracking_error.is_some_and(|error| error > 5.0),
+                label: "Follow Δ",
+                // One decimal, matching the session timeline: the same number
+                // rounded two different ways reads as two measurements.
+                value: tracking_error.map(|error| format!("{error:.1}°")),
+                caution: tracking_error
+                    .is_some_and(|error| error >= rerobot_core::api::CAUTION_FOLLOW_ERROR_DEGREES),
             }
         }
     }

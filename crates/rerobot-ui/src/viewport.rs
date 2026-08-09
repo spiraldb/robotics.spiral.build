@@ -76,7 +76,7 @@ pub fn Viewport() -> Element {
     let mut touches = use_signal(BTreeMap::<i32, (f64, f64)>::new);
     let mut pinch = use_signal(|| None::<Pinch>);
     let mut trouble = use_signal(|| Option::<String>::None);
-    let mut show_grid = use_signal(|| true);
+    let mut show_grid = use_signal(|| false);
     // Bumped by the window resize listener: the draw below reads it purely so
     // that a resize redraws even when no telemetry is arriving.
     let mut resized = use_signal(|| 0_u32);
@@ -259,11 +259,9 @@ pub fn Viewport() -> Element {
                 },
             }
 
-            // The viewport is dark in both themes, so its own chrome is spelled
-            // out in white at low opacity rather than in the page's ink tones.
             if let Some(failure) = failure {
                 div { class: "absolute inset-0 flex items-center justify-center p-6",
-                    p { class: "max-w-sm rounded border border-white/10 px-4 py-3 text-center text-[13px] text-white/70",
+                    p { class: "max-w-sm rounded border border-line bg-surface px-4 py-3 text-center text-[13px] text-ink-soft",
                         "{failure}"
                     }
                 }
@@ -301,7 +299,7 @@ fn Legend(arms: Vec<RobotSummary>) -> Element {
     if arms.is_empty() {
         return rsx! {
             div { class: "pointer-events-none absolute inset-0 flex items-center justify-center",
-                p { class: "text-[13px] text-white/40", "Add an arm to see it here." }
+                p { class: "text-[13px] text-ink-faint", "Add an arm to see it here." }
             }
         };
     }
@@ -320,7 +318,7 @@ fn Legend(arms: Vec<RobotSummary>) -> Element {
                         },
                         span { class: "h-2 w-2 shrink-0 rounded-full", style: "background: {accent_css(index)}" }
                         span { "{arm.id}" }
-                        if !arm.connection.connected { span { class: "text-white/45", "offline" } }
+                        if !arm.connection.connected { span { class: "text-ink-faint", "offline" } }
                     }
                 }
             }
@@ -470,12 +468,19 @@ fn instances(urdf: &Urdf, placements: &[Placement], selected: Option<&Selection>
                 };
                 let is_selected = match selected {
                     Some(Selection::Robot(robot)) => robot == &placement.id,
-                    Some(Selection::Joint { robot, joint: selected_joint }) => {
+                    Some(Selection::Joint {
+                        robot,
+                        joint: selected_joint,
+                    }) => {
                         robot == &placement.id && joint.as_deref() == Some(selected_joint.as_str())
                     }
                     _ => false,
                 };
-                let color = if is_selected { highlighted(color) } else { color };
+                let color = if is_selected {
+                    highlighted(color)
+                } else {
+                    color
+                };
                 instances.push(Instance {
                     geometry: visual.geometry.clone(),
                     transform: placement.base * transforms[link_index] * visual.origin.matrix(),
@@ -512,8 +517,8 @@ fn highlighted(color: [f32; 4]) -> [f32; 4] {
 /// Wash a colour out toward the background, marking an arm that is not
 /// reporting so a stale pose is never mistaken for a live one.
 fn faded(color: [f32; 4]) -> [f32; 4] {
-    const TOWARD: [f32; 3] = [0.30, 0.30, 0.29];
-    let mix = |value: f32, target: f32| value + (target - value) * 0.72;
+    const TOWARD: [f32; 3] = [0.82, 0.82, 0.80];
+    let mix = |value: f32, target: f32| value + (target - value) * 0.55;
     [
         mix(color[0], TOWARD[0]),
         mix(color[1], TOWARD[1]),

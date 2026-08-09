@@ -23,15 +23,17 @@ use rerobot::serial_ports::{
     available_ports, disconnected_ports, port_description, port_kind, port_names,
 };
 use rerobot_core::api::{
-    ApiError, CameraBinding, CameraStatus, CreateRobotRequest, GoalRequest, IdentifyPortRequest,
-    IdentifyPortResponse, ModeSelection, RobotSummary, SerialPortSummary, StudioSnapshot,
-    TorqueRequest, UpdateRobotRequest,
+    ApiError, CameraBinding, CameraStatus, CreateRobotRequest, EpisodeSummary, ExportRequest,
+    ExportResponse, GoalRequest, IdentifyPortRequest, IdentifyPortResponse,
+    JudgeEpisodeRequest, ModeSelection, RobotSummary, SerialPortSummary, StartRecordingRequest,
+    StartReplayRequest, StopRecordingRequest, StudioSnapshot, TorqueRequest, UpdateRobotRequest,
 };
 use rerobot_core::calibration::build_calibration;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use crate::camera_manager::{CameraManager, Frame};
+use crate::episodes::{EpisodeError, EpisodeStore, build_arms};
 use crate::hardware::{HardwareHandle, RobotSpec};
 use crate::workspace::{RobotWorkspace, WorkspaceError, validate_camera_role};
 
@@ -48,12 +50,14 @@ const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(400);
 #[derive(Clone)]
 pub struct AppState {
     pub workspace: Arc<RobotWorkspace>,
+    pub episodes: Arc<EpisodeStore>,
     pub hardware: Arc<HardwareHandle>,
     pub cameras: Arc<CameraManager>,
     pub simulated: bool,
 }
 
 /// A failed request, rendered as `{"error": "..."}`.
+#[derive(Debug)]
 pub struct Failure(StatusCode, String);
 
 impl Failure {
@@ -65,6 +69,18 @@ impl Failure {
 impl IntoResponse for Failure {
     fn into_response(self) -> Response {
         (self.0, Json(ApiError::new(self.1))).into_response()
+    }
+}
+
+impl From<EpisodeError> for Failure {
+    fn from(error: EpisodeError) -> Self {
+        let status = match &error {
+            EpisodeError::InvalidId(_) | EpisodeError::Invalid(_) => StatusCode::BAD_REQUEST,
+            EpisodeError::NotFound(_) => StatusCode::NOT_FOUND,
+            EpisodeError::AlreadyExists(_) => StatusCode::CONFLICT,
+            EpisodeError::Io { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        Self(status, error.to_string())
     }
 }
 
@@ -113,6 +129,14 @@ pub fn api_router(state: AppState) -> Router {
         .route("/robots/{id}/calibration/finish", post(finish_calibration))
         .route("/robots/{id}/calibration/cancel", post(cancel_calibration))
         .route("/mode", post(set_mode))
+        .route("/episodes", get(list_episodes))
+        .route("/episodes/record", post(start_recording))
+        .route("/episodes/record/stop", post(stop_recording))
+        .route("/episodes/replay", post(start_replay))
+        .route("/episodes/export", post(export_episodes))
+        .route("/episodes/{id}", delete(delete_episode))
+        .route("/episodes/{id}/judge", post(judge_episode))
+        .route("/episodes/{id}/trace", get(episode_trace))
         .with_state(state)
 }
 
@@ -135,6 +159,27 @@ pub fn build_snapshot(state: &AppState) -> StudioSnapshot {
 
     let mut issues = state.workspace.issues();
     issues.extend(state.cameras.issues());
+    issues.extend(state.episodes.issues());
+    // A take that stopped itself has to be visible after the counters that were
+    // describing it have gone.
+    issues.extend(hardware.recording_issue);
+
+    // The take being captured right now has a part file on disk, which the store
+    // correctly reports as a recording that has not finished. It has not — it is
+    // still going, and the live counters are what describe it. Listing it here
+    // as well would draw it twice and count it as a casualty while it is still
+    // being written.
+    let recording = hardware
+        .telemetry
+        .recording
+        .as_ref()
+        .map(|progress| progress.episode.clone());
+    let episodes = state
+        .episodes
+        .list()
+        .into_iter()
+        .filter(|episode| Some(&episode.id) != recording.as_ref())
+        .collect();
 
     StudioSnapshot {
         workspace: state.workspace.directory().display().to_string(),
@@ -142,6 +187,8 @@ pub fn build_snapshot(state: &AppState) -> StudioSnapshot {
         robots,
         cameras: state.cameras.statuses(),
         mode: hardware.mode,
+        episodes,
+        episode_directory: state.episodes.directory().display().to_string(),
         issues,
     }
 }
@@ -617,8 +664,287 @@ async fn set_mode(
     State(state): State<AppState>,
     Json(selection): Json<ModeSelection>,
 ) -> Result<StatusCode, Failure> {
+    // Replay carries a trajectory that has to be read off disk, so it has its
+    // own endpoint. Accepting it here would mean either loading the episode
+    // behind the caller's back or entering a mode with nothing to play.
+    if matches!(selection, ModeSelection::Replay { .. }) {
+        return Err(Failure::bad_request(
+            "start a replay with POST /api/episodes/replay, which loads the take first",
+        ));
+    }
     state.hardware.set_mode(selection).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_episodes(State(state): State<AppState>) -> Json<Vec<EpisodeSummary>> {
+    Json(state.episodes.list())
+}
+
+/// Begin a take.
+///
+/// The arms and their joint order come from what the control thread is already
+/// publishing, so a take's frames are laid out exactly like the telemetry the
+/// operator was watching while it was captured.
+async fn start_recording(
+    State(state): State<AppState>,
+    Json(request): Json<StartRecordingRequest>,
+) -> Result<Json<EpisodeSummary>, Failure> {
+    let hardware = state.hardware.state();
+    let connected = hardware
+        .telemetry
+        .robots
+        .iter()
+        .filter(|robot| {
+            hardware
+                .connections
+                .get(&robot.id)
+                .is_some_and(|connection| connection.connected)
+        })
+        .collect::<Vec<_>>();
+
+    let wanted = if request.arms.is_empty() {
+        connected.iter().map(|robot| robot.id.clone()).collect()
+    } else {
+        for id in &request.arms {
+            if !connected.iter().any(|robot| &robot.id == id) {
+                return Err(Failure::bad_request(format!(
+                    "robot {id:?} is not connected, so it cannot be recorded"
+                )));
+            }
+        }
+        request.arms.clone()
+    };
+    if wanted.is_empty() {
+        return Err(Failure::bad_request(
+            "connect at least one arm before recording a take",
+        ));
+    }
+
+    let arms = wanted
+        .iter()
+        .filter_map(|id| {
+            let robot = connected.iter().find(|robot| &robot.id == id)?;
+            Some((
+                id.clone(),
+                robot
+                    .joints
+                    .iter()
+                    .map(|joint| joint.name.clone())
+                    .collect::<Vec<_>>(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let arms = build_arms(&arms).map_err(Failure::from)?;
+
+    let note = request
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|note| !note.is_empty())
+        .map(str::to_owned);
+    let source = describe_mode(&hardware.mode.selection);
+    // Rounded because this is the configured target, which is a whole number of
+    // hertz; it is reconstructed from a nanosecond period, and writing
+    // `60.0000024000001` into every take's header would be noise recorded as
+    // precision.
+    let sample_hz = if hardware.telemetry.target_hz > 0.0 {
+        (hardware.telemetry.target_hz * 1_000.0).round() / 1_000.0
+    } else {
+        crate::hardware::CONTROL_HZ as f64
+    };
+
+    let writer = state
+        .episodes
+        .begin(source, note, sample_hz, arms.clone())
+        .map_err(Failure::from)?;
+    let id = writer.id().to_owned();
+    let started_ms = writer.started_ms();
+    // Hand the open take to the control thread. If it refuses, dropping the
+    // writer leaves a part file, which is honest: nothing was captured, and the
+    // next listing says the take never finished.
+    state.hardware.start_recording(writer, arms.clone()).await?;
+
+    Ok(Json(EpisodeSummary {
+        id,
+        file: String::new(),
+        arms,
+        frames: 0,
+        duration_seconds: 0.0,
+        sample_hz,
+        started_ms,
+        source: describe_mode(&hardware.mode.selection),
+        max_follow_error_degrees: None,
+        discarded: false,
+        problem: None,
+    }))
+}
+
+async fn stop_recording(
+    State(state): State<AppState>,
+    Json(request): Json<StopRecordingRequest>,
+) -> Result<Json<EpisodeSummary>, Failure> {
+    let summary = state.hardware.stop_recording(request.keep).await?;
+    // The take only exists under its final name now, so the cache has to catch
+    // up before anything lists it.
+    state.episodes.reload().map_err(Failure::from)?;
+    Ok(Json(summary))
+}
+
+async fn judge_episode(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<JudgeEpisodeRequest>,
+) -> Result<Json<EpisodeSummary>, Failure> {
+    let episodes = state.episodes.clone();
+    let summary = tokio::task::spawn_blocking(move || episodes.judge(&id, request.discarded))
+        .await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+    Ok(Json(summary))
+}
+
+async fn delete_episode(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, Failure> {
+    // A take being recorded right now is not a file to delete out from under
+    // the writer.
+    if state
+        .hardware
+        .state()
+        .telemetry
+        .recording
+        .is_some_and(|recording| recording.episode == id)
+    {
+        return Err(Failure(
+            StatusCode::CONFLICT,
+            format!("take {id:?} is still recording; stop it first"),
+        ));
+    }
+    let episodes = state.episodes.clone();
+    tokio::task::spawn_blocking(move || episodes.delete(&id))
+        .await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// How many points a trace is reduced to before it is sent.
+#[derive(Debug, Deserialize)]
+struct TraceQuery {
+    #[serde(default = "default_trace_buckets")]
+    buckets: usize,
+}
+
+fn default_trace_buckets() -> usize {
+    240
+}
+
+async fn episode_trace(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<TraceQuery>,
+) -> Result<Json<Vec<Option<f64>>>, Failure> {
+    let episodes = state.episodes.clone();
+    let trace = tokio::task::spawn_blocking(move || episodes.trace(&id, query.buckets))
+        .await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+    Ok(Json(trace))
+}
+
+async fn start_replay(
+    State(state): State<AppState>,
+    Json(request): Json<StartReplayRequest>,
+) -> Result<StatusCode, Failure> {
+    let summary = state.episodes.get(&request.episode).map_err(Failure::from)?;
+    // Prefer the arm's own recorded trajectory, then the take's only arm. A
+    // take of two arms replayed onto one has to say which, because guessing
+    // would drive an arm along the other arm's path.
+    let source = match &request.source_arm {
+        Some(arm) => arm.clone(),
+        None if summary.arm(&request.robot).is_some() => request.robot.clone(),
+        None => match summary.arms.as_slice() {
+            [only] => only.id.clone(),
+            arms => {
+                return Err(Failure::bad_request(format!(
+                    "take {:?} recorded {} arms ({}); say which one to replay",
+                    request.episode,
+                    arms.len(),
+                    arms.iter()
+                        .map(|arm| arm.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+        },
+    };
+
+    let episodes = state.episodes.clone();
+    let episode = request.episode.clone();
+    let frames = tokio::task::spawn_blocking(move || episodes.trajectory(&episode, &source))
+        .await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+
+    state
+        .hardware
+        .start_replay(&request.robot, &request.episode, frames, summary.sample_hz)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn export_episodes(
+    State(state): State<AppState>,
+    Json(request): Json<ExportRequest>,
+) -> Result<Json<ExportResponse>, Failure> {
+    let destination = resolve_export_directory(state.episodes.directory(), &request.directory)?;
+    let episodes = state.episodes.clone();
+    let response = tokio::task::spawn_blocking(move || episodes.export(&destination))
+        .await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+    Ok(Json(response))
+}
+
+/// Resolve an export destination, refusing anything that escapes the workspace.
+///
+/// A relative path lands beside the episode directory, which is where a dataset
+/// belongs. An absolute path is the operator saying exactly where they want it,
+/// and is taken at its word; what is refused is the shape that looks relative
+/// and is not — a `..` that walks out of the directory it appears to be under.
+fn resolve_export_directory(
+    episode_directory: &std::path::Path,
+    requested: &str,
+) -> Result<std::path::PathBuf, Failure> {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return Err(Failure::bad_request("name a directory to export into"));
+    }
+    let path = std::path::Path::new(requested);
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(Failure::bad_request(
+            "an export directory cannot contain '..'; give a name or an absolute path",
+        ));
+    }
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    let parent = episode_directory
+        .parent()
+        .unwrap_or(episode_directory)
+        .to_path_buf();
+    Ok(parent.join(path))
+}
+
+/// The studio's own words for what produced a take.
+fn describe_mode(selection: &ModeSelection) -> String {
+    match selection {
+        ModeSelection::Idle => "Idle — moved by hand".to_owned(),
+        ModeSelection::Manual { robot } => format!("Manual — {robot}"),
+        ModeSelection::Teleoperate { leader, follower } => {
+            format!("Teleoperation — {leader} → {follower}")
+        }
+        ModeSelection::Replay { robot, episode } => format!("Replay — {episode} on {robot}"),
+    }
 }
 
 #[cfg(test)]
@@ -740,6 +1066,69 @@ mod tests {
         assert!(text.contains("Content-Length: 5\r\n\r\n"));
         assert!(part.ends_with(b"\r\n"));
         assert_eq!(part.len(), 5 + part.len() - 5);
+    }
+
+    #[test]
+    fn an_export_directory_may_not_climb_out_of_the_workspace() {
+        let episodes = std::path::Path::new("/bench/rerobot/episodes");
+
+        // A plain name lands beside the episode directory, where a dataset goes.
+        assert_eq!(
+            resolve_export_directory(episodes, "pick-place-v1").unwrap(),
+            std::path::PathBuf::from("/bench/rerobot/pick-place-v1")
+        );
+        // An absolute path is the operator being explicit.
+        assert_eq!(
+            resolve_export_directory(episodes, "/data/sets/a").unwrap(),
+            std::path::PathBuf::from("/data/sets/a")
+        );
+        // What is refused is the shape that reads as relative and is not.
+        for escape in ["../../etc", "sets/../../..", ".."] {
+            let error = resolve_export_directory(episodes, escape).expect_err(escape);
+            assert_eq!(error.0, StatusCode::BAD_REQUEST);
+            assert!(error.1.contains(".."), "{}", error.1);
+        }
+        assert_eq!(
+            resolve_export_directory(episodes, "   ").expect_err("blank").0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn a_take_records_which_mode_produced_it() {
+        assert_eq!(
+            describe_mode(&ModeSelection::Teleoperate {
+                leader: "leader".to_owned(),
+                follower: "follower".to_owned(),
+            }),
+            "Teleoperation — leader → follower"
+        );
+        // An idle take is still a take: the operator moved the arm by hand.
+        assert_eq!(
+            describe_mode(&ModeSelection::Idle),
+            "Idle — moved by hand"
+        );
+    }
+
+    #[test]
+    fn episode_errors_map_to_the_right_status_codes() {
+        let cases = [
+            (
+                EpisodeError::InvalidId("../x".to_owned()),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                EpisodeError::NotFound("episode_000001".to_owned()),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                EpisodeError::AlreadyExists("/tmp/set".into()),
+                StatusCode::CONFLICT,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(Failure::from(error).0, expected);
+        }
     }
 
     #[test]

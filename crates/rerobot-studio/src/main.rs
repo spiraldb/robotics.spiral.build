@@ -10,6 +10,7 @@ use axum::Router;
 use clap::Parser;
 use rerobot::cameras;
 use rerobot_studio::camera_manager::CameraManager;
+use rerobot_studio::episodes::EpisodeStore;
 use rerobot_studio::hardware::{
     ControlSettings, DEFAULT_MAX_STEP_COUNTS, DEFAULT_TELEOP_MAX_STEP_COUNTS, HardwareHandle,
 };
@@ -39,6 +40,10 @@ struct Args {
     /// Directory holding one JSON file per robot instance.
     #[arg(long, default_value = "robots", value_name = "PATH")]
     workspace: PathBuf,
+
+    /// Directory holding one file per recorded episode.
+    #[arg(long, default_value = "episodes", value_name = "PATH")]
+    episodes: PathBuf,
 
     /// Address the web UI is served on.
     #[arg(long, default_value = "127.0.0.1:8080", value_name = "ADDR:PORT")]
@@ -135,6 +140,7 @@ fn main() -> ExitCode {
 
 async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
     let workspace = Arc::new(RobotWorkspace::open(args.workspace.clone())?);
+    let episodes = Arc::new(EpisodeStore::open(args.episodes.clone())?);
     let hardware = Arc::new(HardwareHandle::spawn(ControlSettings {
         max_step_counts: args.max_step,
         teleop_max_step_counts: args.teleop_max_step,
@@ -154,10 +160,12 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
         tokio::task::spawn_blocking(move || discovery.refresh_blocking()).await?;
     }
 
-    // The workspace is shared with the command-line tools, so the studio has to
-    // re-read it rather than assume it is the only writer.
+    // The workspace and the episode directory are both shared with the
+    // command-line tools, so the studio has to re-read them rather than assume
+    // it is the only writer.
     tokio::spawn({
         let workspace = workspace.clone();
+        let episodes = episodes.clone();
         async move {
             let mut ticker = tokio::time::interval(WORKSPACE_POLL_INTERVAL);
             loop {
@@ -171,6 +179,18 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
                     Ok(Err(error)) => tracing::warn!("could not re-read the workspace: {error}"),
                     Err(error) => tracing::warn!("workspace reload task failed: {error}"),
                 }
+
+                let episodes = episodes.clone();
+                let reloaded =
+                    tokio::task::spawn_blocking(move || episodes.reload_if_changed()).await;
+                match reloaded {
+                    Ok(Ok(true)) => tracing::info!("episode directory changed on disk; reloaded"),
+                    Ok(Ok(false)) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!("could not re-read the episode directory: {error}")
+                    }
+                    Err(error) => tracing::warn!("episode reload task failed: {error}"),
+                }
             }
         }
     });
@@ -178,6 +198,7 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
     let ui_dir = ui::resolve_ui_dir(args.ui_dir.clone());
     let state = AppState {
         workspace: workspace.clone(),
+        episodes: episodes.clone(),
         hardware: hardware.clone(),
         cameras: cameras.clone(),
         simulated: args.simulate,
@@ -191,6 +212,7 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
     let address = listener.local_addr()?;
 
     tracing::info!("robot workspace: {}", workspace.directory().display());
+    tracing::info!("episode directory: {}", episodes.directory().display());
     match &ui_dir {
         Some(directory) => tracing::info!("serving the web UI from {}", directory.display()),
         None => tracing::warn!(

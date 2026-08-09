@@ -5,7 +5,8 @@ use std::rc::Rc;
 
 use dioxus::prelude::*;
 use rerobot_core::api::{
-    ModeSelection, RobotSummary, RobotTelemetry, StudioSnapshot, TelemetryFrame,
+    EpisodeSummary, ModeSelection, RecordingProgress, ReplayProgress, RobotSummary, RobotTelemetry,
+    StudioSnapshot, TelemetryFrame,
 };
 use rerobot_core::urdf::{SO101_URDF, Urdf, UrdfError};
 
@@ -91,6 +92,12 @@ pub struct Studio {
     pub notice: Signal<Option<Notice>>,
     /// The entity every view is currently showing and editing.
     pub selected: Signal<Option<Selection>>,
+    /// The take the timeline is showing in detail.
+    ///
+    /// Deliberately not part of [`Selection`]: choosing a take must not point
+    /// the joint inspector somewhere else, because judging a take and watching
+    /// the arm that produced it are the same gesture.
+    pub selected_episode: Signal<Option<String>>,
 }
 
 impl Studio {
@@ -104,6 +111,7 @@ impl Studio {
             clock_ms: Signal::new(js_sys::Date::now()),
             notice: Signal::new(None),
             selected: Signal::new(None),
+            selected_episode: Signal::new(None),
         });
 
         // One long-lived task owns the connection and reconnects if the server
@@ -201,6 +209,35 @@ impl Studio {
             .iter()
             .position(|robot| robot.id == id)
             .unwrap_or(0)
+    }
+
+    /// Every recorded take, oldest first.
+    pub fn episodes(&self) -> Vec<EpisodeSummary> {
+        self.snapshot.read().episodes.clone()
+    }
+
+    /// The take being captured right now.
+    ///
+    /// Unlike most readings this survives a telemetry gap on purpose: a
+    /// recording that is still running is exactly what an operator needs to know
+    /// about while the link is unreliable.
+    pub fn recording(&self) -> Option<RecordingProgress> {
+        self.telemetry.read().recording.clone()
+    }
+
+    /// The episode being played back right now.
+    pub fn replay(&self) -> Option<ReplayProgress> {
+        self.telemetry.read().replay.clone()
+    }
+
+    /// The take the timeline is showing, when it still exists.
+    pub fn focused_episode(&self) -> Option<EpisodeSummary> {
+        let episodes = self.snapshot.read();
+        let chosen = self.selected_episode.read();
+        chosen
+            .as_ref()
+            .and_then(|id| episodes.episodes.iter().find(|episode| &episode.id == id))
+            .cloned()
     }
 
     /// Robots whose motor bus is currently open.

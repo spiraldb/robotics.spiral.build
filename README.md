@@ -44,23 +44,26 @@ supported by the Rust dependencies.
 Build the interface once, then start the server:
 
 ```console
-cd crates/rerobot-ui && dx build --release
+cd crates/rerobot-ui && tailwindcss -i tailwind.css -o assets/tailwind.css --minify && dx build --release
 ```
 
 ```console
 cargo run -p rerobot-studio
 ```
 
-`dx` compiles the crate to WebAssembly and runs the Tailwind CLI over
-`crates/rerobot-ui/tailwind.css` in the same step — there is no separate
-stylesheet build. The dev shell sets `NO_DOWNLOADS`, so `dx` uses the
-`tailwindcss`, `wasm-bindgen`, and `wasm-opt` the flake pins rather than
-fetching its own.
+`dx` compiles the crate to WebAssembly and bundles it. It does **not** recompile
+the stylesheet on `dx build`, so run the Tailwind CLI first as above whenever
+`tailwind.css` or any class in `src/**/*.rs` has changed — otherwise `dx` bundles
+the previously generated `assets/tailwind.css` and new classes silently have no
+styles. `dx serve` does watch and rebuild it, so this only applies to explicit
+builds. The dev shell sets `NO_DOWNLOADS`, so both tools come from what the flake
+pins rather than being fetched.
 
 The studio opens on <http://127.0.0.1:8080> and reads and writes robot files in
-`./robots`. Pass `--workspace PATH` to keep them somewhere else, `--bind
-ADDR:PORT` to serve on a different address, and `--no-cameras` to skip camera
-discovery entirely.
+`./robots`. Pass `--workspace PATH` to keep them somewhere else, `--episodes
+PATH` to move the recorded takes (default `./episodes`), `--bind ADDR:PORT` to
+serve on a different address, and `--no-cameras` to skip camera discovery
+entirely.
 
 The studio is not the only writer of those files, so it re-reads the directory
 whenever anything in it changes: a robot calibrated with `rerobot-calibrate`, or
