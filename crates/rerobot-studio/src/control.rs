@@ -1,14 +1,12 @@
 //! The joints of whichever arm is selected: what they read, and how to move them.
 
-use std::collections::BTreeMap;
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use rerobot_core::api::{
-    GoalRequest, JointTelemetry, ModeSelection, RobotSummary, RobotTelemetry,
-};
+use rerobot_core::api::{GoalRequest, JointTelemetry, ModeSelection, RobotSummary, RobotTelemetry};
 use rerobot_core::arm::{self, JointAngles};
 
 use crate::api;
@@ -219,8 +217,8 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
             .filter(|error| error.is_finite())
             .reduce(f64::max)
     });
-    let lagging =
-        tracking_error.is_some_and(|error| error >= rerobot_core::api::CAUTION_FOLLOW_ERROR_DEGREES);
+    let lagging = tracking_error
+        .is_some_and(|error| error >= rerobot_core::api::CAUTION_FOLLOW_ERROR_DEGREES);
 
     rsx! {
         dl { class: "grid grid-cols-4 gap-1 px-2 py-1",

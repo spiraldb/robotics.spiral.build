@@ -413,6 +413,42 @@ impl RobotWorkspace {
         Ok(record)
     }
 
+    /// Import one complete robot configuration without overwriting an existing
+    /// instance. The document's `robot_id` is the file name and stable API ID;
+    /// requiring it keeps a browser upload independent of the user's local
+    /// download name.
+    pub fn import_configuration(&self, bytes: &[u8]) -> Result<RobotRecord, WorkspaceError> {
+        let value: Value = serde_json::from_slice(bytes).map_err(|source| {
+            WorkspaceError::Invalid(format!("the configuration is not valid JSON: {source}"))
+        })?;
+        let config = RobotConfig::from_value(value)?;
+        let id = config
+            .root()
+            .get("robot_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                WorkspaceError::Invalid(
+                    "the configuration needs a string `robot_id` field".to_owned(),
+                )
+            })?
+            .to_owned();
+        validate_robot_id(&id)?;
+
+        let path = self.path_for(&id);
+        if self.lock().robots.contains_key(&id) || path.exists() {
+            return Err(WorkspaceError::AlreadyExists(id));
+        }
+
+        config.save_atomic(&path)?;
+        let record = RobotRecord {
+            id: id.clone(),
+            path,
+            config,
+        };
+        self.lock().robots.insert(id, record.clone());
+        Ok(record)
+    }
+
     /// Replace a robot's type, port, and camera assignments.
     ///
     /// Every other field, including ones this build does not understand, is
@@ -744,6 +780,60 @@ mod tests {
         assert!(!summary.calibrated);
         assert_eq!(summary.file, "left_follower.json");
         assert_eq!(summary.motors.len(), 6);
+    }
+
+    #[test]
+    fn importing_a_configuration_preserves_the_complete_document() {
+        let (directory, workspace) = workspace();
+        let source = serde_json::json!({
+            "schema_version": 1,
+            "robot_id": "imported_leader",
+            "robot_type": "so101_leader",
+            "motors": rerobot_core::arm::so101_motor_specs(),
+            "extension": { "keep": true }
+        });
+
+        let record = workspace
+            .import_configuration(&serde_json::to_vec(&source).unwrap())
+            .expect("import configuration");
+
+        assert_eq!(record.id, "imported_leader");
+        assert_eq!(record.config.root()["extension"]["keep"], true);
+        assert!(directory.path().join("imported_leader.json").is_file());
+        assert_eq!(
+            RobotConfig::load(directory.path().join("imported_leader.json")).unwrap(),
+            record.config
+        );
+    }
+
+    #[test]
+    fn importing_never_overwrites_an_existing_robot() {
+        let (_directory, workspace) = workspace();
+        let record = workspace.create("arm", None, None, None).expect("create");
+        let bytes = record.config.to_pretty_json().unwrap();
+
+        let error = workspace
+            .import_configuration(bytes.as_bytes())
+            .expect_err("duplicate import");
+
+        assert!(matches!(error, WorkspaceError::AlreadyExists(id) if id == "arm"));
+    }
+
+    #[test]
+    fn importing_requires_valid_json_with_a_robot_id() {
+        let (_directory, workspace) = workspace();
+
+        assert!(workspace.import_configuration(b"not json").is_err());
+        assert!(
+            workspace
+                .import_configuration(br#"{"schema_version":1}"#)
+                .is_err()
+        );
+        assert!(
+            workspace
+                .import_configuration(br#"{"robot_id":"../escape"}"#)
+                .is_err()
+        );
     }
 
     #[test]

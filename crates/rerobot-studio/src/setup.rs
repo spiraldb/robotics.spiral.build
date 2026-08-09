@@ -66,6 +66,7 @@ pub fn RobotPanel() -> Element {
             }
 
             NewRobotForm {}
+            ImportRobotConfiguration {}
         }
     }
 }
@@ -165,7 +166,7 @@ fn NewRobotForm() -> Element {
             ..CreateRobotRequest::default()
         };
         let selected_name = name.clone();
-        studio.run(format!("Created {name}."), async move {
+        studio.run_utility(format!("Created {name}."), async move {
             api::send(Method::POST, "/api/robots", Some(&request)).await?;
             // Only clear and close after the server accepts the new robot. A
             // rejected name or configuration stays in place for correction.
@@ -180,7 +181,7 @@ fn NewRobotForm() -> Element {
         return rsx! {
             button {
                 r#type: "button",
-                class: "min-h-6 cursor-pointer px-2 text-left text-[11px] text-ink-faint hover:bg-hover hover:text-ink",
+                class: "device-list-action",
                 onclick: move |_| open.set(true),
                 "+ Add an arm"
             }
@@ -235,6 +236,60 @@ fn NewRobotForm() -> Element {
     }
 }
 
+/// Import a complete robot JSON document as a new instance.
+#[component]
+fn ImportRobotConfiguration() -> Element {
+    let studio = studio();
+    let mut importing = use_signal(|| false);
+    let mut chosen = studio.selected;
+
+    rsx! {
+        label {
+            class: if importing() { "device-list-action device-list-action-busy" } else { "device-list-action" },
+            title: "Import a unified rerobot JSON configuration",
+            input {
+                class: "sr-only",
+                r#type: "file",
+                accept: ".json,application/json",
+                disabled: importing(),
+                onchange: move |event| {
+                    let Some(file) = event.files().first().cloned() else { return };
+                    importing.set(true);
+                    let mut notice = studio.notice;
+                    studio.run_utility("", async move {
+                        let result = async {
+                            let bytes = file
+                                .read_bytes()
+                                .await
+                                .map_err(|error| format!("Could not read {}: {error}", file.name()))?;
+                            api::upload_json::<RobotSummary>(
+                                "/api/robots/import",
+                                &bytes,
+                                "application/json",
+                            )
+                            .await
+                        }
+                        .await;
+                        importing.set(false);
+                        match result {
+                            Ok(robot) => {
+                                chosen.set(Some(Selection::Robot(robot.id.clone())));
+                                notice.set(Some(crate::state::Notice {
+                                    text: format!("Imported {}.", robot.id),
+                                    failed: false,
+                                }));
+                                Ok(())
+                            }
+                            Err(error) => Err(error),
+                        }
+                    });
+                }
+            }
+            if importing() { "Importing configuration…" } else { "+ Import configuration" }
+        }
+    }
+}
+
 /// Everything about one arm that ends up in its file.
 #[component]
 fn RobotSetup(robot: RobotSummary) -> Element {
@@ -280,7 +335,14 @@ fn RobotSetup(robot: RobotSummary) -> Element {
             }
             div { class: "device-file-row",
                 span { class: "min-w-0 flex-1 truncate font-mono text-[10px] text-ink-faint", "{robot.file}" }
-                DeleteButton { robot }
+                a {
+                    class: "link",
+                    href: "/api/robots/{robot.id}/configuration",
+                    download: "{robot.id}.json",
+                    title: "Download the complete configuration for {robot.id}",
+                    "Export"
+                }
+                DeleteButton { robot: robot.clone() }
             }
         }
     }

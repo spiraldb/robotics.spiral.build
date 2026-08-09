@@ -1,8 +1,5 @@
-/* `dx serve` watches this file and recompiles it. `dx build` does not: it
-   bundles whatever `assets/tailwind.css` already contains, so an explicit build
-   has to run the Tailwind CLI first or new classes ship with no styles.
-
-     tailwindcss -i tailwind.css -o assets/tailwind.css --minify */
+/* Dioxus.toml declares this as the Tailwind input, so DX watches and compiles
+   it for both development and release builds. */
 @import "tailwindcss";
 
 /* Tailwind discovers utility classes by scanning source text, and the UI is
@@ -800,6 +797,27 @@
     display: none;
   }
 
+  /* The pair and start/stop action stay together as one control row. The
+     hardware consequence gets the full row beneath them, so narrow screens
+     never clip the fact that starting teleoperation releases and energizes
+     physical mechanisms. */
+  .mode-group {
+    width: 100%;
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr) max-content;
+  }
+
+  .mode-group .field-inline {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .teleop-consequence {
+    grid-column: 1 / -1;
+    width: 100%;
+    padding-bottom: 0.25rem;
+  }
+
   .studio-body {
     display: flex;
     min-height: 0;
@@ -968,6 +986,19 @@
 
   .device-entry {
     @apply border-b border-line;
+  }
+
+  .device-list-action {
+    @apply flex min-h-6 cursor-pointer items-center px-2 text-left text-[11px] text-ink-faint transition-colors hover:bg-hover hover:text-ink;
+  }
+
+  .device-list-action:focus-within {
+    outline: 2px solid var(--tone-accent);
+    outline-offset: -2px;
+  }
+
+  .device-list-action-busy {
+    @apply cursor-wait;
   }
 
   /*

@@ -1,8 +1,6 @@
 [workspace]
 members = ["crates/rerobot-core", "crates/rerobot-studio"]
-# The web UI only compiles for wasm32, so it keeps its own lockfile and is built
-# by the Dioxus CLI rather than by a host `cargo build`.
-exclude = ["crates/rerobot-ui", "patches/block"]
+exclude = ["patches/block"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +11,7 @@ publish = false
 rerobot = { path = "." }
 rerobot-core = { path = "crates/rerobot-core" }
 clap = { version = "4.5", features = ["derive"] }
+dioxus = { version = "0.7.10", default-features = false }
 glam = { version = "0.33", default-features = false, features = ["std"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 nokhwa = { version = "0.10.11", default-features = false, features = ["decoding", "input-native", "serialize"] }
@@ -50,6 +49,18 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [patch.crates-io]
 block = { path = "patches/block" }
+
+[profile.web-release]
+inherits = "release"
+# DX uses this profile only for the downloaded WebAssembly half of the studio.
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+
+[profile.server-release]
+inherits = "release"
 
 [[bin]]
 name = "rerobot-find-port"

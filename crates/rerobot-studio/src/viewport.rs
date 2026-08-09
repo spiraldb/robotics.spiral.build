@@ -16,7 +16,9 @@ use rerobot_core::api::RobotSummary;
 use rerobot_core::arm::{self, JointAngles};
 use rerobot_core::glam::{Mat4, Vec3};
 use rerobot_core::urdf::Urdf;
+#[cfg(feature = "web")]
 use wasm_bindgen::JsCast;
+#[cfg(feature = "web")]
 use wasm_bindgen::prelude::Closure;
 use web_sys::HtmlCanvasElement;
 
@@ -79,9 +81,12 @@ pub fn Viewport() -> Element {
     let mut show_grid = use_signal(|| false);
     // Bumped by the window resize listener: the draw below reads it purely so
     // that a resize redraws even when no telemetry is arriving.
-    let mut resized = use_signal(|| 0_u32);
+    let resized = use_signal(|| 0_u32);
+    #[cfg(feature = "web")]
+    let mut resized = resized;
 
     // Held for the life of the component, and dropped — unsubscribing — with it.
+    #[cfg(feature = "web")]
     use_hook(|| {
         Rc::new(WindowListener::new("resize", move || {
             let next = resized.peek().wrapping_add(1);
@@ -156,24 +161,24 @@ pub fn Viewport() -> Element {
                 },
                 onpointermove: move |event| {
                     let position = point(&event);
-                    if let Some((pointer, _)) = touch(&event) {
-                        if touches.read().contains_key(&pointer) {
-                            touches.write().insert(pointer, position);
-                            if let Some(current) = Pinch::from_touches(&touches.read()) {
-                                if let Some(previous) = pinch() {
-                                    let mut camera = camera.write();
-                                    if current.distance > 1.0 && previous.distance > 1.0 {
-                                        camera.zoom(previous.distance / current.distance);
-                                    }
-                                    let metres = camera.metres_per_pixel(viewport_height());
-                                    camera.pan(
-                                        -(current.center.0 - previous.center.0) as f32 * metres,
-                                        (current.center.1 - previous.center.1) as f32 * metres,
-                                    );
+                    if let Some((pointer, _)) = touch(&event)
+                        && touches.read().contains_key(&pointer)
+                    {
+                        touches.write().insert(pointer, position);
+                        if let Some(current) = Pinch::from_touches(&touches.read()) {
+                            if let Some(previous) = pinch() {
+                                let mut camera = camera.write();
+                                if current.distance > 1.0 && previous.distance > 1.0 {
+                                    camera.zoom(previous.distance / current.distance);
                                 }
-                                pinch.set(Some(current));
-                                return;
+                                let metres = camera.metres_per_pixel(viewport_height());
+                                camera.pan(
+                                    -(current.center.0 - previous.center.0) as f32 * metres,
+                                    (current.center.1 - previous.center.1) as f32 * metres,
+                                );
                             }
+                            pinch.set(Some(current));
+                            return;
                         }
                     }
                     let Some(active) = drag() else { return };
@@ -207,10 +212,11 @@ pub fn Viewport() -> Element {
                             drag.set(None);
                             return;
                         }
-                        if drag().is_some_and(|active| !active.moved) {
-                            if let Some(selection) = pick(&camera(), &scene_instances, point(&event)) {
-                                studio.selected.set(Some(selection));
-                            }
+                        if drag().is_some_and(|active| !active.moved)
+                            && let Some(selection) =
+                                pick(&camera(), &scene_instances, point(&event))
+                        {
+                            studio.selected.set(Some(selection));
                         }
                         drag.set(None);
                     }
@@ -610,6 +616,7 @@ fn touch(event: &Event<PointerData>) -> Option<(i32, (f64, f64))> {
 
 /// Keep receiving moves after the pointer leaves the canvas, so a drag that
 /// runs off the edge of a panel keeps turning the robot.
+#[cfg(feature = "web")]
 fn capture(event: &Event<PointerData>) {
     let Some(raw) = event.downcast::<web_sys::PointerEvent>() else {
         return;
@@ -622,6 +629,10 @@ fn capture(event: &Event<PointerData>) {
     }
 }
 
+#[cfg(not(feature = "web"))]
+fn capture(_event: &Event<PointerData>) {}
+
+#[cfg(feature = "web")]
 fn canvas() -> Option<HtmlCanvasElement> {
     web_sys::window()?
         .document()?
@@ -630,17 +641,30 @@ fn canvas() -> Option<HtmlCanvasElement> {
         .ok()
 }
 
+#[cfg(not(feature = "web"))]
+fn canvas() -> Option<HtmlCanvasElement> {
+    None
+}
+
 /// The canvas height in CSS pixels, used to turn a drag into world metres.
+#[cfg(feature = "web")]
 fn viewport_height() -> f32 {
     canvas().map_or(1.0, |canvas| canvas.client_height().max(1) as f32)
 }
 
+#[cfg(not(feature = "web"))]
+fn viewport_height() -> f32 {
+    1.0
+}
+
 /// A window event subscription that ends when the viewport does.
+#[cfg(feature = "web")]
 struct WindowListener {
     event: &'static str,
     callback: Closure<dyn FnMut()>,
 }
 
+#[cfg(feature = "web")]
 impl WindowListener {
     fn new(event: &'static str, handler: impl FnMut() + 'static) -> Option<Self> {
         let callback = Closure::wrap(Box::new(handler) as Box<dyn FnMut()>);
@@ -651,6 +675,7 @@ impl WindowListener {
     }
 }
 
+#[cfg(feature = "web")]
 impl Drop for WindowListener {
     fn drop(&mut self) {
         if let Some(window) = web_sys::window() {

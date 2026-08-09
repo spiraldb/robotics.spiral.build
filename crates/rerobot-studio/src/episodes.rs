@@ -214,8 +214,8 @@ impl EpisodeStore {
         let mut episodes = Vec::new();
         let mut issues = Vec::new();
 
-        let entries =
-            fs::read_dir(&self.directory).map_err(|source| EpisodeError::io(&self.directory, source))?;
+        let entries = fs::read_dir(&self.directory)
+            .map_err(|source| EpisodeError::io(&self.directory, source))?;
         for entry in entries {
             let entry = match entry {
                 Ok(entry) => entry,
@@ -225,7 +225,9 @@ impl EpisodeStore {
                 }
             };
             let path = entry.path();
-            let Some(kind) = classify(&path) else { continue };
+            let Some(kind) = classify(&path) else {
+                continue;
+            };
             match read_summary(&path, kind) {
                 Ok(summary) => episodes.push(summary),
                 // One unreadable take must not hide the rest of the session.
@@ -366,9 +368,8 @@ impl EpisodeStore {
             )));
         }
         let path = self.final_path(id);
-        let (mut footer, offset) = read_footer(&path)?.ok_or_else(|| {
-            EpisodeError::Invalid(format!("take {id:?} has no footer to update"))
-        })?;
+        let (mut footer, offset) = read_footer(&path)?
+            .ok_or_else(|| EpisodeError::Invalid(format!("take {id:?} has no footer to update")))?;
         footer.discarded = discarded;
 
         let mut file = fs::OpenOptions::new()
@@ -558,8 +559,8 @@ impl EpisodeStore {
 
     /// Size and modification time of every take file in the directory.
     fn stamps(&self) -> Result<BTreeMap<String, FileStamp>, EpisodeError> {
-        let entries =
-            fs::read_dir(&self.directory).map_err(|source| EpisodeError::io(&self.directory, source))?;
+        let entries = fs::read_dir(&self.directory)
+            .map_err(|source| EpisodeError::io(&self.directory, source))?;
         let mut stamps = BTreeMap::new();
         for entry in entries.flatten() {
             let path = entry.path();
@@ -708,12 +709,7 @@ impl Drop for EpisodeWriter {
 }
 
 /// The writer thread: serialise samples until the sender goes away.
-fn drain(
-    queue: Receiver<Sample>,
-    mut writer: BufWriter<File>,
-    shared: &WriterShared,
-    path: &Path,
-) {
+fn drain(queue: Receiver<Sample>, mut writer: BufWriter<File>, shared: &WriterShared, path: &Path) {
     let mut failed = false;
     for sample in queue {
         if failed {
@@ -758,7 +754,9 @@ fn classify(path: &Path) -> Option<FileKind> {
     }
     let name = path.file_name()?.to_str()?;
     if let Some(stem) = name.strip_suffix(&format!(".{EPISODE_EXTENSION}.{PARTIAL_EXTENSION}")) {
-        return validate_episode_id(stem).ok().map(|()| FileKind::Unfinished);
+        return validate_episode_id(stem)
+            .ok()
+            .map(|()| FileKind::Unfinished);
     }
     let stem = name.strip_suffix(&format!(".{EPISODE_EXTENSION}"))?;
     validate_episode_id(stem).ok().map(|()| FileKind::Finished)
@@ -928,9 +926,9 @@ fn unix_millis() -> i64 {
 pub fn validate_episode_id(id: &str) -> Result<(), EpisodeError> {
     let acceptable = !id.is_empty()
         && id.len() <= 64
-        && id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_');
+        && id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        });
     acceptable
         .then_some(())
         .ok_or_else(|| EpisodeError::InvalidId(id.to_owned()))
@@ -1102,7 +1100,10 @@ mod tests {
             episodes[0].problem.as_deref(),
             Some("recording did not finish")
         );
-        assert_eq!(episodes[0].frames, 3, "the samples that survived are counted");
+        assert_eq!(
+            episodes[0].frames, 3,
+            "the samples that survived are counted"
+        );
         assert!(!episodes[0].usable());
         assert!(
             store.trajectory("episode_000001", "follower").is_err(),
@@ -1208,8 +1209,7 @@ mod tests {
         );
         assert!(destination.join("episode_000003.jsonl").is_file());
 
-        let manifest =
-            fs::read_to_string(destination.join("dataset.json")).expect("read manifest");
+        let manifest = fs::read_to_string(destination.join("dataset.json")).expect("read manifest");
         assert!(manifest.contains("\"rerobot_dataset\""));
         assert!(manifest.contains("episode_000003"));
         assert!(!manifest.contains("episode_000002"));

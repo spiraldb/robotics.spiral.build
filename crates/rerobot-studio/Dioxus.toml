@@ -3,7 +3,11 @@
 # The app also sets it at runtime; this is what the tab says before the bundle
 # has loaded.
 [application]
-name = "rerobot-ui"
+name = "rerobot-studio"
+# Let DX own the stylesheet pipeline too. Both `dx serve` and `dx bundle`
+# compile it before the client is built, with no checked-in generated CSS.
+tailwind_input = "tailwind.css"
+tailwind_output = "assets/tailwind.css"
 
 [web.app]
 title = "rerobot studio"

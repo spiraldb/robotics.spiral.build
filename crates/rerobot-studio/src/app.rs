@@ -1,6 +1,7 @@
 //! The studio shell: a resizable hierarchy, central visual workspace, and inspector.
 
 use dioxus::prelude::*;
+#[cfg(feature = "web")]
 use wasm_bindgen::JsCast;
 
 use crate::control::JointPanel;
@@ -61,14 +62,25 @@ pub fn App() -> Element {
     Studio::use_studio();
     crate::state::use_description();
 
-    let mut left_open = use_signal(|| stored_bool("rerobot.pane.left", true));
-    let mut right_open = use_signal(|| stored_bool("rerobot.pane.right", true));
-    let mut rail_open = use_signal(|| stored_bool("rerobot.pane.rail", true));
-    let mut left_width = use_signal(|| stored_number("rerobot.pane.left.width", 272.0));
-    let mut right_width = use_signal(|| stored_number("rerobot.pane.right.width", 320.0));
+    // The server and browser must produce the same first tree for hydration.
+    // Browser-only preferences are applied after the hydrated app mounts.
+    let mut left_open = use_signal(|| true);
+    let mut right_open = use_signal(|| true);
+    let mut rail_open = use_signal(|| true);
+    let mut left_width = use_signal(|| 272.0);
+    let mut right_width = use_signal(|| 320.0);
     let mut dragging = use_signal(|| None::<PaneDrag>);
     let mut surface = use_signal(|| Surface::View);
     let studio = crate::state::studio();
+
+    #[cfg(feature = "web")]
+    use_effect(move || {
+        left_open.set(stored_bool("rerobot.pane.left", true));
+        right_open.set(stored_bool("rerobot.pane.right", true));
+        rail_open.set(stored_bool("rerobot.pane.rail", true));
+        left_width.set(stored_number("rerobot.pane.left.width", 272.0));
+        right_width.set(stored_number("rerobot.pane.right.width", 320.0));
+    });
 
     rsx! {
         document::Stylesheet { href: TAILWIND }
@@ -429,6 +441,7 @@ fn NoticeStrip() -> Element {
     }
 }
 
+#[cfg(feature = "web")]
 fn capture(event: &Event<PointerData>) {
     let Some(raw) = event.downcast::<web_sys::PointerEvent>() else {
         return;
@@ -441,10 +454,15 @@ fn capture(event: &Event<PointerData>) {
     }
 }
 
+#[cfg(not(feature = "web"))]
+fn capture(_event: &Event<PointerData>) {}
+
+#[cfg(feature = "web")]
 fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok()?
 }
 
+#[cfg(feature = "web")]
 fn stored_bool(key: &str, fallback: bool) -> bool {
     storage()
         .and_then(|storage| storage.get_item(key).ok().flatten())
@@ -452,6 +470,7 @@ fn stored_bool(key: &str, fallback: bool) -> bool {
         .unwrap_or(fallback)
 }
 
+#[cfg(feature = "web")]
 fn stored_number(key: &str, fallback: f64) -> f64 {
     storage()
         .and_then(|storage| storage.get_item(key).ok().flatten())
@@ -459,17 +478,25 @@ fn stored_number(key: &str, fallback: f64) -> f64 {
         .unwrap_or(fallback)
 }
 
+#[cfg(feature = "web")]
 fn store_bool(key: &str, value: bool) {
     if let Some(storage) = storage() {
         let _ = storage.set_item(key, &value.to_string());
     }
 }
 
+#[cfg(not(feature = "web"))]
+fn store_bool(_key: &str, _value: bool) {}
+
+#[cfg(feature = "web")]
 fn store_number(key: &str, value: f64) {
     if let Some(storage) = storage() {
         let _ = storage.set_item(key, &format!("{value:.0}"));
     }
 }
+
+#[cfg(not(feature = "web"))]
+fn store_number(_key: &str, _value: f64) {}
 
 #[cfg(test)]
 mod tests {

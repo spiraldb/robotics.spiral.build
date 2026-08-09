@@ -15,7 +15,10 @@ pub fn set_mode(studio: Studio, selection: ModeSelection) {
     let request = selection.clone();
     let future = async move { api::send(Method::POST, "/api/mode", Some(&request)).await };
     if matches!(selection, ModeSelection::Idle) {
-        studio.run_safety("Motion commands stopped. Motors may still be holding position.", future);
+        studio.run_safety(
+            "Motion commands stopped. Motors may still be holding position.",
+            future,
+        );
     } else {
         studio.run("", future);
     }

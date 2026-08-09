@@ -3,11 +3,15 @@
 //! Requests go to the same origin the page was served from, so the UI works
 //! unchanged whether the studio is on localhost or on the robot's own machine.
 
+#[cfg(feature = "web")]
 use futures_util::{StreamExt, stream};
+#[cfg(feature = "web")]
 use gloo_net::eventsource::futures::EventSource;
 use gloo_net::http::{Method, RequestBuilder};
 use js_sys::Uint8Array;
-use rerobot_core::api::{ApiError, StudioSnapshot, TelemetryFrame};
+use rerobot_core::api::ApiError;
+#[cfg(feature = "web")]
+use rerobot_core::api::{StudioSnapshot, TelemetryFrame};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -42,12 +46,16 @@ pub async fn post(path: &str) -> Result<(), String> {
     send::<()>(Method::POST, path, None).await
 }
 
-/// Upload one binary file and decode the server's JSON response.
-pub async fn upload_json<T: DeserializeOwned>(path: &str, bytes: &[u8]) -> Result<T, String> {
+/// Upload one file and decode the server's JSON response.
+pub async fn upload_json<T: DeserializeOwned>(
+    path: &str,
+    bytes: &[u8],
+    content_type: &str,
+) -> Result<T, String> {
     let body = Uint8Array::from(bytes);
     let response = RequestBuilder::new(path)
         .method(Method::POST)
-        .header("Content-Type", "application/zip")
+        .header("Content-Type", content_type)
         .body(body)
         .map_err(|error| format!("could not build the upload: {error}"))?
         .send()
@@ -98,6 +106,7 @@ async fn request(method: Method, path: &str, body: Option<Value>) -> Result<Stri
 }
 
 /// One message from the studio's event stream.
+#[cfg(feature = "web")]
 pub enum StudioEvent {
     Snapshot(Box<StudioSnapshot>),
     Telemetry(Box<TelemetryFrame>),
@@ -108,6 +117,7 @@ pub enum StudioEvent {
 /// Returns when the connection closes, which the caller treats as a signal to
 /// reconnect. The [`EventSource`] is owned by this future, so dropping the
 /// future closes the connection.
+#[cfg(feature = "web")]
 pub async fn stream_events<F>(mut on_event: F) -> Result<(), String>
 where
     F: FnMut(StudioEvent),

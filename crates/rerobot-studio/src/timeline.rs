@@ -79,9 +79,7 @@ fn replay(studio: Studio, episode: String, robot: String, source_arm: Option<Str
 fn stop_replay(studio: Studio) {
     studio.run_safety(
         "Replay stopped. Motors may still be holding position.",
-        async move {
-            api::send(Method::POST, "/api/mode", Some(&ModeSelection::Idle)).await
-        },
+        async move { api::send(Method::POST, "/api/mode", Some(&ModeSelection::Idle)).await },
     );
 }
 
@@ -331,7 +329,7 @@ fn EpisodeDetail(selected: Option<EpisodeSummary>) -> Element {
             _ => None,
         });
     // Only this episode's own replay turns the action into a transport; another
-     // episode playing still reads as a blocker on this one.
+    // episode playing still reads as a blocker on this one.
     let playing = replaying
         .clone()
         .filter(|progress| progress.episode == episode.id);
@@ -499,13 +497,18 @@ fn SessionSummary(episodes: Vec<EpisodeSummary>) -> Element {
                         importing.set(true);
                         let mut notice = studio.notice;
                         let mut selected = studio.selected_episode;
-                        studio.run_safety("", async move {
+                        studio.run_utility("", async move {
                             let result = async {
                                 let bytes = file
                                     .read_bytes()
                                     .await
                                     .map_err(|error| format!("Could not read {}: {error}", file.name()))?;
-                                api::upload_json::<ImportResponse>("/api/episodes/import", &bytes).await
+                                api::upload_json::<ImportResponse>(
+                                    "/api/episodes/import",
+                                    &bytes,
+                                    "application/zip",
+                                )
+                                .await
                             }
                             .await;
                             importing.set(false);

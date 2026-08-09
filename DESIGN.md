@@ -255,7 +255,7 @@ and on the pale bench, and danger appears on its own soft wash — so each is
 chosen to clear 4.5:1 on the worst of those, never on white alone.
 
 **The One-Spelling Rule.** Reusable interface colours are declared as
-role-named `--tone-*` properties in `crates/rerobot-ui/tailwind.css`. Components
+role-named `--tone-*` properties in `crates/rerobot-studio/tailwind.css`. Components
 refer to roles, never hue names or one-off theme variants. This covers shadow
 colour too: a `box-shadow` in a component rule names a token rather than writing
 its own alpha-black. Renderer-only arm and
@@ -559,9 +559,8 @@ single letters that would read as keyboard shortcuts beside the ones that are.
   file maintenance last.
 - **Do** reflow, cap, and scroll at narrow widths while keeping active recording
   and safety state visible.
-- **Do** run `tailwindcss -i tailwind.css -o assets/tailwind.css --minify`
-  before `dx build`; the release build otherwise reuses the existing compiled
-  stylesheet.
+- **Do** keep `tailwind_input` and `tailwind_output` declared in
+  `Dioxus.toml`; DX owns stylesheet compilation for serve, build, and bundle.
 
 ### Don't:
 

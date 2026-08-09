@@ -17,6 +17,7 @@
 
 ### Setup flow
 - User select the robot type, the port, and the cameras. When they select cameras, they should be able to see the camera feed in the web ui.
+- Users can export a robot's complete JSON configuration and import one as a new robot instance; imports never overwrite an existing robot.
 
 ### UI design
 - Design language: notion style.
@@ -44,4 +45,3 @@
 
 Unlike lerobot, we should write everything about this robot in a single file, in json or yaml format.
 For example, the port, cameras, the calibration, etc, should be written in a single file.
-

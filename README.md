@@ -15,8 +15,7 @@ sidecars and no hidden state directories.
 | --- | --- |
 | `rerobot` | Hardware: the Feetech motor bus, camera capture, serial discovery, and the three CLIs |
 | `crates/rerobot-core` | Hardware-free domain types shared by everything: calibration, the SO-101 joint model, the robot description it is drawn from, and the studio's wire format |
-| `crates/rerobot-studio` | The web studio's backend: an HTTP server that owns the arms and the cameras |
-| `crates/rerobot-ui` | The web studio's interface, a Dioxus app compiled to WebAssembly |
+| `crates/rerobot-studio` | One Dioxus fullstack app: the WebAssembly interface, server rendering, HTTP API, and hardware ownership |
 
 ## Development
 
@@ -32,7 +31,7 @@ Build and test the workspace:
 
 ```console
 cargo build --bins
-cargo test --all-targets
+cargo test --workspace --features rerobot-studio/server
 ```
 
 The flake provides a pinned development shell for Apple Silicon macOS and
@@ -41,29 +40,36 @@ supported by the Rust dependencies.
 
 ## Web studio
 
-Build the interface once, then start the server:
+Run the client and server as one Dioxus fullstack app:
 
 ```console
-cd crates/rerobot-ui && tailwindcss -i tailwind.css -o assets/tailwind.css --minify && dx build --release
+cd crates/rerobot-studio
+dx serve
 ```
+
+DX owns the whole development loop: it compiles the same package with `web` and
+`server` features, runs Tailwind from the input declared in `Dioxus.toml`, and
+restarts the right side when a source changes. The server
+mounts Dioxus's router, which serves the generated assets and server-rendered
+document and then hydrates it in the browser. The existing `/api` REST and event
+stream remain the explicit boundary used by the UI and other clients.
+
+Create a self-contained release bundle with the server executable beside its
+`public` directory:
 
 ```console
-cargo run -p rerobot-studio
+dx bundle --release --out-dir ../../outputs/rerobot-studio
+../../outputs/rerobot-studio/server
 ```
 
-`dx` compiles the crate to WebAssembly and bundles it. It does **not** recompile
-the stylesheet on `dx build`, so run the Tailwind CLI first as above whenever
-`tailwind.css` or any class in `src/**/*.rs` has changed — otherwise `dx` bundles
-the previously generated `assets/tailwind.css` and new classes silently have no
-styles. `dx serve` does watch and rebuild it, so this only applies to explicit
-builds. The dev shell sets `NO_DOWNLOADS`, so both tools come from what the flake
-pins rather than being fetched.
+The dev shell sets `NO_DOWNLOADS`, so DX, Tailwind, wasm-bindgen, and wasm-opt all
+come from the versions pinned by the flake rather than being fetched at build
+time.
 
 The studio opens on <http://127.0.0.1:8080> and reads and writes robot files in
-`./robots`. Pass `--workspace PATH` to keep them somewhere else, `--episodes
-PATH` to move the recorded takes (default `./episodes`), `--bind ADDR:PORT` to
-serve on a different address, and `--no-cameras` to skip camera discovery
-entirely.
+`./robots`. Use DX's `--addr` and `--port` options during development. A bundled
+server also accepts `--workspace PATH`, `--episodes PATH`, `--bind ADDR:PORT`,
+and `--no-cameras`.
 
 The studio is not the only writer of those files, so it re-reads the directory
 whenever anything in it changes: a robot calibrated with `rerobot-calibrate`, or
@@ -71,10 +77,10 @@ a file copied in by hand, shows up without restarting the server. A file that
 parses but does not describe a usable robot — two motors sharing a bus ID, say —
 is listed with the reason attached rather than quietly ignored.
 
-To try the interface without hardware, run it against emulated motors:
+To try the interface without hardware, pass server arguments through DX:
 
 ```console
-cargo run -p rerobot-studio -- --simulate
+dx serve --args "--simulate --no-cameras"
 ```
 
 Simulated arms drift slowly through their travel, so calibration sweeps and
@@ -95,7 +101,8 @@ like — with a live preview of the chosen device before it is bound, so a
 camera is identified by what it sees rather than by a device path. Then
 calibrate: the studio releases torque, you move every joint to both of its
 limits while a bar per joint fills in, and saving writes the measured ranges
-into the robot's file.
+into the robot's file. Each arm can export that complete JSON configuration;
+the list can import one as a new arm without replacing an existing instance.
 
 **The 3D scene** draws every configured arm live from its measured joint
 angles. It is a real 3D view — drag to orbit, shift-drag or right-drag to pan,
@@ -180,12 +187,10 @@ below 90% of target and shows the follower's largest target error as
 
 ### Developing the interface
 
-`dx build` without `--release` is much faster, and the studio prefers a release
-bundle when both exist. The server reads the bundle from disk on every request,
-so a rebuild plus a browser reload is enough — no restart needed.
-
-`dx serve` gives hot reloading instead, including for Tailwind classes. Run the
-studio separately for the API and point the served page at it.
+Use the fullstack `dx serve` command above while developing. DX watches the
+client, server, assets, and Tailwind input together, then hot reloads or restarts
+the appropriate half. `dx bundle` is for a deployable server/public pair, not a
+second development lifecycle.
 
 ## Command-line tools
 

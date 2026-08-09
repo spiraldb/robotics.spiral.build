@@ -27,9 +27,8 @@ use rerobot::feetech::FeetechBus;
 use crate::episodes::{EpisodeWriter, Sample};
 use rerobot_core::api::{
     CAUTION_FOLLOW_ERROR_DEGREES, CalibrationJointProgress, CalibrationProgress, ConnectionStatus,
-    EpisodeArm, EpisodeSummary,
-    JointRange, JointTelemetry, ModeSelection, ModeStatus, PortSettings, RecordingProgress,
-    ReplayProgress, RobotTelemetry, TelemetryFrame,
+    EpisodeArm, EpisodeSummary, JointRange, JointTelemetry, ModeSelection, ModeStatus,
+    PortSettings, RecordingProgress, ReplayProgress, RobotTelemetry, TelemetryFrame,
 };
 use rerobot_core::arm;
 use rerobot_core::calibration::{
@@ -979,8 +978,7 @@ impl Controller {
             .unwrap_or_else(|| "the take could not be written".to_owned());
         match self.stop_recording(true) {
             Ok(summary) => {
-                self.recording_issue =
-                    Some(format!("stopped recording {}: {reason}", summary.id));
+                self.recording_issue = Some(format!("stopped recording {}: {reason}", summary.id));
             }
             Err(error) => {
                 self.recording_issue = Some(format!("stopped recording: {reason}. {error}"));
@@ -1629,9 +1627,7 @@ impl Controller {
                     // the position is honestly zero rather than a guess.
                     frame: match replay.phase {
                         ReplayPhase::Seeking => 0,
-                        ReplayPhase::Playing => {
-                            replay.cursor().min(replay.frames.len()) as u64
-                        }
+                        ReplayPhase::Playing => replay.cursor().min(replay.frames.len()) as u64,
                     },
                     frames: replay.frames.len() as u64,
                     elapsed_seconds: match replay.phase {
@@ -1763,11 +1759,13 @@ mod tests {
         let mut recording = Recording {
             writer: {
                 let directory = tempfile::TempDir::new().expect("temporary directory");
-                let store = crate::episodes::EpisodeStore::open(directory.path().join("e"))
-                    .expect("store");
+                let store =
+                    crate::episodes::EpisodeStore::open(directory.path().join("e")).expect("store");
                 let arms =
                     crate::episodes::build_arms(&[("a".to_owned(), vec!["j".to_owned()])]).unwrap();
-                let writer = store.begin("t".to_owned(), None, 60.0, arms).expect("begin");
+                let writer = store
+                    .begin("t".to_owned(), None, 60.0, arms)
+                    .expect("begin");
                 std::mem::forget(directory);
                 writer
             },

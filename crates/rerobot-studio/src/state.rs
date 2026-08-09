@@ -10,6 +10,7 @@ use rerobot_core::api::{
 };
 use rerobot_core::urdf::{SO101_URDF, Urdf, UrdfError};
 
+#[cfg(feature = "web")]
 use crate::api::{self, StudioEvent};
 
 /// The robot description the studio poses, draws, and measures from.
@@ -103,19 +104,24 @@ pub struct Studio {
 impl Studio {
     /// Create the shared state and start following the server.
     pub fn use_studio() -> Self {
-        let mut studio = use_context_provider(|| Self {
+        let studio = use_context_provider(|| Self {
             snapshot: Signal::new(StudioSnapshot::default()),
             telemetry: Signal::new(TelemetryFrame::default()),
             live: Signal::new(false),
             last_event_ms: Signal::new(0.0),
-            clock_ms: Signal::new(js_sys::Date::now()),
+            // Keep the server's first render identical to the browser's first
+            // render; the browser clock starts with the client tasks below.
+            clock_ms: Signal::new(0.0),
             notice: Signal::new(None),
             selected: Signal::new(None),
             selected_episode: Signal::new(None),
         });
+        #[cfg(feature = "web")]
+        let mut studio = studio;
 
         // One long-lived task owns the connection and reconnects if the server
         // restarts, so the page recovers without a manual refresh.
+        #[cfg(feature = "web")]
         use_future(move || async move {
             let Self {
                 mut snapshot,
@@ -143,6 +149,7 @@ impl Studio {
             }
         });
 
+        #[cfg(feature = "web")]
         use_future(move || async move {
             loop {
                 gloo_timers::future::TimeoutFuture::new(500).await;
@@ -286,8 +293,7 @@ impl Studio {
 
     /// True when `id` is the robot the operator is driving by hand.
     pub fn is_manual_target(&self, id: &str) -> bool {
-        self.mode_active()
-            && matches!(self.mode(), ModeSelection::Manual { robot } if robot == id)
+        self.mode_active() && matches!(self.mode(), ModeSelection::Manual { robot } if robot == id)
     }
 
     /// The part this robot plays in a running teleoperation, if any.
@@ -325,6 +331,15 @@ impl Studio {
     /// This remains available during an event-stream outage because the HTTP
     /// command path may still be healthy while telemetry reconnects.
     pub fn run_safety<F>(&self, success: impl Into<String>, future: F)
+    where
+        F: Future<Output = Result<(), String>> + 'static,
+    {
+        self.run_inner(success, future);
+    }
+
+    /// Run a file or workspace operation that does not command live hardware.
+    /// These remain useful while telemetry is reconnecting.
+    pub fn run_utility<F>(&self, success: impl Into<String>, future: F)
     where
         F: Future<Output = Result<(), String>> + 'static,
     {

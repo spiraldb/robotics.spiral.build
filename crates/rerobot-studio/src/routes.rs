@@ -119,9 +119,17 @@ pub fn api_router(state: AppState) -> Router {
         .route("/cameras/stream.mjpeg", get(camera_stream))
         .route("/cameras/snapshot.jpg", get(camera_snapshot))
         .route("/robots", get(list_robots).post(create_robot))
+        .route(
+            "/robots/import",
+            post(import_robot_configuration).layer(DefaultBodyLimit::max(1024 * 1024)),
+        )
         .route("/robots/{id}", get(get_robot))
         .route("/robots/{id}", patch(update_robot))
         .route("/robots/{id}", delete(delete_robot))
+        .route(
+            "/robots/{id}/configuration",
+            get(export_robot_configuration),
+        )
         .route("/robots/{id}/connect", post(connect_robot))
         .route("/robots/{id}/disconnect", post(disconnect_robot))
         .route("/robots/{id}/torque", post(set_torque))
@@ -442,6 +450,44 @@ async fn create_robot(
         StatusCode::CREATED,
         Json(record.summary(Default::default())),
     ))
+}
+
+/// Add a complete unified robot JSON document as a new workspace instance.
+async fn import_robot_configuration(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<(StatusCode, Json<RobotSummary>), Failure> {
+    if body.is_empty() {
+        return Err(Failure::bad_request(
+            "choose a robot configuration JSON file to import",
+        ));
+    }
+    let record = state.workspace.import_configuration(&body)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(record.summary(Default::default())),
+    ))
+}
+
+/// Download the complete canonical JSON document for one robot.
+async fn export_robot_configuration(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, Failure> {
+    let record = state.workspace.get(&id)?;
+    let json = record
+        .config
+        .to_pretty_json()
+        .map_err(WorkspaceError::from)?;
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}.json\"", record.id),
+        )
+        .body(Body::from(json))
+        .expect("static robot configuration response headers are valid"))
 }
 
 async fn get_robot(
@@ -884,7 +930,10 @@ async fn start_replay(
     State(state): State<AppState>,
     Json(request): Json<StartReplayRequest>,
 ) -> Result<StatusCode, Failure> {
-    let summary = state.episodes.get(&request.episode).map_err(Failure::from)?;
+    let summary = state
+        .episodes
+        .get(&request.episode)
+        .map_err(Failure::from)?;
     // Prefer the arm's own recorded trajectory, then the take's only arm. A
     // take of two arms replayed onto one has to say which, because guessing
     // would drive an arm along the other arm's path.
@@ -1169,7 +1218,9 @@ mod tests {
             assert!(error.1.contains(".."), "{}", error.1);
         }
         assert_eq!(
-            resolve_export_directory(episodes, "   ").expect_err("blank").0,
+            resolve_export_directory(episodes, "   ")
+                .expect_err("blank")
+                .0,
             StatusCode::BAD_REQUEST
         );
     }
@@ -1184,10 +1235,7 @@ mod tests {
             "Teleoperation — leader → follower"
         );
         // An idle take is still a take: the operator moved the arm by hand.
-        assert_eq!(
-            describe_mode(&ModeSelection::Idle),
-            "Idle — moved by hand"
-        );
+        assert_eq!(describe_mode(&ModeSelection::Idle), "Idle — moved by hand");
     }
 
     #[test]

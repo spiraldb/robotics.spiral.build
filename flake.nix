@@ -46,15 +46,15 @@
           };
           # nixpkgs kept Tailwind 3 under the unsuffixed name for a while.
           tailwind = pkgs.tailwindcss_4 or pkgs.tailwindcss;
-          # `dx` builds crates/rerobot-ui: it compiles the crate to wasm, runs
-          # the Tailwind CLI on tailwind.css, and bundles the result. With
-          # NO_DOWNLOADS set it takes every one of those tools from PATH
-          # instead of fetching its own, so the whole toolchain is pinned here.
+          # `dx` builds the web client and native server as one fullstack app,
+          # compiles the declared Tailwind input, and bundles both. With
+          # NO_DOWNLOADS set it takes every tool from PATH instead of fetching
+          # its own, so the whole toolchain is pinned here.
           webBuildInputs = [
-            pkgs.dioxus-cli # dx build / dx serve
+            pkgs.dioxus-cli # fullstack dx bundle / dx serve
             tailwind # compiles tailwind.css
             # Must match the `wasm-bindgen` version pinned in
-            # crates/rerobot-ui/Cargo.toml; wasm-bindgen refuses a mismatch.
+            # crates/rerobot-studio/Cargo.toml; wasm-bindgen refuses a mismatch.
             pkgs.wasm-bindgen-cli_0_2_126
             pkgs.binaryen # wasm-opt, used for release builds
           ];
