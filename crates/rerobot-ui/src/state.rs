@@ -202,13 +202,36 @@ impl Studio {
     }
 
     /// The colour and position this arm has in the 3D scene.
+    /// Which accent slot an arm owns.
+    ///
+    /// Derived from the arm's own role and name, never from its position in the
+    /// directory: taking it from the list index meant that adding, renaming, or
+    /// removing one arm silently repainted every other one, and "blue is the
+    /// follower" is a thing an operator learns in the first minute and relies on
+    /// while looking at the bench rather than the screen.
     pub fn position_of(&self, id: &str) -> usize {
-        self.snapshot
+        let kind = self
+            .snapshot
             .read()
             .robots
             .iter()
-            .position(|robot| robot.id == id)
-            .unwrap_or(0)
+            .find(|robot| robot.id == id)
+            .and_then(|robot| robot.robot_type.clone());
+        // Blue for the follower and violet for the leader, which is what the
+        // alphabetical accident used to produce on a two-arm bench; the arms
+        // keep the colours their operator already knows.
+        match kind.as_deref() {
+            Some(kind) if kind.contains("follower") => 0,
+            Some(kind) if kind.contains("leader") => 1,
+            // Everything that is not one end of the usual pair takes a stable
+            // slot from its own name, out of the two the pair does not claim.
+            _ => {
+                let hash = id.bytes().fold(0usize, |hash, byte| {
+                    hash.wrapping_mul(31).wrapping_add(usize::from(byte))
+                });
+                2 + hash % 2
+            }
+        }
     }
 
     /// Every recorded take, oldest first.

@@ -260,8 +260,8 @@ pub fn Viewport() -> Element {
             }
 
             if let Some(failure) = failure {
-                div { class: "absolute inset-0 flex items-center justify-center p-6",
-                    p { class: "max-w-sm rounded border border-line bg-surface px-4 py-3 text-center text-[13px] text-ink-soft",
+                div { class: "absolute inset-0 flex items-center justify-center p-4",
+                    p { class: "max-w-sm rounded border border-line bg-surface px-3 py-2 text-center text-[12px] text-ink-soft",
                         "{failure}"
                     }
                 }
@@ -270,23 +270,27 @@ pub fn Viewport() -> Element {
                 div { class: "viewport-help",
                     "click select · drag orbit · shift-drag pan · scroll zoom · F frame"
                 }
-                button {
-                    r#type: "button",
-                    class: "viewport-button absolute top-2 right-2",
-                    onclick: move |_| camera.set(Camera::default()),
-                    title: "Restore the default camera (0)",
-                    "Home"
-                }
-                button {
-                    r#type: "button",
-                    class: "viewport-button absolute top-2 right-16",
-                    "aria-pressed": show_grid(),
-                    onclick: move |_| show_grid.toggle(),
-                    title: "Show or hide the scale grid",
-                    "Grid"
+                // One group rather than two absolutely positioned buttons, the
+                // second of which was pushed off the first by a hard-coded 64px
+                // that only held while "Home" was exactly that wide.
+                div { class: "viewport-controls",
+                    button {
+                        r#type: "button",
+                        class: "viewport-button",
+                        "aria-pressed": show_grid(),
+                        onclick: move |_| show_grid.toggle(),
+                        title: "Show or hide the scale grid",
+                        "Grid"
+                    }
+                    button {
+                        r#type: "button",
+                        class: "viewport-button",
+                        onclick: move |_| camera.set(Camera::default()),
+                        title: "Restore the default camera (0)",
+                        "Home"
+                    }
                 }
                 ViewCube { camera }
-                div { class: "viewport-axis-key", span { class: "axis-x", "X" } span { class: "axis-y", "Y" } span { class: "axis-z", "Z" } }
             }
         }
     }
@@ -299,13 +303,13 @@ fn Legend(arms: Vec<RobotSummary>) -> Element {
     if arms.is_empty() {
         return rsx! {
             div { class: "pointer-events-none absolute inset-0 flex items-center justify-center",
-                p { class: "text-[13px] text-ink-faint", "Add an arm to see it here." }
+                p { class: "text-[12px] text-ink-faint", "Add an arm to see it here." }
             }
         };
     }
 
     rsx! {
-        ul { class: "absolute top-2 left-3 flex flex-col gap-0.5",
+        ul { class: "viewport-legend",
             for (index, arm) in arms.into_iter().enumerate() {
                 li { key: "{arm.id}",
                     button {
@@ -316,7 +320,7 @@ fn Legend(arms: Vec<RobotSummary>) -> Element {
                             let id = arm.id.clone();
                             move |_| studio.selected.set(Some(Selection::Robot(id.clone())))
                         },
-                        span { class: "h-2 w-2 shrink-0 rounded-full", style: "background: {accent_css(index)}" }
+                        span { class: "h-1.5 w-1.5 shrink-0 rounded-full", style: "background: {accent_css(index)}" }
                         span { "{arm.id}" }
                         if !arm.connection.connected { span { class: "text-ink-faint", "offline" } }
                     }
@@ -334,19 +338,30 @@ fn ViewCube(mut camera: Signal<Camera>) -> Element {
             button {
                 r#type: "button", title: "Top view", "aria-label": "Top view",
                 onclick: move |_| camera.set(Camera { yaw: -0.65, pitch: 1.42, ..camera() }),
-                "TOP"
+                "Top"
             }
+            // Spelled out rather than abbreviated: `F` really is a keyboard
+            // shortcut here, so a neighbouring cap reading `R` invited an
+            // operator to press the key that starts a recording on live
+            // hardware.
             div { class: "view-cube-row",
                 button {
                     r#type: "button", title: "Front view", "aria-label": "Front view",
                     onclick: move |_| camera.set(Camera { yaw: -std::f32::consts::FRAC_PI_2, pitch: 0.08, ..camera() }),
-                    "F"
+                    "Front"
                 }
                 button {
                     r#type: "button", title: "Right side view", "aria-label": "Right side view",
                     onclick: move |_| camera.set(Camera { yaw: 0.0, pitch: 0.08, ..camera() }),
-                    "R"
+                    "Right"
                 }
+            }
+            // The axis key belongs to the cube, not to a seventh box floating
+            // above it: both answer "which way is the scene facing".
+            div { class: "viewport-axis-key",
+                span { class: "axis-x", "X" }
+                span { class: "axis-y", "Y" }
+                span { class: "axis-z", "Z" }
             }
         }
     }

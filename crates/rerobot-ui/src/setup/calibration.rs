@@ -18,7 +18,7 @@ pub(super) fn CalibrationSection(
     let Some(progress) = progress else {
         return rsx! {
             section {
-                div { class: "flex items-center gap-2",
+                div { class: "flex items-center gap-1.5",
                     h3 { class: "label mb-0 flex-1", "Calibration" }
                     button {
                         r#type: "button", class: "btn btn-outline", disabled: !connected,
@@ -30,7 +30,7 @@ pub(super) fn CalibrationSection(
                         {if robot.calibrated { "Recalibrate" } else { "Calibrate" }}
                     }
                 }
-                p { class: "mt-1 text-[11px] text-ink-faint",
+                p { class: "mt-0.5 text-[11px] leading-tight text-ink-faint",
                     if robot.calibrated {
                         "Every joint has a recorded range. Recalibrate after rebuilding the arm or moving a horn."
                     } else {
@@ -69,18 +69,18 @@ pub(super) fn CalibrationSection(
                     "Cancel"
                 }
             }
-            p { class: "mt-1 mb-1.5 text-[11px] text-ink-soft",
+            p { class: "mt-0.5 mb-1 text-[11px] leading-tight text-ink-soft",
                 "Torque is off. Move every joint through its full range — to both ends — then save."
             }
-            ul { class: "flex flex-col gap-1",
+            ul { class: "flex flex-col gap-0.5",
                 for joint in progress.joints.clone() {
-                    li { key: "{joint.name}", class: "flex items-center gap-2",
-                        span { class: "w-20 shrink-0 truncate text-[12px]",
+                    li { key: "{joint.name}", class: "flex min-h-5 items-center gap-1.5",
+                        span { class: "w-16 shrink-0 truncate text-[11px]",
                             {arm::so101_joint(&joint.name).map_or_else(|| joint.name.clone(), |known| known.label.to_owned())}
                         }
                         SweepBar { min: joint.min, position: joint.position, max: joint.max }
                         span {
-                            class: "w-3 shrink-0 text-[11px]",
+                            class: "w-3 shrink-0 text-center font-mono text-[10px]",
                             style: if joint.span() >= MINIMUM_CALIBRATION_TRAVEL { "color: var(--tone-good)" } else { "color: var(--tone-line)" },
                             "✓"
                         }

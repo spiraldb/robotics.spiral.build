@@ -203,6 +203,7 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
         cameras: cameras.clone(),
         simulated: args.simulate,
     };
+    tokio::spawn(routes::auto_connect_saved_robots(state.clone()));
     let app = Router::new()
         .nest("/api", routes::api_router(state))
         .merge(ui::ui_router(ui_dir.as_deref()))

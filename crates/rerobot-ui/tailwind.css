@@ -29,14 +29,19 @@
 
   --tone-ink: #37352f;
   --tone-ink-soft: #65645f;
-  --tone-ink-faint: #767570;
+  /* Faint ink has to clear 4.5:1 on the *dimmest* surface it lands on, which is
+     the pale bench rather than paper. The former #767570 passed on white and
+     quietly failed on both the bench and the recess. */
+  --tone-ink-faint: #71706c;
 
   --tone-accent: #0868b8;
   --tone-accent-ink: #ffffff;
   --tone-selected: rgb(8 104 184 / 0.1);
 
-  --tone-danger: #c4443f;
-  --tone-danger-soft: rgb(196 68 63 / 0.1);
+  /* Danger has to stay legible on its own soft wash, which is where it does its
+     most important work: the chip that says a motor is powered. */
+  --tone-danger: #be423d;
+  --tone-danger-soft: rgb(190 66 61 / 0.1);
   --tone-caution: #7d6a41;
   --tone-caution-soft: #fbf3db;
   --tone-good: #448361;
@@ -46,6 +51,11 @@
   --tone-viewport: #f5f5f3;
   --tone-camera: #1f1f1f;
 
+  /* The one shadow colour the studio spells out for itself; the rest come from
+     Tailwind's own `shadow-sm` and `shadow-lg`. It lived as a bare literal in
+     the mobile switcher rule, which made it the only colour in the file not
+     declared up here. */
+  --tone-lift: rgb(0 0 0 / 0.12);
 }
 
 @theme inline {
@@ -101,14 +111,31 @@
     background: var(--tone-selected);
   }
 
+  /* One pixel of offset, not two: at a 24px control height a 2px ring plus a
+     2px gap reaches into the neighbouring control and reads as if both were
+     focused. */
   :focus-visible {
     outline: 2px solid var(--tone-accent);
-    outline-offset: 2px;
+    outline-offset: 1px;
   }
 
   * {
     scrollbar-color: var(--tone-line) transparent;
     scrollbar-width: thin;
+  }
+
+  /* The one authored loop in the studio: the card of the take being recorded
+     right now. Border and wash, never geometry, so nothing in the strip moves. */
+  @keyframes take-pulse {
+    0%,
+    100% {
+      border-color: var(--tone-danger);
+      background: var(--tone-danger-soft);
+    }
+    50% {
+      border-color: color-mix(in srgb, var(--tone-danger) 45%, transparent);
+      background: var(--tone-surface);
+    }
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -117,13 +144,34 @@
     *::after {
       scroll-behavior: auto !important;
       transition-duration: 0.01ms !important;
+      /* Animations, not just transitions: an infinite pulse ignores a
+         transition override entirely. The live take keeps its red border and
+         wash — it settles on the first keyframe rather than disappearing. */
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
     }
   }
 }
 
+/*
+  One type scale, four steps, each with a single job. Before this pass the studio
+  spelled 10, 11, 12, 13 and 22px, and the 12/13 pair carried no distinction at
+  all: a joint's name was 12px while the number beside it was 11px, and a robot's
+  id was 13px while its state was 10px. Sizes that differ without meaning read as
+  drift, so the tiers below are exhaustive — a new element picks one of them
+  rather than a fifth.
+
+    --type-readout  16px mono   the elapsed timer, and nothing else
+    --type-body     12px        language: buttons, fields, titles, sentences
+    --type-label    11px        supporting text: names, status, blockers
+    --type-micro    10px        mono data: counts, ids, rates, metadata
+
+  Hierarchy inside a tier comes from weight and from the graphite ramp, which is
+  what keeps a dense surface legible without a fifth size.
+*/
 @layer components {
   .studio-shell {
-    @apply flex h-screen flex-col overflow-hidden bg-canvas text-[13px] text-ink;
+    @apply flex h-screen flex-col overflow-hidden bg-canvas text-[12px] text-ink;
   }
 
   .studio-body {
@@ -170,27 +218,29 @@
   }
 
   .studio-header {
-    @apply flex min-h-11 shrink-0 items-center gap-2 border-b border-line bg-surface px-3 py-1;
+    @apply flex min-h-7 shrink-0 items-center gap-1.5 border-b border-line bg-surface px-2 py-0.5;
   }
 
   .studio-brand {
-    @apply shrink-0 text-[13px] font-semibold tracking-[-0.01em] whitespace-nowrap;
+    @apply shrink-0 text-[12px] font-semibold tracking-[-0.01em] whitespace-nowrap;
   }
 
   .studio-header-rule {
-    @apply h-4 w-px shrink-0 bg-line;
+    @apply h-3.5 w-px shrink-0 bg-line;
   }
 
   .studio-status {
-    @apply ml-auto flex shrink-0 items-center gap-1.5 text-[11px] text-ink-soft;
+    @apply ml-auto flex shrink-0 items-center gap-1 text-[11px] text-ink-soft;
   }
 
   .pane-toggle-group {
-    @apply flex items-center gap-0.5;
+    @apply flex items-center;
   }
 
+  /* 24px square: the WCAG 2.5.8 minimum target, which is the floor a dense
+     operating surface is allowed to sit on rather than a size to beat. */
   .icon-button {
-    @apply inline-flex min-h-8 min-w-8 cursor-pointer items-center justify-center rounded text-[13px]
+    @apply inline-flex min-h-6 min-w-6 cursor-pointer items-center justify-center rounded text-[12px]
       text-ink-soft transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed
       disabled:opacity-40;
   }
@@ -200,8 +250,8 @@
   }
 
   .ui-icon {
-    width: 1rem;
-    height: 1rem;
+    width: 0.875rem;
+    height: 0.875rem;
     fill: none;
     stroke: currentColor;
     stroke-width: 1.35;
@@ -235,22 +285,35 @@
     background: var(--tone-caution);
   }
 
+  /* The mode bar holds the control that energizes an arm, so it wraps rather
+     than scrolls. A horizontal scroller here silently shears the button and its
+     arm picker off the right edge with no affordance saying they are still
+     there; a second line costs one row of header and hides nothing. */
   .mode-bar {
-    @apply flex min-w-0 flex-nowrap items-center gap-1 overflow-x-auto;
+    @apply flex min-w-0 flex-wrap items-center gap-1;
   }
 
   .mode-group {
-    @apply flex min-h-8 items-center gap-1 rounded border border-line pr-0.5 pl-2 transition-colors;
+    @apply flex min-h-6 items-center gap-1 rounded border border-line pr-0.5 pl-1.5 transition-colors;
   }
 
-  .mode-group-active,
-  .mode-button-active {
+  /* The name of a mode group is a label for the controls inside it, not a
+     heading above them: micro, faint, and out of the way of the picker. */
+  .mode-group-name {
+    @apply text-[10px] whitespace-nowrap text-ink-faint;
+  }
+
+  .mode-group-active {
     @apply border-accent font-medium;
     background: var(--tone-selected);
   }
 
+  /* The narration channel carries fault reasons and live replay progress, so it
+     takes its own line inside the wrapping mode bar rather than competing with
+     the controls for horizontal space. It only renders when it has something to
+     say, so the header stays one row at rest. */
   .mode-description {
-    @apply max-w-72 truncate text-[11px] text-ink-faint;
+    @apply w-full text-[11px] leading-tight text-ink-soft;
   }
 
   .mode-group-fault {
@@ -262,12 +325,63 @@
     @apply text-danger;
   }
 
+  /* What the button is about to do to the arms is the last thing that should be
+     abbreviated. It wraps inside a bounded width instead of truncating, and it
+     is never the smallest type on screen. */
+  /* It stays on one line now rather than wrapping inside a bounded width: a
+     two-line blob in the middle of the mode bar was the reason the header could
+     not hold its controls on one row. */
   .teleop-consequence {
-    @apply max-w-40 truncate px-1 text-[10px] text-ink-faint;
+    @apply px-1 text-[11px] whitespace-nowrap text-ink-soft;
+  }
+
+  /* Releasing torque is confirmed in place, beside the arm it drops, with the
+     instruction visible rather than hovered. */
+  .release-confirm {
+    @apply flex flex-wrap items-center justify-end gap-1;
+  }
+
+  .release-warning {
+    @apply text-[11px] text-danger;
+  }
+
+  /*
+    Four measurements side by side, so they are built to line up: the number is
+    one element and its unit another, and neither ever wraps. "98% open" used to
+    break onto a second line inside its cell, which made that one cell taller
+    than the three beside it and left the whole strip ragged.
+  */
+  .readout {
+    @apply flex min-w-0 flex-col rounded bg-sunken px-1.5 py-0.5;
+  }
+
+  .readout-caution {
+    @apply bg-caution-soft;
+  }
+
+  .readout-label {
+    @apply truncate text-[10px] leading-tight text-ink-faint;
+  }
+
+  .readout-value {
+    @apply flex items-baseline gap-0.5 font-mono text-[11px] leading-tight whitespace-nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .readout-caution .readout-value {
+    @apply text-caution;
+  }
+
+  .readout-unit {
+    @apply text-[10px] text-ink-faint;
+  }
+
+  .readout-caution .readout-unit {
+    @apply text-caution;
   }
 
   .joint-row {
-    @apply -mx-1 flex min-h-8 items-center gap-2 rounded px-1 transition-colors;
+    @apply -mx-1 flex min-h-6 items-center gap-1.5 rounded px-1 transition-colors;
   }
 
   .joint-row:hover,
@@ -276,77 +390,106 @@
   }
 
   .joint-label {
-    @apply inline-flex min-h-8 w-24 shrink-0 cursor-pointer items-center truncate text-left text-[12px] text-ink-soft;
+    @apply inline-flex min-h-6 w-20 shrink-0 cursor-pointer items-center truncate text-left text-[11px] text-ink-soft;
   }
 
+  /* The measured angle beside its slider: mono so the sign and the digits stay
+     in the same place as the arm moves. */
+  .joint-value {
+    @apply w-11 shrink-0 text-right font-mono text-[10px] text-ink-soft;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* The stage is part of the light workspace, so its chrome is written in the
+     same graphite vocabulary as the rest of the app. It used to be authored
+     against a dark viewport and re-stated in light tokens further down; the
+     dark spelling is gone rather than overridden. */
+  /*
+    The bench had six separate things floating over it — legend, Home, Grid, the
+    view cube, an axis key, and a help line — at four corners, each in its own
+    box. Two corners now hold one cluster each, and the axis key has moved inside
+    the cube it was stacked above, because both answer the same question about
+    which way the scene is facing.
+  */
   .viewport-help {
-    @apply pointer-events-none absolute bottom-2 left-3 text-[11px] text-white/35;
+    @apply pointer-events-none absolute bottom-1.5 left-2 text-[10px];
+  }
+
+  .viewport-controls {
+    @apply absolute top-1.5 right-1.5 flex items-center gap-0.5;
   }
 
   .viewport-button {
-    @apply inline-flex min-h-8 cursor-pointer items-center rounded px-2 text-[11px] text-white/60
-      transition-colors hover:bg-white/10 hover:text-white focus-visible:text-white;
+    @apply inline-flex min-h-6 cursor-pointer items-center rounded px-1.5 text-[11px] transition-colors;
   }
 
-  .viewport-button[aria-pressed="true"] {
-    @apply bg-white/10 text-white;
+  .viewport-legend {
+    @apply absolute top-1.5 left-2 flex flex-col;
   }
 
   .viewport-legend-row {
-    @apply flex min-h-7 cursor-pointer items-center gap-1.5 rounded px-1.5 text-[11px] text-white/70
-      transition-colors hover:bg-white/10 hover:text-white;
-  }
-
-  .viewport-legend-selected {
-    @apply bg-white/10 text-white ring-1 ring-white/25;
+    @apply flex min-h-5 cursor-pointer items-center gap-1 rounded px-1 text-[11px] transition-colors;
   }
 
   .view-cube {
-    @apply absolute right-3 bottom-3 flex w-14 flex-col gap-px overflow-hidden rounded border border-white/15 bg-black/20 text-[9px] text-white/65 shadow-sm backdrop-blur-sm;
+    @apply absolute right-1.5 bottom-1.5 flex w-20 flex-col gap-px overflow-hidden rounded border text-[10px] shadow-sm;
   }
 
+  /* The faces spell their view out. Abbreviating them to `F` and `R` put a key
+     cap reading `R` beside one reading `F` — and `F` really is a key, while `R`
+     starts a recording on live hardware. */
   .view-cube button {
-    @apply min-h-7 cursor-pointer transition-colors hover:bg-white/15 hover:text-white focus-visible:text-white;
+    @apply min-h-5 cursor-pointer transition-colors;
   }
 
   .view-cube-row {
-    @apply grid grid-cols-2 gap-px border-t border-white/10;
+    @apply grid grid-cols-2 gap-px border-t;
   }
 
+  /* The last row of the cube rather than a seventh floating box above it. */
   .viewport-axis-key {
-    @apply pointer-events-none absolute right-20 bottom-3 flex gap-1.5 rounded bg-black/20 px-2 py-1 font-mono text-[10px] backdrop-blur-sm;
+    @apply pointer-events-none flex justify-center gap-2 border-t px-1 font-mono text-[10px];
   }
 
-  .axis-x { color: #ef7770; }
-  .axis-y { color: #71c994; }
-  .axis-z { color: #75aef0; }
+  /* Darker than the vivid scene accents so a 10px glyph clears 4.5:1 on the
+     pale bench; the hues still match the axes drawn in the scene. */
+  .axis-x { color: #b65b55; }
+  .axis-y { color: #49815f; }
+  .axis-z { color: #5178a6; }
 
   .camera-placeholder-icon {
-    @apply flex h-7 w-7 items-center justify-center rounded-full border border-white/10 text-lg font-light text-white/35;
+    @apply flex h-6 w-6 items-center justify-center rounded-full border border-white/10 text-white/35;
   }
 
   .camera-properties {
-    @apply mt-1 border-t border-line;
+    @apply border-t border-line;
   }
 
   .property-section-toggle {
-    @apply flex min-h-10 w-full cursor-pointer items-center gap-2 px-3 text-left transition-colors hover:bg-hover;
+    @apply flex min-h-6 w-full cursor-pointer items-center gap-1.5 px-2 text-left transition-colors hover:bg-hover;
   }
 
   .property-section-title {
-    @apply text-[12px] font-medium;
+    @apply text-[11px] font-medium;
   }
 
   .property-section-count {
-    @apply ml-auto inline-flex min-w-5 items-center justify-center rounded bg-sunken px-1.5 py-0.5 font-mono text-[10px] text-ink-faint;
+    @apply ml-auto inline-flex min-w-4 items-center justify-center rounded bg-sunken px-1 font-mono text-[10px] text-ink-faint;
   }
 
+  /*
+    Cameras sit side by side once there is room for two. Stacked full-width
+    16:9 previews cost about 190px each, so a two-camera bench pushed the second
+    one off the bottom of the inspector — on the panel whose job is to show you
+    what the arm is looking at. One camera still fills the width.
+  */
   .property-camera-list {
-    @apply flex flex-col gap-2 px-3 pb-3;
+    @apply grid gap-1 px-2 pb-2;
+    grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
   }
 
   .property-camera-empty {
-    @apply rounded bg-sunken px-2.5 py-2 text-[11px] text-ink-faint;
+    @apply rounded bg-sunken px-2 py-1 text-[11px] text-ink-faint;
   }
 
   .camera-property {
@@ -359,7 +502,7 @@
   }
 
   .camera-property-header {
-    @apply flex min-h-9 items-center gap-2 border-b border-line px-2.5 text-[11px];
+    @apply flex min-h-6 items-center gap-1.5 border-b border-line px-1.5 text-[11px];
   }
 
   .camera-property-name {
@@ -387,51 +530,46 @@
   }
 
   .camera-trouble {
-    @apply border-t border-line px-2.5 py-1.5 text-[11px] text-danger;
+    @apply border-t border-line px-1.5 py-1 text-[11px] text-danger;
   }
 
   .reconnect-guard {
-    @apply absolute inset-0 z-30 flex items-start justify-center bg-surface/70 pt-12 backdrop-blur-[1px];
+    @apply absolute inset-0 z-30 flex items-start justify-center bg-surface/70 pt-8 backdrop-blur-[1px];
   }
 
   .reconnect-card {
-    @apply flex items-center gap-2 rounded border border-line bg-surface px-3 py-2 text-[12px] text-ink shadow-sm;
-  }
-
-  .issue-strip {
-    @apply flex min-h-9 shrink-0 items-start gap-2 border-b border-line bg-caution-soft px-3 text-[11px] text-caution;
+    @apply flex items-center gap-1.5 rounded border border-line bg-surface px-2 py-1 text-[11px] text-ink shadow-sm;
   }
 
   .issue-details {
-    @apply min-w-0 flex-1;
-  }
-
-  .issue-summary {
-    @apply flex min-h-9 cursor-pointer items-center gap-2;
+    @apply min-w-0;
   }
 
   .issue-icon {
-    @apply inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-current text-[10px] font-bold;
+    @apply inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border border-current text-[10px] font-bold;
   }
 
+  /* The first issue's own words, beside the count. The class existed and had a
+     breakpoint rule written for it, but nothing ever rendered it — so what was
+     actually wrong stayed one click away at every width. */
   .issue-preview {
-    @apply truncate text-ink-soft;
+    @apply max-w-40 truncate text-ink-soft;
   }
 
   .issue-list {
-    @apply max-h-28 list-disc space-y-1 overflow-y-auto pb-2 pl-8 text-ink-soft;
+    @apply max-h-28 list-disc space-y-0.5 overflow-y-auto pb-1 pl-4 text-ink-soft;
   }
 
   .issue-dismiss {
-    @apply min-h-9 shrink-0;
+    @apply min-h-6 shrink-0;
   }
 
   .notice-positioner {
-    @apply pointer-events-none fixed inset-x-0 bottom-0 z-50 flex justify-center p-4;
+    @apply pointer-events-none fixed inset-x-0 bottom-0 z-50 flex justify-center p-2;
   }
 
   .notice-card {
-    @apply pointer-events-auto flex max-w-2xl items-center gap-3 rounded-md border border-line bg-surface px-3 py-2 shadow-lg;
+    @apply pointer-events-auto flex max-w-2xl items-center gap-2 rounded-md border border-line bg-surface px-2 py-1 shadow-lg;
   }
 
   /*
@@ -441,8 +579,8 @@
     destroys something.
   */
   .btn {
-    @apply inline-flex cursor-pointer items-center justify-center gap-1.5 rounded border
-      min-h-8 border-transparent px-2 py-1 text-[13px] whitespace-nowrap text-ink transition-colors
+    @apply inline-flex cursor-pointer items-center justify-center gap-1 rounded border
+      min-h-6 border-transparent px-1.5 py-0 text-[12px] whitespace-nowrap text-ink transition-colors
       hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent;
   }
 
@@ -455,37 +593,45 @@
     @apply border-line;
   }
 
+  /* A button that stays on says so, in the same spelling the icon toggles use.
+     Without this the Manual control — which decides whether the sliders move a
+     real arm — looked identical on and off to anyone not using a screen reader. */
+  .btn[aria-pressed="true"] {
+    @apply border-accent text-accent;
+    background: var(--tone-selected);
+  }
+
   .btn-danger {
     @apply text-danger hover:bg-danger-soft;
   }
 
   /* A quiet text action: rescan, identify, remove. */
   .link {
-    @apply inline-flex min-h-8 cursor-pointer items-center text-[12px] text-ink-soft transition-colors hover:text-ink
+    @apply inline-flex min-h-6 cursor-pointer items-center text-[11px] text-ink-soft transition-colors hover:text-ink
       disabled:cursor-not-allowed disabled:text-ink-faint disabled:hover:text-ink-faint;
   }
 
   .field {
-    @apply min-h-8 w-full rounded border border-line bg-surface px-2 py-1 text-[13px] text-ink
+    @apply min-h-6 w-full rounded border border-line bg-surface px-1.5 py-0 text-[12px] text-ink
       focus:border-accent disabled:cursor-not-allowed disabled:text-ink-faint;
   }
 
   /* A picker inside a toolbar: no border of its own, because the group around
      it already has one. */
   .field-inline {
-    @apply min-h-7 cursor-pointer rounded border-0 bg-transparent px-1 py-0.5 text-[13px] text-ink
+    @apply min-h-6 cursor-pointer rounded border-0 bg-transparent px-0.5 py-0 text-[12px] text-ink
       hover:bg-hover disabled:cursor-not-allowed
       disabled:text-ink-faint disabled:hover:bg-transparent;
   }
 
   .label {
-    @apply mb-1 block text-[11px] font-medium text-ink-faint;
+    @apply mb-0.5 block text-[10px] font-medium text-ink-faint;
   }
 
   /* One neutral tag. A state worth colouring says so with a dot beside it
      rather than by turning the whole tag red. */
   .chip {
-    @apply inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-soft;
+    @apply inline-flex items-center gap-1 rounded px-1 py-0 text-[11px] text-ink-soft;
     background-color: var(--tone-hover);
   }
 
@@ -512,7 +658,7 @@
   /* One consistent slider, since the browser default differs per platform and
      the thumb needs to stay visible against both themes. */
   .joint-slider {
-    @apply h-7 w-full cursor-pointer appearance-none bg-transparent
+    @apply h-5 w-full cursor-pointer appearance-none bg-transparent
       disabled:cursor-not-allowed disabled:opacity-50;
   }
 
@@ -523,8 +669,8 @@
   }
 
   .joint-slider::-webkit-slider-thumb {
-    @apply h-3.5 w-3.5 appearance-none rounded-full border-2 border-surface bg-ink-soft shadow-sm;
-    margin-top: -5.5px;
+    @apply h-3 w-3 appearance-none rounded-full border-2 border-surface bg-ink-soft shadow-sm;
+    margin-top: -4.5px;
   }
 
   .joint-slider::-moz-range-track {
@@ -534,39 +680,51 @@
   }
 
   .joint-slider::-moz-range-thumb {
-    @apply h-3.5 w-3.5 rounded-full border-2 border-surface bg-ink-soft shadow-sm;
+    @apply h-3 w-3 rounded-full border-2 border-surface bg-ink-soft shadow-sm;
   }
 
   .studio-panel button[aria-expanded] {
-    @apply min-h-8 min-w-8;
+    @apply min-h-6 min-w-6;
   }
 
 }
 
-@media (max-width: 1180px) {
-  .mode-description {
-    display: none;
-  }
+/*
+  Below this the header can no longer hold the mode controls, the narration and
+  the status cluster on one line. The mode bar drops to its own full-width row
+  rather than any of the three being sheared or hidden — the arrangement the
+  narrow breakpoint already proved correct, applied at the width where the
+  header actually runs out of room instead of 550px later.
+*/
+/*
+  Below this the header can no longer hold the mode controls, the narration and
+  the status cluster on one line. The mode bar drops to its own full-width row
+  rather than any of the three being sheared or hidden.
 
+  The threshold moved down from 1450px because the strip itself got shorter: at
+  a 24px control height with a single-line teleoperation consequence, the whole
+  cluster now fits on one row at the widths where it used to wrap.
+*/
+@media (max-width: 1280px) {
   .studio-header {
-    gap: 0.5rem;
+    flex-wrap: wrap;
+    gap: 0.375rem;
   }
 
-  .control-rate-label {
-    display: none;
-  }
-}
-
-@media (max-width: 1450px) {
-  .mode-description,
-  .teleop-consequence {
-    display: none;
+  .mode-bar {
+    order: 3;
+    width: 100%;
   }
 
   .studio-status {
     gap: 0.25rem;
   }
+}
 
+@media (max-width: 1180px) {
+  .control-rate-label {
+    display: none;
+  }
 }
 
 @media (max-width: 900px) {
@@ -578,17 +736,13 @@
     display: none;
   }
 
-  .mode-bar {
-    order: 3;
-    width: 100%;
-    overflow-x: auto;
-    flex-wrap: nowrap;
-  }
-
+  /* The stage keeps a floor of its own, but not one that can take the panes'
+     whole share: an 18rem minimum against a short window left the inspector
+     showing one joint slider of six. */
   .studio-body {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    grid-template-rows: minmax(18rem, 54%) minmax(0, 46%);
+    grid-template-rows: minmax(10rem, 56%) minmax(11rem, 44%);
   }
 
   .studio-workspace {
@@ -630,21 +784,20 @@
     z-index: 40;
   }
 
-  .studio-brand {
-    font-size: 0.75rem;
-  }
-
   .studio-status {
-    gap: 0.5rem;
-  }
-
-  .studio-status > :not(.connection-status):not(.chip-physical):not(.chip-caution) {
-    display: none;
-  }
-
-  .mode-bar {
+    gap: 0.375rem;
     flex-wrap: wrap;
-    overflow: visible;
+    justify-content: flex-end;
+  }
+
+  /* The cluster sheds what is merely informative — the loop rate and a mode
+     chip that is only reporting "stopped". Anything that would let the operator
+     start a mode without knowing an arm is powered, a mode faulted, or an issue
+     is outstanding stays on the page, because the control that energizes an arm
+     is still right there and still enabled. */
+  .studio-status > .control-rate,
+  .studio-status > .status-mode:not(.chip-danger) {
+    display: none;
   }
 
   .studio-body {
@@ -690,21 +843,21 @@
     width: 100%;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 2px;
-    border-radius: 0.45rem;
+    border-radius: 6px;
     background: var(--tone-sunken);
     padding: 2px;
   }
 
   .mobile-surface-switcher button {
     min-height: 2rem;
-    border-radius: 0.35rem;
+    border-radius: 4px;
     color: var(--tone-ink-soft);
   }
 
   .mobile-surface-switcher .mobile-surface-active {
     color: var(--tone-ink);
     background: var(--tone-surface);
-    box-shadow: 0 1px 3px rgb(0 0 0 / 0.12);
+    box-shadow: 0 1px 3px var(--tone-lift);
   }
 
   .issue-preview {
@@ -758,18 +911,21 @@
     @apply border-line;
   }
 
+  /* Inside the cube now, so it takes the cube's own surface and needs only the
+     rule that separates it from the face buttons above. */
   .viewport-axis-key {
-    @apply border border-line bg-surface/90 backdrop-blur-none;
+    @apply border-line;
   }
 
-  /* Issues belong to the status cluster, not between the operator and the
-     workspace. Details remain one click away in a small anchored popover. */
+  /* Issues belong to the status cluster, and the first of them is readable
+     without opening anything; the rest stay one click away in a small anchored
+     popover. */
   .issue-details {
     @apply relative shrink-0;
   }
 
   .issue-summary {
-    @apply flex min-h-7 cursor-pointer list-none items-center gap-1.5 rounded px-1.5 text-[11px] text-caution hover:bg-caution-soft;
+    @apply flex min-h-6 cursor-pointer list-none items-center gap-1 rounded px-1 text-[11px] text-caution hover:bg-caution-soft;
   }
 
   .issue-summary::-webkit-details-marker {
@@ -781,41 +937,47 @@
   }
 
   .issue-popover {
-    @apply absolute top-[calc(100%+6px)] right-0 z-50 w-80 rounded border border-line bg-surface p-2 text-[11px] text-ink-soft shadow-lg;
+    @apply absolute top-[calc(100%+4px)] right-0 z-50 w-72 rounded border border-line bg-surface p-1.5 text-[11px] text-ink-soft shadow-lg;
   }
 
   .issue-list {
-    @apply max-h-36 list-disc space-y-1 overflow-y-auto px-2 pb-1 pl-5;
+    @apply max-h-36 list-disc space-y-0.5 overflow-y-auto pb-1 pl-4;
   }
 
   .issue-dismiss {
-    @apply mt-1 min-h-7;
+    @apply mt-0.5 min-h-6;
   }
 
   /* Device hierarchy: identity and readiness first, setup details second, file
      maintenance last. */
   .device-panel-header {
-    @apply sticky top-0 z-10 flex min-h-10 items-center gap-2 border-b border-line bg-surface px-3;
+    @apply sticky top-0 z-10 flex min-h-6 items-center gap-1.5 border-b border-line bg-surface px-2;
   }
 
   .device-panel-header h2 {
-    @apply text-[13px] font-semibold tracking-[-0.01em];
+    @apply text-[12px] font-semibold tracking-[-0.01em];
   }
 
   .device-count {
-    @apply inline-flex min-w-5 items-center justify-center rounded bg-sunken px-1.5 py-0.5 font-mono text-[10px] text-ink-faint;
+    @apply inline-flex min-w-4 items-center justify-center rounded bg-sunken px-1 font-mono text-[10px] text-ink-faint;
   }
 
   .device-workspace {
-    @apply ml-auto max-w-32 truncate font-mono text-[10px] text-ink-faint;
+    @apply ml-auto max-w-28 truncate font-mono text-[10px] text-ink-faint;
   }
 
   .device-entry {
     @apply border-b border-line;
   }
 
+  /*
+    One arm is one 24px line. It used to be a 48px block holding a two-line
+    stack, so a two-arm bench spent a hundred pixels of the explorer saying two
+    names — and the setup underneath, which is the part with work in it, started
+    below the fold.
+  */
   .device-entry-row {
-    @apply flex min-h-12 items-center gap-1 pr-2 transition-colors hover:bg-hover;
+    @apply flex min-h-6 items-center gap-1 pr-1.5 transition-colors hover:bg-hover;
   }
 
   .device-entry-selected {
@@ -823,27 +985,29 @@
   }
 
   .device-chevron {
-    @apply flex min-h-10 w-7 cursor-pointer items-center justify-center text-ink-faint hover:text-ink;
+    @apply flex min-h-6 w-5 shrink-0 cursor-pointer items-center justify-center text-ink-faint hover:text-ink;
   }
 
   .device-main {
-    @apply flex min-w-0 flex-1 cursor-pointer items-center gap-2 py-1.5 text-left;
+    @apply flex min-w-0 flex-1 cursor-pointer items-baseline gap-1.5 py-0 text-left;
   }
 
   .device-accent {
-    @apply h-2 w-2 shrink-0 rounded-full;
+    @apply h-1.5 w-1.5 shrink-0 self-center rounded-full;
   }
 
   .device-copy {
-    @apply flex min-w-0 flex-1 flex-col;
+    @apply flex min-w-0 flex-1 items-baseline gap-1.5;
   }
 
   .device-copy strong {
-    @apply truncate text-[13px] font-medium text-ink;
+    @apply shrink-0 truncate text-[12px] font-medium text-ink;
   }
 
+  /* The role gives way first: the arm's own name usually says it, and the state
+     to its right is the part that changes. */
   .device-copy > span {
-    @apply truncate text-[10px] text-ink-faint;
+    @apply min-w-0 truncate text-[10px] text-ink-faint;
   }
 
   .device-state {
@@ -855,15 +1019,15 @@
   }
 
   .device-connection-dot {
-    @apply h-1.5 w-1.5 shrink-0 rounded-full;
+    @apply h-1.5 w-1.5 shrink-0 self-center rounded-full;
   }
 
   .device-setup {
-    @apply flex flex-col bg-sunken px-3 pb-2;
+    @apply flex flex-col bg-sunken px-2 pb-1.5;
   }
 
   .device-primary-row {
-    @apply flex min-h-11 items-center gap-2 border-b border-line;
+    @apply flex min-h-6 items-center gap-1.5 border-b border-line py-1;
   }
 
   .device-primary-status {
@@ -871,7 +1035,7 @@
   }
 
   .device-setup-section {
-    @apply border-b border-line py-2.5;
+    @apply border-b border-line py-1.5;
   }
 
   .device-section-content {
@@ -879,7 +1043,7 @@
   }
 
   .device-file-row {
-    @apply flex min-h-9 items-center gap-2 pt-1.5;
+    @apply flex min-h-6 items-center gap-1.5 pt-1;
   }
 
   /* Light, compact dataset workflow. */
@@ -888,19 +1052,21 @@
   }
 
   .timeline-toolbar {
-    @apply flex min-h-12 items-center gap-4 border-b border-line px-3 py-1.5;
+    @apply flex min-h-7 items-center gap-3 border-b border-line px-2 py-0.5;
   }
 
   .timeline-transport {
-    @apply flex min-w-0 flex-row items-center gap-2;
+    @apply flex min-w-0 flex-row items-center gap-1.5;
     width: auto;
     max-width: none;
     flex: 0 0 auto;
     justify-content: flex-start;
   }
 
+  /* The one control reached for with a hand still on the arm, so it stays the
+     tallest thing in the rail at 28px while everything around it drops to 24. */
   .take-button {
-    @apply inline-flex min-h-8 cursor-pointer items-center justify-center gap-1.5 rounded bg-accent px-3 text-[12px] font-medium text-accent-ink transition-colors hover:brightness-110 disabled:cursor-not-allowed;
+    @apply inline-flex min-h-7 cursor-pointer items-center justify-center gap-1.5 rounded bg-accent px-2 text-[12px] font-medium text-accent-ink transition-colors hover:brightness-110 disabled:cursor-not-allowed;
   }
 
   .take-button:disabled {
@@ -912,31 +1078,46 @@
     @apply bg-danger text-white;
   }
 
+  /* Clock and caption sit on one baseline instead of stacking. The stack was
+     what set the toolbar's height: 22px of digits over a 10px caption made a
+     48px row out of a control that is 28px tall. */
   .timeline-clock {
-    @apply flex min-w-20 flex-col;
+    @apply flex items-baseline gap-1.5;
   }
 
   .timeline-elapsed {
-    @apply block font-mono text-[22px] leading-none font-medium tracking-[-0.02em] text-ink;
+    @apply block min-w-14 font-mono text-[16px] leading-none font-medium tracking-[-0.02em] text-ink;
     font-variant-numeric: tabular-nums;
   }
 
   .timeline-readout-label {
-    @apply mt-0.5 text-[10px] text-ink-faint;
+    @apply text-[10px] whitespace-nowrap text-ink-faint;
   }
 
   .take-cancel {
-    @apply inline-flex min-h-8 cursor-pointer items-center rounded px-2 text-[11px] text-ink-soft hover:bg-hover hover:text-danger;
+    @apply inline-flex min-h-6 cursor-pointer items-center rounded px-1.5 text-[11px] text-ink-soft hover:bg-hover hover:text-danger;
   }
 
+  /* Cancel carries its shortcut beside it, the way Record carries "R to
+     record" — the way out of a bad take is as visible as the way into one. */
+  .take-cancel-block {
+    @apply flex items-baseline gap-1;
+  }
+
+  /* A blocker explains why a control will not act, so it wraps to stay readable
+     instead of running off the end of a narrow toolbar. */
   .take-blocked {
-    @apply text-[10px] leading-snug text-ink-faint;
+    @apply text-[11px] leading-snug text-ink-soft;
     min-width: 0;
-    white-space: nowrap;
+  }
+
+  /* Progress for the take currently driving an arm, beside its stop control. */
+  .episode-progress {
+    @apply font-mono text-[11px] whitespace-nowrap text-ink-soft;
   }
 
   .timeline-summary {
-    @apply ml-auto flex min-w-0 flex-row items-center gap-3;
+    @apply ml-auto flex min-w-0 flex-row items-center gap-2;
   }
 
   .session-count {
@@ -944,56 +1125,123 @@
   }
 
   .session-count strong {
-    @apply font-mono text-[13px] font-medium text-ink;
+    @apply font-mono text-[12px] font-medium text-ink;
   }
 
   .session-duration {
-    @apply ml-2 font-mono text-[10px] text-ink-faint;
+    @apply ml-1.5 font-mono text-[10px] text-ink-faint;
   }
 
   .session-excluded {
-    @apply ml-2 text-[10px] text-caution;
+    @apply ml-1.5 text-[10px] text-caution;
   }
 
-  .export-form {
-    @apply flex items-center gap-1;
+  .dataset-import,
+  .dataset-download {
+    @apply whitespace-nowrap;
   }
 
-  .export-field {
-    @apply min-h-8 w-36 bg-surface text-ink;
+  .dataset-importing {
+    @apply cursor-wait text-ink-faint;
   }
 
+  .dataset-import:focus-within {
+    outline: 2px solid var(--tone-accent);
+    outline-offset: 2px;
+  }
+
+  /* The strip is the toolbar's elastic middle: it takes whatever width Record
+     and the session actions leave, and scrolls inside it. */
   .episode-strip-wrap {
-    @apply border-b border-line px-3 py-1.5;
+    @apply min-w-0 flex-1;
   }
 
-  .episode-strip-heading {
-    @apply flex min-h-6 items-center gap-2 text-[10px] text-ink-faint;
-  }
-
-  .episode-strip-heading strong {
-    @apply text-[11px] font-medium text-ink-soft;
-  }
-
+  /*
+    There is no heading row over the strip any more. "Episodes / Select one to
+    replay" spent 24 permanent pixels restating what a row of episode buttons
+    already is. The one fact that row carried which the strip cannot show — that
+    older takes exist beyond the cap — is now a card at the head of the strip,
+    where it is both truer and free.
+  */
+  /* The cards set the row's height; no floor of its own, or the toolbar would
+     reserve space the strip is not using. */
   .episode-strip {
-    @apply flex min-h-14 gap-1 overflow-x-auto pb-1;
+    @apply flex items-center gap-1 overflow-x-auto;
     scrollbar-color: var(--tone-line) transparent;
   }
 
+  .episode-card,
   .episode-strip > li {
-    @apply shrink-0;
+    @apply relative shrink-0;
   }
 
+  .episode-strip-older {
+    @apply flex h-9 shrink-0 items-center rounded border border-dashed border-line px-1.5 text-[10px] whitespace-nowrap text-ink-faint;
+  }
+
+  /* The same height as a card, so the rail does not jump when the first take
+     lands and the empty state gives way to the strip. */
   .episode-strip-empty {
-    @apply min-h-16 items-center px-3 text-[11px] text-ink-faint;
+    @apply flex min-h-9 items-center gap-1.5 text-[11px] text-ink-faint;
   }
 
   .episode-strip-empty strong {
-    @apply mr-2 font-medium text-ink;
+    @apply font-medium text-ink;
   }
 
+  /*
+    Three facts on two lines: the id and its duration share a baseline, the
+    exportable state sits under them. It was three stacked lines in a 48px card;
+    nothing was dropped, the card just stopped spending a line on each fact.
+    Delete is still revealed over the card rather than given a permanent gutter.
+  */
   .episode-item {
-    @apply flex h-12 w-[5.5rem] cursor-pointer flex-col justify-center rounded border border-line bg-canvas px-2 text-left transition-colors hover:border-ink-faint hover:bg-hover;
+    @apply flex h-9 w-18 cursor-pointer flex-col justify-center gap-0.5 rounded border border-line bg-canvas px-1.5 py-0 text-left transition-colors hover:border-ink-faint hover:bg-hover;
+  }
+
+  .episode-item-head {
+    @apply flex items-baseline justify-between gap-1;
+  }
+
+  .episode-delete {
+    @apply invisible absolute right-0 bottom-0 z-10 inline-flex h-6 w-6 cursor-pointer items-center justify-center rounded bg-surface/90 text-ink-faint opacity-0 transition-[color,background-color,opacity] hover:bg-danger-soft hover:text-danger focus-visible:text-danger;
+  }
+
+  .episode-card:hover .episode-delete,
+  .episode-card:focus-within .episode-delete {
+    @apply visible opacity-100;
+  }
+
+  .episode-delete .ui-icon {
+    @apply h-3 w-3;
+  }
+
+  /* Sized to its buttons rather than to the card, so the confirmation can hold
+     two full-size targets instead of shrinking them below the control floor. */
+  .episode-delete-confirm {
+    @apply absolute inset-y-0 left-0 z-20 flex w-max min-w-full items-center justify-end gap-1 rounded border border-danger bg-surface p-1;
+  }
+
+  /* The confirmation is wider than the 72px card it covers, and the strip it
+     lives in scrolls horizontally — so the card makes room for it rather than
+     letting the scroller clip "Cancel" off the edge of the last take in view. */
+  .episode-card:has(.episode-delete-confirm) {
+    min-width: 8rem;
+  }
+
+  .episode-delete-yes,
+  .episode-delete-no {
+    @apply inline-flex min-h-6 cursor-pointer items-center justify-center rounded px-1.5 text-[11px] font-medium;
+  }
+
+  /* The confirm is the slower of the two choices, so it is not also the louder
+     one: destructive is red text on transparent, never a filled call to action. */
+  .episode-delete-yes {
+    @apply text-danger hover:bg-danger-soft;
+  }
+
+  .episode-delete-no {
+    @apply bg-sunken text-ink-soft hover:text-ink;
   }
 
   .episode-item-selected {
@@ -1015,19 +1263,20 @@
   }
 
   .episode-index {
-    @apply truncate font-mono text-[12px] font-medium text-ink;
+    @apply truncate font-mono text-[11px] leading-none font-medium text-ink;
   }
 
   .episode-duration {
-    @apply font-mono text-[10px] text-ink-soft;
+    @apply shrink-0 font-mono text-[10px] leading-none text-ink-soft;
+    font-variant-numeric: tabular-nums;
   }
 
   .episode-state {
-    @apply truncate text-[10px] text-ink-faint;
+    @apply truncate text-[10px] leading-none text-ink-faint;
   }
 
   .episode-detail {
-    @apply flex min-h-14 items-center gap-4 px-3 py-1.5;
+    @apply flex min-h-7 items-center gap-3 px-2 py-0.5;
   }
 
   .episode-detail-empty {
@@ -1035,19 +1284,26 @@
   }
 
   .episode-detail-title {
-    @apply flex min-w-44 items-center gap-2;
+    @apply flex shrink-0 items-center gap-1.5;
   }
 
   .episode-detail-title strong {
-    @apply font-mono text-[12px] font-medium text-ink;
+    @apply font-mono text-[11px] font-medium text-ink;
   }
 
+  /*
+    The facts do not stretch and Replay is not pinned to the far edge. On a wide
+    window that pairing put a lone button a thousand pixels away from the take
+    it acts on, with nothing in between; the row now reads left to right and
+    simply ends, which is what a row that has run out of things to say should
+    look like.
+  */
   .episode-facts {
-    @apply flex min-w-0 flex-1 flex-wrap items-baseline gap-x-4 gap-y-0.5;
+    @apply flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-0;
   }
 
   .episode-fact {
-    @apply flex items-baseline gap-1.5 whitespace-nowrap;
+    @apply flex items-baseline gap-1 whitespace-nowrap;
   }
 
   .episode-fact dt {
@@ -1055,17 +1311,18 @@
   }
 
   .episode-fact dd {
-    @apply text-[11px] text-ink-soft;
+    @apply font-mono text-[10px] text-ink-soft;
     font-variant-numeric: tabular-nums;
   }
 
-  .episode-actions,
-  .take-confirm {
+  .episode-actions {
     @apply flex shrink-0 flex-wrap items-center gap-1;
   }
 
+  /* No minimum width: "Replay on follower" already sets the button's size, and
+     a floor only added blank fill around a label that was never short. */
   .episode-replay {
-    @apply min-w-32;
+    @apply shrink-0;
   }
 
   .episode-problem {
@@ -1087,13 +1344,16 @@
     flex-wrap: wrap;
   }
 
-  .timeline-summary {
+  /* Once the toolbar wraps, the strip takes a line of its own rather than being
+     squeezed between the transport and the session actions. */
+  .episode-strip-wrap {
+    order: 3;
     width: 100%;
-    margin-left: 0;
+    flex-basis: 100%;
   }
 
-  .episode-actions {
-    width: 100%;
+  .timeline-summary {
+    margin-left: auto;
   }
 }
 
@@ -1117,6 +1377,35 @@
 
   .timeline-summary {
     justify-content: space-between;
+  }
+
+  /* Touch has no hover, so delete stays visible here — and the card grows to
+     hold a 44px target without taking the room its own labels need. */
+  .episode-item {
+    width: 7.5rem;
+    height: 2.75rem;
+    padding-right: 2.75rem;
+  }
+
+  .episode-strip {
+    min-height: 3rem;
+  }
+
+  .episode-delete {
+    visibility: visible;
+    opacity: 1;
+    width: 2.75rem;
+    height: 2.75rem;
+  }
+
+  .episode-delete .ui-icon {
+    width: 0.875rem;
+    height: 0.875rem;
+  }
+
+  .episode-delete-yes,
+  .episode-delete-no {
+    min-height: 2.75rem;
   }
 
   .episode-detail-title,

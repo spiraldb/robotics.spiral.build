@@ -30,6 +30,15 @@ pub fn Transport(recording: bool) -> Element {
     }
 }
 
+#[component]
+pub fn Trash() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M3.5 5.5h9M6 5.5V3.75h4v1.75M5 7.5v5M8 7.5v5M11 7.5v5M4.5 5.5l.5 8h6l.5-8" }
+        }
+    }
+}
+
 /// A rail across the foot of the workspace.
 #[component]
 pub fn Rail() -> Element {
@@ -37,6 +46,23 @@ pub fn Rail() -> Element {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
             rect { x: "1.5", y: "2", width: "13", height: "12", rx: "2" }
             path { d: "M1.5 10.5h13" }
+        }
+    }
+}
+
+/// A camera that cannot be opened: the lens, struck through.
+///
+/// Drawn rather than set as a `×` glyph. The character version was the one mark
+/// in the studio that was type instead of an icon, which made it the one mark
+/// that answered to the type scale — and it sat at 16px, a size this surface
+/// otherwise reserves for the elapsed timer.
+#[component]
+pub fn CameraOff() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M2.5 4.5h6l1-1.5h2l1 1.5h1v7h-2M9.5 11.5h-8v-7" }
+            circle { cx: "6.5", cy: "8", r: "2" }
+            path { d: "M2 2l12 12" }
         }
     }
 }

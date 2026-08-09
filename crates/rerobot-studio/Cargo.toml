@@ -20,6 +20,10 @@ tower-http = { version = "0.7", features = ["fs", "set-header", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-stream = "0.3"
+arrow-array = "58.4.0"
+arrow-schema = "58.4.0"
+parquet = { version = "58.4.0", default-features = false, features = ["arrow", "snap"] }
+zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -235,9 +235,17 @@ impl JointAngles {
     }
 
     /// Set the gripper opening from a normalized `[-1.0, 1.0]` reading.
+    ///
+    /// The SO-101 jaw closes as its encoder counts rise, so the *low* end of the
+    /// calibrated travel is the open jaw and the normalized reading runs
+    /// backwards against the opening this struct reports: `-1.0` is fully open
+    /// and `+1.0` is fully closed. Getting this backwards is invisible during
+    /// teleoperation — leader and follower invert together, so the arms still
+    /// mirror correctly — and only shows up as an inspector percentage and a
+    /// drawn jaw that contradict the hardware on the bench.
     pub fn with_gripper_normalized(mut self, normalized: f64) -> Self {
         self.gripper = if normalized.is_finite() {
-            (normalized + 1.0) / 2.0
+            (1.0 - normalized) / 2.0
         } else {
             0.5
         }
@@ -298,9 +306,13 @@ mod tests {
 
     #[test]
     fn gripper_opening_maps_normalized_readings_to_a_fraction() {
+        // The bottom of the calibrated travel is the open jaw: on the SO-101 the
+        // encoder counts up as the gripper closes. Checked against hardware —
+        // the wrist camera showed the follower's jaws wide open while it read
+        // `raw 1590` against a `1551..3030` travel, normalized `-0.947`.
         assert_eq!(
             JointAngles::default().with_gripper_normalized(-1.0).gripper,
-            0.0
+            1.0
         );
         assert_eq!(
             JointAngles::default().with_gripper_normalized(0.0).gripper,
@@ -308,10 +320,16 @@ mod tests {
         );
         assert_eq!(
             JointAngles::default().with_gripper_normalized(1.0).gripper,
-            1.0
+            0.0
         );
+        // Readings past the calibrated ends clamp rather than reporting a jaw
+        // wider or tighter than the hardware has.
         assert_eq!(
             JointAngles::default().with_gripper_normalized(9.0).gripper,
+            0.0
+        );
+        assert_eq!(
+            JointAngles::default().with_gripper_normalized(-9.0).gripper,
             1.0
         );
         assert_eq!(

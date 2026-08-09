@@ -6,12 +6,12 @@
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use rerobot_core::api::ModeSelection;
+use rerobot_core::api::{ModeSelection, ReplayProgress};
 
 use crate::api;
 use crate::state::{Studio, studio};
 
-fn set_mode(studio: Studio, selection: ModeSelection) {
+pub fn set_mode(studio: Studio, selection: ModeSelection) {
     let request = selection.clone();
     let future = async move { api::send(Method::POST, "/api/mode", Some(&request)).await };
     if matches!(selection, ModeSelection::Idle) {
@@ -93,52 +93,25 @@ pub fn ModeBar() -> Element {
     let has_fault = status.error.is_some();
     let replay = studio.replay();
     let replaying = matches!(mode, ModeSelection::Replay { .. });
+    // Stopping commands does not release motors, so the narration needs to know
+    // whether anything is still energized before it calls the studio quiet.
+    let holding = studio
+        .telemetry
+        .read()
+        .robots
+        .iter()
+        .filter(|robot| robot.torque)
+        .count();
 
     rsx! {
+        // Teleoperation is the only mode the header configures, because it is
+        // the only one that is about a *pair* of arms and so belongs to no
+        // single panel. Manual control is one arm's business and now lives on
+        // that arm's joint panel, beside the sliders it enables; a standing
+        // "Commands stopped" button went with it, since every mode that can
+        // actually be running carries its own stop — teleoperation here, replay
+        // on the session rail.
         div { class: "mode-bar", role: "group", "aria-label": "Operating mode",
-            button {
-                r#type: "button",
-                class: if matches!(mode, ModeSelection::Idle) { "btn mode-button-active" } else { "btn btn-danger" },
-                "aria-pressed": matches!(mode, ModeSelection::Idle),
-                title: "Stop sending motion commands. This is not a safety-rated emergency stop; motors may keep holding position.",
-                onclick: move |_| set_mode(studio, ModeSelection::Idle),
-                {if matches!(mode, ModeSelection::Idle) { "Commands stopped" } else { "Stop motion" }}
-            }
-
-            div {
-                class: if matches!(mode, ModeSelection::Manual { .. }) { "mode-group mode-group-active" } else { "mode-group" },
-                // Teleoperation is a running process with an arm energized at
-                // the end of it. Nudging a dropdown should not end it.
-                title: if replaying { "Stop the replay first" } else if pair_locked { "Stop teleoperation first" } else if controls_paused { "Controls are paused while reconnecting" } else { "Drive one arm's joints from the sliders" },
-                span { class: "text-[11px] text-ink-faint", "Manual" }
-                select {
-                    class: "field-inline",
-                    "aria-label": "Arm to control by hand",
-                    disabled: pair_locked || controls_paused,
-                    onchange: move |event| {
-                        let value = event.value();
-                        set_mode(studio, if value.is_empty() {
-                            ModeSelection::Idle
-                        } else {
-                            ModeSelection::Manual { robot: value }
-                        });
-                    },
-                    option {
-                        value: "",
-                        selected: !matches!(mode, ModeSelection::Manual { .. }),
-                        "off"
-                    }
-                    for arm in arms.clone() {
-                        option {
-                            key: "{arm}",
-                            value: "{arm}",
-                            selected: matches!(&mode, ModeSelection::Manual { robot } if *robot == arm),
-                            "{arm}"
-                        }
-                    }
-                }
-            }
-
             div {
                 class: if teleoperating { "mode-group mode-group-active" } else if has_fault { "mode-group mode-group-fault" } else { "mode-group" },
                 title: match (teleoperating, replaying, can_teleoperate) {
@@ -147,7 +120,7 @@ pub fn ModeBar() -> Element {
                     (_, _, false) => "Teleoperation needs two connected, calibrated arms",
                     _ => "Mirror a hand-guided arm onto a driven one",
                 },
-                span { class: "text-[11px] text-ink-faint", "Teleop" }
+                span { class: "mode-group-name", "Teleop" }
                 select {
                     class: "field-inline",
                     "aria-label": "Leader arm",
@@ -157,7 +130,7 @@ pub fn ModeBar() -> Element {
                         option { key: "{arm}", value: "{arm}", selected: leader == arm, "{arm}" }
                     }
                 }
-                span { class: "text-ink-faint", "→" }
+                span { class: "mode-group-name", "→" }
                 select {
                     class: "field-inline",
                     "aria-label": "Follower arm",
@@ -198,31 +171,69 @@ pub fn ModeBar() -> Element {
             }
 
             if let Some(error) = &status.error {
-                span { class: "mode-description mode-description-fault", "Faulted — {error}" }
-            } else {
-                span { class: "mode-description",
-                    match &mode {
-                        ModeSelection::Idle => "No motion commands. Motor holding state is shown at right.".to_owned(),
-                        ModeSelection::Manual { robot } =>
-                            if status.active { format!("Manual target: {robot}. Enable Hold to energize it.") } else { format!("Manual target {robot} is configured but inactive.") },
-                        ModeSelection::Teleoperate { leader, follower } =>
-                            if status.active { format!("{leader} is released; {follower} is energized and copying it.") } else { format!("{leader} → {follower} is configured but not active.") },
-                        // Replay is started from the session timeline, not from
-                        // here, but it is a mode like any other and the header
-                        // is where the studio says what it is doing.
-                        ModeSelection::Replay { robot, episode } => match &replay {
-                            Some(progress) if progress.frame == 0 =>
-                                format!("{robot} is moving to the start of {episode}."),
-                            Some(progress) => format!(
-                                "{robot} is replaying {episode} — frame {} of {}.",
-                                progress.frame, progress.frames,
-                            ),
-                            None if status.active => format!("{robot} is replaying {episode}."),
-                            None => format!("Replay of {episode} on {robot} has stopped."),
-                        },
-                    }
+                span {
+                    class: "mode-description mode-description-fault",
+                    role: "status",
+                    "Faulted — {error}"
                 }
+            } else if let Some(narration) = narrate(&mode, status.active, holding, &replay) {
+                // The narration takes a line of its own rather than competing
+                // with the controls for whatever space is left over: it is the
+                // only place a replay reports its progress, and the only place
+                // a studio that has stopped commanding still-energized arms
+                // says so.
+                span { class: "mode-description", role: "status", "{narration}" }
             }
         }
+    }
+}
+
+/// What the studio is doing, when that is worth a sentence.
+///
+/// An idle studio with every motor released is already described by the mode
+/// controls and the status chips, so it says nothing: a permanent line
+/// restating the resting state is what teaches an operator to stop reading it.
+/// Everything else is news — including a studio that has stopped commanding
+/// arms which are still holding position, which is the one case where the
+/// resting state is not the safe one.
+fn narrate(
+    mode: &ModeSelection,
+    active: bool,
+    holding: usize,
+    replay: &Option<ReplayProgress>,
+) -> Option<String> {
+    match mode {
+        ModeSelection::Idle if holding == 0 => None,
+        ModeSelection::Idle => Some(format!(
+            "No motion commands, but {} still holding position. Stopping commands is not a safety-rated stop.",
+            match holding {
+                1 => "one arm is".to_owned(),
+                many => format!("{many} arms are"),
+            },
+        )),
+        ModeSelection::Manual { robot } => Some(if active {
+            format!("Manual target: {robot}. Enable Hold to energize it.")
+        } else {
+            format!("Manual target {robot} is configured but inactive.")
+        }),
+        ModeSelection::Teleoperate { leader, follower } => Some(if active {
+            format!("{leader} is released; {follower} is energized and copying it.")
+        } else {
+            format!("{leader} → {follower} is configured but not active.")
+        }),
+        // Replay is started from the session timeline, not from here, but it is
+        // a mode like any other and the header is where the studio says what it
+        // is doing.
+        ModeSelection::Replay { robot, episode } => Some(match replay {
+            Some(progress) if progress.frame == 0 => {
+                format!("{robot} is moving to the start of {episode}.")
+            }
+            Some(progress) => format!(
+                "{robot} is replaying {episode} — frame {} of {}.",
+                progress.frame, progress.frames,
+            ),
+            None if active => format!("{robot} is replaying {episode}."),
+            None => format!("Replay of {episode} on {robot} has stopped."),
+        }),
     }
 }

@@ -8,12 +8,12 @@
 use dioxus::prelude::*;
 use gloo_net::http::Method;
 use rerobot_core::api::{
-    EpisodeSummary, ExportRequest, ExportResponse, RecordingProgress, StartRecordingRequest,
+    EpisodeSummary, ImportResponse, ModeSelection, RecordingProgress, StartRecordingRequest,
     StartReplayRequest, StopRecordingRequest,
 };
 
 use crate::api;
-use crate::icons::Transport;
+use crate::icons::{Transport, Trash};
 use crate::state::{Studio, studio};
 
 /// Most episodes shown in the current session strip.
@@ -60,15 +60,29 @@ fn delete(studio: Studio, id: String) {
     });
 }
 
-fn replay(studio: Studio, episode: String, robot: String) {
+fn replay(studio: Studio, episode: String, robot: String, source_arm: Option<String>) {
     let request = StartReplayRequest {
         episode,
         robot,
-        source_arm: None,
+        source_arm,
     };
     studio.run("", async move {
         api::send(Method::POST, "/api/episodes/replay", Some(&request)).await
     });
+}
+
+/// End a replay from the rail that started it.
+///
+/// This is the same transition the header's stop button performs; it exists
+/// here so the operator does not have to leave the control they just used while
+/// an arm is still moving.
+fn stop_replay(studio: Studio) {
+    studio.run_safety(
+        "Replay stopped. Motors may still be holding position.",
+        async move {
+            api::send(Method::POST, "/api/mode", Some(&ModeSelection::Idle)).await
+        },
+    );
 }
 
 #[component]
@@ -104,12 +118,22 @@ pub fn TimelineRail(compact: bool) -> Element {
 
     rsx! {
         section { class: "timeline-rail", "aria-label": "Dataset recording and replay",
+            // Transport, episodes and session actions share one row. They used
+            // to be two, with the toolbar's middle left empty across the full
+            // width of the window while the episodes sat on a row of their own
+            // underneath — so the strip now takes the space that was already
+            // there rather than paying for a second row to sit in.
             div { class: "timeline-toolbar",
                 TransportBlock { recording: recording.clone() }
+                EpisodeStrip { episodes: episodes.clone(), recording }
                 SessionSummary { episodes: episodes.clone() }
             }
-            EpisodeStrip { episodes, recording }
-            EpisodeDetail { selected: studio.focused_episode() }
+            // With nothing recorded, the strip's own empty state is the whole
+            // answer; a second row saying "select an episode" underneath it
+            // would be asking for something that does not exist yet.
+            if !episodes.is_empty() {
+                EpisodeDetail { selected: studio.focused_episode() }
+            }
         }
     }
 }
@@ -160,13 +184,24 @@ fn TransportBlock(recording: Option<RecordingProgress>) -> Element {
                     }
                 }
             }
+            // The elapsed clock itself stays silent — announcing it ten times a
+            // second would bury everything else — so the transitions a screen
+            // reader actually needs are announced once each instead.
+            span { class: "sr-only", role: "status",
+                if live { "Recording." } else { "Not recording." }
+            }
             if live {
-                button {
-                    r#type: "button",
-                    class: "take-cancel",
-                    title: "Stop this recording and leave it out of exports (X)",
-                    onclick: move |_| stop_recording(studio, false),
-                    "Cancel"
+                // The way out of a bad take is printed the same way the way in
+                // is. It used to live only in a tooltip, on the one control an
+                // operator reaches for while both eyes are on the arm.
+                div { class: "take-cancel-block",
+                    button {
+                        r#type: "button",
+                        class: "take-cancel",
+                        onclick: move |_| stop_recording(studio, false),
+                        "Cancel"
+                    }
+                    span { class: "timeline-readout-label", "X to discard" }
                 }
             }
             if let Some(reason) = blocked {
@@ -187,7 +222,7 @@ fn EpisodeStrip(episodes: Vec<EpisodeSummary>, recording: Option<RecordingProgre
 
     if shown.is_empty() && recording.is_none() {
         return rsx! {
-            div { class: "episode-strip episode-strip-empty",
+            div { class: "episode-strip-wrap episode-strip-empty",
                 strong { "No episodes yet" }
                 span { "Start teleoperation, then press Record or R." }
             }
@@ -196,14 +231,21 @@ fn EpisodeStrip(episodes: Vec<EpisodeSummary>, recording: Option<RecordingProgre
 
     rsx! {
         div { class: "episode-strip-wrap",
-            div { class: "episode-strip-heading",
-                strong { "Episodes" }
-                span { "Select one to replay" }
-                if hidden > 0 { span { class: "ml-auto", "Newest {MAX_VISIBLE_EPISODES} shown" } }
-            }
             ol { class: "episode-strip", "aria-label": "Recorded episodes, oldest first",
+                // The cap is still stated, but at the head of the strip where
+                // the older takes actually are, rather than in a heading row
+                // that also spent its width restating what the strip is.
+                if hidden > 0 {
+                    li {
+                        span {
+                            class: "episode-strip-older",
+                            title: "The newest {MAX_VISIBLE_EPISODES} episodes are shown",
+                            "+{hidden} older"
+                        }
+                    }
+                }
                 for episode in shown.iter().cloned() {
-                    li { key: "{episode.id}",
+                    li { key: "{episode.id}", class: "episode-card",
                         button {
                             r#type: "button",
                             class: episode_button_class(&episode, chosen.as_deref() == Some(episode.id.as_str())),
@@ -213,8 +255,10 @@ fn EpisodeStrip(episodes: Vec<EpisodeSummary>, recording: Option<RecordingProgre
                                 let id = episode.id.clone();
                                 move |_| selected.set(Some(id.clone()))
                             },
-                            span { class: "episode-index", "{short_id(&episode.id)}" }
-                            span { class: "episode-duration", {format!("{}s", format_seconds(episode.duration_seconds))} }
+                            span { class: "episode-item-head",
+                                span { class: "episode-index", "{short_id(&episode.id)}" }
+                                span { class: "episode-duration", {format!("{}s", format_seconds(episode.duration_seconds))} }
+                            }
                             span { class: "episode-state",
                                 if episode.problem.is_some() {
                                     "Incomplete"
@@ -225,13 +269,16 @@ fn EpisodeStrip(episodes: Vec<EpisodeSummary>, recording: Option<RecordingProgre
                                 }
                             }
                         }
+                        DeleteEpisode { id: episode.id.clone() }
                     }
                 }
                 if let Some(progress) = recording {
                     li {
                         div { class: "episode-item episode-item-live", "aria-label": "Recording {progress.episode}",
-                            span { class: "episode-index", "{short_id(&progress.episode)}" }
-                            span { class: "episode-duration", {format_clock(progress.elapsed_seconds)} }
+                            span { class: "episode-item-head",
+                                span { class: "episode-index", "{short_id(&progress.episode)}" }
+                                span { class: "episode-duration", {format_clock(progress.elapsed_seconds)} }
+                            }
                             span { class: "episode-state", "Recording" }
                         }
                     }
@@ -259,17 +306,42 @@ fn EpisodeDetail(selected: Option<EpisodeSummary>) -> Element {
         .into_iter()
         .filter(|robot| robot.calibrated)
         .collect::<Vec<_>>();
-    let target = episode
-        .arms
+    let target = ready
         .iter()
-        .map(|arm| arm.id.clone())
-        .find(|id| ready.iter().any(|robot| &robot.id == id))
-        .or_else(|| ready.first().map(|robot| robot.id.clone()));
+        .find(|robot| {
+            robot
+                .robot_type
+                .as_deref()
+                .is_some_and(|kind| kind.contains("follower"))
+        })
+        .map(|robot| robot.id.clone());
+    let source = target
+        .as_ref()
+        .filter(|target| episode.arm(target).is_some())
+        .cloned()
+        .or_else(|| {
+            episode
+                .arms
+                .iter()
+                .find(|arm| arm.id.to_ascii_lowercase().contains("follower"))
+                .map(|arm| arm.id.clone())
+        })
+        .or_else(|| match episode.arms.as_slice() {
+            [only] => Some(only.id.clone()),
+            _ => None,
+        });
+    // Only this episode's own replay turns the action into a transport; another
+     // episode playing still reads as a blocker on this one.
+    let playing = replaying
+        .clone()
+        .filter(|progress| progress.episode == episode.id);
     let busy = studio.mode_active() || replaying.is_some();
     let replay_blocked = if !episode.usable() {
         Some("This episode did not finish recording".to_owned())
     } else if target.is_none() {
-        Some("Connect and calibrate an arm before replaying".to_owned())
+        Some("Connect and calibrate the follower before replaying".to_owned())
+    } else if source.is_none() {
+        Some("This episode does not identify a follower trajectory".to_owned())
     } else if busy {
         Some("Stop the current mode before replaying".to_owned())
     } else if !studio.controls_available() {
@@ -279,7 +351,6 @@ fn EpisodeDetail(selected: Option<EpisodeSummary>) -> Element {
     };
 
     let id = episode.id.clone();
-    let delete_id = id.clone();
     let blocked_note = replay_blocked.clone();
     rsx! {
         div { class: "episode-detail",
@@ -295,26 +366,45 @@ fn EpisodeDetail(selected: Option<EpisodeSummary>) -> Element {
                 Fact { label: "Recorded in", value: episode.source.clone() }
             }
             div { class: "episode-actions",
-                button {
-                    r#type: "button",
-                    class: "btn btn-primary episode-replay",
-                    disabled: replay_blocked.is_some(),
-                    onclick: {
-                        let (id, target) = (id.clone(), target.clone());
-                        move |_| if let Some(robot) = target.clone() {
-                            replay(studio, id.clone(), robot);
-                        }
-                    },
-                    {
-                        match &target {
-                            Some(robot) => format!("Replay on {robot}"),
-                            None => "Replay episode".to_owned(),
+                // While this take is the one driving an arm, the rail stops
+                // offering a disabled Replay and starts reporting the motion it
+                // began: the escape belongs where the action was, not in a
+                // header button that has quietly relabelled itself.
+                if let Some(progress) = playing {
+                    span { class: "episode-progress", role: "status",
+                        if progress.frame == 0 {
+                            "Moving to the first pose…"
+                        } else {
+                            {format!("Frame {} of {}", progress.frame, progress.frames)}
                         }
                     }
-                }
-                DeleteEpisode { id: delete_id }
-                if let Some(reason) = blocked_note {
-                    span { class: "take-blocked", "{reason}" }
+                    button {
+                        r#type: "button",
+                        class: "btn btn-danger episode-replay",
+                        onclick: move |_| stop_replay(studio),
+                        "Stop replay"
+                    }
+                } else {
+                    button {
+                        r#type: "button",
+                        class: "btn btn-primary episode-replay",
+                        disabled: replay_blocked.is_some(),
+                        onclick: {
+                            let (id, target, source) = (id.clone(), target.clone(), source.clone());
+                            move |_| if let Some(robot) = target.clone() {
+                                replay(studio, id.clone(), robot, source.clone());
+                            }
+                        },
+                        {
+                            match &target {
+                                Some(robot) => format!("Replay on {robot}"),
+                                None => "Replay episode".to_owned(),
+                            }
+                        }
+                    }
+                    if let Some(reason) = blocked_note {
+                        span { class: "take-blocked", "{reason}" }
+                    }
                 }
             }
             if let Some(problem) = &episode.problem {
@@ -340,9 +430,10 @@ fn DeleteEpisode(id: String) -> Element {
     let id = current();
     rsx! {
         if confirming() {
-            span { class: "take-confirm",
+            span { class: "episode-delete-confirm",
                 button {
-                    r#type: "button", class: "btn btn-danger",
+                    r#type: "button", class: "episode-delete-yes",
+                    title: "Permanently delete {id}",
                     onclick: {
                         let id = id.clone();
                         move |_| {
@@ -350,16 +441,23 @@ fn DeleteEpisode(id: String) -> Element {
                             delete(studio, id.clone());
                         }
                     },
-                    "Delete episode"
+                    "Delete"
                 }
-                button { r#type: "button", class: "btn", onclick: move |_| confirming.set(false), "Cancel" }
+                button {
+                    r#type: "button",
+                    class: "episode-delete-no",
+                    "aria-label": "Cancel deletion",
+                    onclick: move |_| confirming.set(false),
+                    "Cancel"
+                }
             }
         } else {
             button {
-                r#type: "button", class: "btn btn-danger",
-                title: "Permanently remove this episode from disk",
+                r#type: "button", class: "episode-delete",
+                title: "Delete {id}",
+                "aria-label": "Delete {id}",
                 onclick: move |_| confirming.set(true),
-                "Delete"
+                Trash {}
             }
         }
     }
@@ -369,8 +467,7 @@ fn DeleteEpisode(id: String) -> Element {
 #[component]
 fn SessionSummary(episodes: Vec<EpisodeSummary>) -> Element {
     let studio = studio();
-    let mut exporting = use_signal(|| false);
-    let mut destination = use_signal(String::new);
+    let mut importing = use_signal(|| false);
     let exportable = episodes
         .iter()
         .filter(|episode| episode.usable() && !episode.discarded)
@@ -389,66 +486,62 @@ fn SessionSummary(episodes: Vec<EpisodeSummary>) -> Element {
                 span { class: "session-duration", {format!("{} total", format_total_duration(seconds))} }
                 if incomplete > 0 { span { class: "session-excluded", "{incomplete} not exported" } }
             }
-            if exporting() {
-                form {
-                    class: "export-form",
-                    onsubmit: move |event| {
-                        event.prevent_default();
-                        let name = destination().trim().to_owned();
-                        if name.is_empty() {
-                            studio.report("Name the directory to export into.");
-                            return;
-                        }
-                        let request = ExportRequest { directory: name };
-                        exporting.set(false);
-                        destination.set(String::new());
+            label {
+                class: if importing() { "btn btn-outline dataset-import dataset-importing" } else { "btn btn-outline dataset-import" },
+                title: "Import a LeRobot v2 or v3 ZIP",
+                input {
+                    class: "sr-only",
+                    r#type: "file",
+                    accept: ".zip,application/zip",
+                    disabled: importing(),
+                    onchange: move |event| {
+                        let Some(file) = event.files().first().cloned() else { return };
+                        importing.set(true);
                         let mut notice = studio.notice;
-                        studio.run("", async move {
-                            let result = api::send_json::<_, ExportResponse>(
-                                Method::POST,
-                                "/api/episodes/export",
-                                Some(&request),
-                            )
-                            .await?;
-                            notice.set(Some(crate::state::Notice {
-                                text: format!(
-                                    "Exported {} episodes ({} frames) to {}{}.",
-                                    result.episodes,
-                                    result.frames,
-                                    result.directory,
-                                    if result.skipped > 0 {
-                                        format!(", skipping {} incomplete or cancelled", result.skipped)
-                                    } else {
-                                        String::new()
-                                    },
-                                ),
-                                failed: false,
-                            }));
-                            Ok(())
+                        let mut selected = studio.selected_episode;
+                        studio.run_safety("", async move {
+                            let result = async {
+                                let bytes = file
+                                    .read_bytes()
+                                    .await
+                                    .map_err(|error| format!("Could not read {}: {error}", file.name()))?;
+                                api::upload_json::<ImportResponse>("/api/episodes/import", &bytes).await
+                            }
+                            .await;
+                            importing.set(false);
+                            match result {
+                                Ok(result) => {
+                                    if let Some(id) = result.first_episode.clone() {
+                                        selected.set(Some(id));
+                                    }
+                                    notice.set(Some(crate::state::Notice {
+                                        text: format!(
+                                            "Imported {} {} ({} frames).",
+                                            result.episodes,
+                                            if result.episodes == 1 { "episode" } else { "episodes" },
+                                            result.frames,
+                                        ),
+                                        failed: false,
+                                    }));
+                                    Ok(())
+                                }
+                                Err(error) => Err(error),
+                            }
                         });
-                    },
-                    label { class: "sr-only", r#for: "export-directory", "Export directory" }
-                    input {
-                        id: "export-directory",
-                        class: "field export-field",
-                        value: "{destination}",
-                        placeholder: "dataset-name",
-                        autofocus: true,
-                        oninput: move |event| destination.set(event.value()),
                     }
-                    button { r#type: "submit", class: "btn btn-primary", "Export" }
-                    button { r#type: "button", class: "btn", onclick: move |_| exporting.set(false), "Cancel" }
                 }
+                if importing() { "Importing…" } else { "Import" }
+            }
+            if exportable.is_empty() {
+                button { r#type: "button", class: "btn btn-outline", disabled: true, "Download dataset" }
+                span { class: "take-blocked", "Record an episode before downloading" }
             } else {
-                button {
-                    r#type: "button",
-                    class: "btn btn-outline",
-                    disabled: exportable.is_empty(),
-                    onclick: move |_| exporting.set(true),
-                    "Export dataset"
-                }
-                if exportable.is_empty() {
-                    span { class: "take-blocked", "Record an episode before exporting" }
+                a {
+                    class: "btn btn-outline dataset-download",
+                    href: "/api/episodes/export.zip",
+                    download: "rerobot-lerobot-v3-dataset.zip",
+                    title: "Download this session as a LeRobot v3 ZIP",
+                    "Download dataset"
                 }
             }
         }

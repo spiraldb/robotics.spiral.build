@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -24,7 +24,7 @@ use rerobot::serial_ports::{
 };
 use rerobot_core::api::{
     ApiError, CameraBinding, CameraStatus, CreateRobotRequest, EpisodeSummary, ExportRequest,
-    ExportResponse, GoalRequest, IdentifyPortRequest, IdentifyPortResponse,
+    ExportResponse, GoalRequest, IdentifyPortRequest, IdentifyPortResponse, ImportResponse,
     JudgeEpisodeRequest, ModeSelection, RobotSummary, SerialPortSummary, StartRecordingRequest,
     StartReplayRequest, StopRecordingRequest, StudioSnapshot, TorqueRequest, UpdateRobotRequest,
 };
@@ -33,9 +33,10 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use crate::camera_manager::{CameraManager, Frame};
+use crate::dataset::{export_lerobot_archive, import_lerobot_archive};
 use crate::episodes::{EpisodeError, EpisodeStore, build_arms};
 use crate::hardware::{HardwareHandle, RobotSpec};
-use crate::workspace::{RobotWorkspace, WorkspaceError, validate_camera_role};
+use crate::workspace::{RobotRecord, RobotWorkspace, WorkspaceError, validate_camera_role};
 
 /// Boundary marker separating parts of an MJPEG response.
 const MJPEG_BOUNDARY: &str = "rerobotframe";
@@ -134,6 +135,11 @@ pub fn api_router(state: AppState) -> Router {
         .route("/episodes/record/stop", post(stop_recording))
         .route("/episodes/replay", post(start_replay))
         .route("/episodes/export", post(export_episodes))
+        .route("/episodes/export.zip", get(download_episodes))
+        .route(
+            "/episodes/import",
+            post(import_episodes).layer(DefaultBodyLimit::max(256 * 1024 * 1024)),
+        )
         .route("/episodes/{id}", delete(delete_episode))
         .route("/episodes/{id}/judge", post(judge_episode))
         .route("/episodes/{id}/trace", get(episode_trace))
@@ -565,20 +571,44 @@ async fn connect_robot(
     Path(id): Path<String>,
 ) -> Result<StatusCode, Failure> {
     let record = state.workspace.get(&id)?;
+    let spec = robot_spec(&record)?;
+    state.hardware.connect(spec).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn robot_spec(record: &RobotRecord) -> Result<RobotSpec, Failure> {
     let port = record.port().ok_or_else(|| {
         Failure::bad_request(format!(
-            "robot {id:?} has no serial port assigned; set one before connecting"
+            "robot {:?} has no serial port assigned; set one before connecting",
+            record.id
         ))
     })?;
-
-    let spec = RobotSpec {
+    Ok(RobotSpec {
         id: record.id.clone(),
         port,
         motors: record.motors()?,
         calibration: record.calibration()?,
-    };
-    state.hardware.connect(spec).await?;
-    Ok(StatusCode::NO_CONTENT)
+    })
+}
+
+/// Try every usable saved robot once when the studio starts.
+///
+/// A failed bus stays disconnected with its error attached; one absent arm
+/// never prevents the web interface or another arm from starting.
+pub async fn auto_connect_saved_robots(state: AppState) {
+    for record in state.workspace.list() {
+        let spec = match robot_spec(&record) {
+            Ok(spec) => spec,
+            Err(error) => {
+                tracing::info!(robot = %record.id, "saved robot is not ready for auto-connect: {}", error.1);
+                continue;
+            }
+        };
+        match state.hardware.connect(spec).await {
+            Ok(()) => tracing::info!(robot = %record.id, "auto-connected saved robot"),
+            Err(error) => tracing::warn!(robot = %record.id, "auto-connect failed: {error}"),
+        }
+    }
 }
 
 async fn disconnect_robot(
@@ -897,6 +927,56 @@ async fn export_episodes(
     let destination = resolve_export_directory(state.episodes.directory(), &request.directory)?;
     let episodes = state.episodes.clone();
     let response = tokio::task::spawn_blocking(move || episodes.export(&destination))
+        .await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+    Ok(Json(response))
+}
+
+/// Build a current LeRobot v3 dataset and let the browser download it as one file.
+async fn download_episodes(State(state): State<AppState>) -> Result<Response, Failure> {
+    let episodes = state.episodes.clone();
+    let archive = tokio::task::spawn_blocking(move || export_lerobot_archive(&episodes))
+        .await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+    let mut response = Body::from(archive.bytes).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/zip"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        header::HeaderValue::from_static("attachment; filename=\"rerobot-lerobot-v3-dataset.zip\""),
+    );
+    response.headers_mut().insert(
+        header::HeaderName::from_static("x-rerobot-episodes"),
+        header::HeaderValue::from_str(&archive.episodes.to_string())
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
+    );
+    response.headers_mut().insert(
+        header::HeaderName::from_static("x-rerobot-frames"),
+        header::HeaderValue::from_str(&archive.frames.to_string())
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
+    );
+    response.headers_mut().insert(
+        header::HeaderName::from_static("x-rerobot-skipped"),
+        header::HeaderValue::from_str(&archive.skipped.to_string())
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
+    );
+    Ok(response)
+}
+
+/// Convert a browser-uploaded LeRobot ZIP into replayable local episodes.
+async fn import_episodes(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<ImportResponse>, Failure> {
+    if body.is_empty() {
+        return Err(Failure::bad_request(
+            "choose a LeRobot dataset ZIP to import",
+        ));
+    }
+    let episodes = state.episodes.clone();
+    let response = tokio::task::spawn_blocking(move || import_lerobot_archive(&episodes, &body))
         .await
         .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
     Ok(Json(response))

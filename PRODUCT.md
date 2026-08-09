@@ -94,19 +94,23 @@ Releasing torque lets an arm fall under its own weight.
 - A single-screen web studio: robot instances, serial-port assignment
   (including *Identify* by unplugging), camera assignment by role with live
   preview, and a guided calibration sweep that writes measured ranges into the
-  robot's file.
+  robot's file. On startup the studio tries each usable saved robot once, while
+  leaving an unavailable arm disconnected with its error visible.
 - Four modes: **Idle** (read only), **Manual** (command one arm's joints),
   **Teleoperation** (mirror a hand-guided leader onto a follower, mapped
   through each arm's own calibration), and **Replay** (play a recorded take back
   onto one arm, ramping it to the take's first pose before playing).
 - A live 3D scene drawn from URDF, and MJPEG camera previews.
-- **Episode recording and dataset export**, on a session timeline across the foot
+- **Episode recording and dataset interchange**, on a session timeline across the foot
   of the studio. Recording samples every connected arm at the control rate; one
   take is one self-describing file in the episode directory (`--episodes`,
   default `./episodes`), carrying its arms and joints, normalized positions, raw
-  encoder counts, and per-frame tracking error. A take can be judged in or out,
-  replayed, or deleted; export writes the kept takes plus a manifest into a new
-  directory. Recording is deliberately not a mode: a take is captured *during*
+  encoder counts, and per-frame tracking error. Each take can be selected,
+  replayed on the follower, or deleted from its episode card. Download produces
+  one LeRobot v3 ZIP containing low-dimensional state/action Parquet data and
+  metadata; LeRobot v2/v3 ZIPs can be imported as local replayable episodes.
+  Camera streams are preview-only and are not represented as recorded video.
+  Recording is deliberately not a mode: a take is captured *during*
   teleoperation, manual control, or an idle arm moved by hand.
 - A `--simulate` mode with emulated motors, so calibration, teleoperation,
   recording, and replay all work end to end with no hardware attached.

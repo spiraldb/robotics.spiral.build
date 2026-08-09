@@ -27,6 +27,35 @@ enum PaneDrag {
     Right,
 }
 
+/// How far each side pane may be resized, in pixels.
+///
+/// The drag handler and the keyboard handler read the same bounds, so a pane
+/// cannot be nudged somewhere a drag would refuse to leave it.
+const LEFT_PANE_RANGE: (f64, f64) = (220.0, 380.0);
+const RIGHT_PANE_RANGE: (f64, f64) = (280.0, 440.0);
+
+/// The width an arrow key moves a splitter to, if this key moves it at all.
+///
+/// `direction` is `1.0` when a pane grows as its edge moves right and `-1.0`
+/// when it grows as its edge moves left, so both splitters follow the arrow the
+/// operator actually pressed rather than the pane it happens to belong to.
+fn nudged(
+    event: &Event<KeyboardData>,
+    width: f64,
+    (minimum, maximum): (f64, f64),
+    direction: f64,
+) -> Option<f64> {
+    let step = if event.modifiers().shift() { 32.0 } else { 8.0 };
+    let width = match event.key() {
+        Key::ArrowLeft => width - step * direction,
+        Key::ArrowRight => width + step * direction,
+        Key::Home => minimum,
+        Key::End => maximum,
+        _ => return None,
+    };
+    Some(width.clamp(minimum, maximum))
+}
+
 #[component]
 pub fn App() -> Element {
     Studio::use_studio();
@@ -109,13 +138,16 @@ pub fn App() -> Element {
                     let Some(active) = dragging() else { return };
                     let x = event.data().client_coordinates().x;
                     match active {
-                        PaneDrag::Left => left_width.set(x.clamp(220.0, 380.0)),
+                        PaneDrag::Left => {
+                            left_width.set(x.clamp(LEFT_PANE_RANGE.0, LEFT_PANE_RANGE.1))
+                        }
                         PaneDrag::Right => {
                             let viewport = web_sys::window()
                                 .and_then(|window| window.inner_width().ok())
                                 .and_then(|width| width.as_f64())
                                 .unwrap_or(1280.0);
-                            right_width.set((viewport - x).clamp(280.0, 440.0));
+                            right_width
+                                .set((viewport - x).clamp(RIGHT_PANE_RANGE.0, RIGHT_PANE_RANGE.1));
                         }
                     }
                 },
@@ -140,10 +172,24 @@ pub fn App() -> Element {
                         role: "separator",
                         "aria-label": "Resize robot explorer",
                         "aria-orientation": "vertical",
-                        title: "Drag to resize the robot explorer",
+                        // A separator that only responds to a drag is a separator
+                        // a keyboard cannot move, so it takes focus and the arrow
+                        // keys the role already implies.
+                        tabindex: 0,
+                        "aria-valuenow": left_width() as i64,
+                        "aria-valuemin": LEFT_PANE_RANGE.0 as i64,
+                        "aria-valuemax": LEFT_PANE_RANGE.1 as i64,
+                        title: "Drag, or focus and use the arrow keys, to resize the robot explorer",
                         onpointerdown: move |event| {
                             capture(&event);
                             dragging.set(Some(PaneDrag::Left));
+                        },
+                        onkeydown: move |event| {
+                            if let Some(width) = nudged(&event, left_width(), LEFT_PANE_RANGE, 1.0) {
+                                event.prevent_default();
+                                left_width.set(width);
+                                store_number("rerobot.pane.left.width", width);
+                            }
                         },
                     }
                 }
@@ -157,10 +203,23 @@ pub fn App() -> Element {
                         role: "separator",
                         "aria-label": "Resize joint inspector",
                         "aria-orientation": "vertical",
-                        title: "Drag to resize the joint inspector",
+                        tabindex: 0,
+                        "aria-valuenow": right_width() as i64,
+                        "aria-valuemin": RIGHT_PANE_RANGE.0 as i64,
+                        "aria-valuemax": RIGHT_PANE_RANGE.1 as i64,
+                        title: "Drag, or focus and use the arrow keys, to resize the joint inspector",
                         onpointerdown: move |event| {
                             capture(&event);
                             dragging.set(Some(PaneDrag::Right));
+                        },
+                        onkeydown: move |event| {
+                            // Inverted: this pane grows as its edge moves left.
+                            if let Some(width) = nudged(&event, right_width(), RIGHT_PANE_RANGE, -1.0)
+                            {
+                                event.prevent_default();
+                                right_width.set(width);
+                                store_number("rerobot.pane.right.width", width);
+                            }
                         },
                     }
                     aside {
@@ -255,12 +314,12 @@ fn Header(
                     {if !controls_available { "Environment unknown" } else if snapshot.simulated { "Simulation" } else { "Physical hardware" }}
                 }
                 span {
-                    class: if snapshot.mode.error.is_some() { "chip chip-danger" } else if snapshot.mode.active { "chip chip-active" } else { "chip" },
+                    class: if snapshot.mode.error.is_some() { "chip status-mode chip-danger" } else if snapshot.mode.active { "chip status-mode chip-active" } else { "chip status-mode" },
                     title: "Backend-reported command lifecycle",
                     "{mode_state}"
                 }
                 span {
-                    class: if !controls_available { "chip" } else if holding > 0 { "chip chip-danger" } else { "chip" },
+                    class: if !controls_available { "chip status-hold" } else if holding > 0 { "chip status-hold chip-danger" } else { "chip status-hold" },
                     title: if !controls_available { "Holding state is unknown while telemetry is unavailable or delayed" } else if holding > 0 { "Motor torque is enabled. An arm may resist motion or keep holding after commands stop." } else { "No robot currently reports motor torque" },
                     if !controls_available { "Hold unknown" } else if holding == 0 { "Torque released" } else { "{holding} holding" }
                 }
@@ -322,11 +381,17 @@ fn Warnings() -> Element {
         return rsx! {};
     }
     let count = showing.len();
+    // The first issue's own words ride beside the count. The summary used to be
+    // a bare tally, so what was actually wrong took a click to read at every
+    // width — on a surface whose whole point is that the state of the bench is
+    // legible without one.
+    let first = showing.first().cloned().unwrap_or_default();
     rsx! {
         details { class: "issue-details", role: "status",
             summary { class: "issue-summary",
                 span { class: "issue-icon", "!" }
                 span { if count == 1 { "1 issue" } else { "{count} issues" } }
+                span { class: "issue-preview", "{first}" }
             }
             div { class: "issue-popover",
                 ul { class: "issue-list",
@@ -357,7 +422,7 @@ fn NoticeStrip() -> Element {
                 class: "notice-card", role: if current.failed { "alert" } else { "status" },
                 "aria-live": if current.failed { "assertive" } else { "polite" },
                 span { class: "status-dot", style: if current.failed { "background: var(--tone-danger)" } else { "background: var(--tone-good)" } }
-                span { class: "flex-1", "{current.text}" }
+                span { class: "flex-1 text-[12px]", "{current.text}" }
                 button { r#type: "button", class: "link", onclick: move |_| notice.set(None), "Dismiss" }
             }
         }

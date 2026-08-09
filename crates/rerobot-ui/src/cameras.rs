@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 use rerobot_core::api::{CameraStatus, RobotSummary};
 
 use crate::api;
-use crate::icons::Chevron;
+use crate::icons::{CameraOff, Chevron};
 use crate::state::{Selection, studio};
 
 /// The selected robot's assigned camera feeds, grouped in its properties panel.
@@ -125,15 +125,17 @@ fn CameraProperty(
                     }
                 } else {
                     div { class: "camera-unavailable",
-                        span { class: "camera-placeholder-icon", "×" }
+                        span { class: "camera-placeholder-icon", CameraOff {} }
                         span { "Camera unavailable" }
                     }
                 }
             }
+            // Only a real problem gets a line of its own. Waiting for the first
+            // frame is already said by the header's "Opening", and saying it
+            // twice added a row under every camera for a state that clears in
+            // about a second.
             if let Some(trouble) = trouble {
                 p { class: "camera-trouble", "{trouble}" }
-            } else if frames == 0 {
-                p { class: "camera-trouble text-ink-faint", "Opened; waiting for the first frame." }
             }
         }
     }

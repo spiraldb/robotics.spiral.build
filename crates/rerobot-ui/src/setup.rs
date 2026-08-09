@@ -121,6 +121,10 @@ fn RobotEntry(robot: RobotSummary, focused: bool, accent: &'static str) -> Eleme
                         class: "device-accent",
                         style: "background: {accent}",
                     }
+                    // Name and role share a baseline rather than stacking. The
+                    // stack is what made this row 48px tall, which put the
+                    // setup underneath it — the part with work in it — below
+                    // the fold on a two-arm bench.
                     span { class: "device-copy",
                         strong { "{robot.id}" }
                         span { "{role}" }
@@ -176,7 +180,7 @@ fn NewRobotForm() -> Element {
         return rsx! {
             button {
                 r#type: "button",
-                class: "cursor-pointer px-3 py-1.5 text-left text-ink-faint hover:bg-hover hover:text-ink",
+                class: "min-h-6 cursor-pointer px-2 text-left text-[11px] text-ink-faint hover:bg-hover hover:text-ink",
                 onclick: move |_| open.set(true),
                 "+ Add an arm"
             }
@@ -184,7 +188,7 @@ fn NewRobotForm() -> Element {
     }
 
     rsx! {
-        div { class: "flex flex-col gap-1.5 px-3 py-2",
+        div { class: "flex flex-col gap-1 px-2 py-1.5",
             input {
                 class: "field",
                 "aria-label": "New arm name",
@@ -210,7 +214,7 @@ fn NewRobotForm() -> Element {
                     option { key: "{value}", value: "{value}", selected: robot_type() == value, "{label}" }
                 }
             }
-            div { class: "flex gap-1.5",
+            div { class: "flex gap-1",
                 button {
                     r#type: "button",
                     class: "btn btn-primary",
@@ -253,12 +257,12 @@ fn RobotSetup(robot: RobotSummary) -> Element {
             }
 
             if let Some(problem) = &robot.problem {
-                p { class: "rounded bg-danger-soft px-2 py-1.5 text-[12px] text-danger",
+                p { class: "mb-1 rounded bg-danger-soft px-1.5 py-1 text-[11px] text-danger",
                     "This arm's file cannot be used: {problem}"
                 }
             }
             if let Some(error) = &robot.connection.error {
-                p { class: "rounded bg-danger-soft px-2 py-1.5 text-[12px] text-danger", "{error}" }
+                p { class: "mb-1 rounded bg-danger-soft px-1.5 py-1 text-[11px] text-danger", "{error}" }
             }
 
             div { class: "device-setup-section",
@@ -275,7 +279,7 @@ fn RobotSetup(robot: RobotSummary) -> Element {
                 CalibrationSection { robot: robot.clone(), connected, progress }
             }
             div { class: "device-file-row",
-                span { class: "flex-1 truncate font-mono text-[10px] text-ink-faint", "{robot.file}" }
+                span { class: "min-w-0 flex-1 truncate font-mono text-[10px] text-ink-faint", "{robot.file}" }
                 DeleteButton { robot }
             }
         }
@@ -347,7 +351,7 @@ fn PortSection(robot: RobotSummary, scan: PortScan, on_rescan: EventHandler<()>)
 
     rsx! {
         section { class: "device-section-content",
-            div { class: "mb-1 flex items-center gap-2",
+            div { class: "mb-0.5 flex items-center gap-1.5",
                 h3 { class: "label mb-0", "Motor bus" }
                 button {
                     r#type: "button",
@@ -411,7 +415,7 @@ fn PortSection(robot: RobotSummary, scan: PortScan, on_rescan: EventHandler<()>)
                 }
             }
             if let Some(Err(error)) = &scan {
-                p { class: "mt-1 text-[11px] text-danger", "{error}" }
+                p { class: "mt-0.5 text-[11px] text-danger", "{error}" }
             }
 
             IdentifyPort {
@@ -481,13 +485,13 @@ fn IdentifyPort(
     match step().clone() {
         IdentifyStep::Idle => rsx! {},
         IdentifyStep::AwaitingUnplug(before) => rsx! {
-            div { class: "mt-1.5 rounded border border-line bg-sunken p-2 text-[12px]",
-                p { class: "mb-1.5",
+            div { class: "mt-1 rounded border border-line bg-sunken p-1.5 text-[11px]",
+                p { class: "mb-1",
                     "Unplug the USB cable from "
                     strong { class: "font-medium", "{robot.id}" }
                     ", then continue. Leave every other device connected."
                 }
-                div { class: "flex gap-1.5",
+                div { class: "flex gap-1",
                     button {
                         r#type: "button",
                         class: "btn btn-primary",
@@ -524,7 +528,7 @@ fn IdentifyPort(
             }
         },
         IdentifyStep::Finished(message) => rsx! {
-            div { class: "mt-1.5 flex items-start gap-2 rounded border border-line bg-sunken p-2 text-[12px]",
+            div { class: "mt-1 flex items-start gap-1.5 rounded border border-line bg-sunken p-1.5 text-[11px]",
                 span { class: "flex-1", "{message}" }
                 button {
                     r#type: "button",
@@ -565,7 +569,7 @@ fn CameraSection(robot: RobotSummary) -> Element {
 
     rsx! {
         section { class: "device-section-content",
-            div { class: "mb-1 flex items-center gap-2",
+            div { class: "mb-0.5 flex items-center gap-1.5",
                 h3 { class: "label mb-0 flex-1", "Cameras" }
                 button {
                     r#type: "button",
@@ -588,13 +592,13 @@ fn CameraSection(robot: RobotSummary) -> Element {
                     {if scanning() { "Scanning…" } else { "Rescan" }}
                 }
             }
-            ul { class: "mb-1.5 flex flex-col gap-1",
+            ul { class: "mb-1 flex flex-col gap-0.5",
                 for binding in robot.cameras.clone() {
                     li {
                         key: "{binding.name}",
-                        class: "flex items-center gap-1.5 rounded bg-surface px-2 py-1",
+                        class: "flex min-h-6 items-center gap-1.5 rounded bg-surface px-1.5 text-[11px]",
                         span { "{binding.name}" }
-                        span { class: "flex-1 truncate font-mono text-[10px] text-ink-faint",
+                        span { class: "min-w-0 flex-1 truncate font-mono text-[10px] text-ink-faint",
                             "{binding.id}"
                         }
                         button {
@@ -633,13 +637,13 @@ fn CameraSection(robot: RobotSummary) -> Element {
             // role is asked for here rather than up front, because it is only
             // answerable once you can see what the camera is looking at.
             if let Some(camera) = chosen {
-                div { class: "mt-1.5 overflow-hidden rounded border border-line",
+                div { class: "mt-1 overflow-hidden rounded border border-line",
                     img {
                         class: "aspect-video w-full bg-camera object-contain",
                         src: api::camera_stream_url(&camera.id),
                         alt: "Live preview from {camera.name}",
                     }
-                    div { class: "flex items-center gap-1.5 p-1.5",
+                    div { class: "flex items-center gap-1 p-1",
                         input {
                             class: "field",
                             "aria-label": "Camera role",

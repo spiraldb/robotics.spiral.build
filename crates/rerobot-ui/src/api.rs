@@ -6,6 +6,7 @@
 use futures_util::{StreamExt, stream};
 use gloo_net::eventsource::futures::EventSource;
 use gloo_net::http::{Method, RequestBuilder};
+use js_sys::Uint8Array;
 use rerobot_core::api::{ApiError, StudioSnapshot, TelemetryFrame};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -39,6 +40,27 @@ pub async fn send_json<B: Serialize, T: DeserializeOwned>(
 /// POST with no request body.
 pub async fn post(path: &str) -> Result<(), String> {
     send::<()>(Method::POST, path, None).await
+}
+
+/// Upload one binary file and decode the server's JSON response.
+pub async fn upload_json<T: DeserializeOwned>(path: &str, bytes: &[u8]) -> Result<T, String> {
+    let body = Uint8Array::from(bytes);
+    let response = RequestBuilder::new(path)
+        .method(Method::POST)
+        .header("Content-Type", "application/zip")
+        .body(body)
+        .map_err(|error| format!("could not build the upload: {error}"))?
+        .send()
+        .await
+        .map_err(|error| format!("the studio server is unreachable: {error}"))?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if (200..300).contains(&status) {
+        return decode(&text, path);
+    }
+    Err(serde_json::from_str::<ApiError>(&text)
+        .map(|failure| failure.error)
+        .unwrap_or_else(|_| format!("upload to {path} failed with status {status}")))
 }
 
 fn to_value<B: Serialize>(body: &B) -> Result<Value, String> {

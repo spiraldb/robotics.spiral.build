@@ -6,13 +6,15 @@ use std::rc::Rc;
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use rerobot_core::api::{GoalRequest, JointTelemetry, RobotSummary, RobotTelemetry};
+use rerobot_core::api::{
+    GoalRequest, JointTelemetry, ModeSelection, RobotSummary, RobotTelemetry,
+};
 use rerobot_core::arm::{self, JointAngles};
 
 use crate::api;
 use crate::cameras::RobotCameras;
 use crate::setup::set_torque;
-use crate::state::{Selection, studio};
+use crate::state::{Selection, Studio, studio};
 use crate::viewport::{accent_css, tool_position};
 
 #[derive(Default)]
@@ -37,7 +39,7 @@ pub fn JointPanel() -> Element {
     let studio = studio();
     let Some(robot) = studio.focused() else {
         return rsx! {
-            p { class: "p-3 text-ink-faint", "Add an arm to see its joints." }
+            p { class: "px-2 py-1 text-[11px] text-ink-faint", "Add an arm to see its joints." }
         };
     };
 
@@ -51,16 +53,41 @@ pub fn JointPanel() -> Element {
     let drivable = studio.is_manual_target(&robot.id) && torque && robot.calibrated;
     let role = studio.teleoperation_role(&robot.id);
     let accent = accent_css(studio.position_of(&robot.id));
+    // Releasing is guarded the way deleting a take already is, because it is the
+    // one control on this panel with a physical consequence.
+    let mut confirming_release = use_signal(|| false);
     let id = robot.id.clone();
+    let hold_id = robot.id.clone();
+    let manual_id = robot.id.clone();
+    let manual = studio.is_manual_target(&robot.id);
+    // Taking manual control of one arm cannot happen behind a running pair or a
+    // replay, and an uncalibrated arm cannot be commanded at all — the server
+    // refuses normalized goals for one, so offering the toggle would only
+    // produce a refusal.
+    let manual_blocked = if manual {
+        None
+    } else if telemetry.is_none() {
+        Some("Connect this arm first")
+    } else if !robot.calibrated {
+        Some("Calibrate this arm before driving its joints")
+    } else if role.is_some() {
+        Some("Stop teleoperation first")
+    } else if matches!(studio.mode(), ModeSelection::Replay { .. }) {
+        Some("Stop the replay first")
+    } else if !studio.controls_available() {
+        Some("Controls are paused while telemetry reconnects")
+    } else {
+        None
+    };
 
     rsx! {
         div { class: "flex flex-col",
-            header { class: "flex flex-wrap items-center gap-1.5 border-b border-line px-3 py-2",
+            header { class: "flex flex-wrap items-center gap-1 border-b border-line px-2 py-1",
                 span {
-                    class: "h-2 w-2 shrink-0 rounded-full",
+                    class: "h-1.5 w-1.5 shrink-0 rounded-full",
                     style: "background: {accent}",
                 }
-                h2 { class: "text-[13px] font-medium", "{robot.id}" }
+                h2 { class: "text-[12px] font-semibold tracking-[-0.01em]", "{robot.id}" }
                 if telemetry.is_none() {
                     span { class: "chip", "offline" }
                 }
@@ -72,23 +99,82 @@ pub fn JointPanel() -> Element {
                 if torque {
                     span { class: "chip chip-danger", "torque on" }
                 }
-                button {
-                    r#type: "button",
-                    class: if torque { "btn btn-danger ml-auto" } else { "btn btn-outline ml-auto" },
-                    disabled: telemetry.is_none() || (calibrating && !torque),
-                    title: match (calibrating && !torque, torque, role) {
-                        (true, _, _) => "Finish or cancel calibration first",
-                        (_, true, Some("follower")) => "Releasing now stops this arm following the leader",
-                        (_, true, _) => "The arm will go limp — support it first",
-                        _ => "Energize the motors so the arm holds its position",
-                    },
-                    onclick: move |_| set_torque(studio, &id, !torque),
-                    {if torque { "Release" } else { "Hold" }}
+                // Releasing drops a powered arm under its own weight, so the
+                // consequence is printed on the page at the moment it applies
+                // rather than left in a tooltip the operator — who has a hand on
+                // the arm and none on the mouse — will never hover.
+                if torque && confirming_release() {
+                    span { class: "release-confirm ml-auto",
+                        span { class: "release-warning",
+                            {match role {
+                                Some("follower") => "Support the arm. This also stops it following the leader.",
+                                _ => "Support the arm — it goes limp when released.",
+                            }}
+                        }
+                        button {
+                            r#type: "button",
+                            class: "btn btn-danger",
+                            onclick: move |_| {
+                                confirming_release.set(false);
+                                set_torque(studio, &id, false);
+                            },
+                            "Release"
+                        }
+                        button {
+                            r#type: "button",
+                            class: "btn",
+                            onclick: move |_| confirming_release.set(false),
+                            "Keep holding"
+                        }
+                    }
+                } else {
+                    // Which arm the sliders drive is a property of this panel,
+                    // not of the header: it names one arm, and this is the one
+                    // arm's panel. It used to be a picker in the mode bar, so
+                    // moving a joint meant setting a target in one place and
+                    // energizing it in another.
+                    button {
+                        r#type: "button",
+                        class: "btn btn-outline ml-auto",
+                        "aria-pressed": manual,
+                        disabled: manual_blocked.is_some(),
+                        title: match (manual_blocked, manual) {
+                            (Some(reason), _) => reason,
+                            (None, true) => "Stop driving this arm from the sliders",
+                            (None, false) => "Drive this arm's joints from the sliders below",
+                        },
+                        onclick: move |_| crate::modes::set_mode(
+                            studio,
+                            if manual { ModeSelection::Idle } else { ModeSelection::Manual { robot: manual_id.clone() } },
+                        ),
+                        "Manual"
+                    }
+                    button {
+                        r#type: "button",
+                        class: if torque { "btn btn-danger" } else { "btn btn-outline" },
+                        disabled: telemetry.is_none() || (calibrating && !torque),
+                        title: match (calibrating && !torque, torque) {
+                            (true, _) => "Finish or cancel calibration first",
+                            (_, true) => "Let this arm go limp",
+                            _ => "Energize the motors so the arm holds its position",
+                        },
+                        onclick: move |_| {
+                            if torque {
+                                confirming_release.set(true);
+                            } else {
+                                // A stale confirmation from a previous hold
+                                // must not greet the next one.
+                                confirming_release.set(false);
+                                set_torque(studio, &hold_id, true);
+                            }
+                        },
+                        {if torque { "Release" } else { "Hold" }}
+                    }
                 }
             }
 
             if let Some(error) = telemetry.as_ref().and_then(|robot| robot.error.clone()) {
-                p { class: "mx-3 mt-2 rounded bg-danger-soft px-2 py-1.5 text-[12px] text-danger",
+                p { class: "mx-2 mt-1 rounded bg-danger-soft px-1.5 py-1 text-[11px] text-danger",
                     "{error}"
                 }
             }
@@ -133,17 +219,30 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
             .filter(|error| error.is_finite())
             .reduce(f64::max)
     });
+    let lagging =
+        tracking_error.is_some_and(|error| error >= rerobot_core::api::CAUTION_FOLLOW_ERROR_DEGREES);
 
     rsx! {
-        dl { class: "grid grid-cols-4 gap-1.5 px-3 py-2",
+        dl { class: "grid grid-cols-4 gap-1 px-2 py-1",
             Readout {
                 label: "Reach",
-                value: tip.map(|tip| format!("{:.0} mm", tip.truncate().length())),
+                value: tip.map(|tip| format!("{:.0}", tip.truncate().length())),
+                unit: "mm",
             }
-            Readout { label: "Height", value: tip.map(|tip| format!("{:.0} mm", tip.z)) }
             Readout {
-                label: "Gripper",
-                value: angles.map(|angles| format!("{:.0}%", angles.gripper * 100.0)),
+                label: "Height",
+                value: tip.map(|tip| format!("{:.0}", tip.z)),
+                unit: "mm",
+            }
+            // A bare percentage does not say which end is which, and reading it
+            // backwards is exactly the mistake this readout used to invite — so
+            // "open" moved into the label, where it names the direction without
+            // wrapping the value onto a second line and knocking the four cells
+            // out of alignment with each other.
+            Readout {
+                label: "Gripper open",
+                value: angles.map(|angles| format!("{:.0}", angles.gripper * 100.0)),
+                unit: "%",
             }
             // One name for one number, in every mode. This is the same quantity
             // the session timeline records for a whole take and plots as a
@@ -153,23 +252,41 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
                 label: "Follow Δ",
                 // One decimal, matching the session timeline: the same number
                 // rounded two different ways reads as two measurements.
-                value: tracking_error.map(|error| format!("{error:.1}°")),
-                caution: tracking_error
-                    .is_some_and(|error| error >= rerobot_core::api::CAUTION_FOLLOW_ERROR_DEGREES),
+                value: tracking_error.map(|error| format!("{error:.1}")),
+                unit: "°",
+                caution: lagging,
+            }
+        }
+        // What the measurement means belongs on the page, not in a tooltip, and
+        // the moment it is worth explaining is the moment it goes out of range.
+        if lagging {
+            p { class: "px-2 pb-1 text-[11px] leading-tight text-caution",
+                "Follow Δ is the largest gap between where a joint is and where it was told to be."
             }
         }
     }
 }
 
+/// One measured quantity: its name, its number, and the unit the number is in.
+///
+/// The unit is a separate faint glyph rather than part of the string, so four
+/// of these side by side line their digits up instead of each starting wherever
+/// its own label happened to end.
 #[component]
-fn Readout(label: String, value: Option<String>, #[props(default)] caution: bool) -> Element {
+fn Readout(
+    label: String,
+    value: Option<String>,
+    unit: &'static str,
+    #[props(default)] caution: bool,
+) -> Element {
+    let known = value.is_some();
     rsx! {
         div {
-            class: if caution { "rounded bg-caution-soft px-2 py-1" } else { "rounded bg-sunken px-2 py-1" },
-            title: if label.contains('Δ') { "Largest difference between measured and final target joint angle" } else { "" },
-            dt { class: "truncate text-[10px] text-ink-faint", "{label}" }
-            dd { class: if caution { "font-mono text-[12px] text-caution" } else { "font-mono text-[12px]" },
-                {value.unwrap_or_else(|| "—".to_owned())}
+            class: if caution { "readout readout-caution" } else { "readout" },
+            dt { class: "readout-label", "{label}" }
+            dd { class: "readout-value",
+                span { {value.unwrap_or_else(|| "—".to_owned())} }
+                if known { span { class: "readout-unit", "{unit}" } }
             }
         }
     }
@@ -268,28 +385,21 @@ fn JointControls(
 
     let Some(telemetry) = telemetry else {
         return rsx! {
-            p { class: "px-3 text-[11px] text-ink-faint", "Connect this arm to see its joints." }
+            p { class: "px-2 py-1 text-[11px] text-ink-faint", "Connect this arm to see its joints." }
         };
     };
 
     let id = robot.id.clone();
 
     rsx! {
-        div { class: "flex flex-col gap-1 px-3 pb-3",
-            // Say what would actually make the sliders work — and, while
-            // teleoperation is running, say that they are not supposed to,
-            // rather than inviting the operator to break the mode they are in.
-            if !drivable {
-                p { class: "mb-1 text-[11px] text-ink-faint",
-                    match role {
-                        Some("leader") => "Move this arm by hand; the follower copies it.".to_owned(),
-                        Some(_) => "Following the leader. Stop teleoperation to drive it by hand.".to_owned(),
-                        None if !robot.calibrated => "Calibrate this arm to command its joints.".to_owned(),
-                        None if !studio.is_manual_target(&robot.id) =>
-                            format!("Set Manual to {} in the header to move its joints.", robot.id),
-                        None => "Press Hold to energize the motors, then drag.".to_owned(),
-                    }
-                }
+        div { class: "flex flex-col px-2 pb-1.5",
+            // Say what would actually make the sliders work. The follower during
+            // teleoperation is the one case with nothing to add: the header is
+            // already narrating that it is energized and copying the leader, so
+            // a second line under the sliders repeated the mode back at an
+            // operator who had just set it.
+            if let Some(reason) = undrivable_reason(&robot, role, drivable, studio) {
+                p { class: "mb-0.5 text-[11px] text-ink-faint", "{reason}" }
             }
             for joint in telemetry.joints.clone() {
                 JointRow {
@@ -319,6 +429,32 @@ fn JointControls(
                 }
             }
         }
+    }
+}
+
+/// Why these sliders will not move the arm, when that is worth saying.
+///
+/// A drivable arm needs no explanation, and neither does a follower mid-
+/// teleoperation: the mode bar is already saying that it is energized and
+/// copying the leader, and stopping teleoperation is not something the joint
+/// panel should be suggesting while the pair is running.
+fn undrivable_reason(
+    robot: &RobotSummary,
+    role: Option<&'static str>,
+    drivable: bool,
+    studio: Studio,
+) -> Option<String> {
+    if drivable {
+        return None;
+    }
+    match role {
+        Some("leader") => Some("Move this arm by hand; the follower copies it.".to_owned()),
+        Some(_) => None,
+        None if !robot.calibrated => Some("Calibrate this arm to command its joints.".to_owned()),
+        None if !studio.is_manual_target(&robot.id) => {
+            Some("Press Manual above to drive these joints.".to_owned())
+        }
+        None => Some("Press Hold to energize the motors, then drag.".to_owned()),
     }
 }
 
@@ -396,7 +532,7 @@ fn JointRow(
                     }
                 },
             }
-            output { class: "w-14 shrink-0 text-right font-mono text-[11px] text-ink-soft",
+            output { class: "joint-value",
                 match joint.degrees {
                     Some(degrees) => format!("{degrees:+.0}°"),
                     None => format!("{}", joint.raw),

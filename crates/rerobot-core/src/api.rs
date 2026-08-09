@@ -408,6 +408,15 @@ pub struct ExportResponse {
     pub skipped: u64,
 }
 
+/// What importing a LeRobot dataset added to the local episode workspace.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ImportResponse {
+    pub episodes: u64,
+    pub frames: u64,
+    /// Imported episodes are assigned fresh local IDs; this is the first one.
+    pub first_episode: Option<String>,
+}
+
 /// Create a new robot instance and its JSON file.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CreateRobotRequest {
