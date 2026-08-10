@@ -12,6 +12,7 @@ use rerobot_core::urdf::{SO101_URDF, Urdf, UrdfError};
 
 #[cfg(feature = "web")]
 use crate::api::{self, StudioEvent};
+use crate::signals::SignalStore;
 
 /// The robot description the studio poses, draws, and measures from.
 ///
@@ -155,6 +156,13 @@ pub struct Studio {
     /// the joint inspector somewhere else, because judging a take and watching
     /// the arm that produced it are the same gesture.
     pub selected_episode: Signal<Option<String>>,
+    /// Joint angles for the take being recorded, or the last one recorded.
+    ///
+    /// Filled from the event stream rather than from the panel that draws it:
+    /// a take captured with the Signals region collapsed is still a take, and
+    /// arriving to find it empty would be the interface deciding what was
+    /// measured. See [`crate::signals`].
+    pub signals: Signal<SignalStore>,
 }
 
 impl Studio {
@@ -172,6 +180,7 @@ impl Studio {
             selected: Signal::new(None),
             pointed: Signal::new(None),
             selected_episode: Signal::new(None),
+            signals: Signal::new(SignalStore::default()),
         });
         #[cfg(feature = "web")]
         let mut studio = studio;
@@ -185,6 +194,7 @@ impl Studio {
                 mut telemetry,
                 mut live,
                 mut last_event_ms,
+                mut signals,
                 ..
             } = studio;
             loop {
@@ -197,7 +207,18 @@ impl Studio {
                     last_event_ms.set(js_sys::Date::now());
                     match event {
                         StudioEvent::Snapshot(value) => snapshot.set(*value),
-                        StudioEvent::Telemetry(frame) => telemetry.set(*frame),
+                        StudioEvent::Telemetry(frame) => {
+                            // Only a frame that can change the store touches it.
+                            // Writing on all twenty frames a second marked the
+                            // signal dirty even with nothing recording, which
+                            // re-rendered the whole panel to redraw the same
+                            // empty state — the exact cost its paced paint loop
+                            // exists to avoid.
+                            if frame.recording.is_some() || signals.peek().live() {
+                                signals.write().observe(&frame);
+                            }
+                            telemetry.set(*frame);
+                        }
                     }
                 })
                 .await;

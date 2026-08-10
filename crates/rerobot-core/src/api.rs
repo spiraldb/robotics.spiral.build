@@ -60,6 +60,54 @@ pub struct RobotSummary {
     pub connection: ConnectionStatus,
 }
 
+/// Pick the best connected pair for a recording-led teleoperation session.
+///
+/// Robot type is a preference rather than a requirement: a configured leader
+/// and follower win, while two otherwise ready compatible arms still work.
+/// Compatibility is checked here so the Record button and the server make the
+/// same decision instead of offering a pair the control thread must reject.
+pub fn default_teleoperation_pair(robots: &[RobotSummary]) -> Option<(String, String)> {
+    let ready = robots
+        .iter()
+        .filter(|robot| robot.connection.connected && robot.calibrated && robot.problem.is_none())
+        .collect::<Vec<_>>();
+
+    ready
+        .iter()
+        .enumerate()
+        .flat_map(|(leader_index, leader)| {
+            ready
+                .iter()
+                .enumerate()
+                .filter(move |(follower_index, follower)| {
+                    leader_index != *follower_index
+                        && leader.motors.iter().any(|leader_motor| {
+                            follower
+                                .motors
+                                .iter()
+                                .any(|follower_motor| follower_motor.name == leader_motor.name)
+                        })
+                })
+                .map(move |(follower_index, follower)| {
+                    let role_penalty = u8::from(!robot_has_role(leader, "leader"))
+                        + u8::from(!robot_has_role(follower, "follower"));
+                    (
+                        (role_penalty, leader_index, follower_index),
+                        (leader.id.clone(), follower.id.clone()),
+                    )
+                })
+        })
+        .min_by_key(|(rank, _)| *rank)
+        .map(|(_, pair)| pair)
+}
+
+fn robot_has_role(robot: &RobotSummary, role: &str) -> bool {
+    robot
+        .robot_type
+        .as_deref()
+        .is_some_and(|kind| kind.to_ascii_lowercase().contains(role))
+}
+
 /// A motor as configured, with its calibration when one exists.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MotorSummary {
@@ -681,6 +729,69 @@ impl ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn robot(id: &str, robot_type: Option<&str>) -> RobotSummary {
+        RobotSummary {
+            id: id.to_owned(),
+            file: format!("{id}.json"),
+            robot_type: robot_type.map(str::to_owned),
+            port: None,
+            motors: vec![MotorSummary {
+                name: "shoulder".to_owned(),
+                id: 1,
+                direction: Direction::Normal,
+                model: None,
+                calibration: None,
+                limits: MotorLimits::default(),
+            }],
+            cameras: Vec::new(),
+            calibrated: true,
+            problem: None,
+            connection: ConnectionStatus {
+                connected: true,
+                error: None,
+            },
+        }
+    }
+
+    #[test]
+    fn teleoperation_pair_prefers_configured_roles_over_list_order() {
+        let robots = [
+            robot("follower", Some("so101_follower")),
+            robot("spare", None),
+            robot("leader", Some("SO101_LEADER")),
+        ];
+
+        assert_eq!(
+            default_teleoperation_pair(&robots),
+            Some(("leader".to_owned(), "follower".to_owned()))
+        );
+    }
+
+    #[test]
+    fn teleoperation_pair_falls_back_to_the_first_compatible_ready_arms() {
+        let robots = [robot("left", None), robot("right", None)];
+
+        assert_eq!(
+            default_teleoperation_pair(&robots),
+            Some(("left".to_owned(), "right".to_owned()))
+        );
+    }
+
+    #[test]
+    fn teleoperation_pair_ignores_unready_and_incompatible_arms() {
+        let mut disconnected = robot("disconnected-leader", Some("leader"));
+        disconnected.connection.connected = false;
+        let mut incompatible = robot("incompatible-leader", Some("leader"));
+        incompatible.motors[0].name = "elbow".to_owned();
+        let follower = robot("follower", Some("follower"));
+        let fallback = robot("fallback", None);
+
+        assert_eq!(
+            default_teleoperation_pair(&[disconnected, incompatible, follower, fallback.clone(),]),
+            Some((fallback.id, "follower".to_owned()))
+        );
+    }
 
     #[test]
     fn mode_selection_round_trips_through_its_tag() {

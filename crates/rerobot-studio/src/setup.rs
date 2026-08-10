@@ -31,7 +31,7 @@ const ROBOT_TYPES: [(&str, &str); 2] = [
 ];
 
 #[component]
-pub fn RobotPanel() -> Element {
+pub fn RobotPanel(heading: bool) -> Element {
     let studio = studio();
     let robots = studio.snapshot.read().robots.clone();
     let workspace = studio.snapshot.read().workspace.clone();
@@ -48,12 +48,14 @@ pub fn RobotPanel() -> Element {
             // on the bench this is built for. The directory earns its place
             // because it is the only thing on the panel that says where these
             // files live.
-            header { class: "device-panel-header",
-                h2 { "Robots" }
-                span {
-                    class: "device-workspace",
-                    title: "Robot files are read and written in {workspace}",
-                    "{workspace_name}"
+            if heading {
+                header { class: "device-panel-header",
+                    h2 { "Robots" }
+                    span {
+                        class: "device-workspace",
+                        title: "Robot files are read and written in {workspace}",
+                        "{workspace_name}"
+                    }
                 }
             }
 
@@ -90,7 +92,7 @@ fn RobotEntry(robot: RobotSummary, focused: bool, accent: &'static str) -> Eleme
     // opens on the work. Only the initial state is derived — an arm becoming
     // ready while the operator is reading it must not fold itself away.
     let ready = robot.problem.is_none() && robot.port.is_some() && robot.calibrated;
-    let mut open = use_signal(|| !ready);
+    let mut open = use_signal(|| !ready || !robot.connection.connected);
     let id = robot.id.clone();
     let role = robot_role(robot.robot_type.as_deref());
     let state = if robot.problem.is_some() {
@@ -317,10 +319,27 @@ fn RobotSetup(robot: RobotSummary) -> Element {
             // beside the port it opens, which is also the order the work happens
             // in.
             if let Some(problem) = &robot.problem {
-                p { class: "device-setup-alarm", "This arm's file cannot be used: {problem}" }
+                div { class: "device-setup-alarm",
+                    p { "This arm's configuration needs attention before it can connect." }
+                    details { class: "technical-details",
+                        summary { "Technical details" }
+                        code { "{problem}" }
+                    }
+                }
             }
             if let Some(error) = &robot.connection.error {
-                p { class: "device-setup-alarm", "{error}" }
+                {
+                    let message = friendly_connection_error(error);
+                    rsx! {
+                        div { class: "device-setup-alarm",
+                            p { "{message}" }
+                            details { class: "technical-details",
+                                summary { "Technical details" }
+                                code { "{error}" }
+                            }
+                        }
+                    }
+                }
             }
 
             div { class: "device-setup-section",
@@ -357,6 +376,19 @@ fn robot_role(robot_type: Option<&str>) -> &'static str {
         Some(kind) if kind.contains("leader") => "Leader · hand-guided",
         Some(kind) if kind.contains("follower") => "Follower · driven",
         _ => "Robot arm",
+    }
+}
+
+fn friendly_connection_error(error: &str) -> &'static str {
+    let lowered = error.to_ascii_lowercase();
+    if lowered.contains("device or resource busy") || lowered.contains("already in use") {
+        "This arm's serial port is already in use. Close the other connection, then try again."
+    } else if lowered.contains("no such file") || lowered.contains("not found") {
+        "The saved serial port is not available. Choose the connected device, then try again."
+    } else if lowered.contains("permission") || lowered.contains("access denied") {
+        "The studio cannot open this serial port. Check its permissions, then try again."
+    } else {
+        "This arm could not connect. Check its power and serial port, then try again."
     }
 }
 

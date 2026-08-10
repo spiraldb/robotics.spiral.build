@@ -27,6 +27,7 @@ use rerobot_core::api::{
     ExportResponse, GoalRequest, IdentifyPortRequest, IdentifyPortResponse, ImportResponse,
     JudgeEpisodeRequest, ModeSelection, RobotSummary, SerialPortSummary, StartRecordingRequest,
     StartReplayRequest, StopRecordingRequest, StudioSnapshot, TorqueRequest, UpdateRobotRequest,
+    default_teleoperation_pair,
 };
 use rerobot_core::calibration::build_calibration;
 use serde::Deserialize;
@@ -769,12 +770,56 @@ async fn list_episodes(State(state): State<AppState>) -> Json<Vec<EpisodeSummary
 
 /// Begin a take.
 ///
+/// Record is the session-level command: it chooses the configured pair, enters
+/// teleoperation, and only then opens the take. If opening the take fails, the
+/// mode change is rolled back so a failed recording cannot leave an unnoticed
+/// teleoperation session running.
+async fn start_recording(
+    State(state): State<AppState>,
+    Json(mut request): Json<StartRecordingRequest>,
+) -> Result<Json<EpisodeSummary>, Failure> {
+    if state.hardware.state().telemetry.recording.is_some() {
+        return Err(Failure::from(
+            "a take is already recording; stop it first".to_owned(),
+        ));
+    }
+
+    let (leader, follower) = default_teleoperation_pair(&build_snapshot(&state).robots)
+        .ok_or_else(|| {
+            Failure::bad_request("connect and calibrate two compatible arms before recording")
+        })?;
+    if request.arms.is_empty() {
+        request.arms = vec![leader.clone(), follower.clone()];
+    }
+
+    let selection = ModeSelection::Teleoperate { leader, follower };
+    let source = describe_mode(&selection);
+    state.hardware.set_mode(selection).await?;
+
+    match begin_recording(&state, request, source).await {
+        Ok(summary) => Ok(summary),
+        Err(error) => match state.hardware.set_mode(ModeSelection::Idle).await {
+            Ok(()) => Err(error),
+            Err(stop_error) => Err(Failure(
+                error.0,
+                format!(
+                    "{} Teleoperation also could not stop: {stop_error}",
+                    error.1
+                ),
+            )),
+        },
+    }
+}
+
+/// Open the take once the control thread is already teleoperating.
+///
 /// The arms and their joint order come from what the control thread is already
 /// publishing, so a take's frames are laid out exactly like the telemetry the
 /// operator was watching while it was captured.
-async fn start_recording(
-    State(state): State<AppState>,
-    Json(request): Json<StartRecordingRequest>,
+async fn begin_recording(
+    state: &AppState,
+    request: StartRecordingRequest,
+    source: String,
 ) -> Result<Json<EpisodeSummary>, Failure> {
     let hardware = state.hardware.state();
     let connected = hardware
@@ -829,7 +874,6 @@ async fn start_recording(
         .map(str::trim)
         .filter(|note| !note.is_empty())
         .map(str::to_owned);
-    let source = describe_mode(&hardware.mode.selection);
     // Rounded because this is the configured target, which is a whole number of
     // hertz; it is reconstructed from a nanosecond period, and writing
     // `60.0000024000001` into every take's header would be noise recorded as
@@ -877,7 +921,7 @@ async fn start_recording(
 
     let writer = state
         .episodes
-        .begin(source, note, sample_hz, arms.clone(), condition)
+        .begin(source.clone(), note, sample_hz, arms.clone(), condition)
         .map_err(Failure::from)?;
     let id = writer.id().to_owned();
     let started_ms = writer.started_ms();
@@ -894,7 +938,7 @@ async fn start_recording(
         duration_seconds: 0.0,
         sample_hz,
         started_ms,
-        source: describe_mode(&hardware.mode.selection),
+        source,
         max_follow_error_degrees: None,
         discarded: false,
         problem: None,
@@ -905,11 +949,32 @@ async fn stop_recording(
     State(state): State<AppState>,
     Json(request): Json<StopRecordingRequest>,
 ) -> Result<Json<EpisodeSummary>, Failure> {
-    let summary = state.hardware.stop_recording(request.keep).await?;
-    // The take only exists under its final name now, so the cache has to catch
-    // up before anything lists it.
-    state.episodes.reload().map_err(Failure::from)?;
-    Ok(Json(summary))
+    // Both exits from a take are exits from teleoperation as well. Attempt the
+    // safety transition even if finalizing the file fails; the operator should
+    // never have to repair storage before motion commands can stop.
+    let recording = state.hardware.stop_recording(request.keep).await;
+    let idle = state.hardware.set_mode(ModeSelection::Idle).await;
+
+    match (recording, idle) {
+        (Ok(summary), Ok(())) => {
+            // The take only exists under its final name now, so the cache has
+            // to catch up before anything lists it.
+            state.episodes.reload().map_err(Failure::from)?;
+            Ok(Json(summary))
+        }
+        (Ok(_), Err(mode_error)) => {
+            // The file did finish, so make it visible even though the safety
+            // transition needs attention.
+            state.episodes.reload().map_err(Failure::from)?;
+            Err(Failure::from(format!(
+                "the recording ended, but teleoperation could not stop: {mode_error}"
+            )))
+        }
+        (Err(recording_error), Ok(())) => Err(Failure::from(recording_error)),
+        (Err(recording_error), Err(mode_error)) => Err(Failure::from(format!(
+            "{recording_error}; teleoperation also could not stop: {mode_error}"
+        ))),
+    }
 }
 
 async fn judge_episode(

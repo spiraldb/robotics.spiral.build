@@ -67,16 +67,60 @@ pub fn CameraOff() -> Element {
     }
 }
 
+/// The robot explorer: a compact arm silhouette rather than a generic sidebar.
 #[component]
-pub fn Panel(left: bool) -> Element {
+pub fn RobotPanelIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            rect { x: "1.5", y: "2", width: "13", height: "12", rx: "2" }
-            if left {
-                path { d: "M5.5 2v12" }
-            } else {
-                path { d: "M10.5 2v12" }
-            }
+            path { d: "M3 13h4M5 13V9.5l3-2.5 2.5-3M8 7l2.5 2.5M10.5 9.5l2-1.5M10.5 4l1.5-1.5" }
+            circle { cx: "5", cy: "9.5", r: "1" }
+            circle { cx: "8", cy: "7", r: "1" }
+            circle { cx: "10.5", cy: "4", r: "1" }
+        }
+    }
+}
+
+/// The central spatial scene.
+#[component]
+pub fn ScenePanel() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "m8 2 5 3v6l-5 3-5-3V5zM3 5l5 3 5-3M8 8v6" }
+        }
+    }
+}
+
+/// Measurement over time: an axis with a trace running across it.
+#[component]
+pub fn SignalsPanelIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M2.5 2.5v11h11" }
+            path { d: "M4.5 10.5 7 6.5l2 3 3-6.5" }
+        }
+    }
+}
+
+/// Contextual properties and joint controls.
+#[component]
+pub fn PropertiesPanel() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M3 4h10M3 8h10M3 12h10" }
+            circle { cx: "6", cy: "4", r: "1.25", class: "ui-icon-knob" }
+            circle { cx: "10", cy: "8", r: "1.25", class: "ui-icon-knob" }
+            circle { cx: "7", cy: "12", r: "1.25", class: "ui-icon-knob" }
+        }
+    }
+}
+
+/// Restore the canonical pane widths and visibility.
+#[component]
+pub fn LayoutReset() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            rect { x: "2", y: "2.5", width: "12", height: "11", rx: "1.5" }
+            path { d: "M6 2.5v11M10.5 8.5a3 3 0 1 1-1-2.2M10.5 5v2.5H8" }
         }
     }
 }

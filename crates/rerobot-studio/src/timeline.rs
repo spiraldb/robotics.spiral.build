@@ -9,7 +9,7 @@ use dioxus::prelude::*;
 use gloo_net::http::Method;
 use rerobot_core::api::{
     EpisodeSummary, ImportResponse, ModeSelection, RecordingProgress, StartRecordingRequest,
-    StartReplayRequest, StopRecordingRequest,
+    StartReplayRequest, StopRecordingRequest, default_teleoperation_pair,
 };
 
 use crate::api;
@@ -20,6 +20,12 @@ use crate::state::{Studio, studio};
 const MAX_VISIBLE_EPISODES: usize = 120;
 
 pub fn start_recording(studio: Studio) {
+    // The keyboard shortcut and the visible button share this guard. A disabled
+    // button that `R` can bypass is not actually a safety boundary.
+    if let Some(reason) = recording_blocker(studio) {
+        studio.report(reason);
+        return;
+    }
     let request = StartRecordingRequest::default();
     studio.run("", async move {
         api::send_json::<_, EpisodeSummary>(Method::POST, "/api/episodes/record", Some(&request))
@@ -32,9 +38,9 @@ pub fn stop_recording(studio: Studio, keep: bool) {
     let mut selected = studio.selected_episode;
     let request = StopRecordingRequest { keep };
     let message = if keep {
-        "Episode saved."
+        "Episode saved. Teleoperation stopped."
     } else {
-        "Recording cancelled. The episode remains on disk but will not be exported."
+        "Recording discarded. Teleoperation stopped. The episode remains on disk but will not be exported."
     };
     // Stopping is how the partial file becomes a complete episode, so this
     // remains available while normal controls are paused.
@@ -72,10 +78,6 @@ fn replay(studio: Studio, episode: String, robot: String, source_arm: Option<Str
 }
 
 /// End a replay from the rail that started it.
-///
-/// This is the same transition the header's stop button performs; it exists
-/// here so the operator does not have to leave the control they just used while
-/// an arm is still moving.
 fn stop_replay(studio: Studio) {
     studio.run_safety(
         "Replay stopped. Motors may still be holding position.",
@@ -84,20 +86,19 @@ fn stop_replay(studio: Studio) {
 }
 
 #[component]
-pub fn TimelineRail(compact: bool) -> Element {
+pub fn TimelineRail(compact: bool, on_toggle: EventHandler<()>) -> Element {
     let mut studio = studio();
     let episodes = studio.episodes();
     let recording = studio.recording();
 
-    // Land on the newest episode when the rail first opens. The operator can
-    // replay immediately instead of first discovering that the detail row is a
-    // selection-dependent empty state.
+    // Land on the newest usable episode. An incomplete artifact remains in the
+    // strip, but it must not turn a successful session into a disabled default.
     use_effect(move || {
-        if studio.selected_episode.read().is_none()
-            && studio.recording().is_none()
-            && let Some(latest) = studio.episodes().last()
-        {
-            studio.selected_episode.set(Some(latest.id.clone()));
+        if studio.selected_episode.read().is_none() && studio.recording().is_none() {
+            let episodes = studio.episodes();
+            if let Some(latest) = preferred_episode(&episodes) {
+                studio.selected_episode.set(Some(latest.id.clone()));
+            }
         }
     });
 
@@ -106,8 +107,19 @@ pub fn TimelineRail(compact: bool) -> Element {
             section { class: "timeline-rail timeline-rail-compact", "aria-label": "Dataset recording",
                 div { class: "timeline-toolbar",
                     TransportBlock { recording }
+                    button {
+                        r#type: "button",
+                        class: "dataset-sheet-toggle",
+                        "aria-label": "Open Dataset",
+                        onclick: move |_| on_toggle.call(()),
+                        "Dataset"
+                    }
                     p { class: "timeline-collapsed-note",
-                        "Recording continues. Open the dataset panel to see the episode."
+                        if studio.recording().is_some() {
+                            "Recording continues. Open Dataset to see this episode."
+                        } else {
+                            "Open Dataset for episodes, replay, import, and download."
+                        }
                     }
                 }
             }
@@ -116,6 +128,16 @@ pub fn TimelineRail(compact: bool) -> Element {
 
     rsx! {
         section { class: "timeline-rail", "aria-label": "Dataset recording and replay",
+            header { class: "dataset-sheet-header",
+                strong { "Dataset" }
+                button {
+                    r#type: "button",
+                    class: "dataset-sheet-close",
+                    "aria-label": "Collapse Dataset",
+                    onclick: move |_| on_toggle.call(()),
+                    "Done"
+                }
+            }
             // Transport, episodes and session actions share one row. They used
             // to be two, with the toolbar's middle left empty across the full
             // width of the window while the episodes sat on a row of their own
@@ -140,16 +162,11 @@ pub fn TimelineRail(compact: bool) -> Element {
 #[component]
 fn TransportBlock(recording: Option<RecordingProgress>) -> Element {
     let studio = studio();
-    let connected = studio.connected_robots();
     let live = recording.is_some();
     let blocked = if live {
         None
-    } else if connected.is_empty() {
-        Some("Connect an arm before recording")
-    } else if !studio.controls_available() {
-        Some("Recording is paused while telemetry reconnects")
     } else {
-        None
+        recording_blocker(studio)
     };
     let elapsed = recording
         .as_ref()
@@ -162,7 +179,8 @@ fn TransportBlock(recording: Option<RecordingProgress>) -> Element {
                 r#type: "button",
                 class: if live { "take-button take-button-live" } else { "take-button" },
                 disabled: blocked.is_some(),
-                "aria-label": if live { "Stop recording and save this episode" } else { "Record an episode" },
+                "aria-label": if live { "Stop teleoperation and save this episode" } else { "Start teleoperation and record an episode" },
+                title: if live { "Stop teleoperation and save this episode" } else { "Release the leader, hold the follower, and record" },
                 onclick: move |_| if live { stop_recording(studio, true) } else { start_recording(studio) },
                 Transport { recording: live }
                 span { if live { "Stop & save" } else { "Record" } }
@@ -209,6 +227,18 @@ fn TransportBlock(recording: Option<RecordingProgress>) -> Element {
     }
 }
 
+fn recording_blocker(studio: Studio) -> Option<&'static str> {
+    if matches!(studio.mode(), ModeSelection::Replay { .. }) {
+        Some("Stop replay before recording")
+    } else if default_teleoperation_pair(&studio.snapshot.read().robots).is_none() {
+        Some("Connect and calibrate two compatible arms before recording")
+    } else if !studio.controls_available() {
+        Some("Recording is paused while telemetry reconnects")
+    } else {
+        None
+    }
+}
+
 /// A compact, readable list of episodes in capture order.
 #[component]
 fn EpisodeStrip(episodes: Vec<EpisodeSummary>, recording: Option<RecordingProgress>) -> Element {
@@ -222,7 +252,7 @@ fn EpisodeStrip(episodes: Vec<EpisodeSummary>, recording: Option<RecordingProgre
         return rsx! {
             div { class: "episode-strip-wrap episode-strip-empty",
                 strong { "No episodes yet" }
-                span { "Start teleoperation, then press Record or R." }
+                span { "Press Record or R to begin." }
             }
         };
     }
@@ -335,7 +365,7 @@ fn EpisodeDetail(selected: Option<EpisodeSummary>) -> Element {
         .filter(|progress| progress.episode == episode.id);
     let busy = studio.mode_active() || replaying.is_some();
     let replay_blocked = if !episode.usable() {
-        Some("This episode did not finish recording".to_owned())
+        Some("Replay is unavailable because this episode did not finish.".to_owned())
     } else if target.is_none() {
         Some("Connect and calibrate the follower before replaying".to_owned())
     } else if source.is_none() {
@@ -409,7 +439,10 @@ fn EpisodeDetail(selected: Option<EpisodeSummary>) -> Element {
                 }
             }
             if let Some(problem) = &episode.problem {
-                p { class: "episode-problem", "{problem}" }
+                details { class: "technical-details episode-technical-details",
+                    summary { "Technical details" }
+                    code { "{problem}" }
+                }
             }
         }
     }
@@ -539,7 +572,7 @@ fn SessionSummary(episodes: Vec<EpisodeSummary>) -> Element {
                 if importing() { "Importing…" } else { "Import" }
             }
             if exportable.is_empty() {
-                button { r#type: "button", class: "btn btn-outline", disabled: true, "Download dataset" }
+                button { r#type: "button", class: "btn btn-outline dataset-download", disabled: true, "Download dataset" }
                 span { class: "take-blocked", "Record an episode before downloading" }
             } else {
                 a {
@@ -573,7 +606,16 @@ fn episode_button_class(episode: &EpisodeSummary, selected: bool) -> &'static st
     }
 }
 
-fn short_id(id: &str) -> String {
+fn preferred_episode(episodes: &[EpisodeSummary]) -> Option<&EpisodeSummary> {
+    episodes
+        .iter()
+        .rev()
+        .find(|episode| episode.usable() && !episode.discarded)
+        .or_else(|| episodes.last())
+}
+
+/// A generated episode id as the take number an operator counts in.
+pub(crate) fn short_id(id: &str) -> String {
     id.strip_prefix("episode_")
         .and_then(|number| number.parse::<u64>().ok())
         .map(|number| format!("#{number}"))
@@ -683,5 +725,14 @@ mod tests {
         assert!(label.contains("recorded"));
         assert!(label.contains("24.7 seconds"));
         assert!(label.contains("1478 frames"));
+    }
+
+    #[test]
+    fn newest_usable_episode_wins_over_a_later_incomplete_one() {
+        let usable = episode("episode_000001");
+        let mut incomplete = episode("episode_000002");
+        incomplete.problem = Some("recording did not finish".to_owned());
+        let episodes = vec![usable, incomplete];
+        assert_eq!(preferred_episode(&episodes).unwrap().id, "episode_000001");
     }
 }

@@ -64,9 +64,10 @@ fn CameraProperty(
         .read()
         .as_ref()
         .is_some_and(|selection| selection.matches_camera(&robot, &role));
+    let raw_error = status.as_ref().and_then(|camera| camera.error.clone());
     let trouble = match &status {
-        None => Some("Not detected. Rescan devices or assign another camera.".to_owned()),
-        Some(camera) => camera.error.clone(),
+        None => Some("Camera not detected. Rescan devices or assign another camera.".to_owned()),
+        Some(camera) => camera.error.as_deref().map(friendly_camera_error),
     };
     let (frames, resolution) = status.as_ref().map_or((0, None), |camera| {
         (
@@ -116,27 +117,43 @@ fn CameraProperty(
                     span { class: "camera-resolution", "{resolution}" }
                 }
             }
-            div { class: "camera-property-frame",
-                if trouble.is_none() {
+            if trouble.is_none() {
+                div { class: "camera-property-frame",
                     img {
                         class: "camera-image",
                         src: api::camera_stream_url(&device),
                         alt: "Live view from the {role} camera on {robot}",
                     }
-                } else {
-                    div { class: "camera-unavailable",
-                        span { class: "camera-placeholder-icon", CameraOff {} }
-                        span { "Camera unavailable" }
+                }
+            } else if let Some(trouble) = trouble {
+                div { class: "camera-unavailable-card",
+                    span { class: "camera-placeholder-icon", CameraOff {} }
+                    div { class: "camera-unavailable-copy",
+                        strong { "Camera unavailable" }
+                        span { "{trouble}" }
+                        if let Some(raw_error) = raw_error {
+                            details { class: "technical-details",
+                                summary { "Technical details" }
+                                code { "{raw_error}" }
+                            }
+                        }
                     }
                 }
             }
-            // Only a real problem gets a line of its own. Waiting for the first
-            // frame is already said by the header's "Opening", and saying it
-            // twice added a row under every camera for a state that clears in
-            // about a second.
-            if let Some(trouble) = trouble {
-                p { class: "camera-trouble", "{trouble}" }
-            }
         }
+    }
+}
+
+fn friendly_camera_error(error: &str) -> String {
+    let lowered = error.to_ascii_lowercase();
+    if lowered.contains("lockforconfiguration")
+        || lowered.contains("lock rejected")
+        || lowered.contains("busy")
+    {
+        "Camera is busy in another app. Close it, then rescan.".to_owned()
+    } else if lowered.contains("permission") || lowered.contains("access denied") {
+        "The studio cannot access this camera. Check camera permissions, then rescan.".to_owned()
+    } else {
+        "Rescan devices or assign another camera in this robot's setup.".to_owned()
     }
 }

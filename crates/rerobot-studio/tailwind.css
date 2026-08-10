@@ -176,15 +176,7 @@
   }
 
   .studio-panel {
-    @apply relative flex shrink-0 flex-col overflow-y-auto bg-surface;
-  }
-
-  .studio-panel-left {
-    @apply border-r border-line;
-  }
-
-  .studio-panel-right {
-    @apply border-l border-line;
+    @apply relative flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto bg-surface;
   }
 
   .studio-panel > header:first-child,
@@ -200,18 +192,247 @@
     @apply min-h-0 flex-1 bg-viewport;
   }
 
+  /* Three semantic panes, two widths, two visibility flags. The scene is the
+     elastic center and can never be displaced by workspace customization. */
+  .pane-workspace {
+    @apply flex min-h-0 min-w-0 flex-1 overflow-hidden bg-canvas;
+  }
+
+  .workspace-pane {
+    @apply min-h-0 min-w-0 overflow-hidden;
+  }
+
+  .workspace-pane-side {
+    @apply shrink-0 grow-0 overflow-y-auto bg-surface;
+  }
+
+  .workspace-pane-scene {
+    @apply flex-1;
+  }
+
+  .pane-heading {
+    @apply flex min-h-6 shrink-0 items-center border-b border-line bg-sunken px-2 text-[11px] text-ink;
+  }
+
+  .pane-heading h2 {
+    @apply flex min-w-0 items-center gap-1 font-medium;
+  }
+
+  .pane-heading .ui-icon {
+    width: 0.75rem;
+    height: 0.75rem;
+  }
+
+  .pane-heading-context {
+    @apply ml-auto max-w-28 truncate font-mono text-[10px] text-ink-faint;
+  }
+
   .pane-splitter {
-    @apply relative z-20 w-1 shrink-0 cursor-col-resize touch-none bg-transparent;
+    @apply relative z-20 w-1 shrink-0 cursor-col-resize touch-none bg-canvas;
   }
 
   .pane-splitter::after {
     content: "";
-    @apply absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors;
+    @apply absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-line transition-colors duration-100;
   }
 
   .pane-splitter:hover::after,
-  .pane-splitter:focus-visible::after {
+  .pane-splitter:focus-visible::after,
+  .pane-workspace-resizing .pane-splitter::after {
     background: var(--tone-accent);
+  }
+
+  .pane-workspace-resizing,
+  .pane-workspace-resizing * {
+    cursor: col-resize !important;
+    user-select: none;
+  }
+
+  /* The Robots column is the one place the bench stacks: the arm list above,
+     the plots of what those arms just did below. */
+  .pane-column {
+    @apply overflow-hidden;
+  }
+
+  .pane-slot {
+    @apply flex min-h-0 min-w-0 flex-col;
+  }
+
+  .pane-slot-elastic {
+    @apply flex-1 overflow-y-auto;
+  }
+
+  .pane-slot-fixed {
+    @apply shrink-0 grow-0 overflow-hidden;
+  }
+
+  .studio-panel > .pane-slot > header:first-child {
+    @apply sticky top-0 z-10 bg-surface;
+  }
+
+  .pane-splitter-row {
+    @apply h-1 w-auto cursor-row-resize;
+  }
+
+  .pane-splitter-row::after {
+    @apply inset-x-0 inset-y-auto top-1/2 h-px w-auto translate-x-0 -translate-y-1/2;
+  }
+
+  .pane-workspace-resizing-row,
+  .pane-workspace-resizing-row * {
+    cursor: row-resize !important;
+  }
+
+  /* ── Signals: joint angles over time ──────────────────────────────────
+     One instance draws every arm on one time axis, so a leader and its
+     follower cannot drift apart. The readout below is the legend, the value
+     table, and the joint switchboard at once — which is also what keeps the
+     three lighter trace colours legal on paper: no value here is carried by a
+     1.5px line alone. */
+  .signals-panel {
+    @apply flex min-h-0 flex-1 flex-col overflow-hidden bg-surface;
+  }
+
+  .signals-heading {
+    @apply sticky top-0 z-10 flex min-h-6 shrink-0 flex-wrap items-center gap-x-1.5 gap-y-px
+      border-b border-line bg-sunken px-2 py-px text-[11px] text-ink;
+  }
+
+  .signals-heading h2 {
+    @apply flex min-w-0 shrink-0 items-center gap-1 font-medium;
+  }
+
+  .signals-heading .ui-icon {
+    width: 0.75rem;
+    height: 0.75rem;
+  }
+
+  /* One slot for the exceptions only — a window the operator parked, and a
+     take long enough to have lost its oldest samples. At rest it is empty. */
+  .signals-note {
+    @apply ml-auto flex shrink-0 items-center;
+  }
+
+  .signals-follow {
+    @apply inline-flex min-h-6 cursor-pointer items-center rounded px-1.5 text-[10px] text-accent
+      transition-colors;
+    background: var(--tone-selected);
+  }
+
+  .signals-follow:hover {
+    @apply text-accent-ink;
+    background: var(--tone-accent);
+  }
+
+  .signals-spans {
+    @apply flex shrink-0 items-center gap-px rounded bg-canvas p-px;
+  }
+
+  /* Not monospace: these are control labels, and this world spends its
+     monospace on values that change or were recorded. */
+  .signals-span {
+    @apply inline-flex min-h-6 min-w-8 cursor-pointer items-center justify-center rounded-[3px]
+      px-1 text-[10px] text-ink-faint transition-colors hover:bg-hover hover:text-ink;
+  }
+
+  .signals-span-on {
+    @apply bg-surface text-accent;
+    box-shadow: inset 0 0 0 1px currentColor;
+  }
+
+  /* The plots keep a floor even when the region is dragged small: a readout
+     with no trace above it is a table, and the table is already on the right. */
+  .signals-stage {
+    @apply min-h-0 flex-1 overflow-y-auto overflow-x-hidden;
+    min-height: 5.5rem;
+  }
+
+  .signals-canvas {
+    @apply w-full;
+  }
+
+  /* The plots take focus so the arrow keys can move the time cursor, and they
+     sit inside a scrolling region — so the ring is drawn inside their own box
+     rather than around it, where `overflow` would clip it away. */
+  .signals-canvas:focus-visible {
+    outline: 2px solid var(--tone-accent);
+    outline-offset: -2px;
+  }
+
+  .signals-empty {
+    @apply px-2 py-1.5 text-[11px] text-ink-faint;
+  }
+
+  .signals-empty strong {
+    @apply font-medium text-ink;
+  }
+
+  .signals-readout {
+    @apply grid shrink-0 gap-x-1 border-t border-line px-2 py-1;
+    align-content: start;
+    align-items: center;
+    max-height: 58%;
+    overflow-y: auto;
+  }
+
+  .signals-corner {
+    @apply flex min-h-5 items-baseline font-mono text-[10px] tabular-nums text-ink-faint;
+  }
+
+  .signals-at {
+    @apply text-ink-soft;
+  }
+
+  .signals-column {
+    @apply flex min-h-5 items-center justify-end gap-1 overflow-hidden text-[10px] text-ink-soft;
+  }
+
+  .signals-arm-dot {
+    @apply h-1.5 w-1.5 shrink-0 rounded-full;
+  }
+
+  .signals-arm-name {
+    @apply truncate;
+  }
+
+  .signals-joint {
+    @apply flex min-h-6 cursor-pointer items-center gap-1.5 overflow-hidden rounded pr-1
+      text-left text-[11px] text-ink transition-colors hover:bg-hover;
+  }
+
+  /* A short stroke, not a filled swatch: the mark mirrors what it labels, and
+     what it labels is a line. */
+  .signals-key-mark {
+    @apply h-0.5 w-2.5 shrink-0 rounded-full transition-opacity;
+  }
+
+  .signals-joint-name {
+    @apply truncate;
+  }
+
+  .signals-joint-off {
+    @apply text-ink-faint;
+  }
+
+  .signals-joint-off .signals-key-mark {
+    opacity: 0.3;
+  }
+
+  .signals-value {
+    @apply justify-self-end font-mono text-[11px] tabular-nums text-ink;
+  }
+
+  .signals-value-off {
+    @apply text-ink-faint;
+  }
+
+  .signals-unit {
+    @apply text-ink-faint;
+  }
+
+  .signals-foot {
+    @apply pt-1 text-[10px] text-ink-faint;
+    grid-column: 1 / -1;
   }
 
   .studio-header {
@@ -222,16 +443,20 @@
     @apply shrink-0 text-[12px] font-semibold tracking-[-0.01em] whitespace-nowrap;
   }
 
-  .studio-header-rule {
-    @apply h-3.5 w-px shrink-0 bg-line;
-  }
-
   .studio-status {
     @apply ml-auto flex shrink-0 items-center gap-1 text-[11px] text-ink-soft;
   }
 
   .pane-toggle-group {
     @apply flex items-center;
+  }
+
+  .desktop-dataset-toggle {
+    @apply gap-1 px-1.5;
+  }
+
+  .desktop-dataset-label {
+    @apply text-[11px];
   }
 
   /* 24px square: the WCAG 2.5.8 minimum target, which is the floor a dense
@@ -254,6 +479,15 @@
     stroke-width: 1.35;
     stroke-linecap: round;
     stroke-linejoin: round;
+  }
+
+  .ui-icon-knob {
+    fill: var(--tone-surface);
+  }
+
+  .ui-icon-dot {
+    fill: currentColor;
+    stroke: none;
   }
 
   .chevron-open {
@@ -303,56 +537,6 @@
 
   .control-rate-slow .status-dot {
     background: var(--tone-caution);
-  }
-
-  /* The mode bar holds the control that energizes an arm, so it wraps rather
-     than scrolls. A horizontal scroller here silently shears the button and its
-     arm picker off the right edge with no affordance saying they are still
-     there; a second line costs one row of header and hides nothing. */
-  .mode-bar {
-    @apply flex min-w-0 flex-wrap items-center gap-1;
-  }
-
-  .mode-group {
-    @apply flex min-h-6 items-center gap-1 rounded border border-line pr-0.5 pl-1.5 transition-colors;
-  }
-
-  /* The name of a mode group is a label for the controls inside it, not a
-     heading above them: micro, faint, and out of the way of the picker. */
-  .mode-group-name {
-    @apply text-[10px] whitespace-nowrap text-ink-faint;
-  }
-
-  .mode-group-active {
-    @apply border-accent font-medium;
-    background: var(--tone-selected);
-  }
-
-  /* The narration channel carries fault reasons and live replay progress, so it
-     takes its own line inside the wrapping mode bar rather than competing with
-     the controls for horizontal space. It only renders when it has something to
-     say, so the header stays one row at rest. */
-  .mode-description {
-    @apply w-full text-[11px] leading-tight text-ink-soft;
-  }
-
-  .mode-group-fault {
-    @apply border-danger;
-    background: var(--tone-danger-soft);
-  }
-
-  .mode-description-fault {
-    @apply text-danger;
-  }
-
-  /* What the button is about to do to the arms is the last thing that should be
-     abbreviated. It wraps inside a bounded width instead of truncating, and it
-     is never the smallest type on screen. */
-  /* It stays on one line now rather than wrapping inside a bounded width: a
-     two-line blob in the middle of the mode bar was the reason the header could
-     not hold its controls on one row. */
-  .teleop-consequence {
-    @apply px-1 text-[11px] whitespace-nowrap text-ink-soft;
   }
 
   /* Releasing torque is confirmed in place, beside the arm it drops, with the
@@ -407,15 +591,33 @@
     @apply text-caution;
   }
 
-  /* The one thing standing between these sliders and the arm that the panel
+  /* The one thing standing between these joint controls and the arm that the panel
      cannot itself fix. It changes once, when the arm is calibrated, so it is
      not a line that comes and goes under the joints as the mode changes. */
   .joint-blocked {
     @apply mb-0.5 text-[11px] leading-tight text-caution;
   }
 
+  /* Read-only telemetry packs into as many useful columns as the inspector can
+     hold. A compact cell needs only its label and angle; its positional meter
+     returns when that individual cell has spare width. Active sliders ask for
+     more room and keep their own wider rule. */
+  .joint-list {
+    @apply grid gap-x-1 px-2 pb-1.5;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 8rem), 1fr));
+  }
+
+  .joint-list-drivable {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+  }
+
+  .joint-list-wide {
+    grid-column: 1 / -1;
+  }
+
   .joint-row {
-    @apply -mx-1 flex min-h-6 items-center gap-1.5 rounded px-1 transition-colors;
+    @apply -mx-1 flex min-h-6 items-center gap-1 rounded px-1 transition-colors;
+    container-type: inline-size;
   }
 
   .joint-row:hover,
@@ -448,14 +650,54 @@
   }
 
   .joint-label {
-    @apply inline-flex min-h-6 w-20 shrink-0 cursor-pointer items-center truncate text-left text-[11px] text-ink-soft;
+    @apply inline-flex min-h-6 w-[4.75rem] shrink-0 cursor-pointer items-center truncate text-left text-[11px] text-ink-soft;
   }
 
   /* The measured angle beside its slider: mono so the sign and the digits stay
      in the same place as the arm moves. */
   .joint-value {
-    @apply w-11 shrink-0 text-right font-mono text-[10px] text-ink-soft;
+    @apply w-9 shrink-0 text-right font-mono text-[10px] text-ink-soft;
     font-variant-numeric: tabular-nums;
+  }
+
+  /* Outside Manual mode this is telemetry, not a disabled control. A short
+     hairline and square tick preserve relative position without borrowing the
+     draggable thumb, long track, cursor, or focus behavior of a range input. */
+  .joint-position-meter {
+    @apply relative ml-auto hidden h-3 w-9 shrink-0 text-ink-faint;
+  }
+
+  @container (min-width: 11rem) {
+    .joint-position-meter {
+      display: block;
+    }
+  }
+
+  .joint-position-meter::before {
+    content: "";
+    @apply absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-line;
+  }
+
+  .joint-position-marker {
+    @apply absolute top-1/2 h-2 w-px -translate-x-1/2 -translate-y-1/2 bg-current;
+  }
+
+  .joint-position-unknown::before {
+    height: 0;
+    border-top: 1px dashed var(--tone-line);
+    background: transparent;
+  }
+
+  .joint-row-selected .joint-position-meter {
+    @apply text-accent;
+  }
+
+  .joint-row-caution .joint-position-meter {
+    @apply text-caution;
+  }
+
+  .joint-row-fault .joint-position-meter {
+    @apply text-danger;
   }
 
   /* Everything one motor reports, for the one motor the operator asked about.
@@ -645,12 +887,33 @@
     @apply h-full w-full object-contain;
   }
 
-  .camera-unavailable {
-    @apply absolute inset-0 flex flex-col items-center justify-center gap-2 text-[11px] text-white/60;
+  .camera-unavailable-card {
+    @apply flex min-h-20 items-start gap-2 bg-sunken px-2 py-2 text-[11px] text-ink-soft;
   }
 
-  .camera-trouble {
-    @apply border-t border-line px-1.5 py-1 text-[11px] text-danger;
+  .camera-unavailable-card .camera-placeholder-icon {
+    @apply mt-0.5 shrink-0 text-ink-faint;
+  }
+
+  .camera-unavailable-copy {
+    @apply flex min-w-0 flex-1 flex-col gap-0.5;
+  }
+
+  .camera-unavailable-copy strong {
+    @apply font-medium text-ink;
+  }
+
+  .technical-details {
+    @apply mt-0.5 text-[10px] text-ink-faint;
+  }
+
+  .technical-details summary {
+    @apply w-fit cursor-pointer rounded px-0.5 hover:bg-hover hover:text-ink;
+  }
+
+  .technical-details code {
+    @apply mt-0.5 block max-h-24 overflow-auto rounded bg-sunken p-1 font-mono text-[10px] leading-snug text-ink-soft;
+    overflow-wrap: anywhere;
   }
 
   .reconnect-guard {
@@ -677,7 +940,7 @@
   }
 
   .issue-list {
-    @apply max-h-28 list-disc space-y-0.5 overflow-y-auto pb-1 pl-4 text-ink-soft;
+    @apply max-h-28 space-y-1 overflow-y-auto pb-1 text-ink-soft;
   }
 
   .issue-dismiss {
@@ -736,14 +999,6 @@
       focus:border-accent disabled:cursor-not-allowed disabled:text-ink-faint;
   }
 
-  /* A picker inside a toolbar: no border of its own, because the group around
-     it already has one. */
-  .field-inline {
-    @apply min-h-6 cursor-pointer rounded border-0 bg-transparent px-0.5 py-0 text-[12px] text-ink
-      hover:bg-hover disabled:cursor-not-allowed
-      disabled:text-ink-faint disabled:hover:bg-transparent;
-  }
-
   .label {
     @apply mb-0.5 block text-[10px] font-medium text-ink-faint;
   }
@@ -770,8 +1025,9 @@
     background-color: var(--tone-caution-soft);
   }
 
-  /* One consistent slider, since the browser default differs per platform and
-     the thumb needs to stay visible against both themes. */
+  /* A slider appears only while Manual mode can really command the arm. The
+     browser default differs per platform, so the active control owns its track
+     and thumb rather than sharing them with read-only telemetry. */
   .joint-slider {
     @apply h-5 w-full cursor-pointer appearance-none bg-transparent
       disabled:cursor-not-allowed disabled:opacity-50;
@@ -804,38 +1060,6 @@
 
 }
 
-/*
-  Below this the header can no longer hold the mode controls, the narration and
-  the status cluster on one line. The mode bar drops to its own full-width row
-  rather than any of the three being sheared or hidden — the arrangement the
-  narrow breakpoint already proved correct, applied at the width where the
-  header actually runs out of room instead of 550px later.
-*/
-/*
-  Below this the header can no longer hold the mode controls, the narration and
-  the status cluster on one line. The mode bar drops to its own full-width row
-  rather than any of the three being sheared or hidden.
-
-  The threshold moved down from 1450px because the strip itself got shorter: at
-  a 24px control height with a single-line teleoperation consequence, the whole
-  cluster now fits on one row at the widths where it used to wrap.
-*/
-@media (max-width: 1280px) {
-  .studio-header {
-    flex-wrap: wrap;
-    gap: 0.375rem;
-  }
-
-  .mode-bar {
-    order: 3;
-    width: 100%;
-  }
-
-  .studio-status {
-    gap: 0.25rem;
-  }
-}
-
 @media (max-width: 1180px) {
   .control-rate-label {
     display: none;
@@ -847,48 +1071,12 @@
     flex-wrap: wrap;
   }
 
-  .studio-header-rule {
-    display: none;
-  }
-
-  /* The stage keeps a floor of its own, but not one that can take the panes'
-     whole share: an 18rem minimum against a short window left the inspector
-     showing one joint slider of six. */
-  .studio-body {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    grid-template-rows: minmax(10rem, 56%) minmax(11rem, 44%);
-  }
-
-  .studio-workspace {
-    grid-column: 1 / -1;
-    grid-row: 1;
-  }
-
-  .studio-panel {
-    width: auto !important;
-    min-width: 0;
-  }
-
-  .studio-panel-left {
-    grid-column: 1;
-    grid-row: 2;
-    border-top: 1px solid var(--tone-line);
-  }
-
-  .studio-panel-right {
-    grid-column: 2;
-    grid-row: 2;
-    border-top: 1px solid var(--tone-line);
-  }
-
-  .pane-splitter {
-    display: none;
-  }
-
 }
 
-@media (max-width: 640px) {
+/* Below this width the stable bench gives way to one selected surface. The
+   same panel instances remain mounted; only their presentation changes, so a
+   camera or scene does not restart when the operator switches surfaces. */
+@media (max-width: 760px) {
   .studio-shell {
     height: 100dvh;
     min-height: 0;
@@ -905,13 +1093,8 @@
     justify-content: flex-end;
   }
 
-  /* The cluster sheds what is merely informative — the loop rate. Everything
-     else it still renders is already exceptional: the mode chip now only exists
-     while a mode is running or faulted, and the hold count only while an arm is
-     energized. Anything that would let the operator start a mode without knowing
-     an arm is powered, a mode faulted, or an issue is outstanding stays on the
-     page, because the control that energizes an arm is still right there and
-     still enabled. */
+  /* The cluster sheds what is merely informative — the loop rate. Active mode,
+     holding, faults, issues, and connection health remain visible. */
   .studio-status > .control-rate {
     display: none;
   }
@@ -923,25 +1106,11 @@
     width: 1.75rem;
   }
 
-  /* The pair and start/stop action stay together as one control row. The
-     hardware consequence gets the full row beneath them, so narrow screens
-     never clip the fact that starting teleoperation releases and energizes
-     physical mechanisms. */
-  .mode-group {
-    width: 100%;
-    display: grid;
-    grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr) max-content;
-  }
-
-  .mode-group .field-inline {
-    width: 100%;
-    min-width: 0;
-  }
-
-  .teleop-consequence {
-    grid-column: 1 / -1;
-    width: 100%;
-    padding-bottom: 0.25rem;
+  /* One surface at a time here, so the plots get more of the column than they
+     do beside a Scene — and the readout yields first, because a trace too short
+     to read is worse than a value list that scrolls. */
+  .signals-readout {
+    max-height: 50%;
   }
 
   .studio-body {
@@ -949,11 +1118,22 @@
     min-height: 0;
   }
 
+  /* A column, not a block. The one visible surface is told to take the height
+     with `flex: 1` below, and a block parent silently ignores that — which left
+     the bench, and the plots stacked under the arm list, sized to their content
+     with the rest of the screen blank beneath them. */
+  .pane-workspace {
+    display: flex;
+    flex-direction: column;
+  }
+
   .studio-workspace,
   .studio-panel {
     width: 100% !important;
     min-width: 0;
-    flex: 1;
+    /* `flex-basis: 0` beats the inline percentage each side pane carries for
+       the desktop row, which would otherwise be read here as a height. */
+    flex: 1 1 0% !important;
   }
 
   .studio-panel {
@@ -962,12 +1142,17 @@
     border-left: 0;
   }
 
-  .surface-hidden-mobile {
+  .workspace-pane.surface-hidden-mobile {
     display: none;
   }
 
-  .surface-active-mobile {
+  .workspace-pane.surface-active-mobile {
     display: flex;
+  }
+
+  .pane-heading,
+  .pane-splitter {
+    display: none;
   }
 
   .viewport-tile {
@@ -976,7 +1161,8 @@
   }
 
   .desktop-pane-toggle,
-  .studio-header-rule,
+  .desktop-dataset-toggle,
+  .layout-reset,
   .studio-brand {
     display: none;
   }
@@ -993,7 +1179,7 @@
   }
 
   .mobile-surface-switcher button {
-    min-height: 2rem;
+    min-height: 2.75rem;
     border-radius: 4px;
     color: var(--tone-ink-soft);
   }
@@ -1085,7 +1271,15 @@
   }
 
   .issue-list {
-    @apply max-h-36 list-disc space-y-0.5 overflow-y-auto pb-1 pl-4;
+    @apply max-h-36 space-y-1 overflow-y-auto pb-1;
+  }
+
+  .issue-list > li {
+    @apply rounded bg-sunken px-1.5 py-1;
+  }
+
+  .issue-list strong {
+    @apply block font-medium text-ink;
   }
 
   .issue-dismiss {
@@ -1211,6 +1405,10 @@
 
   .device-setup-alarm {
     @apply mb-1 rounded bg-danger-soft px-1.5 py-1 text-[11px] leading-tight text-danger;
+  }
+
+  .device-setup-alarm .technical-details code {
+    @apply bg-surface text-ink-soft;
   }
 
   /* The port and the button that opens it, on one line. */
@@ -1546,6 +1744,18 @@
     @apply text-[11px] text-ink-faint;
   }
 
+  /* The full Dataset rail is an on-demand work surface. Its collapsed state
+     keeps the recording transport visible and gives the remaining width to one
+     calm explanation instead of rendering a second toolbar of inactive tools. */
+  .timeline-rail-compact .timeline-toolbar {
+    border-bottom: 0;
+  }
+
+  .dataset-sheet-toggle,
+  .dataset-sheet-header {
+    display: none;
+  }
+
   .timeline-rail .btn-primary {
     @apply text-accent-ink;
   }
@@ -1570,14 +1780,78 @@
   }
 }
 
-@media (max-width: 640px) {
+@media (max-width: 760px) {
   .timeline-rail {
-    max-height: 42vh;
+    max-height: 58vh;
     overflow-y: auto;
+    box-shadow: 0 -6px 18px color-mix(in srgb, var(--tone-ink) 10%, transparent);
   }
 
   .timeline-toolbar {
     gap: 0.5rem;
+  }
+
+  .dataset-sheet-header {
+    display: flex;
+    min-height: 2.75rem;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--tone-line);
+    padding: 0 0.5rem;
+    color: var(--tone-ink);
+  }
+
+  .dataset-sheet-close,
+  .dataset-sheet-toggle {
+    min-height: 2.75rem;
+    cursor: pointer;
+    border-radius: 0.25rem;
+    padding: 0 0.75rem;
+    color: var(--tone-accent);
+    font-weight: 500;
+  }
+
+  .dataset-sheet-close:hover,
+  .dataset-sheet-toggle:hover {
+    background: var(--tone-hover);
+  }
+
+  .timeline-rail-compact {
+    max-height: none;
+    overflow: hidden;
+    box-shadow: none;
+  }
+
+  .timeline-rail-compact .timeline-toolbar {
+    min-height: 2.75rem;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) max-content;
+    padding-block: 0;
+  }
+
+  .timeline-rail-compact .timeline-transport {
+    width: auto;
+    flex-wrap: wrap;
+  }
+
+  .timeline-rail-compact .timeline-readout-label {
+    display: none;
+  }
+
+  .timeline-rail-compact .take-blocked {
+    order: 10;
+    flex-basis: 100%;
+  }
+
+  .dataset-sheet-toggle {
+    display: inline-flex;
+    margin-left: auto;
+    align-items: center;
+  }
+
+  .timeline-collapsed-note {
+    display: none;
   }
 
   .timeline-transport {
@@ -1589,7 +1863,37 @@
   }
 
   .timeline-summary {
-    justify-content: space-between;
+    display: grid;
+    width: 100%;
+    margin-left: 0;
+    grid-template-columns: minmax(0, 1fr) max-content;
+    align-items: center;
+    gap: 0.25rem 0.5rem;
+  }
+
+  .session-count {
+    grid-column: 1 / -1;
+    flex-wrap: wrap;
+    white-space: normal;
+  }
+
+  .dataset-import {
+    grid-column: 1;
+    justify-self: start;
+  }
+
+  .dataset-download {
+    grid-column: 2;
+    justify-self: end;
+  }
+
+  .timeline-summary > .take-blocked {
+    grid-column: 1 / -1;
+  }
+
+  .timeline-summary .btn,
+  .timeline-summary .dataset-import {
+    min-height: 2.75rem;
   }
 
   /* Touch has no hover, so delete stays visible here — and the card grows to

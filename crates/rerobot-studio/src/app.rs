@@ -1,61 +1,20 @@
-//! The studio shell: a resizable hierarchy, central visual workspace, and inspector.
+//! The studio shell: global session rails around a stable three-pane bench.
 
 use dioxus::prelude::*;
-#[cfg(feature = "web")]
-use wasm_bindgen::JsCast;
 
-use crate::control::JointPanel;
-use crate::icons::{Panel, Rail};
-use crate::modes::ModeBar;
-use crate::setup::RobotPanel;
+use crate::icons::{LayoutReset, PropertiesPanel, Rail, RobotPanelIcon, SignalsPanelIcon};
+use crate::panes::{PaneLayout, PaneWorkspace, StudioPane};
 use crate::state::Studio;
 use crate::timeline::TimelineRail;
-use crate::viewport::Viewport;
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
+/// The plotting runtime, served from the studio's own assets.
+///
+/// Vendored rather than fetched from a CDN because the machine wired to the
+/// arms is not promised an internet connection, and a bench tool that loses
+/// half a panel when the lab wifi drops is not a bench tool.
+const ECHARTS: Asset = asset!("/assets/echarts.min.js");
 const FAVICON: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2337352f'/%3E%3Cpath d='M9 23V13l7-5 7 5v10' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Surface {
-    Explorer,
-    View,
-    Inspector,
-}
-
-#[derive(Clone, Copy)]
-enum PaneDrag {
-    Left,
-    Right,
-}
-
-/// How far each side pane may be resized, in pixels.
-///
-/// The drag handler and the keyboard handler read the same bounds, so a pane
-/// cannot be nudged somewhere a drag would refuse to leave it.
-const LEFT_PANE_RANGE: (f64, f64) = (220.0, 380.0);
-const RIGHT_PANE_RANGE: (f64, f64) = (280.0, 440.0);
-
-/// The width an arrow key moves a splitter to, if this key moves it at all.
-///
-/// `direction` is `1.0` when a pane grows as its edge moves right and `-1.0`
-/// when it grows as its edge moves left, so both splitters follow the arrow the
-/// operator actually pressed rather than the pane it happens to belong to.
-fn nudged(
-    event: &Event<KeyboardData>,
-    width: f64,
-    (minimum, maximum): (f64, f64),
-    direction: f64,
-) -> Option<f64> {
-    let step = if event.modifiers().shift() { 32.0 } else { 8.0 };
-    let width = match event.key() {
-        Key::ArrowLeft => width - step * direction,
-        Key::ArrowRight => width + step * direction,
-        Key::Home => minimum,
-        Key::End => maximum,
-        _ => return None,
-    };
-    Some(width.clamp(minimum, maximum))
-}
 
 #[component]
 pub fn App() -> Element {
@@ -64,26 +23,22 @@ pub fn App() -> Element {
 
     // The server and browser must produce the same first tree for hydration.
     // Browser-only preferences are applied after the hydrated app mounts.
-    let mut left_open = use_signal(|| true);
-    let mut right_open = use_signal(|| true);
-    let mut rail_open = use_signal(|| true);
-    let mut left_width = use_signal(|| 272.0);
-    let mut right_width = use_signal(|| 320.0);
-    let mut dragging = use_signal(|| None::<PaneDrag>);
-    let mut surface = use_signal(|| Surface::View);
+    let mut rail_open = use_signal(|| false);
+    let mut layout = use_signal(PaneLayout::bench);
+    let mut surface = use_signal(|| StudioPane::Scene);
     let studio = crate::state::studio();
 
     #[cfg(feature = "web")]
     use_effect(move || {
-        left_open.set(stored_bool("rerobot.pane.left", true));
-        right_open.set(stored_bool("rerobot.pane.right", true));
-        rail_open.set(stored_bool("rerobot.pane.rail", true));
-        left_width.set(stored_number("rerobot.pane.left.width", 272.0));
-        right_width.set(stored_number("rerobot.pane.right.width", 320.0));
+        rail_open.set(stored_bool("rerobot.dataset.expanded.v2", false));
+        if let Some(stored) = PaneLayout::stored() {
+            layout.set(stored);
+        }
     });
 
     rsx! {
         document::Stylesheet { href: TAILWIND }
+        document::Script { src: ECHARTS.to_string() }
         document::Title { "rerobot studio" }
         document::Link { rel: "icon", href: FAVICON }
         document::Meta { name: "color-scheme", content: "light" }
@@ -123,124 +78,44 @@ pub fn App() -> Element {
                 }
             },
             Header {
-                left_open: left_open(),
-                right_open: right_open(),
+                robots_open: layout.read().contains(StudioPane::Robots),
+                properties_open: layout.read().contains(StudioPane::Properties),
+                signals_open: layout.read().signals_open(),
+                layout_is_default: layout.read().is_default(),
                 rail_open: rail_open(),
                 surface: surface(),
-                on_left: move |_| {
-                    let next = !left_open();
-                    left_open.set(next);
-                    store_bool("rerobot.pane.left", next);
+                on_robots: move |_| {
+                    layout.write().toggle(StudioPane::Robots);
+                    layout.read().store();
                 },
-                on_right: move |_| {
-                    let next = !right_open();
-                    right_open.set(next);
-                    store_bool("rerobot.pane.right", next);
+                on_signals: move |_| {
+                    layout.write().toggle_signals();
+                    layout.read().store();
+                },
+                on_properties: move |_| {
+                    layout.write().toggle(StudioPane::Properties);
+                    layout.read().store();
                 },
                 on_rail: move |_| {
                     let next = !rail_open();
                     rail_open.set(next);
-                    store_bool("rerobot.pane.rail", next);
+                    store_bool("rerobot.dataset.expanded.v2", next);
                 },
-                on_surface: move |next| surface.set(next),
+                on_reset: move |_| {
+                    layout.write().reset();
+                    layout.read().store();
+                },
+                on_surface: move |next| {
+                    if !layout.read().contains(next) {
+                        layout.write().show(next);
+                        layout.read().store();
+                    }
+                    surface.set(next);
+                },
             }
             div {
                 class: "studio-body",
-                onpointermove: move |event| {
-                    let Some(active) = dragging() else { return };
-                    let x = event.data().client_coordinates().x;
-                    match active {
-                        PaneDrag::Left => {
-                            left_width.set(x.clamp(LEFT_PANE_RANGE.0, LEFT_PANE_RANGE.1))
-                        }
-                        PaneDrag::Right => {
-                            let viewport = web_sys::window()
-                                .and_then(|window| window.inner_width().ok())
-                                .and_then(|width| width.as_f64())
-                                .unwrap_or(1280.0);
-                            right_width
-                                .set((viewport - x).clamp(RIGHT_PANE_RANGE.0, RIGHT_PANE_RANGE.1));
-                        }
-                    }
-                },
-                onpointerup: move |_| {
-                    if let Some(active) = dragging() {
-                        match active {
-                            PaneDrag::Left => store_number("rerobot.pane.left.width", left_width()),
-                            PaneDrag::Right => store_number("rerobot.pane.right.width", right_width()),
-                        }
-                    }
-                    dragging.set(None);
-                },
-                if left_open() {
-                    aside {
-                        class: if surface() == Surface::Explorer { "studio-panel studio-panel-left surface-active-mobile" } else { "studio-panel studio-panel-left surface-hidden-mobile" },
-                        style: "width: {left_width()}px",
-                        RobotPanel {}
-                        if !studio.controls_available() { ReconnectGuard {} }
-                    }
-                    div {
-                        class: "pane-splitter pane-splitter-left",
-                        role: "separator",
-                        "aria-label": "Resize robot explorer",
-                        "aria-orientation": "vertical",
-                        // A separator that only responds to a drag is a separator
-                        // a keyboard cannot move, so it takes focus and the arrow
-                        // keys the role already implies.
-                        tabindex: 0,
-                        "aria-valuenow": left_width() as i64,
-                        "aria-valuemin": LEFT_PANE_RANGE.0 as i64,
-                        "aria-valuemax": LEFT_PANE_RANGE.1 as i64,
-                        title: "Drag, or focus and use the arrow keys, to resize the robot explorer",
-                        onpointerdown: move |event| {
-                            capture(&event);
-                            dragging.set(Some(PaneDrag::Left));
-                        },
-                        onkeydown: move |event| {
-                            if let Some(width) = nudged(&event, left_width(), LEFT_PANE_RANGE, 1.0) {
-                                event.prevent_default();
-                                left_width.set(width);
-                                store_number("rerobot.pane.left.width", width);
-                            }
-                        },
-                    }
-                }
-                main {
-                    class: if surface() == Surface::View { "studio-workspace surface-active-mobile" } else { "studio-workspace surface-hidden-mobile" },
-                    section { class: "viewport-tile", Viewport {} }
-                }
-                if right_open() {
-                    div {
-                        class: "pane-splitter pane-splitter-right",
-                        role: "separator",
-                        "aria-label": "Resize joint inspector",
-                        "aria-orientation": "vertical",
-                        tabindex: 0,
-                        "aria-valuenow": right_width() as i64,
-                        "aria-valuemin": RIGHT_PANE_RANGE.0 as i64,
-                        "aria-valuemax": RIGHT_PANE_RANGE.1 as i64,
-                        title: "Drag, or focus and use the arrow keys, to resize the joint inspector",
-                        onpointerdown: move |event| {
-                            capture(&event);
-                            dragging.set(Some(PaneDrag::Right));
-                        },
-                        onkeydown: move |event| {
-                            // Inverted: this pane grows as its edge moves left.
-                            if let Some(width) = nudged(&event, right_width(), RIGHT_PANE_RANGE, -1.0)
-                            {
-                                event.prevent_default();
-                                right_width.set(width);
-                                store_number("rerobot.pane.right.width", width);
-                            }
-                        },
-                    }
-                    aside {
-                        class: if surface() == Surface::Inspector { "studio-panel studio-panel-right surface-active-mobile" } else { "studio-panel studio-panel-right surface-hidden-mobile" },
-                        style: "width: {right_width()}px",
-                        JointPanel {}
-                        if !studio.controls_available() { ReconnectGuard {} }
-                    }
-                }
+                PaneWorkspace { layout, mobile_pane: surface() }
             }
             // Below the panes rather than inside the viewport column, and
             // outside the surface switcher's reach. A take is a span of time
@@ -251,10 +126,13 @@ pub fn App() -> Element {
             // Collapsing the rail during a take leaves the transport behind
             // rather than hiding it: whether an arm is being recorded is not a
             // thing a preference gets to switch off.
-            if rail_open() {
-                TimelineRail { compact: false }
-            } else if studio.recording().is_some() {
-                TimelineRail { compact: true }
+            TimelineRail {
+                compact: !rail_open(),
+                on_toggle: move |_| {
+                    let next = !rail_open();
+                    rail_open.set(next);
+                    store_bool("rerobot.dataset.expanded.v2", next);
+                }
             }
             NoticeStrip {}
         }
@@ -263,14 +141,18 @@ pub fn App() -> Element {
 
 #[component]
 fn Header(
-    left_open: bool,
-    right_open: bool,
+    robots_open: bool,
+    properties_open: bool,
+    signals_open: bool,
+    layout_is_default: bool,
     rail_open: bool,
-    surface: Surface,
-    on_left: EventHandler<()>,
-    on_right: EventHandler<()>,
+    surface: StudioPane,
+    on_robots: EventHandler<()>,
+    on_signals: EventHandler<()>,
+    on_properties: EventHandler<()>,
     on_rail: EventHandler<()>,
-    on_surface: EventHandler<Surface>,
+    on_reset: EventHandler<()>,
+    on_surface: EventHandler<StudioPane>,
 ) -> Element {
     let studio = crate::state::studio();
     let snapshot = studio.snapshot.read().clone();
@@ -299,25 +181,43 @@ fn Header(
             div { class: "pane-toggle-group", "aria-label": "Workspace panes",
                 button {
                     r#type: "button", class: "icon-button desktop-pane-toggle",
-                    "aria-pressed": left_open, "aria-label": "Toggle robot explorer", title: "Toggle robot explorer",
-                    onclick: move |_| on_left.call(()), Panel { left: true }
+                    "aria-pressed": robots_open, "aria-label": "Toggle Robots panel", title: "Toggle Robots panel",
+                    onclick: move |_| on_robots.call(()), RobotPanelIcon {}
+                }
+                // Beside Robots because that is the column it stacks into: the
+                // arms and what they just did are one subject, and the plots
+                // are not a fourth surface competing with the bench.
+                button {
+                    r#type: "button", class: "icon-button desktop-pane-toggle",
+                    "aria-pressed": signals_open, "aria-label": "Toggle Signals plots", title: "Toggle Signals plots",
+                    onclick: move |_| on_signals.call(()), SignalsPanelIcon {}
                 }
                 button {
                     r#type: "button", class: "icon-button desktop-pane-toggle",
-                    "aria-pressed": right_open, "aria-label": "Toggle joint inspector", title: "Toggle joint inspector",
-                    onclick: move |_| on_right.call(()), Panel { left: false }
+                    "aria-pressed": properties_open, "aria-label": "Toggle Properties panel", title: "Toggle Properties panel",
+                    onclick: move |_| on_properties.call(()), PropertiesPanel {}
                 }
                 // Not a `desktop-pane-toggle`: the rail is the only region that
                 // reports a running take, so the way to collapse it has to exist
                 // at every width, including the one where the panes do not.
                 button {
-                    r#type: "button", class: "icon-button rail-toggle",
-                    "aria-pressed": rail_open, "aria-label": "Toggle session timeline", title: "Toggle session timeline",
-                    onclick: move |_| on_rail.call(()), Rail {}
+                    r#type: "button", class: "icon-button rail-toggle desktop-dataset-toggle",
+                    "aria-pressed": rail_open,
+                    "aria-expanded": rail_open,
+                    "aria-label": if rail_open { "Collapse Dataset" } else { "Open Dataset" },
+                    title: if rail_open { "Collapse Dataset" } else { "Open Dataset" },
+                    onclick: move |_| on_rail.call(()),
+                    Rail {}
+                    span { class: "desktop-dataset-label", "Dataset" }
+                }
+                if !layout_is_default {
+                    button {
+                        r#type: "button", class: "icon-button layout-reset",
+                        "aria-label": "Reset pane widths and visibility", title: "Reset pane widths and visibility",
+                        onclick: move |_| on_reset.call(()), LayoutReset {}
+                    }
                 }
             }
-            div { class: "studio-header-rule" }
-            ModeBar {}
             div { class: "studio-status",
                 Warnings {}
                 // Only the exceptional environment is worth a coloured tag.
@@ -392,27 +292,15 @@ fn Header(
                 }
             }
             nav { class: "mobile-surface-switcher", "aria-label": "Workspace view",
-                for (choice, label) in [(Surface::Explorer, "Robots"), (Surface::View, "View"), (Surface::Inspector, "Inspect")] {
+                for choice in StudioPane::ALL {
                     button {
                         r#type: "button",
                         class: if surface == choice { "mobile-surface-active" } else { "" },
                         "aria-pressed": surface == choice,
                         onclick: move |_| on_surface.call(choice),
-                        "{label}"
+                        "{choice.label()}"
                     }
                 }
-            }
-        }
-    }
-}
-
-#[component]
-fn ReconnectGuard() -> Element {
-    rsx! {
-        div { class: "reconnect-guard", role: "status",
-            div { class: "reconnect-card",
-                span { class: "status-dot", style: "background: var(--tone-danger)" }
-                span { "Telemetry unavailable — controls paused" }
             }
         }
     }
@@ -431,12 +319,20 @@ fn Warnings() -> Element {
     if showing.is_empty() {
         return rsx! {};
     }
-    let count = showing.len();
-    // The first issue's own words ride beside the count. The summary used to be
-    // a bare tally, so what was actually wrong took a click to read at every
-    // width — on a surface whose whole point is that the state of the bench is
-    // legible without one.
-    let first = showing.first().cloned().unwrap_or_default();
+    // Several sensors can report the same root failure. The operator needs one
+    // recovery path, not one raw implementation string per device.
+    let mut copies = Vec::<IssueCopy>::new();
+    for issue in &showing {
+        let copy = issue_copy(issue);
+        if !copies.iter().any(|known| known.message == copy.message) {
+            copies.push(copy);
+        }
+    }
+    let count = copies.len();
+    let first = copies
+        .first()
+        .map(|copy| copy.message.clone())
+        .unwrap_or_default();
     rsx! {
         details { class: "issue-details", role: "status",
             summary { class: "issue-summary",
@@ -446,7 +342,17 @@ fn Warnings() -> Element {
             }
             div { class: "issue-popover",
                 ul { class: "issue-list",
-                    for issue in showing { li { key: "{issue}", "{issue}" } }
+                    for copy in copies {
+                        li { key: "{copy.message}",
+                            strong { "{copy.message}" }
+                            if let Some(detail) = copy.detail {
+                                details { class: "technical-details",
+                                    summary { "Technical details" }
+                                    code { "{detail}" }
+                                }
+                            }
+                        }
+                    }
                 }
                 button {
                     r#type: "button", class: "link issue-dismiss",
@@ -456,6 +362,36 @@ fn Warnings() -> Element {
                 }
             }
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IssueCopy {
+    message: String,
+    detail: Option<String>,
+}
+
+fn issue_copy(issue: &str) -> IssueCopy {
+    let lowered = issue.to_ascii_lowercase();
+    let message = if lowered.contains("camera")
+        && (lowered.contains("lockforconfiguration")
+            || lowered.contains("lock rejected")
+            || lowered.contains("busy"))
+    {
+        "A camera is busy. Close other camera apps, then rescan.".to_owned()
+    } else if lowered.contains("camera") && lowered.contains("unavailable") {
+        "A camera is unavailable. Rescan devices or assign another camera.".to_owned()
+    } else if lowered.contains("device or resource busy")
+        || lowered.contains("serial port") && lowered.contains("use")
+    {
+        "An arm's serial port is already in use. Close the other connection, then try again."
+            .to_owned()
+    } else {
+        "The studio needs attention. Open Technical details for diagnostics.".to_owned()
+    };
+    IssueCopy {
+        detail: (message != issue).then(|| issue.to_owned()),
+        message,
     }
 }
 
@@ -483,36 +419,12 @@ fn NoticeStrip() -> Element {
 }
 
 #[cfg(feature = "web")]
-fn capture(event: &Event<PointerData>) {
-    let Some(raw) = event.downcast::<web_sys::PointerEvent>() else {
-        return;
-    };
-    if let Some(target) = raw
-        .target()
-        .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
-    {
-        let _ = target.set_pointer_capture(raw.pointer_id());
-    }
-}
-
-#[cfg(not(feature = "web"))]
-fn capture(_event: &Event<PointerData>) {}
-
-#[cfg(feature = "web")]
 fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok()?
 }
 
 #[cfg(feature = "web")]
 fn stored_bool(key: &str, fallback: bool) -> bool {
-    storage()
-        .and_then(|storage| storage.get_item(key).ok().flatten())
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(fallback)
-}
-
-#[cfg(feature = "web")]
-fn stored_number(key: &str, fallback: f64) -> f64 {
     storage()
         .and_then(|storage| storage.get_item(key).ok().flatten())
         .and_then(|value| value.parse().ok())
@@ -528,22 +440,3 @@ fn store_bool(key: &str, value: bool) {
 
 #[cfg(not(feature = "web"))]
 fn store_bool(_key: &str, _value: bool) {}
-
-#[cfg(feature = "web")]
-fn store_number(key: &str, value: f64) {
-    if let Some(storage) = storage() {
-        let _ = storage.set_item(key, &format!("{value:.0}"));
-    }
-}
-
-#[cfg(not(feature = "web"))]
-fn store_number(_key: &str, _value: f64) {}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn pane_defaults_stay_inside_supported_ranges() {
-        assert!((220.0..=380.0).contains(&272.0));
-        assert!((280.0..=440.0).contains(&320.0));
-    }
-}

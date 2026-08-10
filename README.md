@@ -88,10 +88,14 @@ teleoperation both work end to end with nothing plugged in.
 
 ### What the studio does
 
-The studio is one screen, not a stack of tabs. The arms and their setup sit on
-the left, the 3D scene and the camera feeds in the middle, and the joints of
-whichever arm is selected on the right — so nothing an operator needs while
-driving a robot is hidden behind a tab they have to leave.
+The studio opens as one three-pane workspace: arms and setup on the left, the 3D
+scene in the middle, and properties for the selected arm on the right. Those
+roles stay fixed: the two side panels can be resized or hidden, while the Scene
+remains the elastic center. The left column splits again, carrying Signals — the
+plots of what those arms just did — under the arm list. Pane widths, heights, and
+visibility persist locally, and the layout-reset control restores the default
+bench. The Dataset rail stays outside the panes, so recording and safety state do
+not move or disappear with a panel.
 
 **The arm list and its setup**, on the left, creates robot instances and
 prepares them. Assign a serial port from the detected list, or use *Identify*:
@@ -104,6 +108,18 @@ limits while a bar per joint fills in, and saving writes the measured ranges
 into the robot's file. Each arm can export that complete JSON configuration;
 the list can import one as a new arm without replacing an existing instance.
 
+**Signals**, under the arm list, plots joint angles against time — one chart per
+arm, all six joints on each, every arm on one time axis and one degree scale, so
+you can see the follower tracking the leader rather than reading two numbers and
+subtracting. It is empty until you press Record, fills while the take runs, and
+holds the finished take afterwards so you can look at what you just captured
+before recording another. As a take gets long the window keeps up with the live
+edge — 10s, 30s, 2m, or the whole take — and dragging the zoom, scrolling a
+plot, or pressing the arrow keys parks it there until you press *Follow*. Under
+the plots, a readout lists every joint's angle for every arm at the time the
+cursor is on; hovering a row lifts that joint's trace on every chart, and
+clicking one takes it off them. Toggle the whole region from the header.
+
 **The 3D scene** draws every configured arm live from its measured joint
 angles. It is a real 3D view — drag to orbit, shift-drag or right-drag to pan,
 scroll to zoom — and every shape in it comes from a URDF robot description
@@ -111,14 +127,12 @@ rather than from drawing code, so teaching the studio a new arm means adding a
 description rather than a renderer. Arms that are offline or uncalibrated stand
 at their rest pose, faded, rather than vanishing.
 
-**The mode selector**, in the header, decides what the studio does with the
-motors:
-
-- **Idle** reads the motors but never drives them.
-- **Manual** commands one arm's joints from the sliders on the right.
-- **Teleoperation** mirrors a hand-guided leader arm onto a follower arm,
-  mapping through each arm's own calibration so two differently built arms
-  still agree on what "halfway" means.
+**Record**, in the Dataset rail, is also the start of teleoperation. The studio
+chooses the connected, calibrated leader and follower from their robot types,
+releases the leader, holds the follower, and starts capture as one action.
+Stopping or discarding the take ends teleoperation too. Manual control remains
+local to one arm: choose Manual and Hold in its Properties panel to reveal the
+joint sliders.
 
 **The camera strip**, under the scene, previews every detected camera as an
 MJPEG stream. Streams start when a preview is on screen and release the device
@@ -155,13 +169,14 @@ leaving an unexplained black preview.
 The rules are enforced by the server, not by the interface, so they hold for
 anything that talks to the API:
 
-- Torque is enabled without being asked for in exactly one place: starting
-  teleoperation releases the leader and holds the follower, because the mode
+- Torque is enabled without being asked for in exactly one place: starting a
+  recording releases the leader and holds the follower, because teleoperation
   does nothing at all otherwise. Everywhere else it takes a deliberate click.
   Either way, enabling it copies each motor's present position into its goal
   register first, so an arm cannot snap to a target left over from an earlier
-  session. Stopping teleoperation does not release the follower — torque is
-  what keeps an arm from falling, so dropping it is always the operator's call.
+  session. Stopping the recording ends teleoperation but does not release the
+  follower — torque is what keeps an arm from falling, so dropping it is always
+  the operator's call.
 - Joints can only be commanded in normalized units, which are meaningless
   without a calibration — so an uncalibrated arm cannot be driven at all, and a
   command can never leave the travel that was actually measured.

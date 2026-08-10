@@ -28,6 +28,12 @@ colors:
   axis-x: "#b65b55"
   axis-y: "#49815f"
   axis-z: "#5178a6"
+  signal-1: "#2a78d6"
+  signal-2: "#eb6834"
+  signal-3: "#1baf7a"
+  signal-4: "#eda100"
+  signal-5: "#e87ba4"
+  signal-6: "#008300"
 typography:
   readout:
     fontFamily: "ui-monospace, SF Mono, JetBrains Mono, Menlo, monospace"
@@ -181,8 +187,17 @@ diagnostic console. Camera pixels alone keep a dark mat for honest letterboxing.
 The interaction story is equally direct: connect arms, teleoperate, Record,
 select an episode, Replay it on a compatible arm, then Export the completed
 episodes. Measurement and fault data remain available where they help operate
-the hardware, but judgement, traces, thresholds, and diagnostic visualization
-do not become competing primary lanes.
+the hardware, but judgement, thresholds, and diagnostic dashboards do not
+become competing primary lanes.
+
+The one measurement drawn rather than printed is **Signals**: joint angles
+over the length of a take, under the arm list. It exists because a take is the
+only thing in this studio that has a *shape* — a reach, a grasp, a lift — and
+no column of live numbers can show a shape. It is bound to the take and to
+nothing else: empty before Record, filling while the take runs, held afterwards
+until the next Record replaces it. That binding is what keeps it an instrument
+rather than a dashboard, and it is the only exception to the rule against
+charting telemetry over time.
 
 Density is the point, not a side effect. The base face is 12px, ordinary
 controls are 24px tall — the WCAG 2.5.8 target floor, used as a floor rather
@@ -202,9 +217,13 @@ reads as a bench tool.
 
 **Key Characteristics:**
 
-- One light neutral world across shell, panels, WebGL stage, and dataset rail.
-- A persistent three-pane studio with a compact global session region below it.
-- One literal dataset loop: Record → select an episode → Replay → Export.
+- One light neutral world across shell, panels, WebGL stage, plots, and dataset
+  rail.
+- A persistent three-pane bench with a fixed semantic order and a compact global
+  session region below it; the Robots column is the one that stacks, carrying
+  Signals under the arm list.
+- One literal dataset loop: Record → select an episode → Replay → Export, with
+  the plots reading out the take that loop is capturing.
 - Compact 12px type, 24px controls, small radii, and hairline separators.
 - Monospace tabular figures for elapsed time, rates, durations, counts, and IDs.
 - Live values in fixed boxes and status that reports only the exception, so the
@@ -246,6 +265,19 @@ small set of semantic and identity accents.
   small WebGL orientation key only. They are deeper than the lines drawn in the
   scene because they are 10px *text* on the pale bench and have to clear 4.5:1;
   the vivid originals measured 2.0–2.8:1.
+- **Joint signal slots** (`{colors.signal-1}` through `{colors.signal-6}`): The
+  six traces on a Signals plot, and the key beside each row of the readout under
+  it. Assigned by joint *name* in kinematic order — pan, lift, elbow, wrist
+  flex, wrist roll, gripper — so an arm missing a motor does not repaint every
+  joint below it, and so the same joint is the same colour on every arm. The
+  order is the safety mechanism, not a preference: it is what holds each
+  adjacent pair apart under protanopia and deuteranopia, measured at worst 9.1
+  simulated and 19.6 unsimulated. Three of the six (aqua, yellow, magenta) sit
+  at 2.2–2.8:1 against paper, which is legal here for exactly one reason: the
+  readout prints every plotted value as text, so no reading depends on telling
+  two 1.5px lines apart. Remove that readout and the palette becomes illegal.
+  These are the only interface colours outside the light neutral world, and
+  they are spent on identity in a plot, never on chrome.
 
 ### Neutral
 
@@ -302,6 +334,18 @@ covers shadow colour too: a `box-shadow` in a component rule names a token
 rather than writing its own alpha-black. Renderer-only arm and grid colours
 remain centralized in `viewport.rs` and in the `rerobot-viewport` crate,
 which owns everything drawn on the bench and cannot see the studio at all.
+The joint signal slots follow the same exception for the same reason: they are
+painted into a canvas that never sees a stylesheet, so they live beside the
+code that draws them, in `signals.rs`, and the one piece of HTML that spends
+one — the key beside a value it labels — takes it from `signal_color` rather
+than restating the hex.
+
+That exception covers colours the canvas *owns*. It does not extend to the
+shell's own tokens, which a canvas still needs as strings: the ink, hairline,
+recess, and accent a plot draws with are **read from `:root` at paint time**, so
+moving a `--tone-*` property moves the plots with it. A literal beside one of
+those reads is a fallback for a stylesheet that failed to load, never a second
+spelling of one that did.
 
 ## Typography
 
@@ -360,29 +404,35 @@ tracked kickers, eyebrows, or decorative display faces.
 
 ## Layout
 
-The first viewport is a full-height shell with a 28px minimum header, a
-three-pane body, and the dataset rail spanning the entire width below the panes.
-Header and rail together cost about 135px, so the workspace keeps the rest: the
-studio is dense because the instrumentation is thin, not because the content is
-crowded.
-The left robot explorer defaults to 272px and resizes from 220–380px; the right
-inspector defaults to 320px and resizes from 280–440px. The pale WebGL bench
-absorbs the remaining width. Pane toggles and the rail toggle live in the
-header; the rail remains global rather than belonging to the viewport pane.
+The first viewport is a full-height shell with a 28px minimum header, a stable
+three-pane body, and the Dataset transport spanning the entire width below the
+panes. The full Dataset rail opens on demand; at rest its compact transport
+keeps recording visible without taking the scene's working height.
+The canonical layout is Robots on the left, Scene in the elastic center, and
+Properties on the right. Their order does not change: this is a physical bench,
+not a general editor. The two side panes can be hidden and have pointer- and
+keyboard-resizable separators; the Scene always remains present and absorbs the
+available width. The versioned widths and visibility persist locally. A reset
+control restores the canonical arrangement. Pane toggles, the Signals toggle,
+and the Dataset toggle live in the header; the header and rail remain global
+rather than becoming pane content.
 
-The header is a shallow operating strip: wordmark and pane controls, the
-teleoperation pair, then a right-aligned status cluster. Teleoperation is the
-only mode the header configures, because it is the only one that is about a pair
-of arms and so belongs to no single panel; manual control names one arm and
-lives on that arm's joint panel, next to the sliders it enables. The mode bar
-wraps rather than scrolling, and below 1280px it drops to a full-width row of
-its own; the strip is shallow because it fits, never because something was
-sheared off its right edge; the teleoperation consequence stays on one
-unbreakable line, so what wraps is the whole phrase rather than the middle of
-it. At rest the status cluster is a faint environment word, the control rate,
-and the connection state — three items, no badges. The mode narration takes a
-whole line, and only for a replay: every other mode is legible from the control
-that set it, so the strip stays one row through an ordinary session. Warnings
+The Robots column is the one that stacks: the arm list above, Signals below a
+horizontal separator that drags and takes arrow keys like the vertical ones.
+Signals is deliberately not a fourth pane. The arms and the traces they just
+made are one subject seen twice, so the plots sit with the arms, the Scene
+keeps its full working size while a take is read, and the three-part semantic
+order — and the three-part mobile switcher — stay exactly as they were. The
+plots ship on, at 55% of the column; hiding them leaves the column open, and
+asking for them opens the column that holds them.
+
+The header is a shallow operating strip: wordmark and pane controls, then a
+right-aligned status cluster. It does not configure teleoperation: Record is the
+single session action that starts both teleoperation and capture. Manual control
+names one arm and lives on that arm's joint panel, next to the sliders it
+enables. At rest the status cluster is a faint environment word, the control
+rate, and the connection state — three items, no badges. Active mode and holding
+appear only while exceptional. Warnings
 show the first issue's own words beside the count, with the rest in an anchored
 details popover — never a full-width banner between the operator and the
 workspace.
@@ -398,7 +448,10 @@ one share a single quiet row at the foot of the list rather than stacking two
 full-width bars that read as two more robots.
 
 The joint inspector reads identity and mode controls, two rows of four readout
-cells, the joint stack, the selected motor's detail card, then cameras. The
+cells, an adaptive joint grid, the selected motor's detail card, then cameras.
+Read-only joints use as many 8rem columns as the pane can hold, showing the
+position meter only when an individual cell reaches 11rem; active sliders use a
+wider 20rem minimum. The
 first readout row is where the arm is; the second is how its motors are doing,
 and two of its four cells are thermal because heat is the one reading that does
 not recover when the load comes off. Camera previews are one per row at the panel's full
@@ -420,21 +473,37 @@ them. Card width never encodes duration; values are printed explicitly. The
 selected episode defaults to the newest completed episode when the rail first
 opens.
 
-At 900px and below, the header and dataset detail may wrap; the viewport spans
-the upper 56% of a two-column body and the explorer and inspector share the
-lower row. At 640px and below, the body shows one of Robots, View, or Inspect at
-a time via a three-part surface switcher. The rail remains outside that switch,
-caps at 42dvh, and scrolls internally. Record grows to a 44px touch target and
-the selected-episode facts and actions stack to full width. Touch has no hover,
-so revealed actions stay visible there: Delete on an episode card, which grows
-to 120×44px to hold a 44px target without taking the room its labels need, and
-the camera row's unassign mark, which grows to 28px.
+At 900px and below, the header and Dataset detail may wrap. At 760px and below,
+the pane chrome recedes and the body shows one of Robots, Scene, or Properties
+at a time via a three-part surface switcher. The same panel instances stay
+mounted so switching does not restart the scene or a camera. The compact Record
+transport remains outside that switch. Dataset opens above it as a bounded
+bottom work surface, caps at 58dvh, and scrolls internally. Record grows to a
+44px touch target and the selected-episode facts and actions stack to full
+width. Touch has no hover, so revealed actions stay visible there: Delete on an
+episode card, which grows to 120×44px to hold a 44px target without taking the
+room its labels need, and the camera row's unassign mark, which grows to 28px.
 
 ### Named Rules
 
 **The Literal-Loop Rule.** The primary session sequence is Record → select an
 episode → Replay → Export. Do not fork it into judgement, diagnostics, or
-analysis lanes.
+analysis lanes. Signals is not a fork of it: it has no actions of its own that
+touch a take, it draws only what Record is capturing or last captured, and the
+loop runs identically with the plots switched off.
+
+**The Bound-To-The-Take Rule.** The plots exist for the length of a take and
+for nothing else. No always-on scope, no rolling window over idle arms, no
+second measurement drawn over time because it is now possible to draw one. A
+surface that plots whenever it has numbers is a monitoring dashboard, and this
+is a bench beside two arms.
+
+*One take, and the identity of a take is not its name.* A restarted server
+numbers its episodes from one again, so a take is recognized as new when its id
+changes, when recording resumes after a gap, **or when its clock runs backwards**
+— any of the three. Getting this wrong does not merely mix two takes: it leaves
+the shared time column unsorted, and every search over it, every window, and
+every cursor then quietly lies.
 
 **The No-Flung-Pair Rule.** A wide strip does not hold two clusters pinned to
 opposite edges with nothing between them. Either something elastic fills the
@@ -521,7 +590,7 @@ cards, or ornamental silhouettes.
   padding, and a transparent resting border so variants share a box. Record is
   the single 28px exception.
 - **Primary:** Role-blue fill with white text. Use once per local purpose:
-  starting teleoperation, Connect, Record, or Replay.
+  Connect, Record, or Replay.
 - **Hover / Focus:** Quiet controls gain the hover wash; primary controls
   brighten without changing hue. All retain the global 2px focus ring at 1px
   offset — one pixel, not two, because at a 24px control height a 2px gap reaches
@@ -631,15 +700,19 @@ why neither is one of the bench's corner clusters.
 - **Paired action:** A picker whose purpose is completed by one button shares its
   line with that button — the port select and Connect — rather than stacking a
   status row above and an action row below.
-- **Slider:** A 3px hairline track and 12px soft-graphite thumb with a 2px paper
-  ring, in a 20px row.
+- **Joint position:** Outside Manual mode, label and angle are the compact
+  minimum. A 36px hairline with a square tick appears only when its cell has
+  spare width, reading as telemetry rather than a disabled control. In active
+  Manual mode it becomes the full-width slider: a 3px track and 12px
+  soft-graphite thumb with a 2px paper ring.
 
 ### Navigation
 
-There is no site navigation. Pane visibility is application chrome: three 24px
-icon toggles in the header, with pressed state shown as role blue on the selected
-wash. Below 640px, a Robots / View / Inspect segmented switcher replaces the two
-side-pane toggles; the dataset rail toggle remains independently available.
+There is no site navigation. Panel visibility and layout are application chrome:
+24px icon toggles in the header use role blue on the selected wash, and a quiet
+reset action restores the canonical widths and visibility. Below
+760px, a Robots / Scene / Properties segmented switcher replaces the desktop
+pane controls; the Dataset toggle remains independently available.
 
 ### The Dataset Rail
 
@@ -647,8 +720,10 @@ The rail is the signature shipped component because it makes the product loop
 literal without turning recordings into an analysis surface.
 
 - **Record transport:** A 28px blue button with the record mark, “Record,” and
-  `R` shortcut; on mobile it grows to 44px. During capture it becomes red and
-  reads “Stop & save.” Cancel remains a secondary mid-recording escape hatch.
+  `R` shortcut; on mobile it grows to 44px. It automatically starts
+  teleoperation with the ready leader/follower pair. During capture it becomes
+  red and reads “Stop & save.” Save and Cancel both end teleoperation; Cancel
+  remains the secondary escape hatch for a bad take.
 - **Timer:** 16px tabular mono with a 10px supporting label on the same
   baseline, carrying the shortcut or the live frame count.
 - **Session summary:** Exportable episode count and total duration followed by
@@ -656,8 +731,8 @@ literal without turning recordings into an analysis surface.
   operator invokes Export.
 - **Episode strip:** Equal-size, horizontally scrolling buttons in oldest-first
   capture order, limited to the newest 120 items when necessary, with the
-  remainder counted on a dashed card at the head of the strip. Empty state
-  tells the operator to start teleoperation and press Record or `R`.
+  remainder counted on a dashed card at the head of the strip. Empty state says
+  to press Record or `R`.
 - **Selected row:** Identity and completion dot, four compact facts, then a
   target-specific action such as “Replay on follower.” Replay selects a
   compatible calibrated arm and prints any blocker beside the disabled action.
@@ -667,6 +742,51 @@ literal without turning recordings into an analysis surface.
 - **Workflow boundary:** Incomplete and cancelled legacy files remain visible
   and excluded from export, but there is no primary keep/reject judgement lane,
   tracking trace, error graticule, or quality verdict.
+
+### Signals
+
+Under the arm list, and only ever about a take. Three layers, top to bottom.
+
+- **The window strip:** the panel name, one fixed slot that is empty at rest,
+  and four presets — 10s / 30s / 2m / All — each a 24px target, set in the body
+  face rather than in mono, because a preset names a window instead of measuring
+  one. The presets are *following* modes: the window keeps up with the newest
+  sample until the operator drags the zoom, which leaves following and puts a
+  **Follow** control in the fixed slot. That control is named for what it does,
+  not for the state it appears in — its presence is the state — because a label
+  reading "Held" leaves the way back in a `title`, which a touch bench and a
+  screen reader both never receive. The slot reports exceptions and nothing
+  else: a parked window, and a take long enough to have lost its oldest samples
+  to the 30-minute plot cap. At rest it is blank, so nothing in the strip moves
+  under a telemetry stream.
+- **The plots:** one grid per arm, stacked, named in 10px graphite at the grid's
+  own left edge. One time axis, one degree scale, one zoom, one crosshair, drawn
+  by one renderer instance — a leader and its follower are aligned by
+  construction rather than by two charts being kept in step. Gridlines are
+  hairlines and the count is chosen from the plot's height, two on a short trace
+  and four on a tall one, because axis labels crowding out the trace is the
+  failure mode of a small multiple. A zoom slider spans the whole take beneath
+  the last plot; it shows no data shadow, because the shadow ECharts offers is
+  one joint of one arm standing in for everything.
+- **The readout:** joints down, arms across. It is the legend, the value table,
+  and the joint switchboard at once, which is why it earns the space three
+  separate components would have taken. Each row is a 24px toggle carrying a
+  short stroke in the joint's own colour — a stroke, not a swatch, because what
+  it labels is a line — and each cell is that arm's angle at the cursor, in
+  tabular mono with the degree sign as its own faint element, in a column wide
+  enough for the widest angle a joint can report. Pointing at or focusing a row
+  lifts that joint's trace on every plot and steps the others back: that is what
+  makes this a legend rather than a colour-coded table, and it changes no
+  geometry, so nothing moves. With no cursor it holds the newest sample in the
+  window, so the numbers are on the page without anyone hovering for them. The
+  corner cell carries the time being read. Once a take stops, a footer names it.
+
+The empty state names the two ways to start: press Record, or press `R`. The
+plots take focus and the arrow keys move the time cursor along the samples,
+because the crosshair is a pointer device and the readout it feeds is the whole
+reason three of the six trace colours are allowed on paper. And the one
+dependency that can be missing says so: a plotting runtime that never loads
+leaves a sentence, not an empty rectangle, and the readout keeps working.
 
 ### The WebGL Bench
 
@@ -704,8 +824,12 @@ raised without one.
 
 ### Do:
 
-- **Do** keep the shell, WebGL bench, and dataset rail in one light neutral
-  world; reserve the dark mat for camera imagery.
+- **Do** keep the shell, WebGL bench, plots, and dataset rail in one light
+  neutral world; reserve the dark mat for camera imagery.
+- **Do** print every value a plot draws, in the readout beneath it. It is what
+  makes the trace palette legal, and it is why nothing here needs a hover.
+- **Do** keep the plots bound to a take: empty before Record, live during, held
+  after, replaced by the next one.
 - **Do** keep Record and Replay as the key local filled actions and Export as
   the session's explicit exit action.
 - **Do** use equal-size episode buttons and print duration explicitly.
@@ -733,6 +857,8 @@ raised without one.
   and safety state visible.
 - **Do** keep `tailwind_input` and `tailwind_output` declared in
   `Dioxus.toml`; DX owns stylesheet compilation for serve, build, and bundle.
+- **Do** vendor the plotting runtime into the studio's own assets. The machine
+  wired to the arms is not promised an internet connection.
 
 ### Don't:
 
@@ -750,15 +876,24 @@ raised without one.
   few pixels away.
 - **Don't** hide a hover-revealed control with `visibility` or `display` when it
   is the only focusable thing in its row.
-- **Don't** make judgement, keep/reject verdicts, tracking traces, thresholds,
-  graticules, or diagnostic charts primary dataset UI.
+- **Don't** make judgement, keep/reject verdicts, thresholds, graticules, or
+  diagnostic dashboards primary dataset UI. Signals plots what a take measured;
+  it does not rule on it.
 - **Don't** encode episode duration or quality in card width or height.
 - **Don't** show persistent warning banners between the header and workspace.
 - **Don't** add dense minor grid lines to the bench.
 - **Don't** put a permanent per-motor table of temperatures, currents, and loads
   on the inspector. The arm-level row says whether; the bench says which; the
   selected motor's card says how much.
-- **Don't** chart telemetry over time. A rise rate is a number, not a graph.
+- **Don't** chart telemetry over time anywhere but Signals, and there only for
+  the length of a take. A rise rate is still a number, not a graph, and a motor
+  temperature does not get a second plot because a plotting library is now on
+  the page.
+- **Don't** hand the renderer a point per sample. The window is reduced to a
+  fixed budget by extremes — never by averaging, which is the one operation
+  that hides the peak a trace exists to show.
+- **Don't** give two arms two scales. Every plot shares one degree range and
+  one time axis, or comparing a leader to its follower becomes arithmetic.
 - **Don't** put camera pixels in the 3D scene; the bench gets a camera's
   geometry and identity, the properties panel gets its frames.
 - **Don't** write one-off colour literals or hue-named utilities in components;

@@ -621,15 +621,16 @@ fn JointControls(
     let id = robot.id.clone();
 
     rsx! {
-        div { class: "flex flex-col px-2 pb-1.5",
+        div {
+            class: if drivable { "joint-list joint-list-drivable" } else { "joint-list" },
             // The one blocker this panel cannot answer for itself: an
             // uncalibrated arm refuses every command, and the control that fixes
             // it lives in the robot explorer. "Press Manual", "press Hold" and
             // "stop the teleoperation you just started" were sentences pointing
             // at buttons forty pixels above them — and each one appeared and
-            // vanished under the sliders as the mode changed.
+            // vanished under the joint list as the mode changed.
             if !robot.calibrated {
-                p { class: "joint-blocked",
+                p { class: "joint-blocked joint-list-wide",
                     "Calibrate this arm in the robot explorer to command its joints."
                 }
             }
@@ -719,6 +720,16 @@ fn JointRow(
     let label = arm::so101_joint(&joint.name).map_or(joint.name.clone(), |j| j.label.to_owned());
     let measured = joint.normalized.unwrap_or(0.0);
     let shown = value.unwrap_or(measured);
+    let interactive = drivable && joint.range.is_some();
+    let position_percent = ((measured + 1.0) * 50.0).clamp(0.0, 100.0);
+    let displayed = match joint.degrees {
+        Some(degrees) => format!("{degrees:+.0}°"),
+        None => format!("{}", joint.raw),
+    };
+    let position_title = match joint.target_degrees {
+        Some(target) => format!("Measured joint angle; current target {target:+.0}°"),
+        None => "Measured joint angle".to_owned(),
+    };
     // Which motor is hot is a question the readouts above cannot answer in a
     // cell, so the row answers it. The tint is the whole treatment: nothing is
     // added to the row, so a joint crossing its limit does not move the stack.
@@ -750,31 +761,45 @@ fn JointRow(
                 onclick: move |_| on_select.call(()),
                 "{label}"
             }
-            input {
-                r#type: "range",
-                class: "joint-slider",
-                "aria-label": "{label} position",
-                min: "-1",
-                max: "1",
-                step: "0.005",
-                disabled: !drivable || joint.range.is_none(),
-                value: "{shown}",
-                title: match joint.target_degrees {
-                    Some(target) => format!("Measured joint angle; current target {target:+.0}°"),
-                    None => "Measured joint angle".to_owned(),
-                },
-                oninput: move |event| {
-                    if let Ok(value) = event.value().parse::<f64>() {
-                        on_change.call(value);
+            if interactive {
+                input {
+                    r#type: "range",
+                    class: "joint-slider",
+                    "aria-label": "Set {label} position",
+                    min: "-1",
+                    max: "1",
+                    step: "0.005",
+                    value: "{shown}",
+                    title: "{position_title}",
+                    oninput: move |event| {
+                        if let Ok(value) = event.value().parse::<f64>() {
+                            on_change.call(value);
+                        }
+                    },
+                }
+            } else if joint.normalized.is_some() {
+                span {
+                    class: "joint-position-meter",
+                    role: "meter",
+                    "aria-label": "{label} measured position",
+                    "aria-valuemin": "-1",
+                    "aria-valuemax": "1",
+                    "aria-valuenow": "{measured}",
+                    "aria-valuetext": "{displayed}",
+                    title: "{position_title}",
+                    span {
+                        class: "joint-position-marker",
+                        style: "left: {position_percent:.2}%",
                     }
-                },
-            }
-            output { class: "joint-value",
-                match joint.degrees {
-                    Some(degrees) => format!("{degrees:+.0}°"),
-                    None => format!("{}", joint.raw),
+                }
+            } else {
+                span {
+                    class: "joint-position-meter joint-position-unknown",
+                    role: "img",
+                    "aria-label": "{label} measured position unavailable",
                 }
             }
+            output { class: "joint-value", "{displayed}" }
         }
     }
 }
