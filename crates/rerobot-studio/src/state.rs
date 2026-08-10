@@ -457,6 +457,12 @@ impl Studio {
         let mut notice = self.notice;
         notice.set(Some(Notice::new(message, true)));
     }
+
+    /// Confirm a completed browser-side utility action.
+    pub fn report_success(&self, message: impl Into<String>) {
+        let mut notice = self.notice;
+        notice.set(Some(Notice::new(message, false)));
+    }
 }
 
 /// Read the shared studio state from context.

@@ -786,6 +786,27 @@ impl ConnectedRobot {
         (normalized, raw)
     }
 
+    /// The normalized goal most recently sent to each named joint.
+    ///
+    /// A free arm has no action. Returning `None` for the whole arm preserves
+    /// the difference between an observed leader pose and a follower command.
+    fn sample_action(&self, joints: &[String]) -> Option<Vec<Option<f64>>> {
+        if !self.torque {
+            return None;
+        }
+        let calibration = self.spec.calibration.as_ref()?;
+        Some(
+            joints
+                .iter()
+                .map(|joint| {
+                    let counts = self.commanded.get(joint).copied()?;
+                    let motor = calibration.motors.get(joint)?;
+                    normalize_centered_raw(motor, counts).ok()
+                })
+                .collect(),
+        )
+    }
+
     /// This instant's velocity and effort for the named joints.
     ///
     /// Both come back in the caller's order, and both are `None` per joint on a
@@ -1208,6 +1229,7 @@ impl Controller {
         let mut raw = Vec::with_capacity(arms.len());
         let mut velocity = Vec::with_capacity(arms.len());
         let mut effort = Vec::with_capacity(arms.len());
+        let mut action = Vec::with_capacity(arms.len());
         let mut instant_error: Option<f64> = None;
         // A take is one shape from its first frame to its last. If any joint on
         // any arm cannot report velocity or effort, the take records neither,
@@ -1222,6 +1244,7 @@ impl Controller {
             normalized.push(arm_normalized);
             raw.push(arm_raw);
             let (arm_velocity, arm_effort) = robot.sample_proprioception(&arm.joints);
+            action.push(robot.sample_action(&arm.joints));
             proprioception &= arm_velocity.iter().chain(&arm_effort).all(Option::is_some);
             velocity.push(arm_velocity);
             effort.push(arm_effort);
@@ -1241,6 +1264,7 @@ impl Controller {
             follow_error_degrees: instant_error,
             velocity: proprioception.then_some(velocity),
             effort: proprioception.then_some(effort),
+            action,
         }) {
             recording.frames += 1;
             return;

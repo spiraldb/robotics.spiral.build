@@ -194,10 +194,17 @@ struct FrameLine {
     /// Effort per joint as a signed fraction of rated torque, same shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     f: Option<Vec<Vec<Option<f64>>>>,
+    /// Commanded normalized position per arm, in the same arm and joint order.
+    ///
+    /// An arm with no active motor command is `null`; it is not rewritten as
+    /// measured state. That distinction is what keeps a leader observation
+    /// from silently becoming a policy action in exported training data.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    a: Vec<Option<Vec<Option<f64>>>>,
 }
 
 /// One instant handed from the control loop to the writer thread.
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Sample {
     pub seconds: f64,
     pub normalized: Vec<Vec<Option<f64>>>,
@@ -206,6 +213,44 @@ pub struct Sample {
     /// Present only when every recorded arm reports it.
     pub velocity: Option<Vec<Vec<Option<f64>>>>,
     pub effort: Option<Vec<Vec<Option<f64>>>>,
+    /// Commanded normalized position for each arm, or `None` when that arm is
+    /// not being driven. Empty for recordings made before actions were stored.
+    pub action: Vec<Option<Vec<Option<f64>>>>,
+}
+
+/// Everything fixed before the first sample of an episode is captured.
+///
+/// A recording backend receives this once when it opens. Keeping the contract
+/// independent of JSONL lets the control loop feed the same writer facade to a
+/// local file, a Spiral table writer, or a mirrored pair without learning how
+/// any of those destinations persist data.
+#[derive(Clone, Debug)]
+pub struct EpisodeStart {
+    pub id: String,
+    pub started_ms: i64,
+    pub sample_hz: f64,
+    pub source: String,
+    pub note: Option<String>,
+    pub arms: Vec<EpisodeArm>,
+    pub condition: Vec<ArmCondition>,
+}
+
+/// Values known only after the final sample has been captured.
+#[derive(Clone, Debug)]
+pub struct EpisodeCompletion {
+    pub duration_seconds: f64,
+    pub max_follow_error_degrees: Option<f64>,
+    pub discarded: bool,
+    pub condition: Vec<ArmConditionSummary>,
+}
+
+/// A finished local recovery copy, ready for an external publisher.
+#[derive(Clone, Debug)]
+pub struct CompletedEpisode {
+    pub start: EpisodeStart,
+    pub samples: Vec<Sample>,
+    pub completion: EpisodeCompletion,
+    pub path: PathBuf,
 }
 
 /// What a take's file looked like when it was last read.
@@ -322,6 +367,68 @@ impl EpisodeStore {
             .ok_or_else(|| EpisodeError::NotFound(id.to_owned()))
     }
 
+    /// Read a complete take into the provider-neutral episode contract.
+    pub fn completed(&self, id: &str) -> Result<CompletedEpisode, EpisodeError> {
+        validate_episode_id(id)?;
+        let summary = self.get(id)?;
+        if let Some(problem) = &summary.problem {
+            return Err(EpisodeError::Invalid(format!(
+                "take {id:?} cannot be published: {problem}"
+            )));
+        }
+        let path = self.directory.join(&summary.file);
+        let file = File::open(&path).map_err(|source| EpisodeError::io(&path, source))?;
+        let mut lines = BufReader::new(file).lines();
+        let header = lines
+            .next()
+            .transpose()
+            .map_err(|source| EpisodeError::io(&path, source))?
+            .ok_or_else(|| EpisodeError::Invalid(format!("take {id:?} is empty")))?;
+        let header: Header = serde_json::from_str(&header).map_err(|error| {
+            EpisodeError::Invalid(format!("take {id:?} has an invalid header: {error}"))
+        })?;
+        let mut samples = Vec::with_capacity(summary.frames as usize);
+        let mut footer = None;
+        for line in lines {
+            let line = line.map_err(|source| EpisodeError::io(&path, source))?;
+            if let Some(frame) = parse_frame(&line) {
+                samples.push(Sample {
+                    seconds: frame.t,
+                    normalized: frame.n,
+                    raw: frame.raw,
+                    follow_error_degrees: frame.e,
+                    velocity: frame.v,
+                    effort: frame.f,
+                    action: frame.a,
+                });
+            } else if let Ok(parsed) = serde_json::from_str::<Footer>(&line) {
+                footer = Some(parsed);
+            }
+        }
+        let footer = footer.ok_or_else(|| {
+            EpisodeError::Invalid(format!("take {id:?} has no completion footer"))
+        })?;
+        Ok(CompletedEpisode {
+            start: EpisodeStart {
+                id: header.id,
+                started_ms: header.started_ms,
+                sample_hz: header.sample_hz,
+                source: header.source,
+                note: header.note,
+                arms: header.arms,
+                condition: header.condition,
+            },
+            samples,
+            completion: EpisodeCompletion {
+                duration_seconds: footer.duration_seconds,
+                max_follow_error_degrees: footer.max_follow_error_degrees,
+                discarded: footer.discarded,
+                condition: footer.condition,
+            },
+            path,
+        })
+    }
+
     /// The identifier the next take will get.
     ///
     /// One past the highest number present, counting unfinished takes, so a
@@ -364,8 +471,7 @@ impl EpisodeStore {
         let id = self.next_id();
         validate_episode_id(&id)?;
         let started_ms = unix_millis();
-        let header = Header {
-            rerobot_episode: FORMAT_VERSION,
+        let start = EpisodeStart {
             id: id.clone(),
             started_ms,
             sample_hz,
@@ -373,6 +479,16 @@ impl EpisodeStore {
             note,
             arms,
             condition,
+        };
+        let header = Header {
+            rerobot_episode: FORMAT_VERSION,
+            id: start.id.clone(),
+            started_ms: start.started_ms,
+            sample_hz: start.sample_hz,
+            source: start.source.clone(),
+            note: start.note.clone(),
+            arms: start.arms.clone(),
+            condition: start.condition.clone(),
         };
         let partial = self.partial_path(&id);
         let file = File::create(&partial).map_err(|source| EpisodeError::io(&partial, source))?;
@@ -394,15 +510,14 @@ impl EpisodeStore {
             .map_err(|source| EpisodeError::io(&partial, source))?;
 
         let final_path = self.final_path(&id);
-        Ok(EpisodeWriter {
-            id,
-            started_ms,
+        Ok(EpisodeWriter::from_session(JsonlEpisodeWriter {
+            start,
             samples: Some(samples),
             thread: Some(thread),
             shared,
             partial,
             final_path,
-        })
+        }))
     }
 
     /// Record the operator's judgement of a stored take.
@@ -643,14 +758,80 @@ struct WriterShared {
     failure: Mutex<Option<String>>,
 }
 
-/// A take being written.
+/// Backend session behind [`EpisodeWriter`].
+///
+/// Implementations must keep [`push`](EpisodeWriteSession::push) non-blocking:
+/// it runs on the hardware control thread. Network and filesystem work belongs
+/// on an implementation-owned worker just as it does for the JSONL writer.
+pub(crate) trait EpisodeWriteSession: Send {
+    fn start(&self) -> &EpisodeStart;
+    fn push(&self, sample: Sample) -> bool;
+    fn written(&self) -> u64;
+    fn failure(&self) -> Option<String>;
+    fn finish(
+        self: Box<Self>,
+        completion: EpisodeCompletion,
+    ) -> Result<EpisodeSummary, EpisodeError>;
+}
+
+/// A destination-independent take being written.
+///
+/// Hardware owns this small facade. The concrete backend owns its worker,
+/// queue, recovery state, and publication rules.
+pub struct EpisodeWriter {
+    session: Box<dyn EpisodeWriteSession>,
+}
+
+impl EpisodeWriter {
+    pub(crate) fn from_session(session: impl EpisodeWriteSession + 'static) -> Self {
+        Self {
+            session: Box::new(session),
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        &self.session.start().id
+    }
+
+    pub fn started_ms(&self) -> i64 {
+        self.session.start().started_ms
+    }
+
+    pub fn push(&self, sample: Sample) -> bool {
+        self.session.push(sample)
+    }
+
+    pub fn written(&self) -> u64 {
+        self.session.written()
+    }
+
+    pub fn failure(&self) -> Option<String> {
+        self.session.failure()
+    }
+
+    pub fn finish(
+        self,
+        duration_seconds: f64,
+        max_follow_error_degrees: Option<f64>,
+        discarded: bool,
+        condition: Vec<ArmConditionSummary>,
+    ) -> Result<EpisodeSummary, EpisodeError> {
+        self.session.finish(EpisodeCompletion {
+            duration_seconds,
+            max_follow_error_degrees,
+            discarded,
+            condition,
+        })
+    }
+}
+
+/// JSONL implementation of an episode write session.
 ///
 /// The control loop only ever enqueues a sample; every byte of file I/O happens
 /// on the writer thread, because a loop that must finish inside sixteen
 /// milliseconds cannot afford to wait for a disk.
-pub struct EpisodeWriter {
-    id: String,
-    started_ms: i64,
+struct JsonlEpisodeWriter {
+    start: EpisodeStart,
     samples: Option<mpsc::SyncSender<Sample>>,
     thread: Option<JoinHandle<()>>,
     shared: Arc<WriterShared>,
@@ -658,20 +839,12 @@ pub struct EpisodeWriter {
     final_path: PathBuf,
 }
 
-impl EpisodeWriter {
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-
-    pub fn started_ms(&self) -> i64 {
-        self.started_ms
-    }
-
+impl JsonlEpisodeWriter {
     /// Hand one sample to the writer thread.
     ///
     /// Returns `false` when the sample could not be queued, which means the
     /// take is already failing and the caller should stop it.
-    pub fn push(&self, sample: Sample) -> bool {
+    fn push_sample(&self, sample: Sample) -> bool {
         let Some(samples) = &self.samples else {
             return false;
         };
@@ -686,12 +859,12 @@ impl EpisodeWriter {
     }
 
     /// Frames durably handed to the writer thread.
-    pub fn written(&self) -> u64 {
+    fn written_samples(&self) -> u64 {
         self.shared.written.load(Ordering::Relaxed)
     }
 
     /// Why the take stopped writing, if it did.
-    pub fn failure(&self) -> Option<String> {
+    fn failure_reason(&self) -> Option<String> {
         self.shared.failure.lock().expect("writer failure").clone()
     }
 
@@ -704,12 +877,9 @@ impl EpisodeWriter {
 
     /// Close the take: flush the samples, append the footer, and publish the
     /// file under its final name.
-    pub fn finish(
+    fn finish_jsonl(
         mut self,
-        duration_seconds: f64,
-        max_follow_error_degrees: Option<f64>,
-        discarded: bool,
-        condition: Vec<ArmConditionSummary>,
+        completion: EpisodeCompletion,
     ) -> Result<EpisodeSummary, EpisodeError> {
         // Dropping the sender is what tells the writer thread to flush and
         // stop, so it has to happen before the join.
@@ -717,7 +887,7 @@ impl EpisodeWriter {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-        if let Some(reason) = self.failure() {
+        if let Some(reason) = self.failure_reason() {
             return Err(EpisodeError::Invalid(format!(
                 "the take was cut short: {reason}. The samples captured before that are in '{}'",
                 self.partial.display()
@@ -726,11 +896,11 @@ impl EpisodeWriter {
 
         let footer = Footer {
             rerobot_episode_end: FORMAT_VERSION,
-            frames: self.written(),
-            duration_seconds,
-            max_follow_error_degrees,
-            discarded,
-            condition,
+            frames: self.written_samples(),
+            duration_seconds: completion.duration_seconds,
+            max_follow_error_degrees: completion.max_follow_error_degrees,
+            discarded: completion.discarded,
+            condition: completion.condition,
         };
         let mut file = fs::OpenOptions::new()
             .append(true)
@@ -749,7 +919,32 @@ impl EpisodeWriter {
     }
 }
 
-impl Drop for EpisodeWriter {
+impl EpisodeWriteSession for JsonlEpisodeWriter {
+    fn start(&self) -> &EpisodeStart {
+        &self.start
+    }
+
+    fn push(&self, sample: Sample) -> bool {
+        self.push_sample(sample)
+    }
+
+    fn written(&self) -> u64 {
+        self.written_samples()
+    }
+
+    fn failure(&self) -> Option<String> {
+        self.failure_reason()
+    }
+
+    fn finish(
+        self: Box<Self>,
+        completion: EpisodeCompletion,
+    ) -> Result<EpisodeSummary, EpisodeError> {
+        (*self).finish_jsonl(completion)
+    }
+}
+
+impl Drop for JsonlEpisodeWriter {
     fn drop(&mut self) {
         // A writer dropped without `finish` leaves its part file in place on
         // purpose: the samples are real, and the next listing reports the take
@@ -775,6 +970,7 @@ fn drain(queue: Receiver<Sample>, mut writer: BufWriter<File>, shared: &WriterSh
             e: sample.follow_error_degrees,
             v: sample.velocity,
             f: sample.effort,
+            a: sample.action,
         };
         match write_line(&mut writer, &line) {
             Ok(()) => {
@@ -1092,6 +1288,7 @@ mod tests {
                 follow_error_degrees: None,
                 velocity: Some(vec![vec![Some(12.0), Some(-3.0)]]),
                 effort: Some(vec![vec![Some(0.4), Some(-0.2)]]),
+                action: Vec::new(),
             }));
         }
         let summary = writer

@@ -74,6 +74,7 @@
                 pkgs.cargo-fuzz
                 llvmPackages.llvm
                 pkgs.cargo-binutils
+                pkgs.ffmpeg
               ]
               ++ webBuildInputs
               ++ linuxNativeBuildInputs

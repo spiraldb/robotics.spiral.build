@@ -23,10 +23,12 @@ use rerobot::serial_ports::{
     available_ports, disconnected_ports, port_description, port_kind, port_names,
 };
 use rerobot_core::api::{
-    ApiError, CameraBinding, CameraStatus, CreateRobotRequest, EpisodeSummary, ExportRequest,
-    ExportResponse, GoalRequest, IdentifyPortRequest, IdentifyPortResponse, ImportResponse,
-    JudgeEpisodeRequest, ModeSelection, RobotSummary, SerialPortSummary, StartRecordingRequest,
-    StartReplayRequest, StopRecordingRequest, StudioSnapshot, TorqueRequest, UpdateRobotRequest,
+    ApiError, CameraBinding, CameraStatus, ConnectionTestResponse, CreateRobotRequest,
+    DataSettings, EpisodeSummary, ExportRequest, ExportResponse, GoalRequest, IdentifyPortRequest,
+    IdentifyPortResponse, ImportResponse, JudgeEpisodeRequest, ModeSelection, PublicationStatus,
+    RobotSummary, SerialPortSummary, SpiralQueryRequest, SpiralQueryResponse,
+    StartRecordingRequest, StartReplayRequest, StartSpiralReplayRequest, StopRecordingRequest,
+    StudioSnapshot, TorqueRequest, UpdateDataSettingsRequest, UpdateRobotRequest,
     default_teleoperation_pair,
 };
 use rerobot_core::calibration::build_calibration;
@@ -34,9 +36,12 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use crate::camera_manager::{CameraManager, Frame};
+use crate::data_settings::DataSettingsStore;
 use crate::dataset::{export_lerobot_archive, import_lerobot_archive};
 use crate::episodes::{ArmCondition, EpisodeError, EpisodeStore, build_arms};
 use crate::hardware::{HardwareHandle, RobotSpec};
+use crate::storage_manager::StorageManager;
+use crate::video_capture::{CameraCaptureSpec, VideoAsset, VideoCapture, VideoEncoderSettings};
 use crate::workspace::{RobotRecord, RobotWorkspace, WorkspaceError, validate_camera_role};
 
 /// Boundary marker separating parts of an MJPEG response.
@@ -48,6 +53,11 @@ const TELEMETRY_INTERVAL: Duration = Duration::from_millis(50);
 /// How often the setup-level snapshot is rebuilt and diffed.
 const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(400);
 
+/// A short debounce keeps a just-started recording from being mistaken for an
+/// automatic stop before the next telemetry snapshot is published.
+const VIDEO_RECORDING_MONITOR_INTERVAL: Duration = Duration::from_millis(200);
+const VIDEO_RECORDING_STOP_TICKS: u8 = 5;
+
 /// Everything a request handler can reach.
 #[derive(Clone)]
 pub struct AppState {
@@ -55,7 +65,83 @@ pub struct AppState {
     pub episodes: Arc<EpisodeStore>,
     pub hardware: Arc<HardwareHandle>,
     pub cameras: Arc<CameraManager>,
+    pub data_settings: Arc<DataSettingsStore>,
+    pub storage: Arc<StorageManager>,
+    pub recording_video: Arc<tokio::sync::Mutex<Option<VideoCapture>>>,
+    pub video_encoder: VideoEncoderSettings,
     pub simulated: bool,
+}
+
+/// Finish camera recording when the control thread closes a take on its own
+/// (for example, after an arm disconnects). The normal stop endpoint takes the
+/// capture out of the slot first, so the two paths cannot publish each other's
+/// video.
+pub async fn monitor_video_recording(state: AppState) {
+    let mut ticker = tokio::time::interval(VIDEO_RECORDING_MONITOR_INTERVAL);
+    let mut missing_episode = String::new();
+    let mut missing_ticks = 0_u8;
+    loop {
+        ticker.tick().await;
+        let capture_episode = state
+            .recording_video
+            .lock()
+            .await
+            .as_ref()
+            .map(|capture| capture.episode_id().to_owned());
+        let Some(capture_episode) = capture_episode else {
+            missing_episode.clear();
+            missing_ticks = 0;
+            continue;
+        };
+        let hardware_episode = state
+            .hardware
+            .state()
+            .telemetry
+            .recording
+            .map(|recording| recording.episode);
+        if hardware_episode.as_deref() == Some(&capture_episode) {
+            missing_episode.clear();
+            missing_ticks = 0;
+            continue;
+        }
+        if missing_episode == capture_episode {
+            missing_ticks = missing_ticks.saturating_add(1);
+        } else {
+            missing_episode = capture_episode;
+            missing_ticks = 1;
+        }
+        if missing_ticks < VIDEO_RECORDING_STOP_TICKS {
+            continue;
+        }
+        finish_stale_video_capture(&state).await;
+        missing_episode.clear();
+        missing_ticks = 0;
+    }
+}
+
+/// Close and publish any capture whose corresponding control-loop recording
+/// has already ended. Also used during graceful backend shutdown.
+pub async fn finish_stale_video_capture(state: &AppState) {
+    let capture = state.recording_video.lock().await.take();
+    let Some(capture) = capture else {
+        return;
+    };
+    let episode_id = capture.episode_id().to_owned();
+    let videos = finish_video_capture(state, capture).await;
+    if let Err(error) = state.episodes.reload() {
+        tracing::warn!(episode = %episode_id, "could not reload automatically stopped episode: {error}");
+    }
+    state.storage.queue_publish(episode_id, videos);
+}
+
+async fn finish_video_capture(state: &AppState, capture: VideoCapture) -> Vec<VideoAsset> {
+    let (videos, failures) = capture.finish().await;
+    for failure in failures {
+        state
+            .cameras
+            .note_issue(format!("episode video was not saved: {failure}"));
+    }
+    videos
 }
 
 /// A failed request, rendered as `{"error": "..."}`.
@@ -65,6 +151,10 @@ pub struct Failure(StatusCode, String);
 impl Failure {
     fn bad_request(message: impl Into<String>) -> Self {
         Self(StatusCode::BAD_REQUEST, message.into())
+    }
+
+    fn bad_gateway(message: impl Into<String>) -> Self {
+        Self(StatusCode::BAD_GATEWAY, message.into())
     }
 }
 
@@ -152,6 +242,17 @@ pub fn api_router(state: AppState) -> Router {
         .route("/episodes/{id}", delete(delete_episode))
         .route("/episodes/{id}/judge", post(judge_episode))
         .route("/episodes/{id}/trace", get(episode_trace))
+        .route(
+            "/settings/data",
+            get(get_data_settings).patch(update_data_settings),
+        )
+        .route("/settings/data/test/spiral", post(test_spiral))
+        .route("/settings/data/test/hugging-face", post(test_hugging_face))
+        .route("/publications", get(list_publications))
+        .route("/publications/{episode}", post(publish_existing_episode))
+        .route("/spiral/query", post(spiral_query))
+        .route("/spiral/replay", post(start_spiral_replay))
+        .route("/spiral/video.mp4", get(spiral_video))
         .with_state(state)
 }
 
@@ -186,6 +287,14 @@ pub fn build_snapshot(state: &AppState) -> StudioSnapshot {
     let mut issues = state.workspace.issues();
     issues.extend(state.cameras.issues());
     issues.extend(state.episodes.issues());
+    issues.extend(
+        state
+            .storage
+            .statuses()
+            .into_iter()
+            .filter(|status| status.state == "failed")
+            .map(|status| format!("{} publication failed", status.episode_id)),
+    );
     // A take that stopped itself has to be visible after the counters that were
     // describing it have gone.
     issues.extend(hardware.recording_issue);
@@ -768,6 +877,99 @@ async fn list_episodes(State(state): State<AppState>) -> Json<Vec<EpisodeSummary
     Json(state.episodes.list())
 }
 
+async fn get_data_settings(State(state): State<AppState>) -> Json<DataSettings> {
+    Json(state.data_settings.public())
+}
+
+async fn update_data_settings(
+    State(state): State<AppState>,
+    Json(request): Json<UpdateDataSettingsRequest>,
+) -> Result<Json<DataSettings>, Failure> {
+    state
+        .data_settings
+        .update(request)
+        .map(Json)
+        .map_err(Failure::bad_request)
+}
+
+async fn test_spiral(State(state): State<AppState>) -> Json<ConnectionTestResponse> {
+    Json(state.storage.test_spiral().await)
+}
+
+async fn test_hugging_face(State(state): State<AppState>) -> Json<ConnectionTestResponse> {
+    Json(state.storage.test_hugging_face().await)
+}
+
+async fn list_publications(State(state): State<AppState>) -> Json<Vec<PublicationStatus>> {
+    Json(state.storage.statuses())
+}
+
+async fn publish_existing_episode(
+    State(state): State<AppState>,
+    Path(episode): Path<String>,
+) -> Result<StatusCode, Failure> {
+    state
+        .storage
+        .publish_existing(episode)
+        .map_err(Failure::bad_request)?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn spiral_query(
+    State(state): State<AppState>,
+    Json(request): Json<SpiralQueryRequest>,
+) -> Result<Json<SpiralQueryResponse>, Failure> {
+    state
+        .storage
+        .query(&request.sql, request.max_rows)
+        .await
+        .map(Json)
+        .map_err(Failure::bad_gateway)
+}
+
+async fn start_spiral_replay(
+    State(state): State<AppState>,
+    Json(request): Json<StartSpiralReplayRequest>,
+) -> Result<StatusCode, Failure> {
+    let (sample_hz, frames) = state
+        .storage
+        .trajectory(&request.episode, &request.stream)
+        .await
+        .map_err(Failure::bad_gateway)?;
+    state
+        .hardware
+        .start_replay(&request.robot, &request.episode, frames, sample_hz)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+struct SpiralVideoQuery {
+    episode: String,
+    stream: String,
+}
+
+async fn spiral_video(
+    State(state): State<AppState>,
+    Query(query): Query<SpiralVideoQuery>,
+) -> Result<Response, Failure> {
+    let bytes = state
+        .storage
+        .video_asset(&query.episode, &query.stream)
+        .await
+        .map_err(Failure::bad_gateway)?;
+    let mut response = Body::from(bytes).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("video/mp4"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("private, no-store"),
+    );
+    Ok(response)
+}
+
 /// Begin a take.
 ///
 /// Record is the session-level command: it chooses the configured pair, enters
@@ -851,6 +1053,12 @@ async fn begin_recording(
             "connect at least one arm before recording a take",
         ));
     }
+    if state.recording_video.lock().await.is_some() {
+        return Err(Failure(
+            StatusCode::CONFLICT,
+            "the previous episode's video is still being finalized; try again shortly".to_owned(),
+        ));
+    }
 
     let arms = wanted
         .iter()
@@ -925,10 +1133,60 @@ async fn begin_recording(
         .map_err(Failure::from)?;
     let id = writer.id().to_owned();
     let started_ms = writer.started_ms();
+    let video_settings = state.data_settings.get().video;
+    let capture = if video_settings.enabled {
+        let snapshot = build_snapshot(state);
+        let camera_status = snapshot
+            .cameras
+            .iter()
+            .map(|camera| (camera.id.as_str(), camera))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut seen = BTreeSet::new();
+        let mut cameras = Vec::new();
+        for robot in snapshot
+            .robots
+            .iter()
+            .filter(|robot| wanted.contains(&robot.id))
+        {
+            for camera in &robot.cameras {
+                if !seen.insert(camera.id.clone()) {
+                    continue;
+                }
+                let Some(status) = camera_status.get(camera.id.as_str()) else {
+                    continue;
+                };
+                cameras.push(CameraCaptureSpec {
+                    stream_id: format!("{}.camera.{}", robot.id, camera.name),
+                    camera_id: camera.id.clone(),
+                    width: status.width,
+                    height: status.height,
+                    fps: status.fps,
+                });
+            }
+        }
+        VideoCapture::start(
+            state.cameras.clone(),
+            state.episodes.directory(),
+            &id,
+            cameras,
+            &state.video_encoder.executable,
+            &state.video_encoder.codec,
+        )
+        .await
+        .map_err(Failure::bad_request)?
+    } else {
+        None
+    };
     // Hand the open take to the control thread. If it refuses, dropping the
     // writer leaves a part file, which is honest: nothing was captured, and the
     // next listing says the take never finished.
-    state.hardware.start_recording(writer, arms.clone()).await?;
+    if let Err(error) = state.hardware.start_recording(writer, arms.clone()).await {
+        if let Some(capture) = capture {
+            let _ = capture.finish().await;
+        }
+        return Err(Failure::from(error));
+    }
+    *state.recording_video.lock().await = capture;
 
     Ok(Json(EpisodeSummary {
         id,
@@ -952,28 +1210,51 @@ async fn stop_recording(
     // Both exits from a take are exits from teleoperation as well. Attempt the
     // safety transition even if finalizing the file fails; the operator should
     // never have to repair storage before motion commands can stop.
+    // Claim the video first. If the control thread publishes its stopped state
+    // while this request is awaiting the reply, the automatic monitor must not
+    // race this explicit stop and publish a second copy without its video.
+    let capture = state.recording_video.lock().await.take();
     let recording = state.hardware.stop_recording(request.keep).await;
     let idle = state.hardware.set_mode(ModeSelection::Idle).await;
+    let capture_episode = capture
+        .as_ref()
+        .map(|capture| capture.episode_id().to_owned());
+    let videos = match capture {
+        Some(capture) => finish_video_capture(&state, capture).await,
+        None => Vec::new(),
+    };
 
     match (recording, idle) {
         (Ok(summary), Ok(())) => {
             // The take only exists under its final name now, so the cache has
             // to catch up before anything lists it.
             state.episodes.reload().map_err(Failure::from)?;
+            state.storage.queue_publish(summary.id.clone(), videos);
             Ok(Json(summary))
         }
-        (Ok(_), Err(mode_error)) => {
+        (Ok(summary), Err(mode_error)) => {
             // The file did finish, so make it visible even though the safety
             // transition needs attention.
             state.episodes.reload().map_err(Failure::from)?;
+            state.storage.queue_publish(summary.id, videos);
             Err(Failure::from(format!(
                 "the recording ended, but teleoperation could not stop: {mode_error}"
             )))
         }
-        (Err(recording_error), Ok(())) => Err(Failure::from(recording_error)),
-        (Err(recording_error), Err(mode_error)) => Err(Failure::from(format!(
-            "{recording_error}; teleoperation also could not stop: {mode_error}"
-        ))),
+        (Err(recording_error), Ok(())) => {
+            if let Some(episode) = capture_episode {
+                state.storage.queue_publish(episode, videos);
+            }
+            Err(Failure::from(recording_error))
+        }
+        (Err(recording_error), Err(mode_error)) => {
+            if let Some(episode) = capture_episode {
+                state.storage.queue_publish(episode, videos);
+            }
+            Err(Failure::from(format!(
+                "{recording_error}; teleoperation also could not stop: {mode_error}"
+            )))
+        }
     }
 }
 
@@ -1007,10 +1288,22 @@ async fn delete_episode(
             format!("take {id:?} is still recording; stop it first"),
         ));
     }
+    let video_directory = state.episodes.directory().join("videos").join(&id);
     let episodes = state.episodes.clone();
     tokio::task::spawn_blocking(move || episodes.delete(&id))
         .await
         .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+    // Camera files and their retry manifest are part of the local episode.
+    // Keep deletion successful if a stale sidecar cannot be removed, but make
+    // the leak visible to the backend operator.
+    if let Err(error) = tokio::fs::remove_dir_all(&video_directory).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            video_directory = %video_directory.display(),
+            "episode JSONL was deleted but its video sidecar could not be removed: {error}"
+        );
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

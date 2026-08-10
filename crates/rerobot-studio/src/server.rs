@@ -7,11 +7,14 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use crate::camera_manager::CameraManager;
+use crate::data_settings::DataSettingsStore;
 use crate::episodes::EpisodeStore;
 use crate::hardware::{
     ControlSettings, DEFAULT_MAX_STEP_COUNTS, DEFAULT_TELEOP_MAX_STEP_COUNTS, HardwareHandle,
 };
 use crate::routes::{self, AppState};
+use crate::storage_manager::StorageManager;
+use crate::video_capture::VideoEncoderSettings;
 use crate::workspace::RobotWorkspace;
 use clap::Parser;
 use rerobot::cameras;
@@ -24,8 +27,10 @@ const WORKSPACE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_s
 /// Browser event streams are intentionally long lived, so graceful draining
 /// gets a short deadline instead of being allowed to hold process exit open.
 const SERVER_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
-/// Motor and camera cleanup normally completes within one control/frame cycle.
-const RESOURCE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1_500);
+/// Motor and camera cleanup normally completes within one control/frame cycle;
+/// a final MP4 may need a few more seconds to flush its index and fast-start
+/// metadata without corrupting the last recorded episode.
+const RESOURCE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
 
 /// Set up, calibrate, and drive SO-ARM101 arms from a browser.
 #[derive(Debug, Parser)]
@@ -54,6 +59,19 @@ struct Args {
     /// Skip camera discovery entirely.
     #[arg(long)]
     no_cameras: bool,
+
+    /// FFmpeg executable used by the backend for episode camera recording.
+    #[arg(long, default_value = "ffmpeg", value_name = "PATH")]
+    ffmpeg: String,
+
+    /// FFmpeg video codec used for browser-playable episode MP4s.
+    #[arg(long, default_value = "libx264", value_name = "CODEC")]
+    video_codec: String,
+
+    /// Trusted SpiralDB ADBC shared library. The environment variable
+    /// SPIRALDB_ADBC_DRIVER is used when this option is omitted.
+    #[arg(long, value_name = "PATH")]
+    spiral_adbc_driver: Option<PathBuf>,
 
     /// Largest change, in encoder counts, applied to a joint per control cycle.
     #[arg(long, default_value_t = DEFAULT_MAX_STEP_COUNTS, value_name = "COUNTS")]
@@ -147,6 +165,16 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
         .unwrap_or_else(dioxus::cli_config::fullstack_address_or_localhost);
     let workspace = Arc::new(RobotWorkspace::open(args.workspace.clone())?);
     let episodes = Arc::new(EpisodeStore::open(args.episodes.clone())?);
+    let data_settings =
+        Arc::new(DataSettingsStore::open(episodes.directory()).map_err(std::io::Error::other)?);
+    let spiral_adbc_driver = args
+        .spiral_adbc_driver
+        .clone()
+        .or_else(|| std::env::var_os("SPIRALDB_ADBC_DRIVER").map(PathBuf::from));
+    let storage = Arc::new(
+        StorageManager::new(data_settings.clone(), episodes.clone(), spiral_adbc_driver)
+            .map_err(std::io::Error::other)?,
+    );
     let hardware = Arc::new(HardwareHandle::spawn(ControlSettings {
         max_step_counts: args.max_step,
         teleop_max_step_counts: args.teleop_max_step,
@@ -206,9 +234,18 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
         episodes: episodes.clone(),
         hardware: hardware.clone(),
         cameras: cameras.clone(),
+        data_settings,
+        storage,
+        recording_video: Arc::new(tokio::sync::Mutex::new(None)),
+        video_encoder: VideoEncoderSettings {
+            executable: args.ffmpeg.clone(),
+            codec: args.video_codec.clone(),
+        },
         simulated: args.simulate,
     };
     tokio::spawn(routes::auto_connect_saved_robots(state.clone()));
+    let video_monitor = tokio::spawn(routes::monitor_video_recording(state.clone()));
+    let cleanup_state = state.clone();
     let app = dioxus::server::router(crate::App)
         .nest("/api", routes::api_router(state))
         .layer(tower_http::trace::TraceLayer::new_for_http());
@@ -248,12 +285,14 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
         }
     };
     tracing::info!("releasing motors and cameras");
-    let camera_cleanup = tokio::task::spawn_blocking({
-        let cameras = cameras.clone();
-        move || cameras.shutdown()
-    });
     let cleanup = async {
-        let ((), camera_result) = tokio::join!(hardware.shutdown(), camera_cleanup);
+        hardware.shutdown().await;
+        routes::finish_stale_video_capture(&cleanup_state).await;
+        let camera_result = tokio::task::spawn_blocking({
+            let cameras = cameras.clone();
+            move || cameras.shutdown()
+        })
+        .await;
         if let Err(error) = camera_result {
             tracing::warn!("camera cleanup task failed: {error}");
         }
@@ -264,6 +303,7 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
     {
         tracing::warn!("resource cleanup timed out; the operating system will release devices");
     }
+    video_monitor.abort();
     signal_task.abort();
     if let Some(result) = server_result {
         result?;

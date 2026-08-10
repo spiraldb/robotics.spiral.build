@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 
+use crate::data_panel::{DataIcon, DataSettingsPanel, DataWorkspace};
 use crate::icons::{LayoutReset, PropertiesPanel, Rail, RobotPanelIcon, SignalsPanelIcon};
 use crate::panes::{PaneLayout, PaneWorkspace, StudioPane};
 use crate::state::Studio;
@@ -21,7 +22,8 @@ const TAILWIND: Asset = asset!("/assets/tailwind.css");
 /// panel reports that in its own words and keeps printing every joint's angle
 /// from the studio's own telemetry — see [`crate::signals`].
 const ECHARTS: &str = "https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js";
-const ECHARTS_INTEGRITY: &str = "sha384-pPi0zxBAoDu6+JXW/C68UZLvBUUtU+7zonhif43rqj7pxsGyqyqzcian2Rj37Rss";
+const ECHARTS_INTEGRITY: &str =
+    "sha384-pPi0zxBAoDu6+JXW/C68UZLvBUUtU+7zonhif43rqj7pxsGyqyqzcian2Rj37Rss";
 const FAVICON: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2337352f'/%3E%3Cpath d='M9 23V13l7-5 7 5v10' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E";
 
 #[component]
@@ -34,6 +36,9 @@ pub fn App() -> Element {
     let mut rail_open = use_signal(|| false);
     let mut layout = use_signal(PaneLayout::bench);
     let mut surface = use_signal(|| StudioPane::Scene);
+    let mut data_open = use_signal(|| false);
+    let mut settings_open = use_signal(|| false);
+    let mut settings_revision = use_signal(|| 0_u64);
     let studio = crate::state::studio();
 
     #[cfg(feature = "web")]
@@ -66,6 +71,17 @@ pub fn App() -> Element {
             // than on the document so they only fire while the studio has focus,
             // and ignored while a field is focused so a letter stays a letter.
             onkeydown: move |event| {
+                if event.key() == Key::Escape && settings_open() {
+                    settings_open.set(false);
+                    return;
+                }
+                if event.key() == Key::Escape && data_open() {
+                    data_open.set(false);
+                    return;
+                }
+                if data_open() || settings_open() {
+                    return;
+                }
                 if event.modifiers().ctrl() || event.modifiers().meta() || event.modifiers().alt() {
                     return;
                 }
@@ -98,6 +114,7 @@ pub fn App() -> Element {
                 signals_open: layout.read().signals_open(),
                 layout_is_default: layout.read().is_default(),
                 rail_open: rail_open(),
+                data_open: data_open(),
                 surface: surface(),
                 on_robots: move |_| {
                     layout.write().toggle(StudioPane::Robots);
@@ -116,6 +133,7 @@ pub fn App() -> Element {
                     rail_open.set(next);
                     store_bool("rerobot.dataset.expanded.v2", next);
                 },
+                on_data: move |_| data_open.toggle(),
                 on_reset: move |_| {
                     layout.write().reset();
                     layout.read().store();
@@ -127,6 +145,19 @@ pub fn App() -> Element {
                     }
                     surface.set(next);
                 },
+            }
+            if data_open() {
+                DataWorkspace {
+                    on_close: move |_| data_open.set(false),
+                    on_settings: move |_| settings_open.set(true),
+                    settings_revision,
+                }
+            }
+            if settings_open() {
+                DataSettingsPanel {
+                    on_close: move |_| settings_open.set(false),
+                    on_saved: move |_| *settings_revision.write() += 1,
+                }
             }
             div {
                 class: "studio-body",
@@ -161,11 +192,13 @@ fn Header(
     signals_open: bool,
     layout_is_default: bool,
     rail_open: bool,
+    data_open: bool,
     surface: StudioPane,
     on_robots: EventHandler<()>,
     on_signals: EventHandler<()>,
     on_properties: EventHandler<()>,
     on_rail: EventHandler<()>,
+    on_data: EventHandler<()>,
     on_reset: EventHandler<()>,
     on_surface: EventHandler<StudioPane>,
 ) -> Element {
@@ -198,6 +231,15 @@ fn Header(
                     r#type: "button", class: "icon-button desktop-pane-toggle",
                     "aria-pressed": robots_open, "aria-label": "Toggle Robots panel", title: "Toggle Robots panel",
                     onclick: move |_| on_robots.call(()), RobotPanelIcon {}
+                }
+                button {
+                    r#type: "button", class: "icon-button data-workspace-toggle",
+                    "aria-pressed": data_open,
+                    "aria-label": if data_open { "Close Dataset workspace" } else { "Open Dataset workspace" },
+                    title: if data_open { "Close Dataset workspace" } else { "Open Dataset workspace" },
+                    onclick: move |_| on_data.call(()),
+                    DataIcon {}
+                    span { "Data" }
                 }
                 // Beside Robots because that is the column it stacks into: the
                 // arms and what they just did are one subject, and the plots

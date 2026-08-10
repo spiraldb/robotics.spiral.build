@@ -158,6 +158,20 @@ pub fn camera_stream_url(id: &str) -> String {
     format!("/api/cameras/stream.mjpeg?id={}", encode_query(id))
 }
 
+/// URL of one MP4 stored in Spiral for browser-native preview.
+pub fn spiral_video_url(episode: &str, stream: &str) -> String {
+    format!(
+        "/api/spiral/video.mp4?episode={}&stream={}",
+        encode_query(episode),
+        encode_query(stream)
+    )
+}
+
+/// Endpoint for publishing or retrying one completed local recovery copy.
+pub fn publication_url(episode: &str) -> String {
+    format!("/api/publications/{}", encode_query(episode))
+}
+
 /// Percent-encode a value for use in a query string.
 ///
 /// Camera identifiers are device paths on Linux, so at minimum the separators
@@ -189,5 +203,9 @@ mod tests {
         // macOS reports opaque identifiers that may contain anything at all.
         assert_eq!(encode_query("cam 1&x=2"), "cam%201%26x%3D2");
         assert_eq!(encode_query("plain-id_1.0~"), "plain-id_1.0~");
+        assert_eq!(
+            spiral_video_url("episode 1", "arm/camera"),
+            "/api/spiral/video.mp4?episode=episode%201&stream=arm%2Fcamera"
+        );
     }
 }

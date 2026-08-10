@@ -10,6 +10,129 @@ use serde::{Deserialize, Serialize};
 
 use crate::calibration::{Direction, MotorCalibration};
 
+/// Server-owned data destinations. Secret values are intentionally absent:
+/// the browser can replace or clear them but can never read them back.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DataSettings {
+    pub spiral: SpiralSettings,
+    pub hugging_face: HuggingFaceSettings,
+    pub video: VideoSettings,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SpiralSettings {
+    pub enabled: bool,
+    /// ADBC database URI, such as `spiraldb://` or `spiral:memory:`.
+    pub uri: String,
+    pub project_id: String,
+    pub dataset: String,
+}
+
+impl Default for SpiralSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            uri: "spiraldb://".to_owned(),
+            project_id: String::new(),
+            dataset: "rerobot".to_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HuggingFaceSettings {
+    pub enabled: bool,
+    /// Dataset repository in `owner/name` form.
+    pub repository: String,
+    pub revision: String,
+    pub has_token: bool,
+}
+
+impl Default for HuggingFaceSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            repository: String::new(),
+            revision: "main".to_owned(),
+            has_token: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct VideoSettings {
+    pub enabled: bool,
+}
+
+impl Default for VideoSettings {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// Update from the settings screen. An omitted token preserves the stored
+/// secret; `clear_*_token` removes it explicitly.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct UpdateDataSettingsRequest {
+    pub spiral: SpiralSettings,
+    pub hugging_face: HuggingFaceSettings,
+    pub video: VideoSettings,
+    #[serde(default)]
+    pub hugging_face_token: Option<String>,
+    #[serde(default)]
+    pub clear_hugging_face_token: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ConnectionTestResponse {
+    pub ok: bool,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PublicationStatus {
+    pub episode_id: String,
+    /// `queued`, `publishing`, `published`, `failed`, or `local`.
+    pub state: String,
+    pub spiral: Option<String>,
+    pub hugging_face: Option<String>,
+    pub updated_ms: i64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct SpiralQueryRequest {
+    pub sql: String,
+    #[serde(default = "default_query_rows")]
+    pub max_rows: usize,
+}
+
+fn default_query_rows() -> usize {
+    100
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct QueryColumn {
+    pub name: String,
+    pub data_type: String,
+    pub nullable: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct SpiralQueryResponse {
+    pub columns: Vec<QueryColumn>,
+    pub rows: Vec<serde_json::Map<String, serde_json::Value>>,
+    pub truncated: bool,
+    pub elapsed_ms: u64,
+}
+
+/// Replay a trajectory fetched from Spiral instead of the local recovery file.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StartSpiralReplayRequest {
+    pub episode: String,
+    pub robot: String,
+    pub stream: String,
+}
+
 /// Everything the UI needs to draw the setup screens.
 ///
 /// This changes only when a robot, camera, or mode changes, so it is sent on

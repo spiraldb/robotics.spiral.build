@@ -61,6 +61,7 @@ pub struct DatasetArchive {
 struct ExportEpisode {
     joints: Vec<String>,
     positions: Vec<Vec<f32>>,
+    actions: Vec<Vec<f32>>,
     /// Per accepted frame, in `joints` order. `None` when any frame of this
     /// take lacked it, because a take is exported whole or not at all.
     velocity: Option<Vec<Vec<f32>>>,
@@ -134,6 +135,7 @@ pub fn export_lerobot_archive(store: &EpisodeStore) -> Result<DatasetArchive, Ep
     let proprioception = without_proprioception == 0;
     let mut velocities = Vec::with_capacity(total_frames * dimension);
     let mut efforts = Vec::with_capacity(total_frames * dimension);
+    let mut states = Vec::with_capacity(total_frames * dimension);
     let mut actions = Vec::with_capacity(total_frames * dimension);
     let mut timestamps = Vec::with_capacity(total_frames);
     let mut frame_indices = Vec::with_capacity(total_frames);
@@ -145,8 +147,14 @@ pub fn export_lerobot_archive(store: &EpisodeStore) -> Result<DatasetArchive, Ep
     for (episode_index, episode) in episodes.iter().enumerate() {
         let from = cursor;
         for (frame_index, pose) in episode.positions.iter().enumerate() {
-            actions.extend(
+            states.extend(
                 pose.iter()
+                    .zip(&joints)
+                    .map(|(value, joint)| to_lerobot_position(*value, joint)),
+            );
+            actions.extend(
+                episode.actions[frame_index]
+                    .iter()
                     .zip(&joints)
                     .map(|(value, joint)| to_lerobot_position(*value, joint)),
             );
@@ -174,10 +182,9 @@ pub fn export_lerobot_archive(store: &EpisodeStore) -> Result<DatasetArchive, Ep
         episode_offsets.push((from, cursor, episode.positions.len() as i64));
     }
 
-    let state_values = actions.clone();
     let data = data_parquet(
         dimension,
-        state_values,
+        states,
         actions.clone(),
         proprioception.then(|| velocities.clone()),
         proprioception.then(|| efforts.clone()),
@@ -418,6 +425,7 @@ pub fn import_lerobot_archive(
                 .zip(&joints)
                 .map(|(value, joint)| from_lerobot_position(*value, joint))
                 .collect::<Result<Vec<_>, _>>()?;
+            let action = normalized.iter().copied().map(Some).collect();
             last_time = frame.timestamp.max(last_time);
             if !writer.push(Sample {
                 seconds: frame.timestamp.max(0.0),
@@ -426,6 +434,7 @@ pub fn import_lerobot_archive(
                 follow_error_degrees: None,
                 velocity: None,
                 effort: None,
+                action: vec![Some(action)],
             }) {
                 return Err(invalid(format!("could not write imported episode {id}")));
             }
@@ -483,6 +492,7 @@ fn read_export_episode(
         .ok_or_else(|| invalid(format!("{} has no unambiguous follower arm", summary.id)))?;
     let joints = arms[arm_index].joints.clone();
     let mut positions = Vec::with_capacity(summary.frames as usize);
+    let mut actions = Vec::with_capacity(summary.frames as usize);
     let mut velocity = Vec::with_capacity(summary.frames as usize);
     let mut effort = Vec::with_capacity(summary.frames as usize);
     // One missing frame disqualifies the whole take rather than the frame: a
@@ -512,7 +522,12 @@ fn read_export_episode(
         let Some(pose) = arm_values("n") else {
             continue;
         };
+        // Files recorded before actions were added replay measured follower
+        // position, which preserves their established meaning. New files use
+        // the actual command and never substitute a free leader observation.
+        let action = arm_values("a").unwrap_or_else(|| pose.clone());
         positions.push(pose);
+        actions.push(action);
         match (arm_values("v"), arm_values("f")) {
             (Some(frame_velocity), Some(frame_effort)) => {
                 velocity.push(frame_velocity);
@@ -526,6 +541,7 @@ fn read_export_episode(
         velocity: proprioception.then_some(velocity),
         effort: proprioception.then_some(effort),
         positions,
+        actions,
         sample_hz: summary.sample_hz,
     })
 }
@@ -1046,6 +1062,13 @@ mod tests {
                 velocity: proprioception
                     .then(|| vec![vec![Some(frame as f64); SO101_JOINTS.len()]]),
                 effort: proprioception.then(|| vec![vec![Some(0.25); SO101_JOINTS.len()]]),
+                // Keep the commanded action visibly different from measured
+                // state so this fixture catches accidental state-as-action
+                // exports.
+                action: vec![Some(vec![
+                    Some(frame as f64 / 10.0 + 0.5);
+                    SO101_JOINTS.len()
+                ])],
             });
         }
         writer.finish(0.1, None, false, Vec::new()).unwrap();
@@ -1182,8 +1205,8 @@ mod tests {
                 .all(|joint| trajectory[0].contains_key(*joint))
         );
         assert!(trajectory[0].keys().all(|joint| !joint.ends_with(".pos")));
-        assert!((trajectory[3]["shoulder_pan"] - 0.3).abs() < 0.001);
-        assert!((trajectory[3]["gripper"] - 0.3).abs() < 0.001);
+        assert!((trajectory[3]["shoulder_pan"] - 0.8).abs() < 0.001);
+        assert!((trajectory[3]["gripper"] - 0.8).abs() < 0.001);
     }
 
     #[test]

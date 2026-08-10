@@ -25,6 +25,10 @@ server = [
     "dep:arrow-schema",
     "dep:parquet",
     "dep:zip",
+    "dep:arrow-json",
+    "dep:adbc_core",
+    "dep:adbc_driver_manager",
+    "dep:hf-hub",
 ]
 
 [dependencies]
@@ -69,7 +73,7 @@ web-sys = { version = "0.3", features = [
     "WebGlVertexArrayObject",
     "Window",
 ] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "time"], optional = true }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "sync", "signal", "time"], optional = true }
 tokio-stream = { version = "0.1", features = ["sync"], optional = true }
 tower-http = { version = "0.7", features = ["set-header", "trace"], optional = true }
 tracing = { version = "0.1", optional = true }
@@ -80,6 +84,10 @@ arrow-schema = { version = "58.4.0", optional = true }
 parquet = { version = "58.4.0", default-features = false, features = ["arrow", "snap"], optional = true }
 zip = { version = "2.4.2", default-features = false, features = ["deflate"], optional = true }
 charming = { version = "0.6.0", default-features = false, features = ["wasm"], optional = true }
+arrow-json = { version = "58.4.0", optional = true }
+adbc_core = { version = "0.24.0", optional = true }
+adbc_driver_manager = { version = "0.24.0", optional = true }
+hf-hub = { version = "1.0.0", features = ["rustls-tls"], optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
