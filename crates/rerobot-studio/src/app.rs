@@ -8,12 +8,20 @@ use crate::state::Studio;
 use crate::timeline::TimelineRail;
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
-/// The plotting runtime, served from the studio's own assets.
+/// The plotting runtime the Signals panel draws with.
 ///
-/// Vendored rather than fetched from a CDN because the machine wired to the
-/// arms is not promised an internet connection, and a bench tool that loses
-/// half a panel when the lab wifi drops is not a bench tool.
-const ECHARTS: Asset = asset!("/assets/echarts.min.js");
+/// Fetched from a CDN, pinned to an exact version, and checked against the
+/// hash of the bytes that version is expected to have — so the studio either
+/// gets that exact file or gets nothing, never something else. Nothing else is
+/// loaded from the network, so this is the whole of the studio's third-party
+/// surface.
+///
+/// It is the one part of the interface that can therefore be missing: a bench
+/// machine with no route out, or a blocked CDN, leaves the plots undrawn. The
+/// panel reports that in its own words and keeps printing every joint's angle
+/// from the studio's own telemetry — see [`crate::signals`].
+const ECHARTS: &str = "https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js";
+const ECHARTS_INTEGRITY: &str = "sha384-pPi0zxBAoDu6+JXW/C68UZLvBUUtU+7zonhif43rqj7pxsGyqyqzcian2Rj37Rss";
 const FAVICON: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2337352f'/%3E%3Cpath d='M9 23V13l7-5 7 5v10' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E";
 
 #[component]
@@ -38,7 +46,14 @@ pub fn App() -> Element {
 
     rsx! {
         document::Stylesheet { href: TAILWIND }
-        document::Script { src: ECHARTS.to_string() }
+        // `crossorigin` is not decoration: without it the browser will not
+        // enforce `integrity` on a cross-origin script.
+        document::Script {
+            src: ECHARTS.to_string(),
+            integrity: ECHARTS_INTEGRITY.to_string(),
+            crossorigin: "anonymous".to_string(),
+            referrerpolicy: "no-referrer".to_string(),
+        }
         document::Title { "rerobot studio" }
         document::Link { rel: "icon", href: FAVICON }
         document::Meta { name: "color-scheme", content: "light" }
