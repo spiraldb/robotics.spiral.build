@@ -754,7 +754,7 @@ fn CameraSection(robot: RobotSummary) -> Element {
                                         .filter(|camera| camera.name != name)
                                         .cloned()
                                         .collect::<Vec<_>>();
-                                    bindings.push(CameraBinding { name, id: device_id });
+                                    bindings.push(CameraBinding { name, id: device_id, mount: None });
                                     save_cameras(studio, id.clone(), bindings);
                                 }
                             },

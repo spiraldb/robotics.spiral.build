@@ -6,7 +6,10 @@ use std::rc::Rc;
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use rerobot_core::api::{GoalRequest, JointTelemetry, ModeSelection, RobotSummary, RobotTelemetry};
+use rerobot_core::api::{
+    GoalRequest, JointTelemetry, ModeSelection, MotorCondition, MotorLimits, RobotSummary,
+    RobotTelemetry,
+};
 use rerobot_core::arm::{self, JointAngles};
 
 use crate::api;
@@ -190,10 +193,20 @@ pub fn JointPanel() -> Element {
                 calibrated: robot.calibrated,
             }
 
+            ConditionReadout {
+                robot: robot.clone(),
+                telemetry: telemetry.clone(),
+            }
+
             JointControls {
                 robot: robot.clone(),
                 telemetry: telemetry.clone(),
                 drivable,
+            }
+
+            MotorDetail {
+                robot: robot.clone(),
+                telemetry: telemetry.clone(),
             }
 
             RobotCameras { robot }
@@ -271,6 +284,215 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
     }
 }
 
+/// The limits the named motor reported for itself when it connected.
+fn motor_limits(robot: &RobotSummary, joint: &str) -> MotorLimits {
+    robot
+        .motors
+        .iter()
+        .find(|motor| motor.name == joint)
+        .map(|motor| motor.limits)
+        .unwrap_or_default()
+}
+
+/// How the whole arm is doing against the limits its own motors reported.
+///
+/// Four cells, two of them thermal, because heat is the one reading that does
+/// not recover the moment the load comes off. `Hottest` alone cannot be acted
+/// on — fifty-eight degrees is either fine or four minutes from a shutdown
+/// depending on which way it is going — so the cell beside it carries the
+/// direction. Neither cell names which motor is hot: that does not fit in a
+/// readout, and the joint row a few pixels below tints itself instead.
+#[component]
+fn ConditionReadout(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> Element {
+    let joints = telemetry.map(|robot| robot.joints).unwrap_or_default();
+
+    // The hottest motor decides both thermal cells, so they always describe the
+    // same motor as each other.
+    let hottest = joints
+        .iter()
+        .filter(|joint| joint.temperature_celsius.is_some())
+        .max_by(|left, right| {
+            left.temperature_celsius
+                .unwrap_or_default()
+                .total_cmp(&right.temperature_celsius.unwrap_or_default())
+        });
+    let hot = hottest.is_some_and(|joint| {
+        joint.condition(&motor_limits(&robot, &joint.name)) != MotorCondition::Nominal
+    });
+
+    // Every motor shares one supply, so the interesting number is the worst of
+    // them: the motor seeing the deepest sag is the one about to complain.
+    let supply = joints
+        .iter()
+        .filter_map(|joint| joint.voltage_volts)
+        .reduce(f64::min);
+    let sagging = joints.iter().any(|joint| {
+        joint.voltage_volts.is_some()
+            && joint.voltage_volts == supply
+            && joint.condition(&motor_limits(&robot, &joint.name)) != MotorCondition::Nominal
+    });
+
+    let hardest = joints
+        .iter()
+        .filter(|joint| joint.load.is_some())
+        .max_by(|left, right| {
+            left.load
+                .unwrap_or_default()
+                .abs()
+                .total_cmp(&right.load.unwrap_or_default().abs())
+        });
+    let strained = hardest.is_some_and(|joint| {
+        joint.condition(&motor_limits(&robot, &joint.name)) != MotorCondition::Nominal
+    });
+
+    rsx! {
+        dl { class: "grid grid-cols-4 gap-1 px-2 pb-1",
+            Readout {
+                label: "Hottest",
+                value: hottest
+                    .and_then(|joint| joint.temperature_celsius)
+                    .map(|celsius| format!("{celsius:.0}")),
+                unit: "°C",
+                caution: hot,
+                hint: "The warmest motor on this arm",
+            }
+            // No caution tint: a rise has no limit to be near, and this studio
+            // does not invent thresholds the hardware did not state.
+            Readout {
+                label: "Rise",
+                value: hottest
+                    .and_then(|joint| joint.temperature_rise_per_minute)
+                    .map(|rate| format!("{rate:+.0}")),
+                unit: "°C/m",
+                hint: "How fast the warmest motor is heating, measured over the last minute",
+            }
+            Readout {
+                label: "Supply",
+                value: supply.map(|volts| format!("{volts:.1}")),
+                unit: "V",
+                caution: sagging,
+                hint: "The lowest supply voltage any motor on this bus reports",
+            }
+            Readout {
+                label: "Load",
+                value: hardest
+                    .and_then(|joint| joint.load)
+                    .map(|load| format!("{:.0}", load.abs() * 100.0)),
+                unit: "%",
+                caution: strained,
+                hint: "The hardest any motor is working, as a share of its rated torque",
+            }
+        }
+    }
+}
+
+/// Everything one motor reports, for the motor the operator picked.
+///
+/// This appears on selection rather than living on the panel permanently: six
+/// more numbers for every joint would be a diagnostic console, and the arm-level
+/// row above already answers whether anything is wrong. Selection is a
+/// deliberate act rather than a live value, so opening this does not put the
+/// layout at the mercy of the telemetry stream.
+#[component]
+fn MotorDetail(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> Element {
+    let studio = studio();
+    let selected = studio.selected.read().clone();
+    let Some(name) = selected.and_then(|selection| match selection {
+        Selection::Joint {
+            robot: selected,
+            joint,
+        } if selected == robot.id => Some(joint),
+        _ => None,
+    }) else {
+        return rsx! {};
+    };
+    let Some(joint) = telemetry.and_then(|telemetry| {
+        telemetry
+            .joints
+            .into_iter()
+            .find(|joint| joint.name == name)
+    }) else {
+        return rsx! {};
+    };
+
+    let label = arm::so101_joint(&joint.name).map_or(joint.name.clone(), |j| j.label.to_owned());
+    let model = robot
+        .motors
+        .iter()
+        .find(|motor| motor.name == joint.name)
+        .and_then(|motor| motor.model.clone());
+    let limits = motor_limits(&robot, &joint.name);
+    let condition = joint.condition(&limits);
+
+    rsx! {
+        section { class: "motor-detail",
+            header { class: "motor-detail-head",
+                h3 { class: "motor-detail-name", "{label}" }
+                // One line whatever happens: identity when the motor is well,
+                // its own complaint when it is not. A line that appears only on
+                // a fault would push the readouts below it down a row at the
+                // exact moment they matter most.
+                if joint.faults.is_empty() {
+                    span { class: "motor-detail-id",
+                        "id {joint.id}"
+                        if let Some(model) = model {
+                            " · {model}"
+                        }
+                    }
+                } else {
+                    span { class: "motor-detail-fault",
+                        {joint.faults.iter().map(|fault| fault.label()).collect::<Vec<_>>().join(" · ")}
+                    }
+                }
+            }
+            dl { class: "grid grid-cols-3 gap-1",
+                Readout {
+                    label: "Temp",
+                    value: joint.temperature_celsius.map(|celsius| format!("{celsius:.0}")),
+                    unit: "°C",
+                    caution: condition != MotorCondition::Nominal,
+                    hint: match limits.max_temperature_celsius {
+                        Some(limit) => format!("This motor faults at {limit:.0} °C"),
+                        None => "This motor did not report a temperature limit".to_owned(),
+                    },
+                }
+                Readout {
+                    label: "Rise",
+                    value: joint.temperature_rise_per_minute.map(|rate| format!("{rate:+.0}")),
+                    unit: "°C/m",
+                    hint: "Measured over the last minute",
+                }
+                Readout {
+                    label: "Supply",
+                    value: joint.voltage_volts.map(|volts| format!("{volts:.1}")),
+                    unit: "V",
+                    hint: "Supply voltage at this motor",
+                }
+                Readout {
+                    label: "Load",
+                    value: joint.load.map(|load| format!("{:.0}", load.abs() * 100.0)),
+                    unit: "%",
+                    hint: "Share of this motor's rated torque",
+                }
+                Readout {
+                    label: "Current",
+                    value: joint.current_amps.map(|amps| format!("{amps:.2}")),
+                    unit: "A",
+                    hint: "Peak draw since the last reading",
+                }
+                Readout {
+                    label: "Speed",
+                    value: joint
+                        .speed_degrees_per_second
+                        .map(|speed| format!("{speed:+.0}")),
+                    unit: "°/s",
+                    hint: "Shaft speed the motor is reporting",
+                }
+            }
+        }
+    }
+}
+
 /// One measured quantity: its name, its number, and the unit the number is in.
 ///
 /// The unit is a separate faint glyph rather than part of the string, so four
@@ -284,7 +506,7 @@ fn Readout(
     value: Option<String>,
     unit: &'static str,
     #[props(default)] caution: bool,
-    #[props(default)] hint: &'static str,
+    #[props(default)] hint: String,
 ) -> Element {
     let known = value.is_some();
     rsx! {
@@ -421,6 +643,7 @@ fn JointControls(
                         .read()
                         .as_ref()
                         .is_some_and(|selection| selection.matches_joint(&robot.id, &joint.name)),
+                    condition: joint.condition(&motor_limits(&robot, &joint.name)),
                     value: drivable
                         .then(|| commanded.read().get(&joint.name).copied())
                         .flatten(),
@@ -432,6 +655,13 @@ fn JointControls(
                     on_select: {
                         let (robot_id, joint_name) = (id.clone(), joint.name.clone());
                         move |_| studio.selected.set(Some(Selection::Joint {
+                            robot: robot_id.clone(),
+                            joint: joint_name.clone(),
+                        }))
+                    },
+                    on_point: {
+                        let (robot_id, joint_name) = (id.clone(), joint.name.clone());
+                        move |pointing: bool| studio.pointed.set(pointing.then(|| Selection::Joint {
                             robot: robot_id.clone(),
                             joint: joint_name.clone(),
                         }))
@@ -480,20 +710,43 @@ fn JointRow(
     joint: JointTelemetry,
     drivable: bool,
     selected: bool,
+    condition: MotorCondition,
     value: Option<f64>,
     on_change: EventHandler<f64>,
     on_select: EventHandler<()>,
+    on_point: EventHandler<bool>,
 ) -> Element {
     let label = arm::so101_joint(&joint.name).map_or(joint.name.clone(), |j| j.label.to_owned());
     let measured = joint.normalized.unwrap_or(0.0);
     let shown = value.unwrap_or(measured);
+    // Which motor is hot is a question the readouts above cannot answer in a
+    // cell, so the row answers it. The tint is the whole treatment: nothing is
+    // added to the row, so a joint crossing its limit does not move the stack.
+    let mut classes = String::from("joint-row");
+    if selected {
+        classes.push_str(" joint-row-selected");
+    }
+    match condition {
+        MotorCondition::Nominal => {}
+        MotorCondition::Caution => classes.push_str(" joint-row-caution"),
+        MotorCondition::Fault => classes.push_str(" joint-row-fault"),
+    }
 
     rsx! {
-        div { class: if selected { "joint-row joint-row-selected" } else { "joint-row" },
+        div {
+            class: "{classes}",
+            // Pointing at the row lights the motor on the bench, the same way
+            // pointing at the motor lights the row. Neither disturbs what is
+            // selected: one object, seen twice, and looking at it is not
+            // choosing it.
+            onpointerenter: move |_| on_point.call(true),
+            onpointerleave: move |_| on_point.call(false),
             button {
                 r#type: "button",
                 class: "joint-label",
                 title: "Select {label}",
+                onfocus: move |_| on_point.call(true),
+                onblur: move |_| on_point.call(false),
                 onclick: move |_| on_select.call(()),
                 "{label}"
             }

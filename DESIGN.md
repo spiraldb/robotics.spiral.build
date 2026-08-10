@@ -277,6 +277,12 @@ or dark session rail; only camera pixels use the camera mat.
 caution, danger, or a primary action. If none applies, use graphite, a tonal
 step, or a hairline.
 
+**The Hardware-Owns-Its-Thresholds Rule.** A reading is judged against the limit
+the hardware reported for itself, read once when it connected — never against a
+number written into this repository. The one constant the studio owns is the
+margin: how close to a motor's own limit counts as worth reporting. A motor that
+states no limit gets no verdict, and its own fault bit outranks any margin.
+
 **The Exceptional-Status Rule.** A chip reports an exception; it never announces
 the resting state. Simulation gets a wash, physical hardware gets a plain faint
 word. A mode chip exists while a mode is running or faulted, not while it is
@@ -294,7 +300,8 @@ role-named `--tone-*` properties in `crates/rerobot-studio/tailwind.css`.
 Components refer to roles, never hue names or one-off theme variants. This
 covers shadow colour too: a `box-shadow` in a component rule names a token
 rather than writing its own alpha-black. Renderer-only arm and grid colours
-remain centralized in `viewport.rs` and `scene.rs`.
+remain centralized in `viewport.rs` and in the `rerobot-viewport` crate,
+which owns everything drawn on the bench and cannot see the studio at all.
 
 ## Typography
 
@@ -390,8 +397,11 @@ and the Connect button's own label carries the rest. Adding an arm and importing
 one share a single quiet row at the foot of the list rather than stacking two
 full-width bars that read as two more robots.
 
-The joint inspector reads identity and mode controls, four readout cells, the
-joint stack, then cameras. Camera previews are one per row at the panel's full
+The joint inspector reads identity and mode controls, two rows of four readout
+cells, the joint stack, the selected motor's detail card, then cameras. The
+first readout row is where the arm is; the second is how its motors are doing,
+and two of its four cells are thermal because heat is the one reading that does
+not recover when the load comes off. Camera previews are one per row at the panel's full
 width: two side by side in a 320px inspector gave each a 150px picture, which is
 too small to answer the question a preview exists for.
 
@@ -543,7 +553,8 @@ cards, or ornamental silhouettes.
 ### Readout Cell
 
 - **Style:** A recess-filled 4px cell holding a 10px faint label over an 11px
-  tabular mono value, four across the top of the joint inspector.
+  tabular mono value, four across, in two rows at the top of the joint inspector
+  and three across inside the selected motor's card.
 - **Unit:** A separate faint element rather than part of the value string, so
   four cells line their digits up instead of each starting wherever its own
   label ended. The digits hold 3.5ch so the unit stays at a fixed x as the value
@@ -551,6 +562,39 @@ cards, or ornamental silhouettes.
 - **Caution:** An out-of-range reading swaps recess for the ochre wash and
   graphite for ochre ink. The tint is the entire treatment; nothing is added to
   the layout.
+- **Threshold:** A cell tints against the limit the hardware reported for
+  itself, never against a number written in this repository. A motor that
+  reports no limit gets no tint, because there is nothing to be near.
+
+### Motor Detail Card
+
+Everything one motor reports, for the one motor the operator picked. White with
+a hairline and 4px corners — the camera property card's treatment, and for the
+same reason: its readouts are recess cells, and a recess block full of recess
+cells is a block with no cells in it.
+
+- **Presence:** It appears on selection rather than living on the panel. Six
+  more figures for every joint would be a diagnostic console, and the arm-level
+  row above already answers whether anything is wrong.
+- **Head:** The joint's name, then one line that carries either its bus ID and
+  model or, when it is faulted, the motor's own complaint in danger ink. One
+  line either way, so a fault renames what is already there instead of unfolding
+  a row and pushing its own readouts down at the moment they matter most.
+
+### The Bench Mark and the Hover Note
+
+Two pieces of chrome that belong to objects rather than to the stage, which is
+why neither is one of the bench's corner clusters.
+
+- **Bench mark:** A 6px ochre or red dot anchored at an unwell motor, ringed in
+  the bench colour so it reads against the arm. The arm-level readouts answer
+  whether anything is wrong; only the bench can answer *which one*, and pointing
+  at the part is how the physical world answers it. Nothing else changes: the
+  arm keeps its identity accent, because a hot elbow is still that arm's elbow.
+- **Hover note:** A small paper card that follows the pointer, carrying a name
+  and at most one reading. It is a glance, not a panel, and it is never the only
+  place a fact lives — an operator with a hand on the arm has no hand for a
+  hover, and a touch bench has no hover at all.
 
 ### Cards / Containers
 
@@ -677,6 +721,10 @@ raised without one.
 - **Do** put disabled-action reasons on the page beside Record, Replay, and
   Export.
 - **Do** keep the scale grid sparse and user-controlled, on by default.
+- **Do** make things on the bench selectable, hoverable, and answerable — a
+  motor, a camera, an arm — and keep every fact they carry reachable from the
+  inspector without touching the canvas.
+- **Do** judge a reading against the limit its own hardware reported.
 - **Do** place warnings in the compact header popover and keep transient notices
   floating above the shell.
 - **Do** preserve device hierarchy: identity and readiness first, setup second,
@@ -707,6 +755,12 @@ raised without one.
 - **Don't** encode episode duration or quality in card width or height.
 - **Don't** show persistent warning banners between the header and workspace.
 - **Don't** add dense minor grid lines to the bench.
+- **Don't** put a permanent per-motor table of temperatures, currents, and loads
+  on the inspector. The arm-level row says whether; the bench says which; the
+  selected motor's card says how much.
+- **Don't** chart telemetry over time. A rise rate is a number, not a graph.
+- **Don't** put camera pixels in the 3D scene; the bench gets a camera's
+  geometry and identity, the properties panel gets its frames.
 - **Don't** write one-off colour literals or hue-named utilities in components;
   use the role tokens.
 - **Don't** rely on a `title` attribute as the only explanation for a hardware

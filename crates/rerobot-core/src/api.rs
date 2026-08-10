@@ -68,6 +68,28 @@ pub struct MotorSummary {
     pub direction: Direction,
     pub model: Option<String>,
     pub calibration: Option<MotorCalibration>,
+    /// What this motor will fault at, read from its EEPROM when it connected.
+    ///
+    /// Lives on the snapshot rather than the telemetry frame because it does
+    /// not change while an arm is running; resending it twenty times a second
+    /// would be resending a constant.
+    #[serde(default)]
+    pub limits: MotorLimits,
+}
+
+/// The limits a motor enforces on itself.
+///
+/// These are read from the hardware rather than written down here. A motor
+/// already knows the temperature and voltage it will fault at, and a threshold
+/// copied out of a datasheet is a threshold that can disagree with the motor in
+/// front of the operator.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct MotorLimits {
+    pub max_temperature_celsius: Option<f64>,
+    pub min_voltage_volts: Option<f64>,
+    pub max_voltage_volts: Option<f64>,
+    /// Configured torque ceiling as a fraction of the motor's rated torque.
+    pub max_load: Option<f64>,
 }
 
 /// Serial settings for a robot's motor bus.
@@ -78,12 +100,47 @@ pub struct PortSettings {
 }
 
 /// A camera assigned to a robot.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CameraBinding {
     /// Role the camera plays for this robot, such as `wrist` or `top`.
     pub name: String,
     /// Stable device identifier reported by camera discovery.
     pub id: String,
+    /// Where the camera is bolted, when the robot's file says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount: Option<CameraMount>,
+}
+
+/// Where a camera sits and how much of the bench it can see.
+///
+/// Optional, and stays optional. A camera with no mount is a camera whose
+/// position nobody has told the studio, and the honest thing to do with an
+/// unknown position is not to draw one — a frustum at the origin would be a
+/// claim about the hardware rather than a picture of it.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CameraMount {
+    /// Link in the robot description the camera rides, or `None` for one fixed
+    /// to the bench. A wrist camera moves with the wrist; a top camera does not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<String>,
+    /// Offset from that frame, in metres.
+    #[serde(default)]
+    pub xyz: [f64; 3],
+    /// Roll, pitch, and yaw from that frame, in radians.
+    #[serde(default)]
+    pub rpy: [f64; 3],
+    /// Horizontal field of view, in degrees.
+    #[serde(default = "default_field_of_view")]
+    pub fov_degrees: f64,
+}
+
+/// Field of view assumed for a mount that does not state one.
+///
+/// A middling webcam lens. It is a drawing default, not a measurement, and the
+/// frustum it produces answers "is this pointed at the workspace" rather than
+/// "what exactly is in shot".
+fn default_field_of_view() -> f64 {
+    62.0
 }
 
 /// Whether a robot's motor bus is currently open.
@@ -214,6 +271,136 @@ pub struct JointTelemetry {
     /// calibration and cannot be reconstructed from [`JointRange`] alone.
     pub target_degrees: Option<f64>,
     pub range: Option<JointRange>,
+
+    /// What the motor reports about its own condition.
+    ///
+    /// Every one of these is optional and stays optional: a bus whose firmware
+    /// will not answer the wider status read still drives the arm perfectly
+    /// well, and a missing measurement reported as zero would put a cold motor
+    /// and an unreadable one in the same cell. Unlike the fields above, none of
+    /// these depend on calibration — they are the only readings an operator can
+    /// get out of an arm that has never been calibrated.
+    #[serde(default)]
+    pub temperature_celsius: Option<f64>,
+    #[serde(default)]
+    pub voltage_volts: Option<f64>,
+    #[serde(default)]
+    pub current_amps: Option<f64>,
+    /// Signed fraction of the motor's rated torque.
+    #[serde(default)]
+    pub load: Option<f64>,
+    #[serde(default)]
+    pub speed_degrees_per_second: Option<f64>,
+    /// How fast this motor is heating, in degrees per minute.
+    ///
+    /// A temperature alone cannot be acted on: fifty-eight degrees is fine, or
+    /// four minutes from a shutdown, depending entirely on which way it is
+    /// going. Measured over a window rather than between frames, because these
+    /// registers report whole degrees and a difference taken across two frames
+    /// is quantization noise wearing a unit. `None` until the window fills.
+    #[serde(default)]
+    pub temperature_rise_per_minute: Option<f64>,
+    /// Faults the motor is reporting about itself, not thresholds applied here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub faults: Vec<MotorFault>,
+}
+
+/// A fault a motor reports about itself.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MotorFault {
+    Overheat,
+    Overload,
+    Voltage,
+    /// A fault bit the motor set that this build does not have a name for.
+    ///
+    /// Carried rather than dropped: an operator who can see that something is
+    /// wrong can act on it, and a fault silently swallowed because it was
+    /// unfamiliar is the one that ends a session.
+    Unrecognized,
+}
+
+impl MotorFault {
+    /// How the studio says this on the page.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Overheat => "overheating",
+            Self::Overload => "overloaded",
+            Self::Voltage => "supply voltage",
+            Self::Unrecognized => "motor fault",
+        }
+    }
+}
+
+/// How a motor is doing against its own limits.
+///
+/// Ordered worst-last so an arm's condition is the maximum of its motors'.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MotorCondition {
+    #[default]
+    Nominal,
+    Caution,
+    Fault,
+}
+
+impl MotorCondition {
+    pub fn is_nominal(self) -> bool {
+        self == Self::Nominal
+    }
+}
+
+/// How close to a motor's own limit is close enough to report, as a fraction.
+///
+/// Lives on the wire contract for the same reason
+/// [`CAUTION_FOLLOW_ERROR_DEGREES`] does: the interface tints a reading with
+/// it, and anything else reading this API has to reach the same verdict about
+/// the same motor. The number is a margin, never a threshold — the threshold
+/// itself comes from the motor's EEPROM.
+pub const CAUTION_LIMIT_FRACTION: f64 = 0.85;
+
+/// How near the edge of its own voltage window a supply may drift quietly.
+pub const CAUTION_VOLTAGE_MARGIN_VOLTS: f64 = 0.3;
+
+impl JointTelemetry {
+    /// This motor's condition, judged against the limits it reported itself.
+    ///
+    /// A motor raising its own fault bit is a fault whatever the limits say —
+    /// that is the hardware's verdict and it outranks any margin applied here.
+    /// Without limits there is nothing to be near, so only the motor's own
+    /// faults can speak.
+    pub fn condition(&self, limits: &MotorLimits) -> MotorCondition {
+        if !self.faults.is_empty() {
+            return MotorCondition::Fault;
+        }
+
+        let hot = match (self.temperature_celsius, limits.max_temperature_celsius) {
+            (Some(celsius), Some(limit)) => celsius >= limit * CAUTION_LIMIT_FRACTION,
+            _ => false,
+        };
+        let strained = match (self.load, limits.max_load) {
+            (Some(load), Some(limit)) => load.abs() >= limit * CAUTION_LIMIT_FRACTION,
+            _ => false,
+        };
+        let supply = match self.voltage_volts {
+            Some(volts) => {
+                let low = limits
+                    .min_voltage_volts
+                    .is_some_and(|min| volts <= min + CAUTION_VOLTAGE_MARGIN_VOLTS);
+                let high = limits
+                    .max_voltage_volts
+                    .is_some_and(|max| volts >= max - CAUTION_VOLTAGE_MARGIN_VOLTS);
+                low || high
+            }
+            None => false,
+        };
+
+        if hot || strained || supply {
+            MotorCondition::Caution
+        } else {
+            MotorCondition::Nominal
+        }
+    }
 }
 
 /// The calibrated travel of one joint.
@@ -434,7 +621,7 @@ pub struct CreateRobotRequest {
 ///
 /// Omitted fields are left exactly as they are on disk, including fields this
 /// build does not understand.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct UpdateRobotRequest {
     #[serde(default)]
     pub robot_type: Option<String>,
@@ -582,5 +769,108 @@ mod tests {
             max: i64::MAX,
         };
         assert_eq!(progress.span(), i64::MAX);
+    }
+
+    fn joint() -> JointTelemetry {
+        JointTelemetry {
+            name: "shoulder_pan".to_owned(),
+            id: 1,
+            raw: 2048,
+            degrees: None,
+            normalized: None,
+            goal_raw: None,
+            target_raw: None,
+            target_degrees: None,
+            range: None,
+            temperature_celsius: Some(30.0),
+            voltage_volts: Some(7.4),
+            current_amps: Some(0.2),
+            load: Some(0.1),
+            speed_degrees_per_second: Some(0.0),
+            temperature_rise_per_minute: Some(0.0),
+            faults: Vec::new(),
+        }
+    }
+
+    fn limits() -> MotorLimits {
+        MotorLimits {
+            max_temperature_celsius: Some(70.0),
+            min_voltage_volts: Some(4.5),
+            max_voltage_volts: Some(9.0),
+            max_load: Some(1.0),
+        }
+    }
+
+    #[test]
+    fn a_motor_within_its_own_limits_is_nominal() {
+        assert_eq!(joint().condition(&limits()), MotorCondition::Nominal);
+    }
+
+    #[test]
+    fn nearing_a_limit_is_caution_and_the_motors_own_verdict_is_fault() {
+        let hot = JointTelemetry {
+            temperature_celsius: Some(70.0 * CAUTION_LIMIT_FRACTION),
+            ..joint()
+        };
+        assert_eq!(hot.condition(&limits()), MotorCondition::Caution);
+
+        let strained = JointTelemetry {
+            load: Some(-0.9),
+            ..joint()
+        };
+        assert_eq!(
+            strained.condition(&limits()),
+            MotorCondition::Caution,
+            "load is judged by how hard it is pushing, not which way"
+        );
+
+        let sagging = JointTelemetry {
+            voltage_volts: Some(4.5 + CAUTION_VOLTAGE_MARGIN_VOLTS - 0.1),
+            ..joint()
+        };
+        assert_eq!(sagging.condition(&limits()), MotorCondition::Caution);
+
+        // The motor's own fault byte outranks every margin applied here.
+        let faulted = JointTelemetry {
+            faults: vec![MotorFault::Overheat],
+            ..joint()
+        };
+        assert_eq!(faulted.condition(&limits()), MotorCondition::Fault);
+    }
+
+    #[test]
+    fn without_limits_only_the_motors_own_faults_can_speak() {
+        let scorching = JointTelemetry {
+            temperature_celsius: Some(200.0),
+            ..joint()
+        };
+
+        assert_eq!(
+            scorching.condition(&MotorLimits::default()),
+            MotorCondition::Nominal,
+            "there is nothing to be near, and a threshold invented here would be a guess"
+        );
+        assert_eq!(
+            JointTelemetry {
+                faults: vec![MotorFault::Unrecognized],
+                ..scorching
+            }
+            .condition(&MotorLimits::default()),
+            MotorCondition::Fault
+        );
+    }
+
+    #[test]
+    fn an_arms_condition_is_the_worst_of_its_motors() {
+        assert_eq!(
+            [
+                MotorCondition::Nominal,
+                MotorCondition::Fault,
+                MotorCondition::Caution
+            ]
+            .into_iter()
+            .max(),
+            Some(MotorCondition::Fault)
+        );
     }
 }

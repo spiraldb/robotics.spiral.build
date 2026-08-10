@@ -1,16 +1,14 @@
-//! The WebGL side of the 3D viewport.
+//! The WebGL half of the bench.
 //!
 //! This module knows about triangles and nothing about robots: it is handed a
-//! list of already-placed shapes and a camera, and it draws them. Deciding
-//! which shapes those are, and where, is [`crate::viewport`]'s job.
+//! camera and a list of already-placed shapes and it draws them. Deciding which
+//! shapes those are, and where, belongs to [`crate::robot`].
 //!
 //! The primitives a URDF is built from are drawn from three unit meshes — a
 //! box, a cylinder, and a sphere — scaled per instance. A whole arm is around
 //! twenty draw calls, so nothing here needs instancing or batching to keep up
 //! with the telemetry stream.
 
-use rerobot_core::glam::camera::rh::proj::opengl;
-use rerobot_core::glam::camera::rh::view::look_at_mat4;
 use rerobot_core::glam::{Mat4, Vec3};
 use rerobot_core::urdf::Geometry;
 use wasm_bindgen::JsCast;
@@ -19,102 +17,8 @@ use web_sys::{
     WebGlVertexArrayObject,
 };
 
-/// One shape to draw, already placed in the world and traceable to a robot entity.
-#[derive(Clone)]
-pub struct Instance {
-    pub geometry: Geometry,
-    /// Where the shape's own frame sits in the world.
-    pub transform: Mat4,
-    pub color: [f32; 4],
-    pub robot: String,
-    pub joint: Option<String>,
-}
-
-/// Where the viewer is looking from.
-///
-/// The camera orbits a target rather than flying freely, which is what makes
-/// dragging feel like turning the robot around instead of steering past it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Camera {
-    /// Rotation about the vertical axis, radians.
-    pub yaw: f32,
-    /// Elevation above the horizon, radians.
-    pub pitch: f32,
-    /// Distance from the target, metres.
-    pub distance: f32,
-    pub target: Vec3,
-}
-
-impl Default for Camera {
-    fn default() -> Self {
-        // Three-quarter view from the front right, high enough to read the
-        // shoulder and elbow apart, framed on the middle of a working arm.
-        Self {
-            yaw: -0.65,
-            pitch: 0.32,
-            distance: 0.78,
-            target: Vec3::new(0.03, 0.0, 0.17),
-        }
-    }
-}
-
-/// How far the camera may tip before looking straight down the world's up axis,
-/// where the view direction and the up vector stop defining a rotation.
-const PITCH_LIMIT: f32 = 1.45;
-const MIN_DISTANCE: f32 = 0.18;
-const MAX_DISTANCE: f32 = 3.0;
-
-impl Camera {
-    /// Turn the camera about its target, in radians.
-    pub fn orbit(&mut self, yaw: f32, pitch: f32) {
-        self.yaw += yaw;
-        self.pitch = (self.pitch + pitch).clamp(-PITCH_LIMIT, PITCH_LIMIT);
-    }
-
-    /// Move closer or further away. `factor` above one pulls back.
-    pub fn zoom(&mut self, factor: f32) {
-        self.distance = (self.distance * factor).clamp(MIN_DISTANCE, MAX_DISTANCE);
-    }
-
-    /// Slide the target across the screen, in metres of world space.
-    pub fn pan(&mut self, right: f32, up: f32) {
-        let (right_axis, up_axis) = self.screen_axes();
-        self.target += right_axis * right + up_axis * up;
-    }
-
-    /// Where the camera sits.
-    pub fn eye(&self) -> Vec3 {
-        let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
-        let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
-        self.target + Vec3::new(cos_pitch * cos_yaw, cos_pitch * sin_yaw, sin_pitch) * self.distance
-    }
-
-    /// The world directions that screen right and screen up correspond to.
-    fn screen_axes(&self) -> (Vec3, Vec3) {
-        let forward = (self.target - self.eye()).normalize_or(Vec3::X);
-        let right = forward.cross(Vec3::Z).normalize_or(Vec3::Y);
-        (right, right.cross(forward))
-    }
-
-    /// How many metres one screen pixel covers at the target, so panning and
-    /// the model keep pace no matter how far out the camera has been pulled.
-    pub fn metres_per_pixel(&self, viewport_height: f32) -> f32 {
-        if viewport_height <= 0.0 {
-            return 0.0;
-        }
-        2.0 * self.distance * (FIELD_OF_VIEW / 2.0).tan() / viewport_height
-    }
-
-    pub(crate) fn view_projection(&self, aspect: f32) -> Mat4 {
-        // Right handed, with the depth range OpenGL and WebGL expect. Near and
-        // far bracket a tabletop scene: close enough to push the camera almost
-        // into a joint, far enough to pull back off the bench.
-        let projection = opengl::perspective(FIELD_OF_VIEW, aspect.max(0.01), 0.02, 20.0);
-        projection * look_at_mat4(self.eye(), self.target, Vec3::Z)
-    }
-}
-
-const FIELD_OF_VIEW: f32 = 0.9;
+use crate::camera::Camera;
+use crate::scene::{Condition, Entity, Interaction, Scene};
 
 /// A light neutral bench matching `--tone-viewport` in the stylesheet.
 const BACKGROUND: [f32; 4] = [0.965, 0.965, 0.955, 1.0];
@@ -250,7 +154,7 @@ impl Renderer {
     }
 
     /// Draw one frame.
-    pub fn draw(&self, camera: &Camera, aspect: f32, instances: &[Instance], show_grid: bool) {
+    pub fn draw(&self, camera: &Camera, aspect: f32, scene: &Scene) {
         let gl = &self.gl;
         gl.clear(Gl::COLOR_BUFFER_BIT | Gl::DEPTH_BUFFER_BIT);
         gl.use_program(Some(&self.program));
@@ -260,7 +164,7 @@ impl Renderer {
             &camera.view_projection(aspect).to_cols_array(),
         );
 
-        if show_grid {
+        if scene.grid {
             // One sparse grid rhythm communicates scale without turning the
             // largest surface in the studio into a high-frequency texture.
             gl.uniform1f(self.uniforms.shaded.as_ref(), 0.0);
@@ -279,9 +183,8 @@ impl Renderer {
             draw_lines(&self.axis_y, &AXIS_Y);
         }
 
-        gl.uniform1f(self.uniforms.shaded.as_ref(), 1.0);
-        for instance in instances {
-            let (mesh, scale) = match &instance.geometry {
+        for entity in &scene.entities {
+            let (mesh, scale) = match &entity.geometry {
                 Geometry::Box { size } => (&self.cube, *size),
                 Geometry::Cylinder { radius, length } => {
                     (&self.cylinder, Vec3::new(*radius, *radius, *length))
@@ -291,17 +194,74 @@ impl Renderer {
                 // description that references one drawable rather than blank.
                 Geometry::Mesh { .. } => continue,
             };
-            gl.uniform4fv_with_f32_array(self.uniforms.color.as_ref(), &instance.color);
+            gl.uniform1f(
+                self.uniforms.shaded.as_ref(),
+                if entity.wireframe { 0.0 } else { 1.0 },
+            );
+            gl.uniform4fv_with_f32_array(self.uniforms.color.as_ref(), &state_color(entity));
             gl.uniform_matrix4fv_with_f32_array(
                 self.uniforms.model.as_ref(),
                 false,
-                &(instance.transform * Mat4::from_scale(scale)).to_cols_array(),
+                &(entity.transform * Mat4::from_scale(scale)).to_cols_array(),
             );
             gl.bind_vertex_array(Some(&mesh.array));
-            gl.draw_arrays(Gl::TRIANGLES, 0, mesh.vertices);
+            gl.draw_arrays(
+                if entity.wireframe {
+                    Gl::LINE_STRIP
+                } else {
+                    Gl::TRIANGLES
+                },
+                0,
+                mesh.vertices,
+            );
         }
         gl.bind_vertex_array(None);
     }
+}
+
+/// How a hovered, selected, or unwell entity is painted.
+///
+/// Hover lifts less than selection, so the two are never mistaken for each
+/// other: a pointer passing over the bench should feel like a highlight and a
+/// click should feel like a decision. Condition is a wash toward the studio's
+/// caution and danger inks rather than a replacement colour, because an arm's
+/// accent is the thing that says which arm it is, and a hot elbow is still that
+/// arm's elbow.
+fn state_color(entity: &Entity) -> [f32; 4] {
+    let color = match entity.interaction {
+        Interaction::Resting => entity.color,
+        Interaction::Hovered => lift(entity.color, 1.10, 0.04),
+        Interaction::Selected => lift(entity.color, 1.22, 0.08),
+    };
+    match entity.condition {
+        Condition::Nominal => color,
+        Condition::Caution => toward(color, CAUTION),
+        Condition::Fault => toward(color, DANGER),
+    }
+}
+
+/// Bench ochre and brick red, matching the studio's caution and danger tokens.
+const CAUTION: [f32; 3] = [0.49, 0.42, 0.25];
+const DANGER: [f32; 3] = [0.75, 0.26, 0.24];
+
+fn lift(color: [f32; 4], gain: f32, floor: f32) -> [f32; 4] {
+    [
+        (color[0] * gain + floor).min(1.0),
+        (color[1] * gain + floor).min(1.0),
+        (color[2] * gain + floor).min(1.0),
+        color[3],
+    ]
+}
+
+/// Mix a colour most of the way toward a state ink, keeping some of its own.
+fn toward(color: [f32; 4], target: [f32; 3]) -> [f32; 4] {
+    const MIX: f32 = 0.62;
+    [
+        color[0] + (target[0] - color[0]) * MIX,
+        color[1] + (target[1] - color[1]) * MIX,
+        color[2] + (target[2] - color[2]) * MIX,
+        color[3],
+    ]
 }
 
 fn link_program(gl: &Gl) -> Result<WebGlProgram, String> {

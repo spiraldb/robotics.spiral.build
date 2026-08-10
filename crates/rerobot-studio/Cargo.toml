@@ -30,6 +30,7 @@ server = [
 [dependencies]
 rerobot = { workspace = true, optional = true }
 rerobot-core.workspace = true
+rerobot-viewport.workspace = true
 clap = { workspace = true, optional = true }
 dioxus = { workspace = true, features = [
     "asset",

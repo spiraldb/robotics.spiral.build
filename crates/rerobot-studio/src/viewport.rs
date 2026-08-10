@@ -1,9 +1,16 @@
-//! The studio's 3D view of the arms.
+//! The studio's window onto the bench.
 //!
-//! Every arm in the workspace is drawn in one scene, posed from its measured
-//! joint angles. What gets drawn comes entirely from the robot description in
-//! [`rerobot_core::urdf`], so the shape of the arm is a fact about a file, not
-//! about this module.
+//! Everything about *drawing* the scene — the camera, the WebGL, picking, the
+//! gesture arithmetic, and turning a robot description into shapes — lives in
+//! [`rerobot_viewport`], which cannot see this crate. What is left here is the
+//! part that is genuinely the studio's: which arms are on the bench, what their
+//! motors are doing, and what the operator has picked.
+//!
+//! The seam is worth naming. The crate answers *where on the canvas is this
+//! thing*; this module answers *what should be said about it*. That is why the
+//! hover callout is Dioxus markup positioned from an anchor rather than text
+//! drawn into the scene: the renderer never learns what a motor is called, and
+//! the studio never learns what a projection matrix is.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -12,24 +19,25 @@ use std::rc::Rc;
 use dioxus::prelude::*;
 use dioxus_elements::geometry::WheelDelta;
 use dioxus_elements::input_data::MouseButton;
-use rerobot_core::api::RobotSummary;
-use rerobot_core::arm::{self, JointAngles};
-use rerobot_core::glam::{Mat4, Vec3};
-use rerobot_core::urdf::Urdf;
+use rerobot_core::api::{MotorCondition, RobotSummary};
+use rerobot_core::glam::Vec3;
+use rerobot_viewport::robot::BENCH_SPACING;
+use rerobot_viewport::{
+    ArmPlacement, Camera, CameraMount, Condition, Drag, Gesture, Interaction, Pinch, RobotEntity,
+    RobotScene, Viewport as Bench, robot,
+};
 #[cfg(feature = "web")]
 use wasm_bindgen::JsCast;
 #[cfg(feature = "web")]
 use wasm_bindgen::prelude::Closure;
 use web_sys::HtmlCanvasElement;
 
-use crate::scene::{Camera, Instance, Renderer};
 use crate::state::{Selection, studio};
+
+pub use rerobot_viewport::tool_position;
 
 /// The canvas the viewport draws into. There is exactly one on the page.
 const CANVAS_ID: &str = "robot-viewport";
-
-/// How far apart two arms stand on the bench, in metres.
-const BENCH_SPACING: f32 = 0.34;
 
 /// The colours arms are told apart by, as WebGL values and as CSS.
 ///
@@ -57,27 +65,34 @@ pub fn accent_css(index: usize) -> &'static str {
     ACCENTS[index % ACCENTS.len()].1
 }
 
-/// One arm, ready to be turned into shapes.
-struct Placement {
-    id: String,
-    accent: [f32; 4],
-    /// False for an arm that is configured but not currently reporting, which
-    /// is drawn at its rest pose and faded rather than left out.
-    live: bool,
-    angles: JointAngles,
-    base: Mat4,
+/// The canvas height in CSS pixels, which is what turns a drag into metres.
+fn height(bench: &Rc<RefCell<Option<Bench>>>) -> f32 {
+    bench
+        .try_borrow()
+        .ok()
+        .and_then(|slot| slot.as_ref().map(Bench::height))
+        .unwrap_or(1.0)
+}
+
+/// What the pointer is over, and where to put a note about it.
+#[derive(Clone, PartialEq)]
+struct Hover {
+    entity: RobotEntity,
+    /// Where the callout points, in client pixels.
+    at: (f64, f64),
 }
 
 #[component]
 pub fn Viewport() -> Element {
     let mut studio = studio();
     let urdf = crate::state::description();
-    let renderer = use_hook(|| Rc::new(RefCell::new(Option::<Renderer>::None)));
+    let bench = use_hook(|| Rc::new(RefCell::new(Option::<Bench>::None)));
     let mut camera = use_signal(Camera::default);
     let mut drag = use_signal(|| Option::<Drag>::None);
     let mut touches = use_signal(BTreeMap::<i32, (f64, f64)>::new);
     let mut pinch = use_signal(|| None::<Pinch>);
     let mut trouble = use_signal(|| Option::<String>::None);
+    let mut hover = use_signal(|| Option::<Hover>::None);
     // On by default: the bench is a physical workspace and the 20cm rhythm is
     // how an operator reads reach and clearance off the screen. It stays a
     // control, so a scene that only needs the arms can still shed it.
@@ -97,28 +112,22 @@ pub fn Viewport() -> Element {
         }))
     });
 
-    let selected = studio.selected.read().clone();
-    let scene_instances = urdf
-        .as_ref()
-        .as_ref()
-        .map(|urdf| instances(urdf, &placements(&studio), selected.as_ref()))
-        .unwrap_or_default();
-    let scene_urdf = urdf.clone();
-    let scene_renderer = renderer.clone();
+    let draw_bench = bench.clone();
+    let draw_urdf = urdf.clone();
     use_effect(move || {
         let _ = resized();
         let camera = camera();
         let grid = show_grid();
-        let Ok(urdf) = scene_urdf.as_ref() else {
+        let hovered = hover();
+        let Ok(urdf) = draw_urdf.as_ref() else {
             return;
         };
-        let selected = studio.selected.read().clone();
-        let draw_instances = instances(urdf, &placements(&studio), selected.as_ref());
+        let scene = compose(urdf, &studio, grid, hovered.as_ref().map(|it| &it.entity));
 
         let Some(canvas) = canvas() else { return };
-        let mut slot = scene_renderer.borrow_mut();
+        let mut slot = draw_bench.borrow_mut();
         if slot.is_none() {
-            match Renderer::new(&canvas) {
+            match Bench::new(canvas) {
                 Ok(ready) => *slot = Some(ready),
                 Err(error) => {
                     trouble.set(Some(error));
@@ -126,13 +135,11 @@ pub fn Viewport() -> Element {
                 }
             }
         }
-        let Some(renderer) = slot.as_mut() else {
+        let Some(bench) = slot.as_mut() else {
             return;
         };
         let ratio = web_sys::window().map_or(1.0, |window| window.device_pixel_ratio());
-        if let Some(aspect) = renderer.resize(&canvas, ratio) {
-            renderer.draw(&camera, aspect, &draw_instances, grid);
-        }
+        bench.draw(&camera, &scene.scene, ratio);
     });
 
     let arms = studio.snapshot.read().robots.clone();
@@ -140,16 +147,26 @@ pub fn Viewport() -> Element {
         Err(error) => Some(format!("The robot description could not be read: {error}")),
         Ok(_) => trouble(),
     };
+    // Where each unwell motor sits on the canvas right now. Computed from the
+    // scene the crate just drew, so a mark cannot drift away from the part it
+    // is about as the camera moves.
+    let marks = condition_marks(&urdf, &studio, &bench, camera(), show_grid());
 
     rsx! {
         div { class: "relative h-full w-full overflow-hidden bg-viewport",
             canvas {
                 id: CANVAS_ID,
                 class: "h-full w-full touch-none select-none",
-                class: if drag().is_some() { "cursor-grabbing" } else { "cursor-grab" },
+                class: if drag().is_some() {
+                    "cursor-grabbing"
+                } else if hover().is_some() {
+                    "cursor-pointer"
+                } else {
+                    "cursor-grab"
+                },
                 role: "application",
                 tabindex: "0",
-                "aria-label": "Interactive 3D robot viewer. Click an arm to select it. Drag to orbit, shift-drag or two-finger drag to pan, pinch or scroll to zoom, and press F to frame the selection.",
+                "aria-label": "Interactive 3D robot viewer. Click a motor or camera to select it and see its readings in the inspector. Drag to orbit, shift-drag or two-finger drag to pan, pinch or scroll to zoom, and press F to frame the selection.",
                 onpointerdown: move |event| {
                     capture(&event);
                     if let Some((pointer, position)) = touch(&event) {
@@ -160,54 +177,50 @@ pub fn Viewport() -> Element {
                             return;
                         }
                     }
-                    drag.set(Some(Drag::start(&event)));
+                    // The middle and right buttons pan, matching every other 3D
+                    // viewer; shift with the left button does the same for a
+                    // one-button mouse.
+                    let panning = event.modifiers().shift()
+                        || matches!(
+                            event.trigger_button(),
+                            Some(MouseButton::Secondary | MouseButton::Auxiliary)
+                        );
+                    drag.set(Some(Drag::new(point(&event), panning)));
                 },
-                onpointermove: move |event| {
-                    let position = point(&event);
-                    if let Some((pointer, _)) = touch(&event)
-                        && touches.read().contains_key(&pointer)
-                    {
-                        touches.write().insert(pointer, position);
-                        if let Some(current) = Pinch::from_touches(&touches.read()) {
-                            if let Some(previous) = pinch() {
-                                let mut camera = camera.write();
-                                if current.distance > 1.0 && previous.distance > 1.0 {
-                                    camera.zoom(previous.distance / current.distance);
+                onpointermove: {
+                    let bench = bench.clone();
+                    let urdf = urdf.clone();
+                    move |event| {
+                        let position = point(&event);
+                        if let Some((pointer, _)) = touch(&event)
+                            && touches.read().contains_key(&pointer)
+                        {
+                            touches.write().insert(pointer, position);
+                            if let Some(current) = Pinch::from_touches(&touches.read()) {
+                                if let Some(previous) = pinch() {
+                                    current.advance_from(
+                                        previous,
+                                        &mut camera.write(),
+                                        height(&bench),
+                                    );
                                 }
-                                let metres = camera.metres_per_pixel(viewport_height());
-                                camera.pan(
-                                    -(current.center.0 - previous.center.0) as f32 * metres,
-                                    (current.center.1 - previous.center.1) as f32 * metres,
-                                );
+                                pinch.set(Some(current));
+                                return;
                             }
-                            pinch.set(Some(current));
+                        }
+                        if let Some(mut active) = drag() {
+                            active.advance(position, &mut camera.write(), height(&bench));
+                            drag.set(Some(active));
                             return;
                         }
-                    }
-                    let Some(active) = drag() else { return };
-                    let (dx, dy) = (
-                        position.0 - active.last.0,
-                        position.1 - active.last.1,
-                    );
-                    let moved = active.moved
-                        || (position.0 - active.start.0).hypot(position.1 - active.start.1) > 3.0;
-                    drag.set(Some(Drag { last: position, moved, ..active }));
-                    let mut camera = camera.write();
-                    // Both gestures are direct manipulation: the drag moves the
-                    // scene, not the camera. Dragging down tips the arm's top
-                    // toward the viewer — the same way dragging down a globe
-                    // brings its north pole around — which puts the camera up.
-                    if active.panning {
-                        // A pan should keep the point under the pointer under
-                        // the pointer, so it moves in world metres per pixel.
-                        let metres = camera.metres_per_pixel(viewport_height());
-                        camera.pan(-dx as f32 * metres, dy as f32 * metres);
-                    } else {
-                        camera.orbit(-dx as f32 * 0.007, dy as f32 * 0.007);
+                        // Only while nothing is being dragged: an orbit is not
+                        // a tour of everything the pointer sweeps past.
+                        hover.set(hovered(&urdf, &studio, &bench, camera(), show_grid(), position));
                     }
                 },
                 onpointerup: {
-                    let scene_instances = scene_instances.clone();
+                    let bench = bench.clone();
+                    let urdf = urdf.clone();
                     move |event| {
                         if let Some((pointer, _)) = touch(&event) {
                             touches.write().remove(&pointer);
@@ -215,11 +228,15 @@ pub fn Viewport() -> Element {
                             drag.set(None);
                             return;
                         }
-                        if drag().is_some_and(|active| !active.moved)
-                            && let Some(selection) =
-                                pick(&camera(), &scene_instances, point(&event))
-                        {
-                            studio.selected.set(Some(selection));
+                        if drag().is_some_and(|active| !active.moved()) {
+                            let position = point(&event);
+                            let picked =
+                                hovered(&urdf, &studio, &bench, camera(), show_grid(), position);
+                            // Clicking bare bench clears the selection, the way
+                            // clicking empty space does everywhere else.
+                            studio
+                                .selected
+                                .set(picked.map(|hit| selection_of(&hit.entity)));
                         }
                         drag.set(None);
                     }
@@ -235,36 +252,45 @@ pub fn Viewport() -> Element {
                     // Captured mouse pointers continue reporting outside the
                     // canvas. Touch pointers are kept until up/cancel so a
                     // two-finger gesture cannot lose one finger at an edge.
-                    if touch(&event).is_none() { drag.set(None); }
+                    if touch(&event).is_none() {
+                        drag.set(None);
+                    }
+                    hover.set(None);
                 },
                 oncontextmenu: move |event| event.prevent_default(),
                 onwheel: move |event| {
-                    // Mice report notches and trackpads report pixels; both are
-                    // normalized so one notch zooms by about a sixth, which is
-                    // small enough that a trackpad flick does not overshoot.
                     let notches = match event.delta() {
                         WheelDelta::Pixels(delta) => delta.y / 120.0,
                         WheelDelta::Lines(delta) => delta.y / 3.0,
                         WheelDelta::Pages(delta) => delta.y,
                     };
-                    camera.write().zoom((notches.clamp(-4.0, 4.0) as f32 * 0.15).exp());
+                    Gesture::Wheel(notches).apply(&mut camera.write());
                 },
-                onkeydown: move |event| match event.key() {
-                    Key::ArrowLeft => camera.write().orbit(0.08, 0.0),
-                    Key::ArrowRight => camera.write().orbit(-0.08, 0.0),
-                    Key::ArrowUp => camera.write().orbit(0.0, -0.08),
-                    Key::ArrowDown => camera.write().orbit(0.0, 0.08),
-                    Key::Character(value) if value == "+" || value == "=" => {
-                        camera.write().zoom(0.88)
+                onkeydown: move |event| {
+                    let gesture = match event.key() {
+                        Key::ArrowLeft => Some(Gesture::OrbitLeft),
+                        Key::ArrowRight => Some(Gesture::OrbitRight),
+                        Key::ArrowUp => Some(Gesture::OrbitUp),
+                        Key::ArrowDown => Some(Gesture::OrbitDown),
+                        Key::Character(value) if value == "+" || value == "=" => {
+                            Some(Gesture::ZoomIn)
+                        }
+                        Key::Character(value) if value == "-" || value == "_" => {
+                            Some(Gesture::ZoomOut)
+                        }
+                        Key::Character(value) if value == "0" => {
+                            camera.set(Camera::default());
+                            None
+                        }
+                        Key::Character(value) if value.eq_ignore_ascii_case("f") => {
+                            frame_selection(&mut camera, &studio);
+                            None
+                        }
+                        _ => None,
+                    };
+                    if let Some(gesture) = gesture {
+                        gesture.apply(&mut camera.write());
                     }
-                    Key::Character(value) if value == "-" || value == "_" => {
-                        camera.write().zoom(1.14)
-                    }
-                    Key::Character(value) if value == "0" => camera.set(Camera::default()),
-                    Key::Character(value) if value.eq_ignore_ascii_case("f") => {
-                        frame_selection(&mut camera, &studio)
-                    }
-                    _ => {}
                 },
             }
 
@@ -275,6 +301,20 @@ pub fn Viewport() -> Element {
                     }
                 }
             } else {
+                // A motor reporting trouble marks itself where it is, because
+                // "which one" is the question the inspector's arm-level cells
+                // cannot answer and the bench can.
+                for mark in marks {
+                    span {
+                        key: "{mark.0}",
+                        class: if mark.3 { "bench-mark bench-mark-fault" } else { "bench-mark" },
+                        style: "left: {mark.1}px; top: {mark.2}px",
+                        "aria-hidden": true,
+                    }
+                }
+                if let Some(hovered) = hover() {
+                    HoverNote { hover: hovered }
+                }
                 Legend { arms }
                 div { class: "viewport-help",
                     "click select · drag orbit · shift-drag pan · scroll zoom · F frame"
@@ -303,6 +343,265 @@ pub fn Viewport() -> Element {
             }
         }
     }
+}
+
+/// The one fact worth putting under the pointer.
+///
+/// A hover is a glance, so it carries a name and the single reading that would
+/// make an operator stop: a temperature when the motor is unwell, and otherwise
+/// nothing but the name. Everything else is in the inspector, which is where
+/// the operator is going next anyway — and which stays reachable without a
+/// pointer at all.
+#[component]
+fn HoverNote(hover: Hover) -> Element {
+    let studio = studio();
+    let (title, detail) = describe(&studio, &hover.entity);
+    rsx! {
+        div {
+            class: "bench-note",
+            style: "left: {hover.at.0}px; top: {hover.at.1}px",
+            "aria-hidden": true,
+            span { class: "bench-note-title", "{title}" }
+            if let Some(detail) = detail {
+                span { class: "bench-note-detail", "{detail}" }
+            }
+        }
+    }
+}
+
+/// What to call an entity, and the reading worth showing beside its name.
+fn describe(studio: &crate::state::Studio, entity: &RobotEntity) -> (String, Option<String>) {
+    match entity {
+        RobotEntity::Structure { robot } => (robot.clone(), None),
+        RobotEntity::Camera { robot, role } => (format!("{role} camera"), Some(robot.clone())),
+        RobotEntity::Joint { robot, joint } => {
+            let label = rerobot_core::arm::so101_joint(joint)
+                .map_or_else(|| joint.clone(), |joint| joint.label.to_owned());
+            let telemetry = studio.robot_telemetry(robot).and_then(|telemetry| {
+                telemetry
+                    .joints
+                    .into_iter()
+                    .find(|candidate| candidate.name == *joint)
+            });
+            let detail = telemetry.and_then(|telemetry| {
+                telemetry
+                    .temperature_celsius
+                    .map(|celsius| format!("{celsius:.0} °C"))
+            });
+            (label, detail)
+        }
+    }
+}
+
+/// Turn a scene entity into the studio's own idea of what is selected.
+fn selection_of(entity: &RobotEntity) -> Selection {
+    match entity {
+        RobotEntity::Joint { robot, joint } => Selection::Joint {
+            robot: robot.clone(),
+            joint: joint.clone(),
+        },
+        RobotEntity::Structure { robot } => Selection::Robot(robot.clone()),
+        RobotEntity::Camera { robot, role } => Selection::Camera {
+            robot: robot.clone(),
+            role: role.clone(),
+        },
+    }
+}
+
+/// Whether `entity` is one of the things `selection` refers to.
+///
+/// Selecting a whole arm selects all of it. The legend row names the robot, not
+/// the plinth it stands on, so lighting only the base would answer a different
+/// question than the one the operator asked.
+fn matches_selection(selection: Option<&Selection>, entity: &RobotEntity) -> bool {
+    match selection {
+        Some(Selection::Robot(robot)) => entity.robot() == robot,
+        Some(Selection::Joint { robot, joint }) => matches!(
+            entity,
+            RobotEntity::Joint { robot: on, joint: named } if on == robot && named == joint
+        ),
+        Some(Selection::Camera { robot, role }) => matches!(
+            entity,
+            RobotEntity::Camera { robot: on, role: named } if on == robot && named == role
+        ),
+        None => false,
+    }
+}
+
+/// Build the bench from what the studio currently knows.
+///
+/// The two closures are where the studio's state meets the scene: one says what
+/// the operator is doing with a thing, the other what its hardware is saying
+/// about itself. Neither is stored in the scene, because both change far more
+/// often than the geometry does.
+fn compose(
+    urdf: &rerobot_core::urdf::Urdf,
+    studio: &crate::state::Studio,
+    grid: bool,
+    hovered: Option<&RobotEntity>,
+) -> RobotScene {
+    let selected = studio.selected.read().clone();
+    // Hovering a joint row in the inspector lights the motor on the bench, the
+    // same way hovering the motor lights the row: one object, seen twice.
+    let pointed = studio.pointed.read().clone();
+    let conditions = motor_conditions(studio);
+
+    robot::build(
+        urdf,
+        &placements(studio),
+        grid,
+        |entity| {
+            if matches_selection(selected.as_ref(), entity) {
+                Interaction::Selected
+            } else if hovered == Some(entity) || matches_selection(pointed.as_ref(), entity) {
+                Interaction::Hovered
+            } else {
+                Interaction::Resting
+            }
+        },
+        |entity| match entity {
+            RobotEntity::Joint { robot, joint } => conditions
+                .get(&(robot.clone(), joint.clone()))
+                .copied()
+                .unwrap_or_default(),
+            _ => Condition::Nominal,
+        },
+    )
+}
+
+/// Every motor's condition, judged once per frame against its own limits.
+fn motor_conditions(studio: &crate::state::Studio) -> BTreeMap<(String, String), Condition> {
+    let snapshot = studio.snapshot.read();
+    let telemetry = studio.telemetry.read();
+    let mut conditions = BTreeMap::new();
+    for robot in &telemetry.robots {
+        let Some(summary) = snapshot.robots.iter().find(|arm| arm.id == robot.id) else {
+            continue;
+        };
+        for joint in &robot.joints {
+            let limits = summary
+                .motors
+                .iter()
+                .find(|motor| motor.name == joint.name)
+                .map(|motor| motor.limits)
+                .unwrap_or_default();
+            let condition = match joint.condition(&limits) {
+                MotorCondition::Nominal => Condition::Nominal,
+                MotorCondition::Caution => Condition::Caution,
+                MotorCondition::Fault => Condition::Fault,
+            };
+            if condition != Condition::Nominal {
+                conditions.insert((robot.id.clone(), joint.name.clone()), condition);
+            }
+        }
+    }
+    conditions
+}
+
+/// A key, its place on the canvas, and whether it is a fault rather than a
+/// caution — one entry per motor currently reporting trouble.
+type Mark = (String, f64, f64, bool);
+
+fn condition_marks(
+    urdf: &crate::state::Description,
+    studio: &crate::state::Studio,
+    bench: &Rc<RefCell<Option<Bench>>>,
+    camera: Camera,
+    grid: bool,
+) -> Vec<Mark> {
+    let Ok(urdf) = urdf.as_ref().as_ref() else {
+        return Vec::new();
+    };
+    let Ok(slot) = bench.try_borrow() else {
+        return Vec::new();
+    };
+    let Some(bench) = slot.as_ref() else {
+        return Vec::new();
+    };
+    let scene = compose(urdf, studio, grid, None);
+    let rect = canvas().map(|canvas| canvas.get_bounding_client_rect());
+    let (left, top) = rect.map_or((0.0, 0.0), |rect| (rect.left(), rect.top()));
+
+    scene
+        .scene
+        .entities
+        .iter()
+        .filter(|entity| entity.condition != Condition::Nominal)
+        .map(|entity| entity.key)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|key| {
+            let entity = scene.entity(key)?;
+            let RobotEntity::Joint { robot, joint } = entity else {
+                return None;
+            };
+            let at = bench.anchor(&camera, scene.scene.anchor_point(key)?)?;
+            let fault = scene
+                .scene
+                .entity(key)
+                .is_some_and(|entity| entity.condition == Condition::Fault);
+            Some((format!("{robot}/{joint}"), at.0 - left, at.1 - top, fault))
+        })
+        .collect()
+}
+
+/// What the pointer is over, and where the note about it belongs.
+fn hovered(
+    urdf: &crate::state::Description,
+    studio: &crate::state::Studio,
+    bench: &Rc<RefCell<Option<Bench>>>,
+    camera: Camera,
+    grid: bool,
+    at: (f64, f64),
+) -> Option<Hover> {
+    let urdf = urdf.as_ref().as_ref().ok()?;
+    let slot = bench.try_borrow().ok()?;
+    let bench = slot.as_ref()?;
+    let scene = compose(urdf, studio, grid, None);
+    let key = bench.pick(&camera, &scene.scene, at)?;
+    let rect = canvas()?.get_bounding_client_rect();
+    Some(Hover {
+        entity: scene.entity(key)?.clone(),
+        at: (at.0 - rect.left(), at.1 - rect.top()),
+    })
+}
+
+/// Every arm on the bench, posed from what it is currently reporting.
+fn placements(studio: &crate::state::Studio) -> Vec<ArmPlacement> {
+    let arms = studio.snapshot.read().robots.clone();
+    let count = arms.len();
+    arms.iter()
+        .enumerate()
+        .map(|(index, arm)| {
+            // An arm that is offline or uncalibrated has no angles worth
+            // drawing, so it stands at its rest pose and is faded rather than
+            // left out — an empty bench says less than a greyed-out one.
+            let telemetry = studio.robot_telemetry(&arm.id).filter(|_| arm.calibrated);
+            ArmPlacement {
+                id: arm.id.clone(),
+                accent: ACCENTS[index % ACCENTS.len()].0,
+                live: telemetry.is_some(),
+                angles: telemetry
+                    .map(|robot| crate::control::measured_angles(&robot.joints))
+                    .unwrap_or_default(),
+                cameras: arm.cameras.iter().filter_map(mount_of).collect(),
+                index,
+                count,
+            }
+        })
+        .collect()
+}
+
+/// Where a bound camera sits, for the ones whose file says.
+fn mount_of(binding: &rerobot_core::api::CameraBinding) -> Option<CameraMount> {
+    let mount = binding.mount.as_ref()?;
+    Some(CameraMount {
+        role: binding.name.clone(),
+        frame: mount.frame.clone(),
+        xyz: mount.xyz.map(|value| value as f32),
+        rpy: mount.rpy.map(|value| value as f32),
+        fov_degrees: mount.fov_degrees as f32,
+    })
 }
 
 /// Which arm is which colour in the scene.
@@ -389,222 +688,16 @@ fn frame_selection(camera: &mut Signal<Camera>, studio: &crate::state::Studio) {
     };
     let count = studio.snapshot.read().robots.len();
     let index = studio.position_of(&robot);
-    let base = bench_position(index, count).transform_point3(Vec3::ZERO);
+    let base = Vec3::new(
+        0.0,
+        (index as f32 - count.saturating_sub(1) as f32 / 2.0) * BENCH_SPACING,
+        0.0,
+    );
     camera.set(Camera {
         target: base + Vec3::new(0.03, 0.0, 0.17),
         distance: 0.68,
         ..camera()
     });
-}
-
-/// Ray-cast the visible primitive bounds and return the nearest semantic entity.
-fn pick(camera: &Camera, instances: &[Instance], client: (f64, f64)) -> Option<Selection> {
-    let canvas = canvas()?;
-    let rect = canvas.get_bounding_client_rect();
-    if rect.width() <= 0.0 || rect.height() <= 0.0 {
-        return None;
-    }
-    let x = ((client.0 - rect.left()) / rect.width() * 2.0 - 1.0) as f32;
-    let y = (1.0 - (client.1 - rect.top()) / rect.height() * 2.0) as f32;
-    let aspect = (rect.width() / rect.height()) as f32;
-    let inverse = camera.view_projection(aspect).inverse();
-    let near = inverse.project_point3(Vec3::new(x, y, -1.0));
-    let far = inverse.project_point3(Vec3::new(x, y, 1.0));
-    let direction = (far - near).normalize_or(Vec3::X);
-
-    instances
-        .iter()
-        .filter_map(|instance| {
-            let radius = match &instance.geometry {
-                rerobot_core::urdf::Geometry::Box { size } => size.length() * 0.5,
-                rerobot_core::urdf::Geometry::Cylinder { radius, length } => {
-                    (radius * radius + length * length * 0.25).sqrt()
-                }
-                rerobot_core::urdf::Geometry::Sphere { radius } => *radius,
-                rerobot_core::urdf::Geometry::Mesh { .. } => return None,
-            };
-            let center = instance.transform.transform_point3(Vec3::ZERO);
-            let to_center = center - near;
-            let along = to_center.dot(direction);
-            if along < 0.0 {
-                return None;
-            }
-            let distance_squared = to_center.length_squared() - along * along;
-            if distance_squared > radius * radius {
-                return None;
-            }
-            let hit = along - (radius * radius - distance_squared).sqrt();
-            let selection = instance.joint.as_ref().map_or_else(
-                || Selection::Robot(instance.robot.clone()),
-                |joint| Selection::Joint {
-                    robot: instance.robot.clone(),
-                    joint: joint.clone(),
-                },
-            );
-            Some((hit, selection))
-        })
-        .min_by(|(left, _), (right, _)| left.total_cmp(right))
-        .map(|(_, selection)| selection)
-}
-
-/// Read every configured arm's current pose out of the studio state.
-fn placements(studio: &crate::state::Studio) -> Vec<Placement> {
-    let arms = studio.snapshot.read().robots.clone();
-    let count = arms.len();
-    arms.iter()
-        .enumerate()
-        .map(|(index, arm)| {
-            // An arm that is offline or uncalibrated has no angles worth
-            // drawing, so it stands at its rest pose and is faded rather than
-            // left out — an empty bench says less than a greyed-out one.
-            let telemetry = studio.robot_telemetry(&arm.id).filter(|_| arm.calibrated);
-            Placement {
-                id: arm.id.clone(),
-                accent: ACCENTS[index % ACCENTS.len()].0,
-                live: telemetry.is_some(),
-                angles: telemetry
-                    .map(|robot| crate::control::measured_angles(&robot.joints))
-                    .unwrap_or_default(),
-                base: bench_position(index, count),
-            }
-        })
-        .collect()
-}
-
-/// Stand the arms in a row, centered on the origin.
-fn bench_position(index: usize, count: usize) -> Mat4 {
-    let offset = (index as f32 - (count.saturating_sub(1)) as f32 / 2.0) * BENCH_SPACING;
-    Mat4::from_translation(Vec3::new(0.0, offset, 0.0))
-}
-
-/// Turn posed arms into the shapes the renderer draws.
-fn instances(urdf: &Urdf, placements: &[Placement], selected: Option<&Selection>) -> Vec<Instance> {
-    let mut instances = Vec::new();
-    for placement in placements {
-        let positions = arm::so101_joint_positions(urdf, &placement.angles);
-        let transforms = urdf.pose(&positions);
-        for (link_index, link) in urdf.links.iter().enumerate() {
-            let joint = controlling_joint(urdf, link_index);
-            for visual in &link.visuals {
-                let color = match visual.material.as_deref() {
-                    Some("accent") => placement.accent,
-                    _ => visual.color,
-                };
-                let is_selected = match selected {
-                    Some(Selection::Robot(robot)) => robot == &placement.id,
-                    Some(Selection::Joint {
-                        robot,
-                        joint: selected_joint,
-                    }) => {
-                        robot == &placement.id && joint.as_deref() == Some(selected_joint.as_str())
-                    }
-                    _ => false,
-                };
-                let color = if is_selected {
-                    highlighted(color)
-                } else {
-                    color
-                };
-                instances.push(Instance {
-                    geometry: visual.geometry.clone(),
-                    transform: placement.base * transforms[link_index] * visual.origin.matrix(),
-                    color: if placement.live { color } else { faded(color) },
-                    robot: placement.id.clone(),
-                    joint: joint.clone(),
-                });
-            }
-        }
-    }
-    instances
-}
-
-fn controlling_joint(urdf: &Urdf, mut link: usize) -> Option<String> {
-    while link != urdf.root() {
-        let joint = urdf.joints.iter().find(|joint| joint.child == link)?;
-        if joint.kind.is_movable() {
-            return Some(joint.name.clone());
-        }
-        link = joint.parent;
-    }
-    None
-}
-
-fn highlighted(color: [f32; 4]) -> [f32; 4] {
-    [
-        (color[0] * 1.22 + 0.08).min(1.0),
-        (color[1] * 1.22 + 0.08).min(1.0),
-        (color[2] * 1.22 + 0.08).min(1.0),
-        color[3],
-    ]
-}
-
-/// Wash a colour out toward the background, marking an arm that is not
-/// reporting so a stale pose is never mistaken for a live one.
-fn faded(color: [f32; 4]) -> [f32; 4] {
-    const TOWARD: [f32; 3] = [0.82, 0.82, 0.80];
-    let mix = |value: f32, target: f32| value + (target - value) * 0.55;
-    [
-        mix(color[0], TOWARD[0]),
-        mix(color[1], TOWARD[1]),
-        mix(color[2], TOWARD[2]),
-        color[3],
-    ]
-}
-
-/// Where the gripper tip sits for `angles`, in millimetres from the arm's base.
-///
-/// The description carries a tool frame for exactly this, so no length written
-/// here has to agree with one written there.
-pub fn tool_position(urdf: &Urdf, angles: &JointAngles) -> Option<Vec3> {
-    let index = urdf.link_index("tool_link")?;
-    let transforms = urdf.pose(&arm::so101_joint_positions(urdf, angles));
-    Some(transforms.get(index)?.transform_point3(Vec3::ZERO) * 1000.0)
-}
-
-/// The state of a drag in progress.
-#[derive(Clone, Copy, PartialEq)]
-struct Drag {
-    /// Pointer position at the beginning, to separate clicking from orbiting.
-    start: (f64, f64),
-    /// Pointer position when this drag was last sampled, in client pixels.
-    last: (f64, f64),
-    panning: bool,
-    moved: bool,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-struct Pinch {
-    center: (f64, f64),
-    distance: f32,
-}
-
-impl Pinch {
-    fn from_touches(touches: &BTreeMap<i32, (f64, f64)>) -> Option<Self> {
-        let mut points = touches.values();
-        let (first, second) = (*points.next()?, *points.next()?);
-        Some(Self {
-            center: ((first.0 + second.0) * 0.5, (first.1 + second.1) * 0.5),
-            distance: (second.0 - first.0).hypot(second.1 - first.1) as f32,
-        })
-    }
-}
-
-impl Drag {
-    fn start(event: &Event<PointerData>) -> Self {
-        // The middle and right buttons pan, matching every other 3D viewer;
-        // shift with the left button does the same for a one-button mouse.
-        let panning = event.modifiers().shift()
-            || matches!(
-                event.trigger_button(),
-                Some(MouseButton::Secondary | MouseButton::Auxiliary)
-            );
-        Self {
-            start: point(event),
-            last: point(event),
-            panning,
-            moved: false,
-        }
-    }
 }
 
 fn point(event: &Event<PointerData>) -> (f64, f64) {
@@ -647,17 +740,6 @@ fn canvas() -> Option<HtmlCanvasElement> {
 #[cfg(not(feature = "web"))]
 fn canvas() -> Option<HtmlCanvasElement> {
     None
-}
-
-/// The canvas height in CSS pixels, used to turn a drag into world metres.
-#[cfg(feature = "web")]
-fn viewport_height() -> f32 {
-    canvas().map_or(1.0, |canvas| canvas.client_height().max(1) as f32)
-}
-
-#[cfg(not(feature = "web"))]
-fn viewport_height() -> f32 {
-    1.0
 }
 
 /// A window event subscription that ends when the viewport does.

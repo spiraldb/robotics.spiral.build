@@ -142,6 +142,13 @@ pub struct Studio {
     pub notice: Signal<Option<Notice>>,
     /// The entity every view is currently showing and editing.
     pub selected: Signal<Option<Selection>>,
+    /// What the pointer is over, wherever it is.
+    ///
+    /// Separate from `selected` because pointing is not choosing: hovering a
+    /// joint row lights that motor on the bench and hovering the motor lights
+    /// the row, without either disturbing what the operator actually picked.
+    /// One object, seen twice.
+    pub pointed: Signal<Option<Selection>>,
     /// The take the timeline is showing in detail.
     ///
     /// Deliberately not part of [`Selection`]: choosing a take must not point
@@ -163,6 +170,7 @@ impl Studio {
             clock_ms: Signal::new(0.0),
             notice: Signal::new(None),
             selected: Signal::new(None),
+            pointed: Signal::new(None),
             selected_episode: Signal::new(None),
         });
         #[cfg(feature = "web")]

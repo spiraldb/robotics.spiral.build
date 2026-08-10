@@ -13,7 +13,7 @@ use std::sync::Mutex;
 
 use rerobot::robot_config::{ConfigError, RobotConfig};
 use rerobot_core::api::{
-    CameraBinding, ConnectionStatus, MotorSummary, PortSettings, RobotSummary,
+    CameraBinding, ConnectionStatus, MotorLimits, MotorSummary, PortSettings, RobotSummary,
 };
 use rerobot_core::arm;
 use rerobot_core::calibration::{Calibration, MotorSpec, validate_motor_specs};
@@ -132,8 +132,16 @@ impl RobotRecord {
         self.camera_object()
             .into_iter()
             .filter_map(|(name, value)| {
-                let id = value.as_object()?.get("id")?.as_str()?.to_owned();
-                Some(CameraBinding { name, id })
+                let fields = value.as_object()?;
+                let id = fields.get("id")?.as_str()?.to_owned();
+                // A mount that does not parse is a mount the studio does not
+                // have, not a reason to drop the camera: the feed still works
+                // and the property card still belongs on the panel.
+                let mount = fields
+                    .get("mount")
+                    .cloned()
+                    .and_then(|mount| serde_json::from_value(mount).ok());
+                Some(CameraBinding { name, id, mount })
             })
             .collect()
     }
@@ -199,6 +207,10 @@ impl RobotRecord {
                 calibration: calibration
                     .as_ref()
                     .and_then(|calibration| calibration.motors.get(&name).copied()),
+                // The file does not record what a motor will fault at; the
+                // motor does. A connected robot's limits are folded in where
+                // the snapshot is assembled.
+                limits: MotorLimits::default(),
                 name,
             })
             .collect::<Vec<_>>();
@@ -887,7 +899,8 @@ mod tests {
             record.cameras(),
             [CameraBinding {
                 name: "wrist".to_owned(),
-                id: "/dev/video0".to_owned()
+                id: "/dev/video0".to_owned(),
+                mount: None,
             }]
         );
         assert_eq!(record.config.root()["experimental"]["keep"], true);

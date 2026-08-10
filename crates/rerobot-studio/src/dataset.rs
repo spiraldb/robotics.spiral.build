@@ -5,8 +5,9 @@
 //! projected into the current LeRobot v3 tabular layout and packaged as one
 //! ZIP, while imported v2/v3 Parquet archives are converted back into local
 //! episodes before replay. Camera video is not invented here—the recorder does
-//! not capture it yet—so exports honestly contain low-dimensional state and
-//! action data only.
+//! not capture it yet—so exports contain low-dimensional data only: joint
+//! state and action always, and the motors' own velocity and effort when every
+//! exported take carries them.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -47,12 +48,23 @@ pub struct DatasetArchive {
     pub episodes: u64,
     pub frames: u64,
     pub skipped: u64,
+    /// Exported takes that carried no velocity or effort.
+    ///
+    /// LeRobot wants one feature set for a whole dataset, so a single take
+    /// recorded on a bus that does not publish these costs every take the
+    /// columns. Counted rather than papered over: an export that quietly filled
+    /// the gap with zeroes would put fabricated effort into a training set.
+    pub without_proprioception: u64,
 }
 
 #[derive(Debug)]
 struct ExportEpisode {
     joints: Vec<String>,
     positions: Vec<Vec<f32>>,
+    /// Per accepted frame, in `joints` order. `None` when any frame of this
+    /// take lacked it, because a take is exported whole or not at all.
+    velocity: Option<Vec<Vec<f32>>>,
+    effort: Option<Vec<Vec<f32>>>,
     sample_hz: f64,
 }
 
@@ -110,6 +122,18 @@ pub fn export_lerobot_archive(store: &EpisodeStore) -> Result<DatasetArchive, Ep
         .map(|episode| episode.positions.len())
         .sum::<usize>();
     let dimension = joints.len();
+    // Every take or none: LeRobot declares one feature set for the whole
+    // dataset, so one take recorded on a bus that publishes neither velocity
+    // nor effort costs every take the columns. The alternative — filling the
+    // gap with zeroes — would put fabricated effort into a training set, which
+    // is the one outcome here worth refusing outright.
+    let without_proprioception = episodes
+        .iter()
+        .filter(|episode| episode.velocity.is_none() || episode.effort.is_none())
+        .count() as u64;
+    let proprioception = without_proprioception == 0;
+    let mut velocities = Vec::with_capacity(total_frames * dimension);
+    let mut efforts = Vec::with_capacity(total_frames * dimension);
     let mut actions = Vec::with_capacity(total_frames * dimension);
     let mut timestamps = Vec::with_capacity(total_frames);
     let mut frame_indices = Vec::with_capacity(total_frames);
@@ -126,6 +150,21 @@ pub fn export_lerobot_archive(store: &EpisodeStore) -> Result<DatasetArchive, Ep
                     .zip(&joints)
                     .map(|(value, joint)| to_lerobot_position(*value, joint)),
             );
+            if proprioception {
+                // Physical units, unlike the position columns: degrees per
+                // second and a signed share of rated torque are what the motor
+                // measured, and nothing about LeRobot asks them to be rescaled.
+                velocities.extend(
+                    episode.velocity.as_ref().expect("checked above")[frame_index]
+                        .iter()
+                        .copied(),
+                );
+                efforts.extend(
+                    episode.effort.as_ref().expect("checked above")[frame_index]
+                        .iter()
+                        .copied(),
+                );
+            }
             timestamps.push(frame_index as f32 / fps as f32);
             frame_indices.push(frame_index as i64);
             episode_indices.push(episode_index as i64);
@@ -140,6 +179,8 @@ pub fn export_lerobot_archive(store: &EpisodeStore) -> Result<DatasetArchive, Ep
         dimension,
         state_values,
         actions.clone(),
+        proprioception.then(|| velocities.clone()),
+        proprioception.then(|| efforts.clone()),
         timestamps.clone(),
         frame_indices.clone(),
         episode_indices.clone(),
@@ -148,7 +189,7 @@ pub fn export_lerobot_archive(store: &EpisodeStore) -> Result<DatasetArchive, Ep
     let episode_meta = episodes_parquet(&episode_offsets)?;
     let tasks = tasks_parquet()?;
 
-    let features = json!({
+    let mut features = json!({
         "observation.state": vector_feature(&joints),
         "action": vector_feature(&joints),
         "timestamp": scalar_feature("float32"),
@@ -157,6 +198,19 @@ pub fn export_lerobot_archive(store: &EpisodeStore) -> Result<DatasetArchive, Ep
         "index": scalar_feature("int64"),
         "task_index": scalar_feature("int64"),
     });
+    if proprioception {
+        let declared = features
+            .as_object_mut()
+            .expect("the feature map is a JSON object");
+        declared.insert(
+            "observation.velocity".to_owned(),
+            vector_feature_named(&joints, "vel"),
+        );
+        declared.insert(
+            "observation.effort".to_owned(),
+            vector_feature_named(&joints, "effort"),
+        );
+    }
     let info = json!({
         "codebase_version": "v3.0",
         "robot_type": "so101_follower",
@@ -175,6 +229,8 @@ pub fn export_lerobot_archive(store: &EpisodeStore) -> Result<DatasetArchive, Ep
     let stats = stats_document(
         dimension,
         &actions,
+        proprioception.then_some(velocities.as_slice()),
+        proprioception.then_some(efforts.as_slice()),
         &timestamps,
         &frame_indices,
         &episode_indices,
@@ -213,7 +269,7 @@ pub fn export_lerobot_archive(store: &EpisodeStore) -> Result<DatasetArchive, Ep
         &mut archive,
         options,
         "README.md",
-        b"---\ntags:\n- LeRobot\n- robotics\n---\n\n# rerobot dataset\n\nLeRobot v3 low-dimensional SO-ARM101 state/action data exported by rerobot studio. Camera video is not included because rerobot does not record camera streams yet.\n",
+        dataset_card(proprioception, without_proprioception).as_bytes(),
     )?;
     let bytes = archive
         .finish()
@@ -225,6 +281,7 @@ pub fn export_lerobot_archive(store: &EpisodeStore) -> Result<DatasetArchive, Ep
         episodes: episode_count as u64,
         frames: total_frames as u64,
         skipped,
+        without_proprioception,
     })
 }
 
@@ -347,6 +404,10 @@ pub fn import_lerobot_archive(
                 id: "follower".to_owned(),
                 joints: joints.clone(),
             }],
+            // An imported dataset carries no motor condition: it was recorded
+            // on hardware this studio never saw, and inventing a temperature
+            // for it would put a fabricated reading in a take file.
+            Vec::new(),
         )?;
         let id = writer.id().to_owned();
         let mut last_time = 0.0_f64;
@@ -363,11 +424,18 @@ pub fn import_lerobot_archive(
                 normalized: vec![normalized.into_iter().map(Some).collect()],
                 raw: vec![vec![0; dimension]],
                 follow_error_degrees: None,
+                velocity: None,
+                effort: None,
             }) {
                 return Err(invalid(format!("could not write imported episode {id}")));
             }
         }
-        let summary = writer.finish(last_time.max(frames.len() as f64 / fps), None, false)?;
+        let summary = writer.finish(
+            last_time.max(frames.len() as f64 / fps),
+            None,
+            false,
+            Vec::new(),
+        )?;
         first_episode.get_or_insert(summary.id);
         imported_episodes += 1;
         imported_frames += summary.frames;
@@ -415,6 +483,12 @@ fn read_export_episode(
         .ok_or_else(|| invalid(format!("{} has no unambiguous follower arm", summary.id)))?;
     let joints = arms[arm_index].joints.clone();
     let mut positions = Vec::with_capacity(summary.frames as usize);
+    let mut velocity = Vec::with_capacity(summary.frames as usize);
+    let mut effort = Vec::with_capacity(summary.frames as usize);
+    // One missing frame disqualifies the whole take rather than the frame: a
+    // column that is present for the first half of an episode and absent for
+    // the second is worse than no column at all.
+    let mut proprioception = true;
     for line in lines {
         let line = line.map_err(|source| EpisodeError::Io {
             path: path.clone(),
@@ -423,86 +497,122 @@ fn read_export_episode(
         let Ok(frame) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        let Some(values) = frame
-            .get("n")
-            .and_then(Value::as_array)
-            .and_then(|arms| arms.get(arm_index))
-            .and_then(Value::as_array)
-        else {
+        let arm_values = |key: &str| -> Option<Vec<f32>> {
+            let values = frame
+                .get(key)?
+                .as_array()?
+                .get(arm_index)?
+                .as_array()?
+                .iter()
+                .map(Value::as_f64)
+                .collect::<Option<Vec<_>>>()?;
+            (values.len() == joints.len())
+                .then(|| values.into_iter().map(|value| value as f32).collect())
+        };
+        let Some(pose) = arm_values("n") else {
             continue;
         };
-        let pose = values.iter().map(Value::as_f64).collect::<Option<Vec<_>>>();
-        if let Some(pose) = pose.filter(|pose| pose.len() == joints.len()) {
-            positions.push(pose.into_iter().map(|value| value as f32).collect());
+        positions.push(pose);
+        match (arm_values("v"), arm_values("f")) {
+            (Some(frame_velocity), Some(frame_effort)) => {
+                velocity.push(frame_velocity);
+                effort.push(frame_effort);
+            }
+            _ => proprioception = false,
         }
     }
     Ok(ExportEpisode {
         joints,
+        velocity: proprioception.then_some(velocity),
+        effort: proprioception.then_some(effort),
         positions,
         sample_hz: summary.sample_hz,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn data_parquet(
     dimension: usize,
     state: Vec<f32>,
     action: Vec<f32>,
+    velocity: Option<Vec<f32>>,
+    effort: Option<Vec<f32>>,
     timestamp: Vec<f32>,
     frame_index: Vec<i64>,
     episode_index: Vec<i64>,
     index: Vec<i64>,
 ) -> Result<Vec<u8>, EpisodeError> {
     let item = Arc::new(Field::new("item", DataType::Float32, false));
-    let state = Arc::new(
-        FixedSizeListArray::try_new(
-            item.clone(),
-            dimension as i32,
-            Arc::new(Float32Array::from(state)),
-            None,
-        )
-        .map_err(|error| invalid(error.to_string()))?,
-    ) as ArrayRef;
-    let action = Arc::new(
-        FixedSizeListArray::try_new(
-            item.clone(),
-            dimension as i32,
-            Arc::new(Float32Array::from(action)),
-            None,
-        )
-        .map_err(|error| invalid(error.to_string()))?,
-    ) as ArrayRef;
-    let schema = Arc::new(Schema::new(vec![
+    let vector = |values: Vec<f32>| -> Result<ArrayRef, EpisodeError> {
+        Ok(Arc::new(
+            FixedSizeListArray::try_new(
+                item.clone(),
+                dimension as i32,
+                Arc::new(Float32Array::from(values)),
+                None,
+            )
+            .map_err(|error| invalid(error.to_string()))?,
+        ) as ArrayRef)
+    };
+    let vector_field = |name: &str| {
         Field::new(
-            "observation.state",
+            name,
             DataType::FixedSizeList(item.clone(), dimension as i32),
             false,
-        ),
-        Field::new(
-            "action",
-            DataType::FixedSizeList(item, dimension as i32),
-            false,
-        ),
+        )
+    };
+
+    let rows = timestamp.len();
+    let mut fields = vec![vector_field("observation.state"), vector_field("action")];
+    let mut columns = vec![vector(state)?, vector(action)?];
+    // Declared together or not at all, in the order `features` names them, so
+    // the schema and the metadata cannot drift apart.
+    if let (Some(velocity), Some(effort)) = (velocity, effort) {
+        fields.push(vector_field("observation.velocity"));
+        fields.push(vector_field("observation.effort"));
+        columns.push(vector(velocity)?);
+        columns.push(vector(effort)?);
+    }
+    fields.extend([
         Field::new("timestamp", DataType::Float32, false),
         Field::new("frame_index", DataType::Int64, false),
         Field::new("episode_index", DataType::Int64, false),
         Field::new("index", DataType::Int64, false),
         Field::new("task_index", DataType::Int64, false),
-    ]));
-    let rows = timestamp.len();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            state,
-            action,
-            Arc::new(Float32Array::from(timestamp)),
-            Arc::new(Int64Array::from(frame_index)),
-            Arc::new(Int64Array::from(episode_index)),
-            Arc::new(Int64Array::from(index)),
-            Arc::new(Int64Array::from(vec![0; rows])),
-        ],
-    )
-    .map_err(|error| invalid(error.to_string()))?;
+    ]);
+    columns.extend([
+        Arc::new(Float32Array::from(timestamp)) as ArrayRef,
+        Arc::new(Int64Array::from(frame_index)),
+        Arc::new(Int64Array::from(episode_index)),
+        Arc::new(Int64Array::from(index)),
+        Arc::new(Int64Array::from(vec![0; rows])),
+    ]);
+
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), columns)
+        .map_err(|error| invalid(error.to_string()))?;
     parquet_bytes(schema, batch)
+}
+
+/// The dataset card, which has to describe the archive that was actually made.
+///
+/// A reader who finds no effort columns deserves to know whether this studio
+/// cannot record them or whether one take in the session could not, so the card
+/// says which, and how many takes were the reason.
+fn dataset_card(proprioception: bool, without_proprioception: u64) -> String {
+    let mut card = String::from(
+        "---\ntags:\n- LeRobot\n- robotics\n---\n\n# rerobot dataset\n\n         LeRobot v3 low-dimensional SO-ARM101 data exported by rerobot studio.          Camera video is not included because rerobot does not record camera          streams yet.\n\n",
+    );
+    if proprioception {
+        card.push_str(
+            "Every exported take carried the motors' own readings, so this              dataset declares `observation.velocity` in degrees per second and              `observation.effort` as a signed share of each motor's rated              torque, alongside `observation.state` and `action`.\n",
+        );
+    } else {
+        card.push_str(&format!(
+            "This dataset declares `observation.state` and `action` only.              {without_proprioception} of the exported takes carried no velocity              or effort — recorded before those were captured, or on a motor bus              that does not publish them — and LeRobot requires one feature set              for a whole dataset, so the columns were dropped rather than              filled in for the takes that had them.\n",
+        ));
+    }
+    card
 }
 
 fn episodes_parquet(offsets: &[(i64, i64, i64)]) -> Result<Vec<u8>, EpisodeError> {
@@ -588,20 +698,35 @@ fn vector_feature(joints: &[String]) -> Value {
     json!({ "dtype": "float32", "shape": [joints.len()], "names": names })
 }
 
+/// A per-joint vector feature whose names carry the quantity they measure.
+///
+/// LeRobot names position columns `<joint>.pos`; velocity and effort follow the
+/// same shape so a reader can tell three same-width vectors apart by name.
+fn vector_feature_named(joints: &[String], suffix: &str) -> Value {
+    let names = joints
+        .iter()
+        .map(|joint| format!("{joint}.{suffix}"))
+        .collect::<Vec<_>>();
+    json!({ "dtype": "float32", "shape": [joints.len()], "names": names })
+}
+
 fn scalar_feature(dtype: &str) -> Value {
     json!({ "dtype": dtype, "shape": [1], "names": Value::Null })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stats_document(
     dimension: usize,
     actions: &[f32],
+    velocities: Option<&[f32]>,
+    efforts: Option<&[f32]>,
     timestamps: &[f32],
     frames: &[i64],
     episodes: &[i64],
     indices: &[i64],
 ) -> Value {
     let vector = vector_stats(actions, dimension);
-    json!({
+    let mut stats = json!({
         "observation.state": vector,
         "action": vector_stats(actions, dimension),
         "timestamp": scalar_stats(timestamps.iter().map(|value| *value as f64)),
@@ -609,7 +734,19 @@ fn stats_document(
         "episode_index": scalar_stats(episodes.iter().map(|value| *value as f64)),
         "index": scalar_stats(indices.iter().map(|value| *value as f64)),
         "task_index": scalar_stats(std::iter::repeat_n(0.0, timestamps.len())),
-    })
+    });
+    if let (Some(velocities), Some(efforts)) = (velocities, efforts) {
+        let stats = stats.as_object_mut().expect("the stats map is an object");
+        stats.insert(
+            "observation.velocity".to_owned(),
+            vector_stats(velocities, dimension),
+        );
+        stats.insert(
+            "observation.effort".to_owned(),
+            vector_stats(efforts, dimension),
+        );
+    }
+    stats
 }
 
 fn vector_stats(values: &[f32], dimension: usize) -> Value {
@@ -878,6 +1015,13 @@ mod tests {
     fn recorded_store() -> (TempDir, EpisodeStore) {
         let directory = TempDir::new().unwrap();
         let store = EpisodeStore::open(directory.path().join("episodes")).unwrap();
+        record_take(&store, true);
+        store.reload().unwrap();
+        (directory, store)
+    }
+
+    /// Write one four-frame take, with or without the motors' own readings.
+    fn record_take(store: &EpisodeStore, proprioception: bool) {
         let writer = store
             .begin(
                 "Teleoperation".to_owned(),
@@ -890,6 +1034,7 @@ mod tests {
                         .map(|joint| (*joint).to_owned())
                         .collect(),
                 }],
+                Vec::new(),
             )
             .unwrap();
         for frame in 0..4 {
@@ -898,11 +1043,107 @@ mod tests {
                 normalized: vec![vec![Some(frame as f64 / 10.0); SO101_JOINTS.len()]],
                 raw: vec![vec![0; SO101_JOINTS.len()]],
                 follow_error_degrees: None,
+                velocity: proprioception
+                    .then(|| vec![vec![Some(frame as f64); SO101_JOINTS.len()]]),
+                effort: proprioception.then(|| vec![vec![Some(0.25); SO101_JOINTS.len()]]),
             });
         }
-        writer.finish(0.1, None, false).unwrap();
+        writer.finish(0.1, None, false, Vec::new()).unwrap();
+    }
+
+    /// Read `meta/info.json` and `README.md` out of an archive.
+    fn archive_metadata(bytes: &[u8]) -> (Value, String) {
+        let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let info: Value = {
+            let mut file = zip.by_name("meta/info.json").unwrap();
+            serde_json::from_reader(&mut file).unwrap()
+        };
+        let mut card = String::new();
+        zip.by_name("README.md")
+            .unwrap()
+            .read_to_string(&mut card)
+            .unwrap();
+        (info, card)
+    }
+
+    /// Column names actually present in the archive's Parquet data.
+    fn archive_columns(bytes: &[u8]) -> Vec<String> {
+        let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut parquet = Vec::new();
+        zip.by_name("data/chunk-000/file-000.parquet")
+            .unwrap()
+            .read_to_end(&mut parquet)
+            .unwrap();
+        ParquetRecordBatchReaderBuilder::try_new(Bytes::from(parquet))
+            .unwrap()
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_session_that_recorded_the_motors_exports_velocity_and_effort() {
+        let (_directory, store) = recorded_store();
+        let archive = export_lerobot_archive(&store).unwrap();
+        assert_eq!(archive.without_proprioception, 0);
+
+        let (info, card) = archive_metadata(&archive.bytes);
+        let features = &info["features"];
+        assert_eq!(
+            features["observation.velocity"]["names"][0],
+            format!("{}.vel", SO101_JOINTS[0])
+        );
+        assert_eq!(
+            features["observation.effort"]["names"][0],
+            format!("{}.effort", SO101_JOINTS[0])
+        );
+        assert_eq!(features["observation.velocity"]["shape"][0], 6);
+        assert!(card.contains("observation.effort"));
+
+        // Declared features and the Parquet schema are written in two separate
+        // places and have to agree, or a reader that trusts the metadata finds
+        // a column that is not there.
+        let columns = archive_columns(&archive.bytes);
+        for declared in features.as_object().unwrap().keys() {
+            assert!(
+                columns.contains(declared),
+                "{declared} is declared in info.json but absent from the data: {columns:?}"
+            );
+        }
+        assert!(columns.contains(&"observation.effort".to_owned()));
+
+        let stats: Value = {
+            let mut zip = ZipArchive::new(Cursor::new(archive.bytes.as_slice())).unwrap();
+            let mut file = zip.by_name("meta/stats.json").unwrap();
+            serde_json::from_reader(&mut file).unwrap()
+        };
+        assert!(stats["observation.velocity"].is_object());
+    }
+
+    #[test]
+    fn one_take_without_the_motors_readings_costs_the_whole_export_its_columns() {
+        let directory = TempDir::new().unwrap();
+        let store = EpisodeStore::open(directory.path().join("episodes")).unwrap();
+        record_take(&store, true);
+        record_take(&store, false);
         store.reload().unwrap();
-        (directory, store)
+
+        let archive = export_lerobot_archive(&store).unwrap();
+        assert_eq!(archive.episodes, 2, "both takes are still exported");
+        assert_eq!(archive.without_proprioception, 1);
+
+        let (info, card) = archive_metadata(&archive.bytes);
+        // Filling the gap with zeroes would put fabricated effort into a
+        // training set, which is worse than shipping fewer columns.
+        assert!(info["features"]["observation.effort"].is_null());
+        assert!(info["features"]["observation.velocity"].is_null());
+        assert!(info["features"]["action"].is_object());
+        assert!(
+            card.contains("1 of the exported takes"),
+            "the dataset card says how many takes were the reason: {card}"
+        );
     }
 
     #[test]

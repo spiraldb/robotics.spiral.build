@@ -423,6 +423,30 @@
     @apply bg-selected;
   }
 
+  /* Selection keeps its ring while a motor's condition takes the wash, so a hot
+     joint that is also the selected one still says both things. Ordered after
+     the selected rule on purpose: the background belongs to the hardware, the
+     ring belongs to the operator. */
+  .joint-row-selected {
+    box-shadow: inset 0 0 0 1px var(--tone-accent);
+  }
+
+  .joint-row-caution {
+    @apply bg-caution-soft;
+  }
+
+  .joint-row-fault {
+    @apply bg-danger-soft;
+  }
+
+  .joint-row-caution .joint-value {
+    @apply text-caution;
+  }
+
+  .joint-row-fault .joint-value {
+    @apply text-danger;
+  }
+
   .joint-label {
     @apply inline-flex min-h-6 w-20 shrink-0 cursor-pointer items-center truncate text-left text-[11px] text-ink-soft;
   }
@@ -431,6 +455,68 @@
      in the same place as the arm moves. */
   .joint-value {
     @apply w-11 shrink-0 text-right font-mono text-[10px] text-ink-soft;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Everything one motor reports, for the one motor the operator asked about.
+     It sits under the joint stack rather than inside a row because a row is
+     20px tall and this is eight numbers; it appears on selection rather than
+     permanently because six more figures per joint would be a console. */
+  /* White, not recess: its readouts are recess cells, and a recess block full
+     of recess cells is a block with no cells in it. The same treatment the
+     camera property card already uses, for the same reason — a card on the
+     inspector is white with a hairline. */
+  .motor-detail {
+    @apply mx-2 mb-1 flex flex-col gap-1 rounded border border-line bg-surface px-1.5 py-1;
+  }
+
+  .motor-detail-head {
+    @apply flex min-h-6 items-baseline gap-1.5;
+  }
+
+  .motor-detail-name {
+    @apply text-[11px] font-medium text-ink;
+  }
+
+  /* Identity and complaint share this line so that a motor raising a fault
+     tints and renames what is already there instead of unfolding a row and
+     pushing its own readouts down at the moment they matter most. */
+  .motor-detail-id {
+    @apply ml-auto truncate font-mono text-[10px] text-ink-faint;
+  }
+
+  .motor-detail-fault {
+    @apply ml-auto truncate text-[10px] text-danger;
+  }
+
+  /* A motor reporting trouble, marked where it actually is. The arm-level
+     readouts answer whether anything is wrong; only the bench can answer which
+     one, and pointing at the part is how the physical world answers it.
+     The same 6px dot the rest of the studio uses for state, so nothing new is
+     invented for the one surface that is drawn rather than laid out. */
+  .bench-mark {
+    @apply pointer-events-none absolute h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-caution;
+    box-shadow: 0 0 0 2px var(--tone-viewport);
+  }
+
+  .bench-mark-fault {
+    @apply bg-danger;
+  }
+
+  /* A glance, not a panel. It follows the pointer, carries a name and at most
+     one reading, and never becomes the place a fact only lives — an operator
+     with a hand on the arm has no hand for a hover, and a touch bench has no
+     hover at all, so everything here is also in the inspector. */
+  .bench-note {
+    @apply pointer-events-none absolute z-10 flex max-w-56 translate-x-3 translate-y-3 items-baseline gap-1.5 rounded border border-line bg-surface px-1.5 py-0.5 shadow-sm;
+  }
+
+  .bench-note-title {
+    @apply truncate text-[11px] text-ink;
+  }
+
+  .bench-note-detail {
+    @apply ml-auto shrink-0 font-mono text-[10px] text-ink-soft;
     font-variant-numeric: tabular-nums;
   }
 

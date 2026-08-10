@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::SystemTime;
 
-use rerobot_core::api::{EpisodeArm, EpisodeSummary, ExportResponse};
+use rerobot_core::api::{EpisodeArm, EpisodeSummary, ExportResponse, MotorLimits};
 use serde::{Deserialize, Serialize};
 
 /// Extension of a finished take.
@@ -112,6 +112,26 @@ struct Header {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     note: Option<String>,
     arms: Vec<EpisodeArm>,
+    /// What the motors were like when the take started.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    condition: Vec<ArmCondition>,
+}
+
+/// One arm's motor condition as a take began.
+///
+/// Temperature and voltage move over seconds, not frames. Recording them per
+/// frame would write three thousand six hundred identical degrees a minute per
+/// motor to answer a question that the two ends of the take answer completely,
+/// so they are stated once here and summarised once in the footer. Every list
+/// follows this arm's joint order in [`Header::arms`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ArmCondition {
+    pub arm: String,
+    pub temperature_celsius: Vec<Option<f64>>,
+    pub voltage_volts: Vec<Option<f64>>,
+    /// What each motor said it would fault at, which is what makes the
+    /// footer's peak temperature mean anything to a reader a week later.
+    pub limits: Vec<MotorLimits>,
 }
 
 /// The last line of a finished episode file.
@@ -124,6 +144,19 @@ struct Footer {
     max_follow_error_degrees: Option<f64>,
     #[serde(default)]
     discarded: bool,
+    /// The worst each motor saw over the whole take.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    condition: Vec<ArmConditionSummary>,
+}
+
+/// The extremes one arm's motors reached during a take.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ArmConditionSummary {
+    pub arm: String,
+    pub peak_temperature_celsius: Vec<Option<f64>>,
+    pub min_voltage_volts: Vec<Option<f64>>,
+    pub peak_load: Vec<Option<f64>>,
+    pub peak_current_amps: Vec<Option<f64>>,
 }
 
 /// One captured instant.
@@ -149,14 +182,30 @@ struct FrameLine {
     /// what lets a take drawn a week later still show where it went wrong.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     e: Option<f64>,
+    /// Shaft speed per joint in degrees per second, in the same shape as `n`.
+    ///
+    /// Absent for a take whose motor bus does not publish it, rather than
+    /// present and full of nulls. Velocity and effort are proprioception —
+    /// they move at the rate the arm moves and a policy can consume them —
+    /// which is what earns them a place in every frame where temperature does
+    /// not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    v: Option<Vec<Vec<Option<f64>>>>,
+    /// Effort per joint as a signed fraction of rated torque, same shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    f: Option<Vec<Vec<Option<f64>>>>,
 }
 
 /// One instant handed from the control loop to the writer thread.
+#[derive(Default)]
 pub struct Sample {
     pub seconds: f64,
     pub normalized: Vec<Vec<Option<f64>>>,
     pub raw: Vec<Vec<i64>>,
     pub follow_error_degrees: Option<f64>,
+    /// Present only when every recorded arm reports it.
+    pub velocity: Option<Vec<Vec<Option<f64>>>>,
+    pub effort: Option<Vec<Vec<Option<f64>>>>,
 }
 
 /// What a take's file looked like when it was last read.
@@ -300,6 +349,7 @@ impl EpisodeStore {
         note: Option<String>,
         sample_hz: f64,
         arms: Vec<EpisodeArm>,
+        condition: Vec<ArmCondition>,
     ) -> Result<EpisodeWriter, EpisodeError> {
         if arms.is_empty() {
             return Err(EpisodeError::Invalid(
@@ -322,6 +372,7 @@ impl EpisodeStore {
             source,
             note,
             arms,
+            condition,
         };
         let partial = self.partial_path(&id);
         let file = File::create(&partial).map_err(|source| EpisodeError::io(&partial, source))?;
@@ -658,6 +709,7 @@ impl EpisodeWriter {
         duration_seconds: f64,
         max_follow_error_degrees: Option<f64>,
         discarded: bool,
+        condition: Vec<ArmConditionSummary>,
     ) -> Result<EpisodeSummary, EpisodeError> {
         // Dropping the sender is what tells the writer thread to flush and
         // stop, so it has to happen before the join.
@@ -678,6 +730,7 @@ impl EpisodeWriter {
             duration_seconds,
             max_follow_error_degrees,
             discarded,
+            condition,
         };
         let mut file = fs::OpenOptions::new()
             .append(true)
@@ -720,6 +773,8 @@ fn drain(queue: Receiver<Sample>, mut writer: BufWriter<File>, shared: &WriterSh
             n: sample.normalized,
             raw: sample.raw,
             e: sample.follow_error_degrees,
+            v: sample.velocity,
+            f: sample.effort,
         };
         match write_line(&mut writer, &line) {
             Ok(()) => {
@@ -959,6 +1014,7 @@ pub fn build_arms(arms: &[(String, Vec<String>)]) -> Result<Vec<EpisodeArm>, Epi
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
     use tempfile::TempDir;
 
     use super::*;
@@ -989,7 +1045,7 @@ mod tests {
 
     fn write_take(store: &EpisodeStore, frames: usize) -> EpisodeSummary {
         let writer = store
-            .begin("Teleoperation".to_owned(), None, 60.0, arms())
+            .begin("Teleoperation".to_owned(), None, 60.0, arms(), Vec::new())
             .expect("begin take");
         for frame in 0..frames {
             assert!(writer.push(Sample {
@@ -997,11 +1053,105 @@ mod tests {
                 normalized: vec![vec![Some(0.1 * frame as f64), Some(0.5)]],
                 raw: vec![vec![2048 + frame as i64, 1024]],
                 follow_error_degrees: Some(frame as f64),
+                ..Sample::default()
             }));
         }
         writer
-            .finish(frames as f64 / 60.0, Some(3.25), false)
+            .finish(frames as f64 / 60.0, Some(3.25), false, Vec::new())
             .expect("finish take")
+    }
+
+    #[test]
+    fn a_take_says_what_its_motors_were_doing_without_saying_it_sixty_times_a_second() {
+        let (_directory, store) = store();
+        let limits = MotorLimits {
+            max_temperature_celsius: Some(70.0),
+            min_voltage_volts: Some(4.5),
+            max_voltage_volts: Some(9.0),
+            max_load: Some(1.0),
+        };
+        let writer = store
+            .begin(
+                "Teleoperation".to_owned(),
+                None,
+                60.0,
+                arms(),
+                vec![ArmCondition {
+                    arm: "follower".to_owned(),
+                    temperature_celsius: vec![Some(31.0), Some(33.0)],
+                    voltage_volts: vec![Some(7.4), Some(7.4)],
+                    limits: vec![limits, limits],
+                }],
+            )
+            .expect("begin take");
+        for frame in 0..3 {
+            assert!(writer.push(Sample {
+                seconds: frame as f64 / 60.0,
+                normalized: vec![vec![Some(0.1), Some(0.5)]],
+                raw: vec![vec![2048, 1024]],
+                follow_error_degrees: None,
+                velocity: Some(vec![vec![Some(12.0), Some(-3.0)]]),
+                effort: Some(vec![vec![Some(0.4), Some(-0.2)]]),
+            }));
+        }
+        let summary = writer
+            .finish(
+                0.05,
+                None,
+                false,
+                vec![ArmConditionSummary {
+                    arm: "follower".to_owned(),
+                    peak_temperature_celsius: vec![Some(38.0), Some(41.0)],
+                    min_voltage_volts: vec![Some(7.1), Some(7.0)],
+                    peak_load: vec![Some(0.55), Some(0.62)],
+                    peak_current_amps: vec![Some(0.9), Some(1.1)],
+                }],
+            )
+            .expect("finish take");
+
+        let text = fs::read_to_string(store.directory().join(&summary.file)).expect("read take");
+        let lines = text.lines().collect::<Vec<_>>();
+        let header: Value = serde_json::from_str(lines[0]).expect("header");
+        let frame: Value = serde_json::from_str(lines[1]).expect("frame");
+        let footer: Value = serde_json::from_str(lines[lines.len() - 1]).expect("footer");
+
+        assert_eq!(header["condition"][0]["temperature_celsius"][1], 33.0);
+        assert_eq!(
+            header["condition"][0]["limits"][0]["max_temperature_celsius"],
+            70.0
+        );
+        assert_eq!(footer["condition"][0]["peak_temperature_celsius"][1], 41.0);
+        assert_eq!(footer["condition"][0]["min_voltage_volts"][0], 7.1);
+
+        // Velocity and effort ride every frame; temperature and voltage do not,
+        // because a whole-degree reading repeated sixty times a second is the
+        // same fact written three thousand six hundred times a minute.
+        assert_eq!(frame["v"][0][0], 12.0);
+        assert_eq!(frame["f"][0][1], -0.2);
+        assert!(frame.get("temperature_celsius").is_none());
+        assert!(frame.get("condition").is_none());
+
+        // Additive optional fields, so the version an older reader checks
+        // against does not move.
+        assert_eq!(header["rerobot_episode"], FORMAT_VERSION);
+    }
+
+    #[test]
+    fn a_take_recorded_before_any_of_this_still_reads() {
+        let (_directory, store) = store();
+        // Exactly the bytes an earlier build wrote: no condition, no v, no f.
+        let take = "{\"rerobot_episode\":1,\"id\":\"episode_000001\",\"started_ms\":0,\
+             \"sample_hz\":60.0,\"source\":\"Idle\",\"arms\":[{\"id\":\"follower\",\
+             \"joints\":[\"shoulder_pan\",\"gripper\"]}]}\n\
+             {\"t\":0.0,\"n\":[[0.1,0.5]],\"raw\":[[2048,1024]]}\n\
+             {\"rerobot_episode_end\":1,\"frames\":1,\"duration_seconds\":0.016}\n";
+        fs::write(store.directory().join("episode_000001.jsonl"), take).expect("write take");
+        store.reload().expect("reload");
+
+        let listed = store.list();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].usable(), "an older take is still a usable take");
+        assert_eq!(listed[0].frames, 1);
     }
 
     #[test]
@@ -1039,7 +1189,7 @@ mod tests {
         // recording is not overwritten by the next one.
         write_take(&store, 1);
         let interrupted = store
-            .begin("Idle".to_owned(), None, 60.0, arms())
+            .begin("Idle".to_owned(), None, 60.0, arms(), Vec::new())
             .expect("begin");
         assert_eq!(interrupted.id(), "episode_000006");
         drop(interrupted);
@@ -1080,7 +1230,7 @@ mod tests {
     fn an_unfinished_take_is_reported_rather_than_hidden() {
         let (_directory, store) = store();
         let writer = store
-            .begin("Manual".to_owned(), None, 60.0, arms())
+            .begin("Manual".to_owned(), None, 60.0, arms(), Vec::new())
             .expect("begin take");
         for frame in 0..3 {
             writer.push(Sample {
@@ -1088,6 +1238,7 @@ mod tests {
                 normalized: vec![vec![Some(0.0), Some(0.0)]],
                 raw: vec![vec![0, 0]],
                 follow_error_degrees: None,
+                ..Sample::default()
             });
         }
         // Dropped instead of finished: the process died mid-take.
@@ -1132,7 +1283,7 @@ mod tests {
     fn an_uncalibrated_take_has_nothing_to_replay() {
         let (_directory, store) = store();
         let writer = store
-            .begin("Idle".to_owned(), None, 60.0, arms())
+            .begin("Idle".to_owned(), None, 60.0, arms(), Vec::new())
             .expect("begin take");
         for _ in 0..4 {
             writer.push(Sample {
@@ -1143,9 +1294,12 @@ mod tests {
                 normalized: vec![vec![None, None]],
                 raw: vec![vec![2048, 1024]],
                 follow_error_degrees: None,
+                ..Sample::default()
             });
         }
-        writer.finish(0.066, None, false).expect("finish");
+        writer
+            .finish(0.066, None, false, Vec::new())
+            .expect("finish");
         store.reload().expect("reload");
 
         let error = store
@@ -1175,15 +1329,18 @@ mod tests {
 
         // A take with no recorded error still answers, with nothing in it.
         let writer = store
-            .begin("Idle".to_owned(), None, 60.0, arms())
+            .begin("Idle".to_owned(), None, 60.0, arms(), Vec::new())
             .expect("begin");
         writer.push(Sample {
             seconds: 0.0,
             normalized: vec![vec![Some(0.0), Some(0.0)]],
             raw: vec![vec![0, 0]],
             follow_error_degrees: None,
+            ..Sample::default()
         });
-        writer.finish(0.016, None, false).expect("finish");
+        writer
+            .finish(0.016, None, false, Vec::new())
+            .expect("finish");
         store.reload().expect("reload");
         assert_eq!(store.trace("episode_000002", 8).expect("trace"), vec![None]);
     }

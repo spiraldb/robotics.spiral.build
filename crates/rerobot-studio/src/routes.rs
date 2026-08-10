@@ -34,7 +34,7 @@ use serde_json::{Map, Value};
 
 use crate::camera_manager::{CameraManager, Frame};
 use crate::dataset::{export_lerobot_archive, import_lerobot_archive};
-use crate::episodes::{EpisodeError, EpisodeStore, build_arms};
+use crate::episodes::{ArmCondition, EpisodeError, EpisodeStore, build_arms};
 use crate::hardware::{HardwareHandle, RobotSpec};
 use crate::workspace::{RobotRecord, RobotWorkspace, WorkspaceError, validate_camera_role};
 
@@ -167,7 +167,18 @@ pub fn build_snapshot(state: &AppState) -> StudioSnapshot {
                 .get(&record.id)
                 .cloned()
                 .unwrap_or_default();
-            record.summary(connection)
+            let mut summary = record.summary(connection);
+            // Limits come from the motors, not the file, so they are folded in
+            // here rather than inside a summary built purely from what was
+            // written on disk.
+            if let Some(limits) = hardware.limits.get(&record.id) {
+                for motor in &mut summary.motors {
+                    if let Some(limits) = limits.get(&motor.name) {
+                        motor.limits = *limits;
+                    }
+                }
+            }
+            summary
         })
         .collect();
 
@@ -829,9 +840,44 @@ async fn start_recording(
         crate::hardware::CONTROL_HZ as f64
     };
 
+    // What the motors were like as the take opened. Recorded once here rather
+    // than on every frame: these move over seconds, and the footer's extremes
+    // close the story the header starts.
+    let condition = arms
+        .iter()
+        .filter_map(|arm| {
+            let robot = connected.iter().find(|robot| robot.id == arm.id)?;
+            let limits = hardware.limits.get(&arm.id);
+            let joint = |name: &str| robot.joints.iter().find(|joint| joint.name == *name);
+            Some(ArmCondition {
+                arm: arm.id.clone(),
+                temperature_celsius: arm
+                    .joints
+                    .iter()
+                    .map(|name| joint(name).and_then(|joint| joint.temperature_celsius))
+                    .collect(),
+                voltage_volts: arm
+                    .joints
+                    .iter()
+                    .map(|name| joint(name).and_then(|joint| joint.voltage_volts))
+                    .collect(),
+                limits: arm
+                    .joints
+                    .iter()
+                    .map(|name| {
+                        limits
+                            .and_then(|limits| limits.get(name))
+                            .copied()
+                            .unwrap_or_default()
+                    })
+                    .collect(),
+            })
+        })
+        .collect();
+
     let writer = state
         .episodes
-        .begin(source, note, sample_hz, arms.clone())
+        .begin(source, note, sample_hz, arms.clone(), condition)
         .map_err(Failure::from)?;
     let id = writer.id().to_owned();
     let started_ms = writer.started_ms();
@@ -1011,6 +1057,14 @@ async fn download_episodes(State(state): State<AppState>) -> Result<Response, Fa
         header::HeaderValue::from_str(&archive.skipped.to_string())
             .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
     );
+    // How many takes cost the whole dataset its velocity and effort columns.
+    // The dataset card says this too, because that is what travels with the
+    // file; the header is for a client that wants it without opening the ZIP.
+    response.headers_mut().insert(
+        header::HeaderName::from_static("x-rerobot-without-proprioception"),
+        header::HeaderValue::from_str(&archive.without_proprioception.to_string())
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
+    );
     Ok(response)
 }
 
@@ -1095,6 +1149,7 @@ mod tests {
 
     fn binding(name: &str, id: &str) -> CameraBinding {
         CameraBinding {
+            mount: None,
             name: name.to_owned(),
             id: id.to_owned(),
         }
@@ -1124,6 +1179,27 @@ mod tests {
         assert_eq!(cameras["wrist"]["height"], 720);
         assert_eq!(cameras["wrist"]["fps"], 30);
         assert_eq!(cameras["wrist"]["rotation"], 180, "unknown fields survive");
+    }
+
+    #[test]
+    fn a_camera_mount_survives_being_reassigned() {
+        // Where a camera is bolted is written by hand into the robot file; the
+        // studio has no control that sets it, so every camera edit the studio
+        // does make has to leave it exactly where it was.
+        let existing = Map::from_iter([(
+            "wrist".to_owned(),
+            serde_json::json!({
+                "id": "/dev/video0",
+                "mount": { "frame": "gripper_link", "xyz": [0.02, 0.0, 0.04] }
+            }),
+        )]);
+
+        let cameras = build_camera_object(&existing, &[binding("wrist", "/dev/video9")], &[])
+            .expect("build cameras");
+
+        assert_eq!(cameras["wrist"]["id"], "/dev/video9");
+        assert_eq!(cameras["wrist"]["mount"]["frame"], "gripper_link");
+        assert_eq!(cameras["wrist"]["mount"]["xyz"][2], 0.04);
     }
 
     #[test]

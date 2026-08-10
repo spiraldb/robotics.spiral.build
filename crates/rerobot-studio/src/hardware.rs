@@ -15,20 +15,20 @@
 //!   single request — and no teleoperation jump — can snap an arm across its
 //!   workspace.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use rerobot::bus::{MotorBus, SimulatedBus};
-use rerobot::feetech::FeetechBus;
+use rerobot::feetech::{self, FeetechBus, MotorSample};
 
-use crate::episodes::{EpisodeWriter, Sample};
+use crate::episodes::{ArmConditionSummary, EpisodeWriter, Sample};
 use rerobot_core::api::{
     CAUTION_FOLLOW_ERROR_DEGREES, CalibrationJointProgress, CalibrationProgress, ConnectionStatus,
-    EpisodeArm, EpisodeSummary, JointRange, JointTelemetry, ModeSelection, ModeStatus,
-    PortSettings, RecordingProgress, ReplayProgress, RobotTelemetry, TelemetryFrame,
+    EpisodeArm, EpisodeSummary, JointRange, JointTelemetry, ModeSelection, ModeStatus, MotorFault,
+    MotorLimits, PortSettings, RecordingProgress, ReplayProgress, RobotTelemetry, TelemetryFrame,
 };
 use rerobot_core::arm;
 use rerobot_core::calibration::{
@@ -112,6 +112,13 @@ pub struct HardwareState {
     /// bus has since been lost, so the reason stays visible.
     pub connections: BTreeMap<String, ConnectionStatus>,
     pub mode: ModeStatus,
+    /// What each connected robot's motors said they will fault at.
+    ///
+    /// Keyed robot then motor. These ride the snapshot rather than the
+    /// telemetry frame because they are read once at connect and do not change
+    /// while an arm runs; publishing them twenty times a second would be
+    /// publishing a constant.
+    pub limits: BTreeMap<String, BTreeMap<String, MotorLimits>>,
     /// Why the last take stopped on its own, kept until another one starts.
     ///
     /// A take cut short by an arm going away has to survive the moment it
@@ -210,6 +217,11 @@ struct Recording {
     /// tracked has no settled period to measure, and saying nothing about it
     /// would make the worst takes look like the ones with no measurement.
     unsettled_peak: Option<f64>,
+    /// The worst each motor has seen so far, in the arms' joint order.
+    ///
+    /// Accumulated as the take runs so the footer can state it without a second
+    /// pass over a file that may be a hundred thousand lines long.
+    condition: Vec<ArmConditionSummary>,
 }
 
 impl Recording {
@@ -224,6 +236,44 @@ impl Recording {
             &mut self.unsettled_peak
         };
         *slot = Some(slot.map_or(error, |worst: f64| worst.max(error)));
+    }
+
+    /// Fold one arm's motor readings into the take's running extremes.
+    fn observe_condition(&mut self, index: usize, joints: &[String], robot: &ConnectedRobot) {
+        let Some(summary) = self.condition.get_mut(index) else {
+            return;
+        };
+        for (slot, name) in joints.iter().enumerate() {
+            let Some(track) = robot.tracks.get(name) else {
+                continue;
+            };
+            worst(
+                &mut summary.peak_temperature_celsius,
+                slot,
+                track.sample.temperature_celsius,
+                f64::max,
+            );
+            worst(
+                &mut summary.min_voltage_volts,
+                slot,
+                track.sample.voltage_volts,
+                f64::min,
+            );
+            // Effort is signed by which way the motor is pushing; the extreme
+            // worth keeping is how hard, not which way.
+            worst(
+                &mut summary.peak_load,
+                slot,
+                track.load.map(f64::abs),
+                f64::max,
+            );
+            worst(
+                &mut summary.peak_current_amps,
+                slot,
+                track.current,
+                f64::max,
+            );
+        }
     }
 
     /// The take's headline tracking error.
@@ -487,11 +537,173 @@ impl HardwareHandle {
 }
 
 /// One arm the control thread currently holds open.
+/// Weight a new sample carries when smoothing a continuously varying reading.
+///
+/// The same trick the loop-rate measurement uses above, and for the same
+/// reason: load and speed are noisy sample to sample, and a readout that
+/// flickers through three values a frame is a readout nobody can read.
+const READING_SMOOTHING: f64 = 0.2;
+
+/// How much of a held peak survives one control cycle.
+///
+/// The loop samples at [`CONTROL_HZ`] but publishes to the interface at a
+/// third of that, so two samples in three never reach a client. Load and
+/// current are exactly the readings where the sample that gets dropped is the
+/// one worth seeing — a stall is over in tens of milliseconds. Holding the peak
+/// and letting it fall away over about three cycles keeps a real transient
+/// visible for one frame without pinning the readout at a spike forever.
+const PEAK_HOLD_DECAY: f64 = 0.79;
+
+/// How far back the temperature-rise reading looks.
+///
+/// The registers report whole degrees, so a difference taken between two frames
+/// is quantization noise with a unit attached: one degree across a 50ms frame
+/// reads as 1,200 degrees a minute. A minute of history buys a resolution of
+/// one degree per minute, which is the number an operator can actually act on.
+const RISE_WINDOW: Duration = Duration::from_secs(60);
+
+/// Spacing between the temperature samples kept for the rise reading.
+///
+/// Thirteen samples per motor covers the window; keeping every cycle would be
+/// three thousand six hundred of them to answer the same question.
+const RISE_SAMPLE_SPACING: Duration = Duration::from_secs(5);
+
+/// One motor's live readings, smoothed and peak-held for display.
+#[derive(Clone, Debug, Default)]
+struct MotorTrack {
+    sample: MotorSample,
+    speed: Option<f64>,
+    load: Option<f64>,
+    current: Option<f64>,
+    /// Sparse temperature history, oldest first, spanning [`RISE_WINDOW`].
+    history: VecDeque<(Instant, f64)>,
+}
+
+impl MotorTrack {
+    fn observe(&mut self, sample: MotorSample, now: Instant) {
+        self.speed = smooth(self.speed, sample.speed_degrees_per_second);
+        self.load = hold_peak(self.load, smooth(self.load, sample.load), f64::abs);
+        self.current = hold_peak(
+            self.current,
+            smooth(self.current, sample.current_amps),
+            |amps| amps,
+        );
+        if let Some(celsius) = sample.temperature_celsius {
+            self.record_temperature(celsius, now);
+        }
+        self.sample = sample;
+    }
+
+    fn record_temperature(&mut self, celsius: f64, now: Instant) {
+        let due = self
+            .history
+            .back()
+            .is_none_or(|(when, _)| now.duration_since(*when) >= RISE_SAMPLE_SPACING);
+        if !due {
+            return;
+        }
+        self.history.push_back((now, celsius));
+        // Keep one sample older than the window so the span it measures is the
+        // whole window rather than whatever is left after the last eviction.
+        while self
+            .history
+            .get(1)
+            .is_some_and(|(when, _)| now.duration_since(*when) > RISE_WINDOW)
+        {
+            self.history.pop_front();
+        }
+    }
+
+    /// Degrees per minute over the retained window, once it has filled.
+    fn temperature_rise_per_minute(&self) -> Option<f64> {
+        let (first, oldest) = self.history.front().copied()?;
+        let (last, newest) = self.history.back().copied()?;
+        let elapsed = last.duration_since(first);
+        if elapsed < RISE_WINDOW {
+            return None;
+        }
+        Some((newest - oldest) / (elapsed.as_secs_f64() / 60.0))
+    }
+}
+
+/// Keep the more extreme of a slot's running value and a new reading.
+///
+/// A slot that has never had a reading stays `None` rather than becoming zero:
+/// a take whose bus reports no temperature must not be readable a week later as
+/// a take that ran at nought degrees.
+fn worst(slots: &mut [Option<f64>], slot: usize, reading: Option<f64>, keep: fn(f64, f64) -> f64) {
+    let Some(reading) = reading else { return };
+    let Some(held) = slots.get_mut(slot) else {
+        return;
+    };
+    *held = Some(held.map_or(reading, |held| keep(held, reading)));
+}
+
+/// Restate a bus-level limit on the wire.
+///
+/// The driver and the wire describe the same quantities and deliberately do not
+/// share a type: the wire contract is the product boundary, and it must not
+/// change shape because a motor SDK did.
+fn convert_limits(limits: feetech::MotorLimits) -> MotorLimits {
+    MotorLimits {
+        max_temperature_celsius: limits.max_temperature_celsius,
+        min_voltage_volts: limits.min_voltage_volts,
+        max_voltage_volts: limits.max_voltage_volts,
+        max_load: limits.max_load,
+    }
+}
+
+/// Restate the servo's fault byte as the faults the wire names.
+fn convert_faults(faults: feetech::MotorFaults) -> Vec<MotorFault> {
+    let mut named = faults
+        .named()
+        .into_iter()
+        .map(|fault| match fault {
+            feetech::MotorFault::Overheat => MotorFault::Overheat,
+            feetech::MotorFault::Overload => MotorFault::Overload,
+            feetech::MotorFault::Voltage => MotorFault::Voltage,
+        })
+        .collect::<Vec<_>>();
+    // A bit this build cannot name is still a motor saying something is wrong,
+    // and dropping it would report a faulted arm as healthy.
+    if faults.unnamed() != 0 {
+        named.push(MotorFault::Unrecognized);
+    }
+    named
+}
+
+/// Fold `next` into a smoothed reading, starting from it when there is none.
+fn smooth(previous: Option<f64>, next: Option<f64>) -> Option<f64> {
+    let next = next?;
+    Some(match previous {
+        Some(previous) if previous.is_finite() => previous + (next - previous) * READING_SMOOTHING,
+        _ => next,
+    })
+}
+
+/// Keep the larger of a decaying held peak and the current reading.
+///
+/// `magnitude` says what "larger" means, so a signed reading holds the peak of
+/// its size while keeping the direction it was pushing in.
+fn hold_peak(held: Option<f64>, next: Option<f64>, magnitude: impl Fn(f64) -> f64) -> Option<f64> {
+    let next = next?;
+    match held {
+        Some(held) if magnitude(held * PEAK_HOLD_DECAY) > magnitude(next) => {
+            Some(held * PEAK_HOLD_DECAY)
+        }
+        _ => Some(next),
+    }
+}
+
 struct ConnectedRobot {
     spec: RobotSpec,
     bus: Box<dyn MotorBus>,
     torque: bool,
     positions: BTreeMap<String, i64>,
+    /// What each motor reports about itself, smoothed for display.
+    tracks: BTreeMap<String, MotorTrack>,
+    /// What each motor said it will fault at, read once when it connected.
+    limits: BTreeMap<String, MotorLimits>,
     /// Where each joint should end up.
     target: BTreeMap<String, i64>,
     /// The last goal actually written, which ramps toward `target`.
@@ -574,6 +786,24 @@ impl ConnectedRobot {
         (normalized, raw)
     }
 
+    /// This instant's velocity and effort for the named joints.
+    ///
+    /// Both come back in the caller's order, and both are `None` per joint on a
+    /// bus that does not publish them — the caller decides what an incomplete
+    /// frame means for the take as a whole.
+    fn sample_proprioception(&self, joints: &[String]) -> (Vec<Option<f64>>, Vec<Option<f64>>) {
+        joints
+            .iter()
+            .map(|joint| {
+                let track = self.tracks.get(joint);
+                (
+                    track.and_then(|track| track.speed),
+                    track.and_then(|track| track.load),
+                )
+            })
+            .unzip()
+    }
+
     /// The largest gap between a measured and a commanded joint angle, in
     /// degrees — the quantity the inspector shows live as `Follow Δ`.
     ///
@@ -603,6 +833,7 @@ impl ConnectedRobot {
             .map(|(name, spec)| {
                 let raw = self.positions.get(name).copied().unwrap_or_default();
                 let motor = calibration.and_then(|calibration| calibration.motors.get(name));
+                let track = self.tracks.get(name);
                 let target_raw = self
                     .torque
                     .then(|| self.target.get(name).copied())
@@ -626,6 +857,19 @@ impl ConnectedRobot {
                         center: motor.center,
                         max: motor.range_max,
                     }),
+                    // Everything below is what the motor says about itself, and
+                    // none of it depends on calibration: these are the only
+                    // readings an arm that has never been calibrated can give.
+                    temperature_celsius: track.and_then(|track| track.sample.temperature_celsius),
+                    voltage_volts: track.and_then(|track| track.sample.voltage_volts),
+                    current_amps: track.and_then(|track| track.current),
+                    load: track.and_then(|track| track.load),
+                    speed_degrees_per_second: track.and_then(|track| track.speed),
+                    temperature_rise_per_minute: track
+                        .and_then(MotorTrack::temperature_rise_per_minute),
+                    faults: track
+                        .map(|track| convert_faults(track.sample.faults))
+                        .unwrap_or_default(),
                 }
             })
             .collect();
@@ -887,6 +1131,19 @@ impl Controller {
             }
         }
 
+        // One slot per joint, sized here so every fold below is an index into a
+        // list that already has the right shape.
+        let condition = arms
+            .iter()
+            .map(|arm| ArmConditionSummary {
+                arm: arm.id.clone(),
+                peak_temperature_celsius: vec![None; arm.joints.len()],
+                min_voltage_volts: vec![None; arm.joints.len()],
+                peak_load: vec![None; arm.joints.len()],
+                peak_current_amps: vec![None; arm.joints.len()],
+            })
+            .collect();
+
         self.recording_issue = None;
         self.recording = Some(Recording {
             writer,
@@ -896,6 +1153,7 @@ impl Controller {
             max_follow_error: None,
             settled: false,
             unsettled_peak: None,
+            condition,
         });
         Ok(())
     }
@@ -907,9 +1165,10 @@ impl Controller {
             .ok_or_else(|| "no take is being recorded".to_owned())?;
         let duration = recording.started.elapsed().as_secs_f64();
         let follow_error = recording.follow_error();
+        let condition = recording.condition;
         recording
             .writer
-            .finish(duration, follow_error, !keep)
+            .finish(duration, follow_error, !keep, condition)
             .map_err(|error| error.to_string())
     }
 
@@ -942,19 +1201,34 @@ impl Controller {
         }
 
         let seconds = recording.started.elapsed().as_secs_f64();
-        let mut normalized = Vec::with_capacity(recording.arms.len());
-        let mut raw = Vec::with_capacity(recording.arms.len());
+        // Cloned once so the loop below can fold this frame into the take's
+        // running extremes while it reads. It is two arms of six joint names.
+        let arms = recording.arms.clone();
+        let mut normalized = Vec::with_capacity(arms.len());
+        let mut raw = Vec::with_capacity(arms.len());
+        let mut velocity = Vec::with_capacity(arms.len());
+        let mut effort = Vec::with_capacity(arms.len());
         let mut instant_error: Option<f64> = None;
-        for arm in &recording.arms {
+        // A take is one shape from its first frame to its last. If any joint on
+        // any arm cannot report velocity or effort, the take records neither,
+        // rather than a column of nulls a reader would have to learn to
+        // distrust partway down.
+        let mut proprioception = true;
+        for (index, arm) in arms.iter().enumerate() {
             let Some(robot) = self.robots.get(&arm.id) else {
                 return;
             };
             let (arm_normalized, arm_raw) = robot.sample(&arm.joints);
             normalized.push(arm_normalized);
             raw.push(arm_raw);
+            let (arm_velocity, arm_effort) = robot.sample_proprioception(&arm.joints);
+            proprioception &= arm_velocity.iter().chain(&arm_effort).all(Option::is_some);
+            velocity.push(arm_velocity);
+            effort.push(arm_effort);
             if let Some(error) = robot.follow_error_degrees() {
                 instant_error = Some(instant_error.map_or(error, |worst: f64| worst.max(error)));
             }
+            recording.observe_condition(index, &arm.joints, robot);
         }
         if let Some(error) = instant_error {
             recording.observe(error);
@@ -965,6 +1239,8 @@ impl Controller {
             normalized,
             raw,
             follow_error_degrees: instant_error,
+            velocity: proprioception.then_some(velocity),
+            effort: proprioception.then_some(effort),
         }) {
             recording.frames += 1;
             return;
@@ -1090,6 +1366,15 @@ impl Controller {
             message
         })?;
 
+        // Off the control loop's path, and allowed to come back empty: an arm
+        // that drives without known thresholds is far more useful than one
+        // that refuses to open because a limit register would not answer.
+        let limits = bus
+            .read_limits()
+            .into_iter()
+            .map(|(name, limits)| (name, convert_limits(limits)))
+            .collect();
+
         let id = spec.id.clone();
         self.robots.insert(
             id.clone(),
@@ -1099,6 +1384,8 @@ impl Controller {
                 torque: false,
                 target: positions.clone(),
                 commanded: positions.clone(),
+                tracks: BTreeMap::new(),
+                limits,
                 positions,
                 error: None,
                 failures: 0,
@@ -1356,15 +1643,23 @@ impl Controller {
     }
 
     fn poll(robot: &mut ConnectedRobot) {
-        match robot.bus.read_positions() {
-            Ok(positions) => {
+        match robot.bus.read_samples() {
+            Ok(samples) => {
                 robot.failures = 0;
                 robot.error = None;
+                let positions = samples
+                    .iter()
+                    .map(|(name, sample)| (name.clone(), sample.position))
+                    .collect::<BTreeMap<_, _>>();
                 if let Some(sweep) = robot.sweep.as_mut()
                     && let Err(error) = sweep.observe(&positions)
                 {
                     robot.error = Some(error.to_string());
                     robot.sweep = None;
+                }
+                let now = Instant::now();
+                for (name, sample) in samples {
+                    robot.tracks.entry(name).or_default().observe(sample, now);
                 }
                 robot.positions = positions;
                 if !robot.torque {
@@ -1639,6 +1934,11 @@ impl Controller {
             },
             connections: self.connections.clone(),
             mode: self.mode.clone(),
+            limits: self
+                .robots
+                .iter()
+                .map(|(id, robot)| (id.clone(), robot.limits.clone()))
+                .collect(),
             recording_issue: self.recording_issue.clone(),
         };
         // `send_replace` rather than `send`: the latest state must be readable
@@ -1723,7 +2023,13 @@ mod tests {
         let layout = crate::episodes::build_arms(&layout).expect("arms");
 
         let writer = store
-            .begin("Teleoperation".to_owned(), None, 60.0, layout.clone())
+            .begin(
+                "Teleoperation".to_owned(),
+                None,
+                60.0,
+                layout.clone(),
+                Vec::new(),
+            )
             .expect("begin");
         controller
             .start_recording(writer, layout)
@@ -1757,6 +2063,7 @@ mod tests {
     #[test]
     fn a_takes_headline_error_ignores_the_arm_getting_into_position() {
         let mut recording = Recording {
+            condition: Vec::new(),
             writer: {
                 let directory = tempfile::TempDir::new().expect("temporary directory");
                 let store =
@@ -1764,7 +2071,7 @@ mod tests {
                 let arms =
                     crate::episodes::build_arms(&[("a".to_owned(), vec!["j".to_owned()])]).unwrap();
                 let writer = store
-                    .begin("t".to_owned(), None, 60.0, arms)
+                    .begin("t".to_owned(), None, 60.0, arms, Vec::new())
                     .expect("begin");
                 std::mem::forget(directory);
                 writer
@@ -1817,14 +2124,14 @@ mod tests {
             .expect("arms");
 
         let first = store
-            .begin("Idle".to_owned(), None, 60.0, layout.clone())
+            .begin("Idle".to_owned(), None, 60.0, layout.clone(), Vec::new())
             .expect("begin");
         controller
             .start_recording(first, layout.clone())
             .expect("first take");
 
         let second = store
-            .begin("Idle".to_owned(), None, 60.0, layout.clone())
+            .begin("Idle".to_owned(), None, 60.0, layout.clone(), Vec::new())
             .expect("begin");
         assert!(
             controller
@@ -1856,7 +2163,7 @@ mod tests {
         let layout = crate::episodes::build_arms(&[("arm".to_owned(), vec!["gripper".to_owned()])])
             .expect("arms");
         let writer = store
-            .begin("Idle".to_owned(), None, 60.0, layout.clone())
+            .begin("Idle".to_owned(), None, 60.0, layout.clone(), Vec::new())
             .expect("begin");
         controller.start_recording(writer, layout).expect("start");
 
@@ -2425,6 +2732,82 @@ mod tests {
             raw.joints
                 .iter()
                 .all(|joint| joint.target_degrees.is_none())
+        );
+    }
+
+    #[test]
+    fn an_uncalibrated_arm_still_reports_what_its_motors_say_about_themselves() {
+        let mut controller = controller();
+        controller.connect(spec("raw", None)).expect("connect");
+        controller.poll_robots();
+        controller.publish();
+
+        let state = controller.state.borrow().clone();
+        let raw = &state.telemetry.robots[0];
+
+        // Calibration is what turns counts into degrees; it has nothing to do
+        // with the motor's own condition, and an arm nobody has calibrated yet
+        // is exactly the arm whose wiring you want to check.
+        assert!(raw.joints.iter().all(|joint| joint.degrees.is_none()));
+        assert!(
+            raw.joints
+                .iter()
+                .all(|joint| joint.temperature_celsius.is_some()),
+            "temperature does not wait for a calibration"
+        );
+        assert!(raw.joints.iter().all(|joint| joint.voltage_volts.is_some()));
+        assert!(raw.joints.iter().all(|joint| joint.faults.is_empty()));
+
+        let limits = &state.limits["raw"];
+        assert_eq!(limits.len(), 6);
+        assert!(
+            limits
+                .values()
+                .all(|limits| limits.max_temperature_celsius.is_some()),
+            "limits are read from the motors when the robot connects"
+        );
+    }
+
+    #[test]
+    fn a_transient_load_spike_survives_to_the_next_published_frame() {
+        let mut track = MotorTrack::default();
+        let now = Instant::now();
+        let idle = MotorSample {
+            load: Some(0.05),
+            current_amps: Some(0.1),
+            ..MotorSample::default()
+        };
+        for _ in 0..40 {
+            track.observe(idle, now);
+        }
+        let settled = track.load.expect("a settled load");
+
+        track.observe(
+            MotorSample {
+                load: Some(0.9),
+                current_amps: Some(1.3),
+                ..MotorSample::default()
+            },
+            now,
+        );
+        let spiked = track.load.expect("the spike");
+        assert!(spiked > settled, "the spike moves the reading");
+
+        // Two of every three samples never reach a client, so the spike has to
+        // outlive the cycle it happened in or nobody ever sees a stall.
+        track.observe(idle, now);
+        track.observe(idle, now);
+        assert!(
+            track.load.expect("the held peak") > settled,
+            "a spike is still visible two cycles later"
+        );
+
+        for _ in 0..40 {
+            track.observe(idle, now);
+        }
+        assert!(
+            (track.load.expect("back to rest") - settled).abs() < 0.02,
+            "and it does not pin the readout at the spike forever"
         );
     }
 }

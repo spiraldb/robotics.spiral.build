@@ -6,7 +6,6 @@ mod cameras;
 mod control;
 mod icons;
 mod modes;
-mod scene;
 mod setup;
 mod state;
 mod timeline;

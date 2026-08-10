@@ -3612,6 +3612,7 @@ dependencies = [
  "parquet",
  "rerobot",
  "rerobot-core",
+ "rerobot-viewport",
  "serde",
  "serde_json",
  "tempfile",
@@ -3623,6 +3624,16 @@ dependencies = [
  "wasm-bindgen",
  "web-sys",
  "zip",
+]
+
+[[package]]
+name = "rerobot-viewport"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "rerobot-core",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
