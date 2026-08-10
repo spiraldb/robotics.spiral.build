@@ -7,7 +7,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use adbc_core::error::Status as AdbcStatus;
 use adbc_core::options::{
-    AdbcVersion, IngestMode, OptionConnection, OptionDatabase, OptionStatement,
+    AdbcVersion, IngestMode, ObjectDepth, OptionConnection, OptionDatabase, OptionStatement,
 };
 use adbc_core::{Connection as _, Database as _, Driver as _, Optionable as _, Statement as _};
 use adbc_driver_manager::{ManagedConnection, ManagedDatabase, ManagedDriver};
@@ -134,7 +134,7 @@ impl StorageManager {
             }
         };
 
-        if !settings.spiral.enabled && !settings.hugging_face.enabled {
+        if !settings.spiral.configured() && !settings.hugging_face.enabled {
             status.state = "local".to_owned();
             status.updated_ms = unix_millis();
             self.set_status(status);
@@ -150,7 +150,7 @@ impl StorageManager {
             return;
         }
 
-        if settings.spiral.enabled {
+        if settings.spiral.configured() {
             status.spiral = Some("publishing".to_owned());
             status.updated_ms = unix_millis();
             self.set_status(status.clone());
@@ -187,20 +187,106 @@ impl StorageManager {
 
     pub async fn test_spiral(&self) -> ConnectionTestResponse {
         let settings = self.settings.get().spiral;
-        match self
-            .run_adbc(settings, |connection| {
-                run_query(connection, "SELECT 1 AS connected", 1)
+        if !settings.configured() {
+            return ConnectionTestResponse {
+                ok: false,
+                message:
+                    "Choose a Spiral catalog, project, and dataset before testing the connection"
+                        .to_owned(),
+            };
+        }
+        if settings.uri == "spiral:memory:" {
+            return match self
+                .run_adbc(settings, |connection| {
+                    run_query(connection, "SELECT 1 AS connected", 1).map(|_| ())
+                })
+                .await
+            {
+                Ok(()) => ConnectionTestResponse {
+                    ok: true,
+                    message: "Temporary in-memory ADBC session is ready".to_owned(),
+                },
+                Err(error) => ConnectionTestResponse {
+                    ok: false,
+                    message: error,
+                },
+            };
+        }
+        let endpoint = spiral_server_endpoint();
+        let project = settings.project_id.clone();
+        let mut probe_settings = settings.clone();
+        // Project listing is currently paginated incompatibly between the
+        // local service and driver. An exact legacy metadata lookup uses the
+        // targeted project route instead, performs no writes, and succeeds
+        // even before this dataset has created its first table.
+        probe_settings.uri = "spiraldb://?catalog=legacy".to_owned();
+        let probe_project = project.clone();
+        if let Err(error) = self
+            .run_adbc(probe_settings, move |connection| {
+                let reader = connection
+                    .get_objects(
+                        ObjectDepth::Tables,
+                        Some("legacy"),
+                        Some(&probe_project),
+                        Some("__rerobot_connection_probe_missing__"),
+                        Some(vec!["TABLE"]),
+                        None,
+                    )
+                    .map_err(|error| format!("checking Spiral project access: {error}"))?;
+                for batch in reader {
+                    batch.map_err(|error| format!("reading Spiral project metadata: {error}"))?;
+                }
+                Ok(())
             })
             .await
         {
-            Ok(_) => ConnectionTestResponse {
-                ok: true,
-                message: "Connected through the SpiralDB ADBC driver".to_owned(),
-            },
-            Err(error) => ConnectionTestResponse {
+            return ConnectionTestResponse {
                 ok: false,
                 message: error,
-            },
+            };
+        }
+
+        // Authorization alone is not enough for the managed ADBC path: an
+        // older/local project may exist in the Tables Service without a
+        // readable project catalog. Pin the actual catalog without requiring
+        // any rerobot table to exist so Test connection predicts Query and
+        // publication instead of returning a false positive.
+        if settings.uri == "spiraldb://" {
+            let catalog_project = project.clone();
+            let table_filter = format!("{}.{}", settings.dataset, EPISODES_TABLE);
+            if let Err(error) = self
+                .run_adbc(settings, move |connection| {
+                    let reader = connection
+                        .get_objects(
+                            ObjectDepth::Tables,
+                            Some("spiraldb"),
+                            Some(&catalog_project),
+                            Some(&table_filter),
+                            Some(vec!["TABLE"]),
+                            None,
+                        )
+                        .map_err(|error| format!("pinning the managed project catalog: {error}"))?;
+                    for batch in reader {
+                        batch.map_err(|error| {
+                            format!("reading the managed project catalog: {error}")
+                        })?;
+                    }
+                    Ok(())
+                })
+                .await
+            {
+                return ConnectionTestResponse {
+                    ok: false,
+                    message: format!(
+                        "Project access succeeded at {endpoint}, but its managed catalog is not ready: {error}"
+                    ),
+                };
+            }
+        }
+
+        ConnectionTestResponse {
+            ok: true,
+            message: format!("ADBC connected to {endpoint} · project {project}"),
         }
     }
 
@@ -231,6 +317,12 @@ impl StorageManager {
     pub async fn query(&self, sql: &str, max_rows: usize) -> Result<SpiralQueryResponse, String> {
         ensure_read_only_sql(sql)?;
         let settings = self.settings.get().spiral;
+        if !settings.configured() {
+            return Err(
+                "Configure a Spiral catalog, project, and dataset in Settings before running Query."
+                    .to_owned(),
+            );
+        }
         let sql = sql.to_owned();
         self.run_adbc(settings, move |connection| {
             run_query(connection, &sql, max_rows.clamp(1, MAX_QUERY_ROWS))
@@ -385,9 +477,18 @@ fn open_adbc(key: AdbcConnectionKey) -> Result<CachedAdbc, String> {
             key.driver_path.display()
         )
     })?;
+    // Give the driver the project at database construction as well as through
+    // CurrentSchema. The hosted driver uses the URI project to initialize its
+    // managed catalog before the first schema lookup; CurrentSchema remains
+    // the standard ADBC namespace seen by statements and metadata calls.
+    let database_uri = if key.uri == "spiraldb://" && !key.project_id.is_empty() {
+        format!("spiraldb://?project={}", key.project_id)
+    } else {
+        key.uri.clone()
+    };
     let database = driver
-        .new_database_with_opts([(OptionDatabase::Uri, key.uri.clone().into())])
-        .map_err(|error| format!("opening Spiral ADBC database {}: {error}", key.uri))?;
+        .new_database_with_opts([(OptionDatabase::Uri, database_uri.clone().into())])
+        .map_err(|error| format!("opening Spiral ADBC database {database_uri}: {error}"))?;
     let connection = if key.project_id.is_empty() {
         database.new_connection()
     } else {
@@ -409,13 +510,25 @@ fn validate_adbc_settings(settings: &StoredSpiralSettings, driver: &Path) -> Res
     if !driver.is_absolute() || !driver.is_file() {
         return Err("Spiral ADBC driver must be an existing absolute file path".to_owned());
     }
-    if !matches!(settings.uri.as_str(), "spiraldb://" | "spiral:memory:") {
+    if !matches!(
+        settings.uri.as_str(),
+        "spiraldb://" | "spiraldb://?catalog=legacy" | "spiral:memory:"
+    ) {
         return Err("Spiral ADBC URI must be 'spiraldb://' or 'spiral:memory:'".to_owned());
     }
     if settings.uri != "spiral:memory:" {
+        if settings.project_id.trim().is_empty() {
+            return Err("Choose a Spiral project in Settings before connecting".to_owned());
+        }
         validate_safe_value("Spiral project", &settings.project_id)?;
     }
     validate_dataset_identifier(&settings.dataset)
+}
+
+fn spiral_server_endpoint() -> String {
+    std::env::var("SPIRAL__SERVER__URL")
+        .or_else(|_| std::env::var("SPIRALDB_API_URL"))
+        .unwrap_or_else(|_| "the configured hosted SpiralDB service".to_owned())
 }
 
 async fn publish_hugging_face(
@@ -437,9 +550,10 @@ async fn publish_hugging_face(
     for video in videos {
         operations.push(CommitOperation::add_file(
             format!(
-                "videos/{}/{}.mp4",
+                "videos/{}/{}.segment-{:03}.mp4",
                 episode.start.id,
-                safe_repo_component(&video.stream_id)
+                safe_repo_component(&video.stream_id),
+                video.segment_index,
             ),
             &video.path,
         ));
@@ -453,7 +567,15 @@ async fn publish_hugging_face(
         "frames": episode.samples.len(),
         "rows": episode.samples.len() * episode.start.arms.len(),
         "duration_seconds": episode.completion.duration_seconds,
-        "video_streams": videos.iter().map(|video| &video.stream_id).collect::<Vec<_>>(),
+        "recording_gaps": episode.completion.recording_gaps,
+        "video_segments": videos.iter().map(|video| serde_json::json!({
+            "stream_id": video.stream_id,
+            "camera_id": video.camera_id,
+            "segment_index": video.segment_index,
+            "timeline_offset_seconds": video.timeline_offset_seconds,
+            "frames": video.frames,
+            "fps": video.fps,
+        })).collect::<Vec<_>>(),
     }))
     .map_err(|error| format!("encoding Hugging Face metadata: {error}"))?;
     operations.push(CommitOperation::add_bytes(
@@ -911,11 +1033,8 @@ fn ensure_read_only_sql(sql: &str) -> Result<(), String> {
         return Err("Spiral preview accepts one read-only statement at a time".to_owned());
     }
     let first = tokens.first().map(String::as_str).unwrap_or_default();
-    if !matches!(first, "SELECT" | "WITH" | "EXPLAIN" | "SHOW" | "DESCRIBE") {
-        return Err(
-            "Spiral preview accepts SELECT, WITH, EXPLAIN, SHOW, or DESCRIBE queries only"
-                .to_owned(),
-        );
+    if !matches!(first, "SELECT" | "WITH" | "EXPLAIN") {
+        return Err("Spiral preview accepts SELECT, WITH, or EXPLAIN queries only".to_owned());
     }
     const MUTATING_KEYWORDS: &[&str] = &[
         "ALTER", "CALL", "COPY", "CREATE", "DELETE", "DROP", "EXECUTE", "GRANT", "INSERT", "MERGE",
@@ -1124,6 +1243,7 @@ mod tests {
         assert!(ensure_read_only_sql("WITH recent AS (SELECT 1) SELECT * FROM recent").is_ok());
         assert!(ensure_read_only_sql("SELECT ';' AS punctuation; -- okay").is_ok());
         assert!(ensure_read_only_sql("DELETE FROM rerobot.episodes").is_err());
+        assert!(ensure_read_only_sql("SHOW TABLES").is_err());
         assert!(
             ensure_read_only_sql("WITH removed AS (DELETE FROM rerobot.episodes) SELECT 1")
                 .is_err()
@@ -1159,6 +1279,8 @@ mod tests {
             height: 24,
             fps: 10,
             frames: 2,
+            segment_index: 0,
+            timeline_offset_seconds: Some(0.0),
         };
 
         publish_spiral_blocking(&mut adbc.connection, &settings, &episode, &[video.clone()])
@@ -1238,6 +1360,7 @@ mod tests {
             samples: vec![sample.clone(), sample],
             completion: crate::episodes::EpisodeCompletion {
                 duration_seconds: 1.0 / 30.0,
+                recording_gaps: Vec::new(),
                 max_follow_error_degrees: None,
                 discarded: false,
                 condition: Vec::new(),

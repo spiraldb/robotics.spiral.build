@@ -16,7 +16,7 @@ use crate::api;
 use crate::cameras::RobotCameras;
 use crate::setup::set_torque;
 use crate::state::{Selection, studio};
-use crate::viewport::{accent_css, tool_position};
+use crate::viewport::tool_position;
 
 #[derive(Default)]
 struct PendingGoals(BTreeMap<String, f64>);
@@ -53,7 +53,6 @@ pub fn JointPanel() -> Element {
         .is_some_and(|robot| robot.calibration.is_some());
     let drivable = studio.is_manual_target(&robot.id) && torque && robot.calibrated;
     let role = studio.teleoperation_role(&robot.id);
-    let accent = accent_css(studio.position_of(&robot.id));
     // Releasing is guarded the way deleting a take already is, because it is the
     // one control on this panel with a physical consequence.
     let mut confirming_release = use_signal(|| false);
@@ -83,12 +82,12 @@ pub fn JointPanel() -> Element {
 
     rsx! {
         div { class: "flex flex-col",
-            header { class: "flex flex-wrap items-center gap-1 border-b border-line px-2 py-1",
-                span {
-                    class: "h-1.5 w-1.5 shrink-0 rounded-full",
-                    style: "background: {accent}",
-                }
-                h2 { class: "text-[12px] font-semibold tracking-[-0.01em]", "{robot.id}" }
+            // The arm switcher immediately above already owns identity and
+            // connection state. This toolbar contains only state that changes
+            // how the selected arm can move.
+            header {
+                class: "selected-arm-toolbar",
+                "aria-label": "Controls for {robot.id}",
                 if telemetry.is_none() {
                     span { class: "chip", "offline" }
                 }
@@ -113,7 +112,7 @@ pub fn JointPanel() -> Element {
                 // rather than left in a tooltip the operator — who has a hand on
                 // the arm and none on the mouse — will never hover.
                 if torque && confirming_release() {
-                    span { class: "release-confirm ml-auto",
+                    span { class: "release-confirm",
                         span { class: "release-warning",
                             {match role {
                                 Some("follower") => "Support the arm. This also stops it following the leader.",
@@ -144,7 +143,7 @@ pub fn JointPanel() -> Element {
                     // energizing it in another.
                     button {
                         r#type: "button",
-                        class: "btn btn-outline ml-auto",
+                        class: "btn btn-outline selected-arm-primary-action",
                         "aria-pressed": manual,
                         disabled: manual_blocked.is_some(),
                         title: match (manual_blocked, manual) {
@@ -209,7 +208,7 @@ pub fn JointPanel() -> Element {
                 telemetry: telemetry.clone(),
             }
 
-            RobotCameras { robot }
+            RobotCameras { robot: robot.clone() }
 
         }
     }

@@ -24,7 +24,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::SystemTime;
 
-use rerobot_core::api::{EpisodeArm, EpisodeSummary, ExportResponse, MotorLimits};
+use rerobot_core::api::{EpisodeArm, EpisodeSummary, ExportResponse, MotorLimits, RecordingGap};
+use rerobot_core::arm::SO101_JOINTS;
 use serde::{Deserialize, Serialize};
 
 /// Extension of a finished take.
@@ -140,6 +141,9 @@ struct Footer {
     rerobot_episode_end: u32,
     frames: u64,
     duration_seconds: f64,
+    /// Deliberate wall-clock omissions from the active sample timeline.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    recording_gaps: Vec<RecordingGap>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_follow_error_degrees: Option<f64>,
     #[serde(default)]
@@ -239,6 +243,7 @@ pub struct EpisodeStart {
 #[derive(Clone, Debug)]
 pub struct EpisodeCompletion {
     pub duration_seconds: f64,
+    pub recording_gaps: Vec<RecordingGap>,
     pub max_follow_error_degrees: Option<f64>,
     pub discarded: bool,
     pub condition: Vec<ArmConditionSummary>,
@@ -267,10 +272,156 @@ struct Cache {
     issues: Vec<String>,
 }
 
+/// A compact in-memory index into one self-describing JSONL take.
+///
+/// The offsets are deliberately not persisted beside the episode. The episode
+/// remains the only durable source of truth, while repeated timeline scrubs do
+/// not have to parse every preceding sample again.
+#[derive(Clone, Debug)]
+struct TimelineIndex {
+    stamp: FileStamp,
+    points: Vec<TimelinePoint>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TimelinePoint {
+    seconds: f64,
+    offset: u64,
+}
+
+/// The extent of samples that can be inspected on a take's timeline.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct TimelineMetadata {
+    pub samples: u64,
+    pub first_seconds: Option<f64>,
+    pub last_seconds: Option<f64>,
+}
+
+/// One arm's values at a historical instant.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct TimelineArmSample {
+    pub arm: String,
+    pub normalized: BTreeMap<String, Option<f64>>,
+    pub raw: BTreeMap<String, i64>,
+    pub velocity: Option<BTreeMap<String, Option<f64>>>,
+    pub effort: Option<BTreeMap<String, Option<f64>>>,
+    pub action: Option<BTreeMap<String, Option<f64>>>,
+}
+
+/// The nearest recorded sample to a requested timeline time.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct TimelineSample {
+    pub frame: u64,
+    pub seconds: f64,
+    pub follow_error_degrees: Option<f64>,
+    pub arms: Vec<TimelineArmSample>,
+}
+
+/// Bounded historical joint traces for the canonical six-lane timeline.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct TimelineTraces {
+    pub episode: String,
+    pub samples: u64,
+    /// Number of time buckets used. Each arm series contributes at most two
+    /// extrema and one missing-sample marker per bucket.
+    pub buckets: usize,
+    pub start_seconds: Option<f64>,
+    pub end_seconds: Option<f64>,
+    pub lanes: Vec<TimelineTraceLane>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct TimelineTraceLane {
+    pub joint: String,
+    pub series: Vec<TimelineTraceSeries>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct TimelineTraceSeries {
+    pub arm: String,
+    pub points: Vec<TimelineTracePoint>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct TimelineTracePoint {
+    pub seconds: f64,
+    /// Normalized joint position. `None` is an observed missing sample and
+    /// breaks the client trace rather than inventing a bridge across it.
+    pub value: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TraceBucket {
+    minimum: Option<(f64, f64)>,
+    maximum: Option<(f64, f64)>,
+    first_missing: Option<f64>,
+}
+
+impl TraceBucket {
+    fn observe(&mut self, seconds: f64, value: Option<f64>) {
+        let Some(value) = value.filter(|value| value.is_finite()) else {
+            self.first_missing.get_or_insert(seconds);
+            return;
+        };
+        if self.minimum.is_none_or(|(_, minimum)| value < minimum) {
+            self.minimum = Some((seconds, value));
+        }
+        if self.maximum.is_none_or(|(_, maximum)| value > maximum) {
+            self.maximum = Some((seconds, value));
+        }
+    }
+
+    fn into_points(self) -> Vec<TimelineTracePoint> {
+        let mut points = Vec::with_capacity(3);
+        if let Some((seconds, value)) = self.minimum {
+            points.push(TimelineTracePoint {
+                seconds,
+                value: Some(value),
+            });
+        }
+        if let Some((seconds, value)) = self.maximum
+            && self.minimum != self.maximum
+        {
+            points.push(TimelineTracePoint {
+                seconds,
+                value: Some(value),
+            });
+        }
+        if let Some(seconds) = self.first_missing {
+            points.push(TimelineTracePoint {
+                seconds,
+                value: None,
+            });
+        }
+        points.sort_by(|left, right| left.seconds.total_cmp(&right.seconds));
+        points
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TraceSeriesBuilder {
+    arm: String,
+    arm_index: usize,
+    joint_index: usize,
+    buckets: Vec<TraceBucket>,
+}
+
+fn trace_bucket(seconds: f64, start: f64, end: f64, buckets: usize) -> usize {
+    if buckets <= 1 || end <= start {
+        return 0;
+    }
+    let position = ((seconds - start) / (end - start)).clamp(0.0, 1.0);
+    ((position * buckets as f64).floor() as usize).min(buckets - 1)
+}
+
 /// A directory of episode files, cached in memory.
 pub struct EpisodeStore {
     directory: PathBuf,
     cache: Mutex<Cache>,
+    timeline_indexes: Mutex<BTreeMap<String, TimelineIndex>>,
+    seek_sequence: AtomicU64,
+    latest_seek: Mutex<BTreeMap<String, u64>>,
+    seek_gate: tokio::sync::Mutex<()>,
 }
 
 impl EpisodeStore {
@@ -280,6 +431,10 @@ impl EpisodeStore {
         let store = Self {
             directory,
             cache: Mutex::new(Cache::default()),
+            timeline_indexes: Mutex::new(BTreeMap::new()),
+            seek_sequence: AtomicU64::new(0),
+            latest_seek: Mutex::new(BTreeMap::new()),
+            seek_gate: tokio::sync::Mutex::new(()),
         };
         store.reload()?;
         Ok(store)
@@ -421,6 +576,7 @@ impl EpisodeStore {
             samples,
             completion: EpisodeCompletion {
                 duration_seconds: footer.duration_seconds,
+                recording_gaps: footer.recording_gaps,
                 max_follow_error_degrees: footer.max_follow_error_degrees,
                 discarded: footer.discarded,
                 condition: footer.condition,
@@ -623,6 +779,94 @@ impl EpisodeStore {
         Ok(frames)
     }
 
+    /// The sample extent available for random-access timeline inspection.
+    pub fn timeline_metadata(&self, id: &str) -> Result<TimelineMetadata, EpisodeError> {
+        let (_, index) = self.timeline_index(id)?;
+        Ok(TimelineMetadata {
+            samples: index.points.len() as u64,
+            first_seconds: index.points.first().map(|point| point.seconds),
+            last_seconds: index.points.last().map(|point| point.seconds),
+        })
+    }
+
+    /// Read the nearest recorded sample without loading the take into memory.
+    ///
+    /// The small index is cached against the file's size and modification time,
+    /// so it also follows a growing unfinished take when another writer owns the
+    /// episode directory.
+    pub fn sample_at(&self, id: &str, seconds: f64) -> Result<TimelineSample, EpisodeError> {
+        if !seconds.is_finite() {
+            return Err(EpisodeError::Invalid(
+                "timeline time must be a finite number of seconds".to_owned(),
+            ));
+        }
+        let (summary, index) = self.timeline_index(id)?;
+        if index.points.is_empty() {
+            return Err(EpisodeError::Invalid(format!(
+                "take {id:?} has no samples to inspect"
+            )));
+        }
+
+        let after = index
+            .points
+            .partition_point(|point| point.seconds < seconds);
+        let frame = match after {
+            0 => 0,
+            position if position == index.points.len() => index.points.len() - 1,
+            position => {
+                let before = index.points[position - 1];
+                let after = index.points[position];
+                if (seconds - before.seconds).abs() <= (after.seconds - seconds).abs() {
+                    position - 1
+                } else {
+                    position
+                }
+            }
+        };
+        let point = index.points[frame];
+        let path = self.directory.join(&summary.file);
+        let mut file = File::open(&path).map_err(|source| EpisodeError::io(&path, source))?;
+        file.seek(SeekFrom::Start(point.offset))
+            .map_err(|source| EpisodeError::io(&path, source))?;
+        let mut line = String::new();
+        BufReader::new(file)
+            .read_line(&mut line)
+            .map_err(|source| EpisodeError::io(&path, source))?;
+        let sample = parse_frame(&line).ok_or_else(|| {
+            EpisodeError::Invalid(format!(
+                "take {id:?} changed while its timeline sample was being read"
+            ))
+        })?;
+        Ok(render_timeline_sample(&summary, &sample, frame as u64))
+    }
+
+    /// Reserve a monotonically increasing physical-seek ticket for one robot.
+    /// Older requests that finish disk I/O after a newer scrub can then be
+    /// dropped before they ever reach the motor controller.
+    pub(crate) fn reserve_seek(&self, robot: &str) -> u64 {
+        let ticket = self.seek_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        self.latest_seek
+            .lock()
+            .expect("historical seek tickets")
+            .insert(robot.to_owned(), ticket);
+        ticket
+    }
+
+    pub(crate) fn seek_is_current(&self, robot: &str, ticket: u64) -> bool {
+        self.latest_seek
+            .lock()
+            .expect("historical seek tickets")
+            .get(robot)
+            .is_some_and(|latest| *latest == ticket)
+    }
+
+    /// Serialize the final current-ticket check and controller handoff. This is
+    /// intentionally shared across robots: physical seek is a low-rate,
+    /// committed timeline action, not a stream of pointer-move commands.
+    pub(crate) async fn lock_seek(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.seek_gate.lock().await
+    }
+
     /// One take's `Follow Δ` over time, reduced to at most `buckets` points.
     ///
     /// Reduced by maximum rather than by average: the question a trace answers
@@ -657,6 +901,100 @@ impl EpisodeStore {
                     .reduce(f64::max)
             })
             .collect())
+    }
+
+    /// The six canonical SO-101 joint lanes over one recorded episode.
+    ///
+    /// Samples are streamed once from the self-describing take and reduced
+    /// into a bounded number of time buckets. Every arm/joint series retains
+    /// both extrema in their original time order, so neither a positive nor a
+    /// negative spike can be averaged away. A bucket that observed any missing
+    /// value also carries one explicit `None` point, which breaks the rendered
+    /// line instead of pretending the arm reported through the gap.
+    pub fn timeline_traces(
+        &self,
+        id: &str,
+        buckets: usize,
+    ) -> Result<TimelineTraces, EpisodeError> {
+        let (summary, index) = self.timeline_index(id)?;
+        let samples = index.points.len();
+        let requested = buckets.clamp(1, 512);
+        let bucket_count = requested.min(samples);
+        let start_seconds = index.points.first().map(|point| point.seconds);
+        let end_seconds = index.points.last().map(|point| point.seconds);
+
+        let mut builders = SO101_JOINTS
+            .iter()
+            .map(|joint| {
+                summary
+                    .arms
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(arm_index, arm)| {
+                        let joint_index = arm.joints.iter().position(|name| name == joint.name)?;
+                        Some(TraceSeriesBuilder {
+                            arm: arm.id.clone(),
+                            arm_index,
+                            joint_index,
+                            buckets: vec![TraceBucket::default(); bucket_count],
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        if bucket_count > 0 {
+            let path = self.directory.join(&summary.file);
+            let file = File::open(&path).map_err(|source| EpisodeError::io(&path, source))?;
+            let start = start_seconds.unwrap_or_default();
+            let end = end_seconds.unwrap_or(start);
+            for line in BufReader::new(file).lines().skip(1) {
+                let line = line.map_err(|source| EpisodeError::io(&path, source))?;
+                let Some(frame) = parse_frame(&line).filter(|frame| frame.t.is_finite()) else {
+                    continue;
+                };
+                let bucket = trace_bucket(frame.t, start, end, bucket_count);
+                for lane in &mut builders {
+                    for series in lane {
+                        let value = frame
+                            .n
+                            .get(series.arm_index)
+                            .and_then(|arm| arm.get(series.joint_index))
+                            .copied()
+                            .flatten();
+                        series.buckets[bucket].observe(frame.t, value);
+                    }
+                }
+            }
+        }
+
+        let lanes = SO101_JOINTS
+            .iter()
+            .zip(builders)
+            .map(|(joint, series)| TimelineTraceLane {
+                joint: joint.name.to_owned(),
+                series: series
+                    .into_iter()
+                    .map(|series| TimelineTraceSeries {
+                        arm: series.arm,
+                        points: series
+                            .buckets
+                            .into_iter()
+                            .flat_map(TraceBucket::into_points)
+                            .collect(),
+                    })
+                    .collect(),
+            })
+            .collect();
+
+        Ok(TimelineTraces {
+            episode: summary.id,
+            samples: samples as u64,
+            buckets: bucket_count,
+            start_seconds,
+            end_seconds,
+            lanes,
+        })
     }
 
     /// Write the kept takes out as a dataset.
@@ -694,6 +1032,7 @@ impl EpisodeStore {
                     "file": episode.file,
                     "frames": episode.frames,
                     "duration_seconds": episode.duration_seconds,
+                    "recording_gaps": episode.recording_gaps,
                     "sample_hz": episode.sample_hz,
                     "started_ms": episode.started_ms,
                     "source": episode.source,
@@ -750,6 +1089,145 @@ impl EpisodeStore {
         }
         Ok(stamps)
     }
+
+    fn timeline_index(&self, id: &str) -> Result<(EpisodeSummary, TimelineIndex), EpisodeError> {
+        validate_episode_id(id)?;
+        let summary = self.get(id)?;
+        let path = self.directory.join(&summary.file);
+        let metadata = fs::metadata(&path).map_err(|source| EpisodeError::io(&path, source))?;
+        let stamp = FileStamp {
+            length: metadata.len(),
+            modified: metadata.modified().ok(),
+        };
+        if let Some(index) = self
+            .timeline_indexes
+            .lock()
+            .expect("timeline indexes")
+            .get(id)
+            .filter(|index| index.stamp == stamp)
+            .cloned()
+        {
+            return Ok((summary, index));
+        }
+
+        let file = File::open(&path).map_err(|source| EpisodeError::io(&path, source))?;
+        let mut reader = BufReader::new(file);
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .map_err(|source| EpisodeError::io(&path, source))?;
+        let mut points = Vec::with_capacity(summary.frames as usize);
+        loop {
+            let offset = reader
+                .stream_position()
+                .map_err(|source| EpisodeError::io(&path, source))?;
+            line.clear();
+            if reader
+                .read_line(&mut line)
+                .map_err(|source| EpisodeError::io(&path, source))?
+                == 0
+            {
+                break;
+            }
+            if let Some(frame) = parse_frame(&line)
+                && frame.t.is_finite()
+            {
+                points.push(TimelinePoint {
+                    seconds: frame.t,
+                    offset,
+                });
+            }
+        }
+        let index = TimelineIndex { stamp, points };
+        self.timeline_indexes
+            .lock()
+            .expect("timeline indexes")
+            .insert(id.to_owned(), index.clone());
+        Ok((summary, index))
+    }
+}
+
+fn render_timeline_sample(
+    summary: &EpisodeSummary,
+    frame: &FrameLine,
+    index: u64,
+) -> TimelineSample {
+    let arms = summary
+        .arms
+        .iter()
+        .enumerate()
+        .map(|(arm_index, arm)| {
+            let joint_values = |values: Option<&Vec<Vec<Option<f64>>>>| {
+                values.map(|values| {
+                    arm.joints
+                        .iter()
+                        .enumerate()
+                        .map(|(joint_index, joint)| {
+                            (
+                                joint.clone(),
+                                values
+                                    .get(arm_index)
+                                    .and_then(|arm| arm.get(joint_index))
+                                    .copied()
+                                    .flatten(),
+                            )
+                        })
+                        .collect::<BTreeMap<_, _>>()
+                })
+            };
+            let normalized = arm
+                .joints
+                .iter()
+                .enumerate()
+                .map(|(joint_index, joint)| {
+                    (
+                        joint.clone(),
+                        frame
+                            .n
+                            .get(arm_index)
+                            .and_then(|arm| arm.get(joint_index))
+                            .copied()
+                            .flatten(),
+                    )
+                })
+                .collect();
+            let raw = arm
+                .joints
+                .iter()
+                .enumerate()
+                .filter_map(|(joint_index, joint)| {
+                    Some((joint.clone(), *frame.raw.get(arm_index)?.get(joint_index)?))
+                })
+                .collect();
+            let action = frame
+                .a
+                .get(arm_index)
+                .and_then(Option::as_ref)
+                .map(|values| {
+                    arm.joints
+                        .iter()
+                        .enumerate()
+                        .map(|(joint_index, joint)| {
+                            (joint.clone(), values.get(joint_index).copied().flatten())
+                        })
+                        .collect()
+                });
+            TimelineArmSample {
+                arm: arm.id.clone(),
+                normalized,
+                raw,
+                velocity: joint_values(frame.v.as_ref()),
+                effort: joint_values(frame.f.as_ref()),
+                action,
+            }
+        })
+        .collect();
+    TimelineSample {
+        frame: index,
+        seconds: frame.t,
+        follow_error_degrees: frame.e,
+        arms,
+    }
 }
 
 /// Shared between the writer thread and whoever is watching it.
@@ -766,6 +1244,7 @@ struct WriterShared {
 pub(crate) trait EpisodeWriteSession: Send {
     fn start(&self) -> &EpisodeStart;
     fn push(&self, sample: Sample) -> bool;
+    fn checkpoint(&self) -> Result<EpisodeCheckpoint, String>;
     fn written(&self) -> u64;
     fn failure(&self) -> Option<String>;
     fn finish(
@@ -773,6 +1252,13 @@ pub(crate) trait EpisodeWriteSession: Send {
         completion: EpisodeCompletion,
     ) -> Result<EpisodeSummary, EpisodeError>;
 }
+
+/// Completion of a writer-thread flush requested by the hardware thread.
+///
+/// The receiver is awaited by the async HTTP path, never by the fixed-rate
+/// hardware loop. That makes a paused `.part` file fully readable without
+/// letting a slow disk stall motor control.
+pub(crate) type EpisodeCheckpoint = tokio::sync::oneshot::Receiver<Result<(), String>>;
 
 /// A destination-independent take being written.
 ///
@@ -801,6 +1287,10 @@ impl EpisodeWriter {
         self.session.push(sample)
     }
 
+    pub fn checkpoint(&self) -> Result<EpisodeCheckpoint, String> {
+        self.session.checkpoint()
+    }
+
     pub fn written(&self) -> u64 {
         self.session.written()
     }
@@ -812,12 +1302,14 @@ impl EpisodeWriter {
     pub fn finish(
         self,
         duration_seconds: f64,
+        recording_gaps: Vec<RecordingGap>,
         max_follow_error_degrees: Option<f64>,
         discarded: bool,
         condition: Vec<ArmConditionSummary>,
     ) -> Result<EpisodeSummary, EpisodeError> {
         self.session.finish(EpisodeCompletion {
             duration_seconds,
+            recording_gaps,
             max_follow_error_degrees,
             discarded,
             condition,
@@ -832,11 +1324,16 @@ impl EpisodeWriter {
 /// milliseconds cannot afford to wait for a disk.
 struct JsonlEpisodeWriter {
     start: EpisodeStart,
-    samples: Option<mpsc::SyncSender<Sample>>,
+    samples: Option<mpsc::SyncSender<WriterMessage>>,
     thread: Option<JoinHandle<()>>,
     shared: Arc<WriterShared>,
     partial: PathBuf,
     final_path: PathBuf,
+}
+
+enum WriterMessage {
+    Sample(Sample),
+    Checkpoint(tokio::sync::oneshot::Sender<Result<(), String>>),
 }
 
 impl JsonlEpisodeWriter {
@@ -848,7 +1345,7 @@ impl JsonlEpisodeWriter {
         let Some(samples) = &self.samples else {
             return false;
         };
-        match samples.try_send(sample) {
+        match samples.try_send(WriterMessage::Sample(sample)) {
             Ok(()) => true,
             Err(mpsc::TrySendError::Full(_)) => {
                 self.fail("the disk could not keep up with the recording");
@@ -856,6 +1353,24 @@ impl JsonlEpisodeWriter {
             }
             Err(mpsc::TrySendError::Disconnected(_)) => false,
         }
+    }
+
+    fn checkpoint_writer(&self) -> Result<EpisodeCheckpoint, String> {
+        let Some(samples) = &self.samples else {
+            return Err("the episode writer is already closed".to_owned());
+        };
+        let (complete, checkpoint) = tokio::sync::oneshot::channel();
+        samples
+            .try_send(WriterMessage::Checkpoint(complete))
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) => {
+                    "the disk queue is full; the recording could not be checkpointed".to_owned()
+                }
+                mpsc::TrySendError::Disconnected(_) => {
+                    "the episode writer stopped before it could be checkpointed".to_owned()
+                }
+            })?;
+        Ok(checkpoint)
     }
 
     /// Frames durably handed to the writer thread.
@@ -898,6 +1413,7 @@ impl JsonlEpisodeWriter {
             rerobot_episode_end: FORMAT_VERSION,
             frames: self.written_samples(),
             duration_seconds: completion.duration_seconds,
+            recording_gaps: completion.recording_gaps,
             max_follow_error_degrees: completion.max_follow_error_degrees,
             discarded: completion.discarded,
             condition: completion.condition,
@@ -926,6 +1442,10 @@ impl EpisodeWriteSession for JsonlEpisodeWriter {
 
     fn push(&self, sample: Sample) -> bool {
         self.push_sample(sample)
+    }
+
+    fn checkpoint(&self) -> Result<EpisodeCheckpoint, String> {
+        self.checkpoint_writer()
     }
 
     fn written(&self) -> u64 {
@@ -957,29 +1477,54 @@ impl Drop for JsonlEpisodeWriter {
 }
 
 /// The writer thread: serialise samples until the sender goes away.
-fn drain(queue: Receiver<Sample>, mut writer: BufWriter<File>, shared: &WriterShared, path: &Path) {
+fn drain(
+    queue: Receiver<WriterMessage>,
+    mut writer: BufWriter<File>,
+    shared: &WriterShared,
+    path: &Path,
+) {
     let mut failed = false;
-    for sample in queue {
-        if failed {
-            continue;
-        }
-        let line = FrameLine {
-            t: sample.seconds,
-            n: sample.normalized,
-            raw: sample.raw,
-            e: sample.follow_error_degrees,
-            v: sample.velocity,
-            f: sample.effort,
-            a: sample.action,
-        };
-        match write_line(&mut writer, &line) {
-            Ok(()) => {
-                shared.written.fetch_add(1, Ordering::Relaxed);
+    for message in queue {
+        match message {
+            WriterMessage::Sample(sample) if !failed => {
+                let line = FrameLine {
+                    t: sample.seconds,
+                    n: sample.normalized,
+                    raw: sample.raw,
+                    e: sample.follow_error_degrees,
+                    v: sample.velocity,
+                    f: sample.effort,
+                    a: sample.action,
+                };
+                match write_line(&mut writer, &line) {
+                    Ok(()) => {
+                        shared.written.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(source) => {
+                        *shared.failure.lock().expect("writer failure") =
+                            Some(EpisodeError::io(path, source).to_string());
+                        failed = true;
+                    }
+                }
             }
-            Err(source) => {
-                *shared.failure.lock().expect("writer failure") =
-                    Some(EpisodeError::io(path, source).to_string());
-                failed = true;
+            WriterMessage::Sample(_) => {}
+            WriterMessage::Checkpoint(complete) => {
+                let result = if failed {
+                    Err(shared
+                        .failure
+                        .lock()
+                        .expect("writer failure")
+                        .clone()
+                        .unwrap_or_else(|| "the episode writer failed".to_owned()))
+                } else {
+                    writer.flush().map_err(|source| {
+                        let error = EpisodeError::io(path, source).to_string();
+                        *shared.failure.lock().expect("writer failure") = Some(error.clone());
+                        failed = true;
+                        error
+                    })
+                };
+                let _ = complete.send(result);
             }
         }
     }
@@ -1045,27 +1590,30 @@ fn read_summary(path: &Path, kind: FileKind) -> Result<EpisodeSummary, EpisodeEr
         FileKind::Unfinished => None,
     };
 
-    let (frames, duration_seconds, max_follow_error_degrees, discarded, problem) = match footer {
-        Some(footer) => (
-            footer.frames,
-            footer.duration_seconds,
-            footer.max_follow_error_degrees,
-            footer.discarded,
-            None,
-        ),
-        // No footer: the recording never closed. Count what survived so the
-        // operator can see how much of the take is there.
-        None => {
-            let (frames, seconds) = measure_samples(path)?;
-            (
-                frames,
-                seconds,
+    let (frames, duration_seconds, recording_gaps, max_follow_error_degrees, discarded, problem) =
+        match footer {
+            Some(footer) => (
+                footer.frames,
+                footer.duration_seconds,
+                footer.recording_gaps,
+                footer.max_follow_error_degrees,
+                footer.discarded,
                 None,
-                false,
-                Some("recording did not finish".to_owned()),
-            )
-        }
-    };
+            ),
+            // No footer: the recording never closed. Count what survived so the
+            // operator can see how much of the take is there.
+            None => {
+                let (frames, seconds) = measure_samples(path)?;
+                (
+                    frames,
+                    seconds,
+                    Vec::new(),
+                    None,
+                    false,
+                    Some("recording did not finish".to_owned()),
+                )
+            }
+        };
 
     Ok(EpisodeSummary {
         id: header.id,
@@ -1073,6 +1621,7 @@ fn read_summary(path: &Path, kind: FileKind) -> Result<EpisodeSummary, EpisodeEr
         arms: header.arms,
         frames,
         duration_seconds,
+        recording_gaps,
         sample_hz: header.sample_hz,
         started_ms: header.started_ms,
         source: header.source,
@@ -1253,7 +1802,13 @@ mod tests {
             }));
         }
         writer
-            .finish(frames as f64 / 60.0, Some(3.25), false, Vec::new())
+            .finish(
+                frames as f64 / 60.0,
+                Vec::new(),
+                Some(3.25),
+                false,
+                Vec::new(),
+            )
             .expect("finish take")
     }
 
@@ -1294,6 +1849,7 @@ mod tests {
         let summary = writer
             .finish(
                 0.05,
+                Vec::new(),
                 None,
                 false,
                 vec![ArmConditionSummary {
@@ -1477,6 +2033,45 @@ mod tests {
     }
 
     #[test]
+    fn timeline_samples_are_random_access_and_choose_the_nearest_frame() {
+        let (_directory, store) = store();
+        record(&store, 4);
+
+        let metadata = store
+            .timeline_metadata("episode_000001")
+            .expect("timeline metadata");
+        assert_eq!(metadata.samples, 4);
+        assert_eq!(metadata.first_seconds, Some(0.0));
+        assert_eq!(metadata.last_seconds, Some(3.0 / 60.0));
+
+        let sample = store
+            .sample_at("episode_000001", 0.031)
+            .expect("nearest sample");
+        assert_eq!(sample.frame, 2);
+        assert_eq!(sample.seconds, 2.0 / 60.0);
+        assert_eq!(sample.follow_error_degrees, Some(2.0));
+        assert_eq!(sample.arms.len(), 1);
+        assert_eq!(sample.arms[0].arm, "follower");
+        assert_eq!(sample.arms[0].normalized["shoulder_pan"], Some(0.2));
+        assert_eq!(sample.arms[0].raw["shoulder_pan"], 2050);
+
+        assert_eq!(
+            store
+                .sample_at("episode_000001", -10.0)
+                .expect("clamped first sample")
+                .frame,
+            0
+        );
+        assert_eq!(
+            store
+                .sample_at("episode_000001", 10.0)
+                .expect("clamped last sample")
+                .frame,
+            3
+        );
+    }
+
+    #[test]
     fn an_uncalibrated_take_has_nothing_to_replay() {
         let (_directory, store) = store();
         let writer = store
@@ -1495,7 +2090,7 @@ mod tests {
             });
         }
         writer
-            .finish(0.066, None, false, Vec::new())
+            .finish(0.066, Vec::new(), None, false, Vec::new())
             .expect("finish");
         store.reload().expect("reload");
 
@@ -1536,10 +2131,64 @@ mod tests {
             ..Sample::default()
         });
         writer
-            .finish(0.016, None, false, Vec::new())
+            .finish(0.016, Vec::new(), None, false, Vec::new())
             .expect("finish");
         store.reload().expect("reload");
         assert_eq!(store.trace("episode_000002", 8).expect("trace"), vec![None]);
+    }
+
+    #[test]
+    fn timeline_joint_traces_keep_both_extrema_and_missing_samples() {
+        let (_directory, store) = store();
+        let writer = store
+            .begin("Teleoperation".to_owned(), None, 60.0, arms(), Vec::new())
+            .expect("begin");
+        let shoulder = [
+            Some(0.0),
+            Some(1.0),
+            Some(-7.0),
+            Some(2.0),
+            None,
+            Some(3.0),
+            Some(9.0),
+            Some(4.0),
+        ];
+        for (frame, value) in shoulder.into_iter().enumerate() {
+            assert!(writer.push(Sample {
+                seconds: frame as f64 / 60.0,
+                normalized: vec![vec![value, Some(0.5)]],
+                raw: vec![vec![2048, 1024]],
+                ..Sample::default()
+            }));
+        }
+        writer
+            .finish(8.0 / 60.0, Vec::new(), None, false, Vec::new())
+            .expect("finish");
+        store.reload().expect("reload");
+
+        let traces = store
+            .timeline_traces("episode_000001", 2)
+            .expect("timeline traces");
+        assert_eq!(traces.samples, 8);
+        assert_eq!(traces.buckets, 2);
+        assert_eq!(traces.lanes.len(), 6);
+        assert_eq!(traces.lanes[0].joint, "shoulder_pan");
+        assert_eq!(traces.lanes[5].joint, "gripper");
+        assert!(traces.lanes[1].series.is_empty());
+
+        let points = &traces.lanes[0].series[0].points;
+        assert!(points.iter().any(|point| point.value == Some(-7.0)));
+        assert!(points.iter().any(|point| point.value == Some(9.0)));
+        assert!(points.iter().any(|point| point.value.is_none()));
+        assert!(points.len() <= 3 * traces.buckets);
+        assert!(
+            points
+                .windows(2)
+                .all(|pair| pair[0].seconds <= pair[1].seconds)
+        );
+
+        let json = serde_json::to_value(&traces).expect("serialize traces");
+        assert!(json.to_string().contains("\"value\":null"));
     }
 
     #[test]

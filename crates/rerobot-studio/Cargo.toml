@@ -7,7 +7,7 @@ publish = false
 
 [features]
 default = []
-web = ["dioxus/web", "dep:charming"]
+web = ["dioxus/web", "dep:charming", "rerobot-panels/web"]
 server = [
     "dioxus/cli-config",
     "dioxus/server",
@@ -34,6 +34,7 @@ server = [
 [dependencies]
 rerobot = { workspace = true, optional = true }
 rerobot-core.workspace = true
+rerobot-panels.workspace = true
 rerobot-viewport.workspace = true
 clap = { workspace = true, optional = true }
 dioxus = { workspace = true, features = [

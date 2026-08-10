@@ -633,6 +633,13 @@ pub struct EpisodeSummary {
     pub arms: Vec<EpisodeArm>,
     pub frames: u64,
     pub duration_seconds: f64,
+    /// Wall-clock intervals deliberately omitted from the episode timeline.
+    ///
+    /// Samples and recorded video use the active timeline, so pausing does not
+    /// create a motionless training-data plateau. Each entry preserves where
+    /// the omission happened and how much real time passed there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recording_gaps: Vec<RecordingGap>,
     /// Rate the take was captured at, so a replay can honour its timing.
     pub sample_hz: f64,
     /// When the take started, as milliseconds since the Unix epoch.
@@ -686,6 +693,15 @@ pub struct RecordingProgress {
     pub episode: String,
     pub frames: u64,
     pub elapsed_seconds: f64,
+    /// Real time since Record was pressed, including deliberate pauses.
+    #[serde(default)]
+    pub wall_elapsed_seconds: f64,
+    /// Real time omitted from the active episode timeline so far.
+    #[serde(default)]
+    pub paused_seconds: f64,
+    /// Whether samples and camera frames are currently being omitted.
+    #[serde(default)]
+    pub paused: bool,
     /// Arms being sampled.
     pub arms: Vec<String>,
     /// Largest `Follow Δ` seen so far in this take, in degrees.
@@ -693,6 +709,17 @@ pub struct RecordingProgress {
     /// Set when the capture stopped itself — a full disk, or an arm that went
     /// away mid-take.
     pub error: Option<String>,
+}
+
+/// A deliberate pause in an otherwise continuous recording session.
+///
+/// `after_seconds` is expressed on the gap-free active timeline. This keeps
+/// replay and dataset sampling contiguous while retaining enough provenance to
+/// display or audit every omitted wall-clock interval.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct RecordingGap {
+    pub after_seconds: f64,
+    pub duration_seconds: f64,
 }
 
 /// An episode being played back right now.
@@ -706,6 +733,10 @@ pub struct ReplayProgress {
     pub frames: u64,
     pub elapsed_seconds: f64,
     pub duration_seconds: f64,
+    /// Whether playback is holding its current frame without discarding the
+    /// loaded trajectory. Resuming continues from this exact position.
+    #[serde(default)]
+    pub paused: bool,
 }
 
 /// Begin capturing a take.
@@ -726,6 +757,18 @@ pub struct StopRecordingRequest {
     /// False marks the finished take discarded in the same gesture that ends
     /// it, for the common case of knowing the take was bad while it ran.
     pub keep: bool,
+}
+
+/// Pause or resume the take in progress without changing its episode ID.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SetRecordingPausedRequest {
+    pub paused: bool,
+}
+
+/// Pause or resume a replay without unloading its trajectory.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SetReplayPausedRequest {
+    pub paused: bool,
 }
 
 /// Change the operator's judgement of a stored take.
@@ -973,6 +1016,7 @@ mod tests {
             }],
             frames: 120,
             duration_seconds: 2.0,
+            recording_gaps: Vec::new(),
             sample_hz: 60.0,
             started_ms: 1_770_000_000_000,
             source: "Teleoperation".to_owned(),

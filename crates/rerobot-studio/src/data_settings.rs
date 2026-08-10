@@ -45,6 +45,19 @@ impl Default for StoredSpiralSettings {
     }
 }
 
+impl StoredSpiralSettings {
+    /// Spiral is active when its destination is complete. The persisted
+    /// `enabled` bit remains readable for compatibility with older settings
+    /// files, but configuration—not a second toggle—is the source of truth.
+    pub fn configured(&self) -> bool {
+        let uri = self.uri.trim();
+        let dataset = self.dataset.trim();
+        !dataset.is_empty()
+            && (uri == "spiral:memory:"
+                || (uri == "spiraldb://" && !self.project_id.trim().is_empty()))
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StoredHuggingFaceSettings {
     #[serde(default)]
@@ -72,7 +85,7 @@ impl StoredDataSettings {
     pub fn public(&self) -> DataSettings {
         DataSettings {
             spiral: SpiralSettings {
-                enabled: self.spiral.enabled,
+                enabled: self.spiral.configured(),
                 uri: self.spiral.uri.clone(),
                 project_id: self.spiral.project_id.clone(),
                 dataset: self.spiral.dataset.clone(),
@@ -124,10 +137,10 @@ impl DataSettingsStore {
         validate_update(&update)?;
         let mut current = lock(&self.current);
         let mut staged = current.clone();
-        staged.spiral.enabled = update.spiral.enabled;
         staged.spiral.uri = update.spiral.uri.trim().to_owned();
         staged.spiral.project_id = update.spiral.project_id.trim().to_owned();
         staged.spiral.dataset = update.spiral.dataset.trim().to_owned();
+        staged.spiral.enabled = staged.spiral.configured();
         staged.hugging_face.enabled = update.hugging_face.enabled;
         staged.hugging_face.repository = update.hugging_face.repository.trim().to_owned();
         staged.hugging_face.revision = update.hugging_face.revision.trim().to_owned();
@@ -154,8 +167,10 @@ impl DataSettingsStore {
 }
 
 fn validate_update(update: &UpdateDataSettingsRequest) -> Result<(), String> {
-    if update.spiral.enabled {
-        validate_spiral_uri(&update.spiral.uri)?;
+    validate_spiral_uri(&update.spiral.uri)?;
+    let spiral_configured =
+        update.spiral.uri.trim() == "spiral:memory:" || !update.spiral.project_id.trim().is_empty();
+    if spiral_configured {
         if update.spiral.uri.trim() != "spiral:memory:" {
             validate_identifier("Spiral project", &update.spiral.project_id)?;
         }
@@ -297,5 +312,29 @@ mod tests {
 
         update.spiral.dataset = "robot_data_1".to_owned();
         validate_update(&update).unwrap();
+    }
+
+    #[test]
+    fn spiral_configuration_is_implicit_from_the_destination() {
+        let mut update = UpdateDataSettingsRequest::default();
+        update.spiral.uri = "spiraldb://".to_owned();
+        validate_update(&update).unwrap();
+
+        update.spiral.uri = "spiral:memory:".to_owned();
+        validate_update(&update).unwrap();
+
+        let mut stored = StoredSpiralSettings::default();
+        assert!(!stored.configured());
+        stored.project_id = "project-123".to_owned();
+        assert!(stored.configured());
+        assert!(
+            StoredDataSettings {
+                spiral: stored,
+                ..StoredDataSettings::default()
+            }
+            .public()
+            .spiral
+            .enabled
+        );
     }
 }

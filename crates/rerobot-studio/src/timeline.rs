@@ -695,6 +695,7 @@ mod tests {
             arms: Vec::new(),
             frames: 1_478,
             duration_seconds: 24.7,
+            recording_gaps: Vec::new(),
             sample_hz: 60.0,
             started_ms: 0,
             source: "Teleoperation · leader → follower".to_owned(),

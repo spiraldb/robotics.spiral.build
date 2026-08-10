@@ -29,6 +29,50 @@ pub struct VideoAsset {
     pub height: u32,
     pub fps: u32,
     pub frames: u64,
+    /// Zero-based active interval for this logical camera stream.
+    #[serde(default)]
+    pub segment_index: u32,
+    /// Start of this segment on the gap-free episode timeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline_offset_seconds: Option<f64>,
+}
+
+/// Filesystem-free metadata safe to expose to a remote studio client.
+///
+/// Paused captures expose one finalized, seekable asset per active interval.
+/// `timeline_offset_seconds` maps each segment onto the same gap-free clock as
+/// joint samples; `segment_index` selects its local HTTP asset.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct VideoAssetMetadata {
+    pub stream_id: String,
+    pub camera_id: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub frames: u64,
+    pub duration_seconds: f64,
+    pub segment_index: u32,
+    pub timeline_offset_seconds: Option<f64>,
+}
+
+impl VideoAsset {
+    pub fn metadata(&self) -> VideoAssetMetadata {
+        VideoAssetMetadata {
+            stream_id: self.stream_id.clone(),
+            camera_id: self.camera_id.clone(),
+            width: self.width,
+            height: self.height,
+            fps: self.fps,
+            frames: self.frames,
+            duration_seconds: if self.fps == 0 {
+                0.0
+            } else {
+                self.frames as f64 / self.fps as f64
+            },
+            segment_index: self.segment_index,
+            timeline_offset_seconds: self.timeline_offset_seconds,
+        }
+    }
 }
 
 const ASSET_MANIFEST: &str = "assets.json";
@@ -69,8 +113,25 @@ pub fn load_assets(root: &Path, episode_id: &str) -> Result<Vec<VideoAsset>, Str
 
 pub struct VideoCapture {
     episode_id: String,
-    cancel: watch::Sender<bool>,
+    cameras: Arc<CameraManager>,
+    root: PathBuf,
+    specs: Vec<CameraCaptureSpec>,
+    ffmpeg: String,
+    codec: String,
+    next_segment: u32,
+    active: Option<VideoCaptureRun>,
+    completed: Vec<VideoAsset>,
+}
+
+struct VideoCaptureRun {
+    control: watch::Sender<CaptureState>,
     tasks: Vec<tokio::task::JoinHandle<Result<VideoAsset, String>>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaptureState {
+    Recording,
+    Finish,
 }
 
 #[derive(Clone, Debug)]
@@ -95,53 +156,110 @@ impl VideoCapture {
         tokio::fs::create_dir_all(&directory)
             .await
             .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
-        let (cancel, _) = watch::channel(false);
-        let mut tasks = Vec::with_capacity(specs.len());
-        for spec in specs {
-            let frames = cameras.subscribe(&spec.camera_id)?;
-            let output = directory.join(format!("{}.mp4", safe_file_stem(&spec.stream_id)));
-            tasks.push(tokio::spawn(record_camera(
-                spec,
-                frames,
-                cancel.subscribe(),
-                ffmpeg.to_owned(),
-                codec.to_owned(),
-                output,
-            )));
-        }
-        Ok(Some(Self {
+        let mut capture = Self {
             episode_id: episode_id.to_owned(),
-            cancel,
-            tasks,
-        }))
+            cameras,
+            root: root.to_path_buf(),
+            specs,
+            ffmpeg: ffmpeg.to_owned(),
+            codec: codec.to_owned(),
+            next_segment: 0,
+            active: None,
+            completed: Vec::new(),
+        };
+        capture.start_segment(0.0)?;
+        Ok(Some(capture))
     }
 
     pub fn episode_id(&self) -> &str {
         &self.episode_id
     }
 
-    pub async fn finish(self) -> (Vec<VideoAsset>, Vec<String>) {
-        self.cancel.send_replace(true);
+    fn start_segment(&mut self, timeline_offset_seconds: f64) -> Result<(), String> {
+        if self.active.is_some() {
+            return Ok(());
+        }
+        let index = self.next_segment;
+        let directory = self.root.join("videos").join(&self.episode_id);
+        let (control, _) = watch::channel(CaptureState::Recording);
+        let mut tasks = Vec::with_capacity(self.specs.len());
+        for spec in self.specs.iter().cloned() {
+            let frames = self.cameras.subscribe(&spec.camera_id)?;
+            let output = directory.join(format!(
+                "{}.segment-{index:03}.mp4",
+                safe_file_stem(&spec.stream_id)
+            ));
+            tasks.push(tokio::spawn(record_camera(
+                spec,
+                frames,
+                control.subscribe(),
+                self.ffmpeg.clone(),
+                self.codec.clone(),
+                output,
+                index,
+                timeline_offset_seconds,
+            )));
+        }
+        self.next_segment += 1;
+        self.active = Some(VideoCaptureRun { control, tasks });
+        Ok(())
+    }
+
+    /// Stop feeding the current encoders immediately. Their finalized MP4s are
+    /// collected after the joint-writer pause barrier has completed.
+    pub fn request_pause(&self) {
+        if let Some(active) = &self.active {
+            active.control.send_replace(CaptureState::Finish);
+        }
+    }
+
+    /// Finalize and publish a provisional segment manifest for paused review.
+    pub async fn finish_pause(&mut self) -> Vec<String> {
+        let failures = self.finish_active().await;
+        if let Err(error) = save_assets(&self.root, &self.episode_id, &self.completed) {
+            return failures.into_iter().chain([error]).collect();
+        }
+        failures
+    }
+
+    /// Open the next active interval under the same episode and camera set.
+    pub fn resume(&mut self, timeline_offset_seconds: f64) -> Result<(), String> {
+        self.start_segment(timeline_offset_seconds)
+    }
+
+    async fn finish_active(&mut self) -> Vec<String> {
         let mut assets = Vec::new();
         let mut failures = Vec::new();
-        for task in self.tasks {
+        let Some(active) = self.active.take() else {
+            return failures;
+        };
+        active.control.send_replace(CaptureState::Finish);
+        for task in active.tasks {
             match task.await {
                 Ok(Ok(asset)) => assets.push(asset),
                 Ok(Err(error)) => failures.push(error),
                 Err(error) => failures.push(format!("camera recording task failed: {error}")),
             }
         }
-        (assets, failures)
+        self.completed.extend(assets);
+        failures
+    }
+
+    pub async fn finish(mut self) -> (Vec<VideoAsset>, Vec<String>) {
+        let failures = self.finish_active().await;
+        (self.completed, failures)
     }
 }
 
 async fn record_camera(
     spec: CameraCaptureSpec,
     mut frames: watch::Receiver<Option<Arc<Frame>>>,
-    mut cancel: watch::Receiver<bool>,
+    mut control: watch::Receiver<CaptureState>,
     ffmpeg: String,
     codec: String,
     output: PathBuf,
+    segment_index: u32,
+    timeline_offset_seconds: f64,
 ) -> Result<VideoAsset, String> {
     let rate = spec.fps.clamp(1, 120).to_string();
     let mut child = tokio::process::Command::new(&ffmpeg)
@@ -189,9 +307,13 @@ async fn record_camera(
     let mut written = 0_u64;
     let mut last_sequence = 0_u64;
     loop {
+        if *control.borrow() == CaptureState::Finish {
+            break;
+        }
         tokio::select! {
-            changed = cancel.changed() => {
-                if changed.is_err() || *cancel.borrow() {
+            biased;
+            changed = control.changed() => {
+                if changed.is_err() || *control.borrow() == CaptureState::Finish {
                     break;
                 }
             }
@@ -252,6 +374,8 @@ async fn record_camera(
         height: spec.height,
         fps: spec.fps,
         frames: written,
+        segment_index,
+        timeline_offset_seconds: Some(timeline_offset_seconds),
     })
 }
 
@@ -297,10 +421,32 @@ mod tests {
             height: 480,
             fps: 30,
             frames: 10,
+            segment_index: 2,
+            timeline_offset_seconds: Some(4.5),
         }];
         save_assets(directory.path(), "episode_000001", &assets).unwrap();
         let loaded = load_assets(directory.path(), "episode_000001").unwrap();
         assert_eq!(loaded[0].stream_id, assets[0].stream_id);
         assert_eq!(loaded[0].frames, 10);
+        assert_eq!(loaded[0].metadata().duration_seconds, 10.0 / 30.0);
+        assert_eq!(loaded[0].metadata().segment_index, 2);
+        assert_eq!(loaded[0].metadata().timeline_offset_seconds, Some(4.5));
+    }
+
+    #[test]
+    fn legacy_video_manifests_do_not_invent_clock_alignment() {
+        let asset: VideoAsset = serde_json::from_value(serde_json::json!({
+            "stream_id": "follower.camera.wrist",
+            "camera_id": "camera-1",
+            "path": "/tmp/legacy.mp4",
+            "width": 640,
+            "height": 480,
+            "fps": 30,
+            "frames": 10
+        }))
+        .expect("legacy manifest");
+
+        assert_eq!(asset.segment_index, 0);
+        assert_eq!(asset.timeline_offset_seconds, None);
     }
 }

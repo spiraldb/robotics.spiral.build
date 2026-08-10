@@ -3,9 +3,9 @@
 //! One arm is one robot instance is one JSON file. Everything on this panel —
 //! the port, the cameras, the calibration — ends up in that single file.
 //!
-//! The panel is a list of arms above the setup for whichever one is selected,
-//! so adding an arm, wiring it up, and calibrating it all happen beside the
-//! 3D view of it rather than on a screen of their own.
+//! The panel lives in Settings as the durable owner of ports, camera
+//! assignments, and calibration. Live consumes that configuration without
+//! mixing setup work into the operating surface.
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;

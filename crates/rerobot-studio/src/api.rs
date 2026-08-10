@@ -3,17 +3,19 @@
 //! Requests go to the same origin the page was served from, so the UI works
 //! unchanged whether the studio is on localhost or on the robot's own machine.
 
+use std::collections::BTreeMap;
+
 #[cfg(feature = "web")]
 use futures_util::{StreamExt, stream};
 #[cfg(feature = "web")]
 use gloo_net::eventsource::futures::EventSource;
 use gloo_net::http::{Method, RequestBuilder};
 use js_sys::Uint8Array;
-use rerobot_core::api::ApiError;
+use rerobot_core::api::{ApiError, EpisodeSummary};
 #[cfg(feature = "web")]
 use rerobot_core::api::{StudioSnapshot, TelemetryFrame};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Fetch and decode a JSON resource.
@@ -44,6 +46,54 @@ pub async fn send_json<B: Serialize, T: DeserializeOwned>(
 /// POST with no request body.
 pub async fn post(path: &str) -> Result<(), String> {
     send::<()>(Method::POST, path, None).await
+}
+
+/// Filesystem-free metadata for one locally recorded camera stream.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct VideoAssetMetadata {
+    pub stream_id: String,
+    pub camera_id: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub frames: u64,
+    pub duration_seconds: f64,
+    pub segment_index: u32,
+    pub timeline_offset_seconds: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct TimelineMetadata {
+    pub samples: u64,
+    pub first_seconds: Option<f64>,
+    pub last_seconds: Option<f64>,
+}
+
+/// Local episode detail used to align timeline samples and recorded media.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct EpisodeTimelineResponse {
+    pub episode: EpisodeSummary,
+    pub samples: TimelineMetadata,
+    pub videos: Vec<VideoAssetMetadata>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct TimelineArmSample {
+    pub arm: String,
+    pub normalized: BTreeMap<String, Option<f64>>,
+    pub raw: BTreeMap<String, i64>,
+    pub velocity: Option<BTreeMap<String, Option<f64>>>,
+    pub effort: Option<BTreeMap<String, Option<f64>>>,
+    pub action: Option<BTreeMap<String, Option<f64>>>,
+}
+
+/// The nearest stored sample to a committed historical playhead position.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct TimelineSample {
+    pub frame: u64,
+    pub seconds: f64,
+    pub follow_error_degrees: Option<f64>,
+    pub arms: Vec<TimelineArmSample>,
 }
 
 /// Upload one file and decode the server's JSON response.
@@ -158,6 +208,28 @@ pub fn camera_stream_url(id: &str) -> String {
     format!("/api/cameras/stream.mjpeg?id={}", encode_query(id))
 }
 
+/// Timeline detail endpoint for one local episode.
+pub fn episode_timeline_url(episode: &str) -> String {
+    format!("/api/episodes/{}/timeline", encode_query(episode))
+}
+
+/// Random-access sample endpoint for one local episode.
+pub fn timeline_sample_url(episode: &str, seconds: f64) -> String {
+    format!(
+        "/api/episodes/{}/timeline/sample?at={seconds:.6}",
+        encode_query(episode)
+    )
+}
+
+/// Browser-native MP4 endpoint for one segment of a local camera stream.
+pub fn episode_video_url(episode: &str, stream: &str, segment: u32) -> String {
+    format!(
+        "/api/episodes/{}/videos/{}?segment={segment}",
+        encode_query(episode),
+        encode_query(stream)
+    )
+}
+
 /// URL of one MP4 stored in Spiral for browser-native preview.
 pub fn spiral_video_url(episode: &str, stream: &str) -> String {
     format!(
@@ -206,6 +278,18 @@ mod tests {
         assert_eq!(
             spiral_video_url("episode 1", "arm/camera"),
             "/api/spiral/video.mp4?episode=episode%201&stream=arm%2Fcamera"
+        );
+        assert_eq!(
+            episode_timeline_url("episode 1"),
+            "/api/episodes/episode%201/timeline"
+        );
+        assert_eq!(
+            timeline_sample_url("episode 1", 1.25),
+            "/api/episodes/episode%201/timeline/sample?at=1.250000"
+        );
+        assert_eq!(
+            episode_video_url("episode 1", "arm/camera", 2),
+            "/api/episodes/episode%201/videos/arm%2Fcamera?segment=2"
         );
     }
 }

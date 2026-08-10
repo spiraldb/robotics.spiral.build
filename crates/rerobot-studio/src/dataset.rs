@@ -441,6 +441,7 @@ pub fn import_lerobot_archive(
         }
         let summary = writer.finish(
             last_time.max(frames.len() as f64 / fps),
+            Vec::new(),
             None,
             false,
             Vec::new(),
@@ -1071,7 +1072,9 @@ mod tests {
                 ])],
             });
         }
-        writer.finish(0.1, None, false, Vec::new()).unwrap();
+        writer
+            .finish(0.1, Vec::new(), None, false, Vec::new())
+            .unwrap();
     }
 
     /// Read `meta/info.json` and `README.md` out of an archive.

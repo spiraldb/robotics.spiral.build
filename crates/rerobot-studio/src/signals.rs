@@ -230,7 +230,9 @@ impl SignalStore {
                         arm.joints.last_mut().expect("just pushed")
                     }
                 };
-                signal.values.push(joint.degrees.map(|degrees| degrees as f32));
+                signal
+                    .values
+                    .push(joint.degrees.map(|degrees| degrees as f32));
             }
         }
 
@@ -422,7 +424,9 @@ pub fn decimate(
     }
     let count = hi - lo;
     if count <= budget {
-        return (lo..hi).map(|index| (times[index], values[index])).collect();
+        return (lo..hi)
+            .map(|index| (times[index], values[index]))
+            .collect();
     }
 
     let buckets = (budget / 2).max(1);
@@ -486,9 +490,7 @@ pub fn decimate(
 /// `divisions` is what the plot has room for, so a 60px trace gets three
 /// labels and a tall one gets five.
 pub fn nice_range(low: f32, high: f32, divisions: u32) -> (f32, f32, f32) {
-    const STEPS: [f32; 10] = [
-        1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 45.0, 60.0, 90.0, 180.0,
-    ];
+    const STEPS: [f32; 10] = [1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 45.0, 60.0, 90.0, 180.0];
     let divisions = divisions.max(1) as f32;
     let fits = |step: &f32| {
         let lower = (low / step).floor();
@@ -936,6 +938,9 @@ mod tests {
                 episode: episode.to_owned(),
                 frames: 1,
                 elapsed_seconds: elapsed,
+                wall_elapsed_seconds: elapsed,
+                paused_seconds: 0.0,
+                paused: false,
                 arms: Vec::new(),
                 max_follow_error_degrees: None,
                 error: None,
@@ -1234,7 +1239,10 @@ mod tests {
         }
 
         let (lo, hi) = store.range(3.0, 6.0);
-        assert!(lo <= 2, "one sample of overhang so a line enters the window");
+        assert!(
+            lo <= 2,
+            "one sample of overhang so a line enters the window"
+        );
         assert!(hi >= 7);
         assert_eq!(store.nearest(5.4), Some(5));
         assert_eq!(store.nearest(-2.0), Some(0));

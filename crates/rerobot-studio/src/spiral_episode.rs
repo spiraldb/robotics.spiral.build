@@ -559,6 +559,7 @@ mod tests {
         let start = start();
         let completion = EpisodeCompletion {
             duration_seconds: 2.5,
+            recording_gaps: Vec::new(),
             max_follow_error_degrees: Some(1.25),
             discarded: false,
             condition: Vec::new(),

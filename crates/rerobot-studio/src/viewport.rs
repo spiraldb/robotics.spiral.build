@@ -20,6 +20,8 @@ use dioxus::prelude::*;
 use dioxus_elements::geometry::WheelDelta;
 use dioxus_elements::input_data::MouseButton;
 use rerobot_core::api::{MotorCondition, RobotSummary};
+use rerobot_core::arm::{JointAngles, counts_to_degrees};
+use rerobot_core::calibration::{Direction, denormalize_centered_raw};
 use rerobot_core::glam::Vec3;
 use rerobot_viewport::robot::BENCH_SPACING;
 use rerobot_viewport::{
@@ -32,6 +34,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 use web_sys::HtmlCanvasElement;
 
+use crate::api::{TimelineArmSample, TimelineSample};
 use crate::state::{Selection, studio};
 
 pub use rerobot_viewport::tool_position;
@@ -83,7 +86,10 @@ struct Hover {
 }
 
 #[component]
-pub fn Viewport() -> Element {
+pub fn Viewport(
+    #[props(default)] historical: Option<TimelineSample>,
+    #[props(default)] resize_revision: u64,
+) -> Element {
     let mut studio = studio();
     let urdf = crate::state::description();
     let bench = use_hook(|| Rc::new(RefCell::new(Option::<Bench>::None)));
@@ -114,33 +120,48 @@ pub fn Viewport() -> Element {
 
     let draw_bench = bench.clone();
     let draw_urdf = urdf.clone();
-    use_effect(move || {
-        let _ = resized();
-        let camera = camera();
-        let grid = show_grid();
-        let hovered = hover();
-        let Ok(urdf) = draw_urdf.as_ref() else {
-            return;
-        };
-        let scene = compose(urdf, &studio, grid, hovered.as_ref().map(|it| &it.entity));
+    let draw_historical = historical.clone();
+    use_effect(use_reactive(
+        (&resize_revision,),
+        move |(_resize_revision,)| {
+            // A workbench divider changes this canvas without changing the
+            // browser window. Its host increments the revision while dragging
+            // so WebGL redraws against the canvas's new CSS bounds instead of
+            // stretching the previous frame until the next telemetry or camera
+            // interaction.
+            let _ = resized();
+            let camera = camera();
+            let grid = show_grid();
+            let hovered = hover();
+            let Ok(urdf) = draw_urdf.as_ref() else {
+                return;
+            };
+            let scene = compose(
+                urdf,
+                &studio,
+                grid,
+                draw_historical.as_ref(),
+                hovered.as_ref().map(|it| &it.entity),
+            );
 
-        let Some(canvas) = canvas() else { return };
-        let mut slot = draw_bench.borrow_mut();
-        if slot.is_none() {
-            match Bench::new(canvas) {
-                Ok(ready) => *slot = Some(ready),
-                Err(error) => {
-                    trouble.set(Some(error));
-                    return;
+            let Some(canvas) = canvas() else { return };
+            let mut slot = draw_bench.borrow_mut();
+            if slot.is_none() {
+                match Bench::new(canvas) {
+                    Ok(ready) => *slot = Some(ready),
+                    Err(error) => {
+                        trouble.set(Some(error));
+                        return;
+                    }
                 }
             }
-        }
-        let Some(bench) = slot.as_mut() else {
-            return;
-        };
-        let ratio = web_sys::window().map_or(1.0, |window| window.device_pixel_ratio());
-        bench.draw(&camera, &scene.scene, ratio);
-    });
+            let Some(bench) = slot.as_mut() else {
+                return;
+            };
+            let ratio = web_sys::window().map_or(1.0, |window| window.device_pixel_ratio());
+            bench.draw(&camera, &scene.scene, ratio);
+        },
+    ));
 
     let arms = studio.snapshot.read().robots.clone();
     let failure = match urdf.as_ref() {
@@ -150,7 +171,12 @@ pub fn Viewport() -> Element {
     // Where each unwell motor sits on the canvas right now. Computed from the
     // scene the crate just drew, so a mark cannot drift away from the part it
     // is about as the camera moves.
-    let marks = condition_marks(&urdf, &studio, &bench, camera(), show_grid());
+    let marks = if historical.is_some() {
+        Vec::new()
+    } else {
+        condition_marks(&urdf, &studio, &bench, camera(), show_grid())
+    };
+    let historical_active = historical.is_some();
 
     rsx! {
         div { class: "relative h-full w-full overflow-hidden bg-viewport",
@@ -190,6 +216,7 @@ pub fn Viewport() -> Element {
                 onpointermove: {
                     let bench = bench.clone();
                     let urdf = urdf.clone();
+                    let historical = historical.clone();
                     move |event| {
                         let position = point(&event);
                         if let Some((pointer, _)) = touch(&event)
@@ -215,12 +242,21 @@ pub fn Viewport() -> Element {
                         }
                         // Only while nothing is being dragged: an orbit is not
                         // a tour of everything the pointer sweeps past.
-                        hover.set(hovered(&urdf, &studio, &bench, camera(), show_grid(), position));
+                        hover.set(hovered(
+                            &urdf,
+                            &studio,
+                            &bench,
+                            camera(),
+                            show_grid(),
+                            historical.as_ref(),
+                            position,
+                        ));
                     }
                 },
                 onpointerup: {
                     let bench = bench.clone();
                     let urdf = urdf.clone();
+                    let historical = historical.clone();
                     move |event| {
                         if let Some((pointer, _)) = touch(&event) {
                             touches.write().remove(&pointer);
@@ -230,8 +266,15 @@ pub fn Viewport() -> Element {
                         }
                         if drag().is_some_and(|active| !active.moved()) {
                             let position = point(&event);
-                            let picked =
-                                hovered(&urdf, &studio, &bench, camera(), show_grid(), position);
+                            let picked = hovered(
+                                &urdf,
+                                &studio,
+                                &bench,
+                                camera(),
+                                show_grid(),
+                                historical.as_ref(),
+                                position,
+                            );
                             // Clicking bare bench clears the selection, the way
                             // clicking empty space does everywhere else.
                             studio
@@ -313,9 +356,15 @@ pub fn Viewport() -> Element {
                     }
                 }
                 if let Some(hovered) = hover() {
-                    HoverNote { hover: hovered }
+                    HoverNote { hover: hovered, historical: historical_active }
                 }
                 Legend { arms }
+                if let Some(sample) = &historical {
+                    div {
+                        class: "pointer-events-none absolute left-1/2 top-2 z-20 -translate-x-1/2 rounded-sm border border-line bg-surface px-2 py-1 font-mono text-[10px] tabular-nums text-ink-soft",
+                        "History · {format_history_time(sample.seconds)}"
+                    }
+                }
                 div { class: "viewport-help",
                     "click select · drag orbit · shift-drag pan · scroll zoom · F frame"
                 }
@@ -353,9 +402,9 @@ pub fn Viewport() -> Element {
 /// the operator is going next anyway — and which stays reachable without a
 /// pointer at all.
 #[component]
-fn HoverNote(hover: Hover) -> Element {
+fn HoverNote(hover: Hover, historical: bool) -> Element {
     let studio = studio();
-    let (title, detail) = describe(&studio, &hover.entity);
+    let (title, detail) = describe(&studio, &hover.entity, historical);
     rsx! {
         div {
             class: "bench-note",
@@ -370,7 +419,11 @@ fn HoverNote(hover: Hover) -> Element {
 }
 
 /// What to call an entity, and the reading worth showing beside its name.
-fn describe(studio: &crate::state::Studio, entity: &RobotEntity) -> (String, Option<String>) {
+fn describe(
+    studio: &crate::state::Studio,
+    entity: &RobotEntity,
+    historical: bool,
+) -> (String, Option<String>) {
     match entity {
         RobotEntity::Structure { robot } => (robot.clone(), None),
         RobotEntity::Camera { robot, role } => (format!("{role} camera"), Some(robot.clone())),
@@ -383,11 +436,14 @@ fn describe(studio: &crate::state::Studio, entity: &RobotEntity) -> (String, Opt
                     .into_iter()
                     .find(|candidate| candidate.name == *joint)
             });
-            let detail = telemetry.and_then(|telemetry| {
-                telemetry
-                    .temperature_celsius
-                    .map(|celsius| format!("{celsius:.0} °C"))
-            });
+            let detail = (!historical)
+                .then_some(telemetry)
+                .flatten()
+                .and_then(|telemetry| {
+                    telemetry
+                        .temperature_celsius
+                        .map(|celsius| format!("{celsius:.0} °C"))
+                });
             (label, detail)
         }
     }
@@ -438,17 +494,21 @@ fn compose(
     urdf: &rerobot_core::urdf::Urdf,
     studio: &crate::state::Studio,
     grid: bool,
+    historical: Option<&TimelineSample>,
     hovered: Option<&RobotEntity>,
 ) -> RobotScene {
     let selected = studio.selected.read().clone();
     // Hovering a joint row in the inspector lights the motor on the bench, the
     // same way hovering the motor lights the row: one object, seen twice.
     let pointed = studio.pointed.read().clone();
-    let conditions = motor_conditions(studio);
+    let conditions = historical
+        .is_none()
+        .then(|| motor_conditions(studio))
+        .unwrap_or_default();
 
     robot::build(
         urdf,
-        &placements(studio),
+        &placements(studio, historical),
         grid,
         |entity| {
             if matches_selection(selected.as_ref(), entity) {
@@ -518,7 +578,7 @@ fn condition_marks(
     let Some(bench) = slot.as_ref() else {
         return Vec::new();
     };
-    let scene = compose(urdf, studio, grid, None);
+    let scene = compose(urdf, studio, grid, None, None);
     let rect = canvas().map(|canvas| canvas.get_bounding_client_rect());
     let (left, top) = rect.map_or((0.0, 0.0), |rect| (rect.left(), rect.top()));
 
@@ -552,12 +612,13 @@ fn hovered(
     bench: &Rc<RefCell<Option<Bench>>>,
     camera: Camera,
     grid: bool,
+    historical: Option<&TimelineSample>,
     at: (f64, f64),
 ) -> Option<Hover> {
     let urdf = urdf.as_ref().as_ref().ok()?;
     let slot = bench.try_borrow().ok()?;
     let bench = slot.as_ref()?;
-    let scene = compose(urdf, studio, grid, None);
+    let scene = compose(urdf, studio, grid, historical, None);
     let key = bench.pick(&camera, &scene.scene, at)?;
     let rect = canvas()?.get_bounding_client_rect();
     Some(Hover {
@@ -567,7 +628,10 @@ fn hovered(
 }
 
 /// Every arm on the bench, posed from what it is currently reporting.
-fn placements(studio: &crate::state::Studio) -> Vec<ArmPlacement> {
+fn placements(
+    studio: &crate::state::Studio,
+    historical: Option<&TimelineSample>,
+) -> Vec<ArmPlacement> {
     let arms = studio.snapshot.read().robots.clone();
     let count = arms.len();
     arms.iter()
@@ -576,20 +640,71 @@ fn placements(studio: &crate::state::Studio) -> Vec<ArmPlacement> {
             // An arm that is offline or uncalibrated has no angles worth
             // drawing, so it stands at its rest pose and is faded rather than
             // left out — an empty bench says less than a greyed-out one.
-            let telemetry = studio.robot_telemetry(&arm.id).filter(|_| arm.calibrated);
+            let historical_angles = historical
+                .and_then(|sample| sample.arms.iter().find(|sample| sample.arm == arm.id))
+                .and_then(|sample| historical_angles(arm, sample));
+            let telemetry = historical
+                .is_none()
+                .then(|| studio.robot_telemetry(&arm.id).filter(|_| arm.calibrated))
+                .flatten();
+            let angles = historical_angles.or_else(|| {
+                telemetry
+                    .as_ref()
+                    .map(|robot| crate::control::measured_angles(&robot.joints))
+            });
             ArmPlacement {
                 id: arm.id.clone(),
                 accent: ACCENTS[index % ACCENTS.len()].0,
-                live: telemetry.is_some(),
-                angles: telemetry
-                    .map(|robot| crate::control::measured_angles(&robot.joints))
-                    .unwrap_or_default(),
+                live: angles.is_some(),
+                angles: angles.unwrap_or_default(),
                 cameras: arm.cameras.iter().filter_map(mount_of).collect(),
                 index,
                 count,
             }
         })
         .collect()
+}
+
+/// Map a stored normalized pose through the arm's current calibration for a
+/// faithful scene. This is preview-only: physical seek independently repeats
+/// the same calibration validation on the server before it can move anything.
+fn historical_angles(arm: &RobotSummary, sample: &TimelineArmSample) -> Option<JointAngles> {
+    let degrees = sample
+        .normalized
+        .iter()
+        .filter_map(|(joint, normalized)| {
+            let normalized = (*normalized)?;
+            let calibration = arm
+                .motors
+                .iter()
+                .find(|motor| motor.name == *joint)?
+                .calibration
+                .as_ref()?;
+            let raw = denormalize_centered_raw(calibration, normalized).ok()?;
+            let degrees = counts_to_degrees(raw.saturating_sub(calibration.center));
+            let degrees = match calibration.direction {
+                Direction::Normal => degrees,
+                Direction::Reversed => -degrees,
+            };
+            Some((joint.clone(), degrees))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let gripper = sample
+        .normalized
+        .get("gripper")
+        .copied()
+        .flatten()
+        .filter(|value| value.is_finite());
+    (!degrees.is_empty() || gripper.is_some()).then(|| {
+        JointAngles::from_named_degrees(&degrees)
+            .with_gripper_normalized(gripper.unwrap_or_default())
+    })
+}
+
+fn format_history_time(seconds: f64) -> String {
+    let seconds = seconds.max(0.0);
+    let minutes = (seconds / 60.0).floor() as u64;
+    format!("{minutes}:{:04.1}", seconds - minutes as f64 * 60.0)
 }
 
 /// Where a bound camera sits, for the ones whose file says.
@@ -769,5 +884,70 @@ impl Drop for WindowListener {
                 self.callback.as_ref().unchecked_ref(),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rerobot_core::api::{ConnectionStatus, MotorLimits, MotorSummary};
+    use rerobot_core::calibration::MotorCalibration;
+
+    use super::*;
+
+    fn robot(calibration: MotorCalibration) -> RobotSummary {
+        RobotSummary {
+            id: "follower".to_owned(),
+            file: "follower.json".to_owned(),
+            robot_type: Some("so101_follower".to_owned()),
+            port: None,
+            motors: vec![MotorSummary {
+                name: "shoulder_pan".to_owned(),
+                id: 1,
+                direction: calibration.direction,
+                model: None,
+                calibration: Some(calibration),
+                limits: MotorLimits::default(),
+            }],
+            cameras: Vec::new(),
+            calibrated: true,
+            problem: None,
+            connection: ConnectionStatus::default(),
+        }
+    }
+
+    #[test]
+    fn historical_normalized_pose_uses_the_current_arm_calibration() {
+        let calibration = MotorCalibration {
+            id: 1,
+            direction: Direction::Normal,
+            range_min: 1_000,
+            center: 2_000,
+            range_max: 3_000,
+        };
+        let sample = TimelineArmSample {
+            arm: "follower".to_owned(),
+            normalized: BTreeMap::from([("shoulder_pan".to_owned(), Some(1.0))]),
+            ..TimelineArmSample::default()
+        };
+
+        let pose = historical_angles(&robot(calibration), &sample).expect("historical pose");
+        assert_eq!(pose.pan_deg, counts_to_degrees(1_000));
+    }
+
+    #[test]
+    fn historical_pose_does_not_guess_without_calibrated_values() {
+        let calibration = MotorCalibration {
+            id: 1,
+            direction: Direction::Normal,
+            range_min: 1_000,
+            center: 2_000,
+            range_max: 3_000,
+        };
+        let sample = TimelineArmSample {
+            arm: "follower".to_owned(),
+            normalized: BTreeMap::from([("shoulder_pan".to_owned(), None)]),
+            ..TimelineArmSample::default()
+        };
+        assert!(historical_angles(&robot(calibration), &sample).is_none());
     }
 }

@@ -22,8 +22,8 @@ use charming::element::{
 use charming::series::Line;
 use charming::{Chart, WasmRenderer};
 use dioxus::prelude::*;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 
 use super::{
     CANVAS_ID, POINT_BUDGET, SignalStore, ViewWindow, decimate, nice_range, shared_bounds,
@@ -295,7 +295,13 @@ fn paint(
         let Ok(instance) = renderer.render(CANVAS_ID, &chart) else {
             return;
         };
-        listen(&instance, &mut held.listeners, window, cursor, extent_cell.clone());
+        listen(
+            &instance,
+            &mut held.listeners,
+            window,
+            cursor,
+            extent_cell.clone(),
+        );
         held.chart = Some(instance);
         held.signature = signature;
         held.size = size;
@@ -373,7 +379,11 @@ fn build(
     let (axis_low, axis_high, interval) = nice_range(low, high, divisions(plot));
     // One label per ~64px of plot width, which is what a 10px monospace time
     // reads at without its neighbours touching.
-    let ticks = time_ticks(start, end, (f64::from(size.0) / 64.0).round().max(2.0) as u32);
+    let ticks = time_ticks(
+        start,
+        end,
+        (f64::from(size.0) / 64.0).round().max(2.0) as u32,
+    );
 
     let mut chart = Chart::new()
         // A scope does not ease into position. Every transition here would be
@@ -387,7 +397,12 @@ fn build(
                 .type_(AxisPointerType::Line)
                 .snap(true)
                 .animation(false)
-                .line_style(LineStyle::new().color(Color::from(tone.accent.clone())).width(1).opacity(0.5))
+                .line_style(
+                    LineStyle::new()
+                        .color(Color::from(tone.accent.clone()))
+                        .width(1)
+                        .opacity(0.5),
+                )
                 .link(vec![AxisPointerLink::new().x_axis_index("all")]),
         );
 
@@ -426,7 +441,11 @@ fn build(
                     // are, which is the one thing it is there for.
                     .min(CompositeValue::from(extent.0))
                     .max(CompositeValue::from(extent.1.max(extent.0 + 0.001)))
-                    .axis_line(AxisLine::new().show(true).line_style((1.0, tone.line.as_str())))
+                    .axis_line(
+                        AxisLine::new()
+                            .show(true)
+                            .line_style((1.0, tone.line.as_str())),
+                    )
                     .axis_tick(AxisTick::new().show(false))
                     .split_line(SplitLine::new().show(false))
                     .axis_label(
@@ -451,9 +470,11 @@ fn build(
                     .axis_line(AxisLine::new().show(false))
                     .axis_tick(AxisTick::new().show(false))
                     .split_line(
-                        SplitLine::new()
-                            .show(true)
-                            .line_style(LineStyle::new().color(Color::from(tone.line.clone())).width(1)),
+                        SplitLine::new().show(true).line_style(
+                            LineStyle::new()
+                                .color(Color::from(tone.line.clone()))
+                                .width(1),
+                        ),
                     )
                     .axis_label(
                         AxisLabel::new()

@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
@@ -26,22 +26,29 @@ use rerobot_core::api::{
     ApiError, CameraBinding, CameraStatus, ConnectionTestResponse, CreateRobotRequest,
     DataSettings, EpisodeSummary, ExportRequest, ExportResponse, GoalRequest, IdentifyPortRequest,
     IdentifyPortResponse, ImportResponse, JudgeEpisodeRequest, ModeSelection, PublicationStatus,
-    RobotSummary, SerialPortSummary, SpiralQueryRequest, SpiralQueryResponse,
-    StartRecordingRequest, StartReplayRequest, StartSpiralReplayRequest, StopRecordingRequest,
-    StudioSnapshot, TorqueRequest, UpdateDataSettingsRequest, UpdateRobotRequest,
-    default_teleoperation_pair,
+    RobotSummary, SerialPortSummary, SetRecordingPausedRequest, SetReplayPausedRequest,
+    SpiralQueryRequest, SpiralQueryResponse, StartRecordingRequest, StartReplayRequest,
+    StartSpiralReplayRequest, StopRecordingRequest, StudioSnapshot, TorqueRequest,
+    UpdateDataSettingsRequest, UpdateRobotRequest, default_teleoperation_pair,
 };
 use rerobot_core::calibration::build_calibration;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
 
 use crate::camera_manager::{CameraManager, Frame};
 use crate::data_settings::DataSettingsStore;
 use crate::dataset::{export_lerobot_archive, import_lerobot_archive};
-use crate::episodes::{ArmCondition, EpisodeError, EpisodeStore, build_arms};
+use crate::episodes::{
+    ArmCondition, EpisodeError, EpisodeStore, TimelineMetadata, TimelineSample, TimelineTraces,
+    build_arms,
+};
 use crate::hardware::{HardwareHandle, RobotSpec};
 use crate::storage_manager::StorageManager;
-use crate::video_capture::{CameraCaptureSpec, VideoAsset, VideoCapture, VideoEncoderSettings};
+use crate::video_capture::{
+    CameraCaptureSpec, VideoAsset, VideoAssetMetadata, VideoCapture, VideoEncoderSettings,
+    load_assets,
+};
 use crate::workspace::{RobotRecord, RobotWorkspace, WorkspaceError, validate_camera_role};
 
 /// Boundary marker separating parts of an MJPEG response.
@@ -231,8 +238,10 @@ pub fn api_router(state: AppState) -> Router {
         .route("/mode", post(set_mode))
         .route("/episodes", get(list_episodes))
         .route("/episodes/record", post(start_recording))
+        .route("/episodes/record/pause", post(set_recording_paused))
         .route("/episodes/record/stop", post(stop_recording))
         .route("/episodes/replay", post(start_replay))
+        .route("/episodes/replay/pause", post(set_replay_paused))
         .route("/episodes/export", post(export_episodes))
         .route("/episodes/export.zip", get(download_episodes))
         .route(
@@ -242,6 +251,17 @@ pub fn api_router(state: AppState) -> Router {
         .route("/episodes/{id}", delete(delete_episode))
         .route("/episodes/{id}/judge", post(judge_episode))
         .route("/episodes/{id}/trace", get(episode_trace))
+        .route("/episodes/{id}/timeline", get(episode_timeline))
+        .route(
+            "/episodes/{id}/timeline/traces",
+            get(episode_timeline_traces),
+        )
+        .route(
+            "/episodes/{id}/timeline/sample",
+            get(episode_timeline_sample),
+        )
+        .route("/episodes/{id}/seek", post(seek_episode))
+        .route("/episodes/{id}/videos/{stream}", get(episode_video))
         .route(
             "/settings/data",
             get(get_data_settings).patch(update_data_settings),
@@ -499,7 +519,10 @@ async fn camera_stream(
             header::CONTENT_TYPE,
             format!("multipart/x-mixed-replace; boundary={MJPEG_BOUNDARY}"),
         )
-        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
+        .header(header::PRAGMA, "no-cache")
+        .header(header::EXPIRES, "0")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .body(Body::from_stream(frames))
         .expect("a valid MJPEG response"))
 }
@@ -1194,6 +1217,7 @@ async fn begin_recording(
         arms,
         frames: 0,
         duration_seconds: 0.0,
+        recording_gaps: Vec::new(),
         sample_hz,
         started_ms,
         source,
@@ -1258,6 +1282,50 @@ async fn stop_recording(
     }
 }
 
+/// Suspend or resume capture without closing the episode writer.
+///
+/// Pause acknowledges only after every accepted sample has crossed the writer
+/// flush barrier and the partial file has been indexed. That makes timeline
+/// reads deterministic while the operator scrubs, without blocking the motor
+/// thread on filesystem I/O. Hardware owns restoring the exact control mode on
+/// resume; the route brackets it with video capture so paused camera frames are
+/// omitted as well.
+async fn set_recording_paused(
+    State(state): State<AppState>,
+    Json(request): Json<SetRecordingPausedRequest>,
+) -> Result<StatusCode, Failure> {
+    if request.paused {
+        if let Some(capture) = state.recording_video.lock().await.as_ref() {
+            capture.request_pause();
+        }
+        let paused = state.hardware.set_recording_paused(true).await;
+        if let Some(capture) = state.recording_video.lock().await.as_mut() {
+            for failure in capture.finish_pause().await {
+                state
+                    .cameras
+                    .note_issue(format!("paused episode video was not saved: {failure}"));
+            }
+        }
+        // Failure stays fail-safe: camera capture remains stopped and the
+        // controller retains its paused/idle state instead of silently
+        // desynchronizing media and joint samples.
+        paused.map_err(Failure::from)?;
+        // The writer barrier has made the `.part` file readable; refreshing
+        // now exposes it to timeline/sample/trace requests by its stable ID.
+        state.episodes.reload().map_err(Failure::from)?;
+    } else {
+        let active_seconds = state.hardware.set_recording_paused(false).await?;
+        if let Some(capture) = state.recording_video.lock().await.as_mut()
+            && let Err(error) = capture.resume(active_seconds)
+        {
+            state
+                .cameras
+                .note_issue(format!("episode video could not resume: {error}"));
+        }
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn judge_episode(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1276,9 +1344,8 @@ async fn delete_episode(
 ) -> Result<StatusCode, Failure> {
     // A take being recorded right now is not a file to delete out from under
     // the writer.
-    if state
-        .hardware
-        .state()
+    let hardware = state.hardware.state();
+    if hardware
         .telemetry
         .recording
         .is_some_and(|recording| recording.episode == id)
@@ -1286,6 +1353,15 @@ async fn delete_episode(
         return Err(Failure(
             StatusCode::CONFLICT,
             format!("take {id:?} is still recording; stop it first"),
+        ));
+    }
+    if matches!(
+        &hardware.mode.selection,
+        ModeSelection::Replay { episode, .. } if episode == &id
+    ) {
+        return Err(Failure(
+            StatusCode::CONFLICT,
+            format!("take {id:?} is driving an arm; stop replay before deleting it"),
         ));
     }
     let video_directory = state.episodes.directory().join("videos").join(&id);
@@ -1330,6 +1406,431 @@ async fn episode_trace(
     Ok(Json(trace))
 }
 
+async fn episode_timeline_traces(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<TraceQuery>,
+) -> Result<Json<TimelineTraces>, Failure> {
+    let episodes = state.episodes.clone();
+    let traces = tokio::task::spawn_blocking(move || episodes.timeline_traces(&id, query.buckets))
+        .await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+    Ok(Json(traces))
+}
+
+#[derive(Debug, Serialize)]
+struct EpisodeTimelineResponse {
+    episode: EpisodeSummary,
+    samples: TimelineMetadata,
+    videos: Vec<VideoAssetMetadata>,
+}
+
+async fn episode_timeline(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<EpisodeTimelineResponse>, Failure> {
+    let episodes = state.episodes.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let episode = episodes.get(&id).map_err(Failure::from)?;
+        let samples = episodes.timeline_metadata(&id).map_err(Failure::from)?;
+        let videos = load_assets(episodes.directory(), &id)
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?
+            .iter()
+            .map(VideoAsset::metadata)
+            .collect();
+        Ok::<_, Failure>(EpisodeTimelineResponse {
+            episode,
+            samples,
+            videos,
+        })
+    })
+    .await
+    .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+    Ok(Json(result))
+}
+
+#[derive(Debug, Deserialize)]
+struct TimelineSampleQuery {
+    at: f64,
+}
+
+async fn episode_timeline_sample(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<TimelineSampleQuery>,
+) -> Result<Json<TimelineSample>, Failure> {
+    let episodes = state.episodes.clone();
+    let sample = tokio::task::spawn_blocking(move || episodes.sample_at(&id, query.at))
+        .await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+    Ok(Json(sample))
+}
+
+#[derive(Debug, Deserialize)]
+struct HistoricalSeekRequest {
+    robot: String,
+    #[serde(default)]
+    source_arm: Option<String>,
+    seconds: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct HistoricalSeekResponse {
+    state: &'static str,
+    episode: String,
+    robot: String,
+    source_arm: String,
+    requested_seconds: f64,
+    resolved_seconds: f64,
+    frame: u64,
+}
+
+/// Move a physical follower to one committed historical sample.
+///
+/// This is intentionally distinct from visual sampling. The controller still
+/// owns torque, calibration, joint compatibility, bounded ramping, obstruction
+/// timeout, and disconnect handling. A ticket drops stale requests that finish
+/// disk I/O after a newer scrub; the one remaining pose enters the controller
+/// as a one-frame replay, so no route can bypass those protections.
+async fn seek_episode(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<HistoricalSeekRequest>,
+) -> Result<Json<HistoricalSeekResponse>, Failure> {
+    if !request.seconds.is_finite() || request.seconds < 0.0 {
+        return Err(Failure::bad_request(
+            "historical seek time must be a finite, non-negative number of seconds",
+        ));
+    }
+    let hardware = state.hardware.state();
+    let paused_current = hardware
+        .telemetry
+        .recording
+        .as_ref()
+        .is_some_and(|recording| recording.paused && recording.episode == id);
+    if let Some(reason) = recording_seek_blocker(hardware.telemetry.recording.as_ref(), &id) {
+        return Err(Failure(StatusCode::CONFLICT, reason));
+    }
+    if !matches!(
+        hardware.mode.selection,
+        ModeSelection::Idle | ModeSelection::Replay { .. }
+    ) {
+        return Err(Failure(
+            StatusCode::CONFLICT,
+            "stop the active control mode before moving a physical arm through history".to_owned(),
+        ));
+    }
+
+    let snapshot = build_snapshot(&state);
+    let target = snapshot
+        .robots
+        .iter()
+        .find(|robot| robot.id == request.robot)
+        .ok_or_else(|| Failure::bad_request(format!("no robot named {:?}", request.robot)))?;
+    if !robot_is_follower(target) {
+        return Err(Failure::bad_request(format!(
+            "historical seek only drives an explicitly configured follower; robot {:?} is {:?}",
+            request.robot, target.robot_type
+        )));
+    }
+    if !target.connection.connected {
+        return Err(Failure(
+            StatusCode::CONFLICT,
+            format!("connect follower {:?} before seeking", request.robot),
+        ));
+    }
+    if !target.calibrated {
+        return Err(Failure(
+            StatusCode::CONFLICT,
+            format!("calibrate follower {:?} before seeking", request.robot),
+        ));
+    }
+    if let Some(problem) = &target.problem {
+        return Err(Failure(
+            StatusCode::CONFLICT,
+            format!("follower {:?} cannot be driven: {problem}", request.robot),
+        ));
+    }
+
+    let summary = state.episodes.get(&id).map_err(Failure::from)?;
+    if let Some(problem) = &summary.problem {
+        let live_partial = paused_current
+            && summary.file.ends_with(".jsonl.part")
+            && problem == "recording did not finish";
+        if !live_partial {
+            return Err(Failure::bad_request(format!(
+                "take {id:?} can be inspected but cannot drive hardware: {problem}"
+            )));
+        }
+    }
+    let source = recorded_arm_for_target(&summary, &request.robot, request.source_arm.as_deref())?;
+    let ticket = state.episodes.reserve_seek(&request.robot);
+    let episodes = state.episodes.clone();
+    let sample_id = id.clone();
+    let seconds = request.seconds;
+    let sample = tokio::task::spawn_blocking(move || episodes.sample_at(&sample_id, seconds))
+        .await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+
+    let response = |state, sample: &TimelineSample| HistoricalSeekResponse {
+        state,
+        episode: id.clone(),
+        robot: request.robot.clone(),
+        source_arm: source.clone(),
+        requested_seconds: request.seconds,
+        resolved_seconds: sample.seconds,
+        frame: sample.frame,
+    };
+    let arm = sample
+        .arms
+        .iter()
+        .find(|arm| arm.arm == source)
+        .ok_or_else(|| {
+            Failure::bad_request(format!(
+                "take {id:?} did not record an arm named {source:?}"
+            ))
+        })?;
+    let pose = arm
+        .normalized
+        .iter()
+        .filter_map(|(joint, value)| Some((joint.clone(), (*value)?)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if pose.is_empty() {
+        return Err(Failure::bad_request(format!(
+            "take {id:?} has no calibrated positions for {source:?} at {:.3}s",
+            sample.seconds
+        )));
+    }
+
+    let _gate = state.episodes.lock_seek().await;
+    if !state.episodes.seek_is_current(&request.robot, ticket) {
+        return Ok(Json(response("coalesced", &sample)));
+    }
+    state
+        .hardware
+        .start_replay(&request.robot, &id, vec![pose], summary.sample_hz)
+        .await?;
+    Ok(Json(response("seeking", &sample)))
+}
+
+fn recording_seek_blocker(
+    recording: Option<&rerobot_core::api::RecordingProgress>,
+    episode: &str,
+) -> Option<String> {
+    let recording = recording?;
+    if !recording.paused {
+        return Some(
+            "pause the active recording before moving a physical arm through history".to_owned(),
+        );
+    }
+    (recording.episode != episode).then(|| {
+        format!(
+            "paused take {:?} is the only episode available for physical scrubbing",
+            recording.episode
+        )
+    })
+}
+
+fn robot_is_follower(robot: &RobotSummary) -> bool {
+    robot_type_is_follower(robot.robot_type.as_deref())
+}
+
+fn robot_type_is_follower(robot_type: Option<&str>) -> bool {
+    robot_type.is_some_and(|kind| kind.to_ascii_lowercase().contains("follower"))
+}
+
+fn recorded_arm_for_target(
+    summary: &EpisodeSummary,
+    target: &str,
+    requested: Option<&str>,
+) -> Result<String, Failure> {
+    if let Some(arm) = requested {
+        if summary.arm(arm).is_none() {
+            return Err(Failure::bad_request(format!(
+                "take {:?} did not record an arm named {arm:?}",
+                summary.id
+            )));
+        }
+        return Ok(arm.to_owned());
+    }
+    if summary.arm(target).is_some() {
+        return Ok(target.to_owned());
+    }
+    match summary.arms.as_slice() {
+        [only] => Ok(only.id.clone()),
+        arms => Err(Failure::bad_request(format!(
+            "take {:?} recorded {} arms ({}); say which one to use",
+            summary.id,
+            arms.len(),
+            arms.iter()
+                .map(|arm| arm.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ByteRange {
+    start: u64,
+    end: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+struct LocalVideoQuery {
+    #[serde(default)]
+    segment: Option<u32>,
+}
+
+async fn episode_video(
+    State(state): State<AppState>,
+    Path((id, stream)): Path<(String, String)>,
+    Query(query): Query<LocalVideoQuery>,
+    headers: HeaderMap,
+) -> Result<Response, Failure> {
+    // Looking up the episode first validates the path component and prevents an
+    // orphaned sidecar from becoming an independent file-serving namespace.
+    state.episodes.get(&id).map_err(Failure::from)?;
+    let assets = load_assets(state.episodes.directory(), &id)
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    let asset = assets
+        .into_iter()
+        .filter(|asset| asset.stream_id == stream)
+        .filter(|asset| {
+            query
+                .segment
+                .is_none_or(|segment| asset.segment_index == segment)
+        })
+        .min_by_key(|asset| asset.segment_index)
+        .ok_or_else(|| {
+            Failure(
+                StatusCode::NOT_FOUND,
+                format!(
+                    "take {id:?} has no recorded video stream {stream:?}{}",
+                    query
+                        .segment
+                        .map(|segment| format!(" segment {segment}"))
+                        .unwrap_or_default()
+                ),
+            )
+        })?;
+    let mut file = tokio::fs::File::open(&asset.path)
+        .await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let length = file
+        .metadata()
+        .await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+        .len();
+    let requested_range = match headers.get(header::RANGE) {
+        None => None,
+        Some(value) => match value
+            .to_str()
+            .ok()
+            .and_then(|value| parse_byte_range(value, length))
+        {
+            Some(range) => Some(range),
+            None => return Ok(range_not_satisfiable(length)),
+        },
+    };
+    let range = requested_range.unwrap_or(ByteRange {
+        start: 0,
+        end: length.saturating_sub(1),
+    });
+    if range.start > 0 {
+        file.seek(std::io::SeekFrom::Start(range.start))
+            .await
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    }
+    let content_length = if length == 0 {
+        0
+    } else {
+        range.end - range.start + 1
+    };
+    let stream = async_stream::stream! {
+        let mut remaining = content_length;
+        let mut buffer = vec![0_u8; 64 * 1024];
+        while remaining > 0 {
+            let wanted = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+            let read = match file.read(&mut buffer[..wanted]).await {
+                Ok(read) => read,
+                Err(error) => {
+                    yield Err::<Bytes, std::io::Error>(error);
+                    break;
+                }
+            };
+            if read == 0 {
+                yield Err::<Bytes, std::io::Error>(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "recorded video ended before its advertised length",
+                ));
+                break;
+            }
+            remaining -= read as u64;
+            yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(&buffer[..read]));
+        }
+    };
+    let mut response = Response::builder()
+        .status(if requested_range.is_some() {
+            StatusCode::PARTIAL_CONTENT
+        } else {
+            StatusCode::OK
+        })
+        .header(header::CONTENT_TYPE, "video/mp4")
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_LENGTH, content_length)
+        .header(header::CACHE_CONTROL, "private, no-store");
+    if requested_range.is_some() {
+        response = response.header(
+            header::CONTENT_RANGE,
+            format!("bytes {}-{}/{}", range.start, range.end, length),
+        );
+    }
+    Ok(response
+        .body(Body::from_stream(stream))
+        .expect("valid local video response"))
+}
+
+fn parse_byte_range(value: &str, length: u64) -> Option<ByteRange> {
+    if length == 0 {
+        return None;
+    }
+    let value = value.trim().strip_prefix("bytes=")?;
+    if value.contains(',') {
+        return None;
+    }
+    let (start, end) = value.split_once('-')?;
+    if start.trim().is_empty() {
+        let suffix = end.trim().parse::<u64>().ok()?;
+        if suffix == 0 {
+            return None;
+        }
+        return Some(ByteRange {
+            start: length.saturating_sub(suffix.min(length)),
+            end: length - 1,
+        });
+    }
+    let start = start.trim().parse::<u64>().ok()?;
+    if start >= length {
+        return None;
+    }
+    let end = if end.trim().is_empty() {
+        length - 1
+    } else {
+        end.trim().parse::<u64>().ok()?.min(length - 1)
+    };
+    (end >= start).then_some(ByteRange { start, end })
+}
+
+fn range_not_satisfiable(length: u64) -> Response {
+    Response::builder()
+        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+        .header(header::CONTENT_RANGE, format!("bytes */{length}"))
+        .header(header::ACCEPT_RANGES, "bytes")
+        .body(Body::empty())
+        .expect("valid unsatisfied range response")
+}
+
 async fn start_replay(
     State(state): State<AppState>,
     Json(request): Json<StartReplayRequest>,
@@ -1341,24 +1842,7 @@ async fn start_replay(
     // Prefer the arm's own recorded trajectory, then the take's only arm. A
     // take of two arms replayed onto one has to say which, because guessing
     // would drive an arm along the other arm's path.
-    let source = match &request.source_arm {
-        Some(arm) => arm.clone(),
-        None if summary.arm(&request.robot).is_some() => request.robot.clone(),
-        None => match summary.arms.as_slice() {
-            [only] => only.id.clone(),
-            arms => {
-                return Err(Failure::bad_request(format!(
-                    "take {:?} recorded {} arms ({}); say which one to replay",
-                    request.episode,
-                    arms.len(),
-                    arms.iter()
-                        .map(|arm| arm.id.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )));
-            }
-        },
-    };
+    let source = recorded_arm_for_target(&summary, &request.robot, request.source_arm.as_deref())?;
 
     let episodes = state.episodes.clone();
     let episode = request.episode.clone();
@@ -1370,6 +1854,14 @@ async fn start_replay(
         .hardware
         .start_replay(&request.robot, &request.episode, frames, summary.sample_hz)
         .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn set_replay_paused(
+    State(state): State<AppState>,
+    Json(request): Json<SetReplayPausedRequest>,
+) -> Result<StatusCode, Failure> {
+    state.hardware.set_replay_paused(request.paused).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1491,6 +1983,31 @@ fn describe_mode(selection: &ModeSelection) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn recording_progress(episode: &str, paused: bool) -> rerobot_core::api::RecordingProgress {
+        rerobot_core::api::RecordingProgress {
+            episode: episode.to_owned(),
+            frames: 12,
+            elapsed_seconds: 0.2,
+            wall_elapsed_seconds: 0.2,
+            paused_seconds: 0.0,
+            paused,
+            arms: vec!["leader".to_owned(), "follower".to_owned()],
+            max_follow_error_degrees: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn only_the_matching_paused_recording_is_physically_seekable() {
+        let active = recording_progress("episode_000001", false);
+        assert!(recording_seek_blocker(Some(&active), &active.episode).is_some());
+
+        let paused = recording_progress("episode_000001", true);
+        assert_eq!(recording_seek_blocker(Some(&paused), &paused.episode), None);
+        assert!(recording_seek_blocker(Some(&paused), "episode_000002").is_some());
+        assert_eq!(recording_seek_blocker(None, "episode_000001"), None);
+    }
 
     fn status(id: &str) -> CameraStatus {
         CameraStatus {
@@ -1670,6 +2187,39 @@ mod tests {
         );
         // An idle take is still a take: the operator moved the arm by hand.
         assert_eq!(describe_mode(&ModeSelection::Idle), "Idle — moved by hand");
+    }
+
+    #[test]
+    fn local_video_ranges_cover_browser_seek_forms() {
+        assert_eq!(
+            parse_byte_range("bytes=10-19", 100),
+            Some(ByteRange { start: 10, end: 19 })
+        );
+        assert_eq!(
+            parse_byte_range("bytes=90-", 100),
+            Some(ByteRange { start: 90, end: 99 })
+        );
+        assert_eq!(
+            parse_byte_range("bytes=-10", 100),
+            Some(ByteRange { start: 90, end: 99 })
+        );
+        assert_eq!(
+            parse_byte_range("bytes=90-200", 100),
+            Some(ByteRange { start: 90, end: 99 })
+        );
+        assert_eq!(parse_byte_range("bytes=100-", 100), None);
+        assert_eq!(parse_byte_range("bytes=20-10", 100), None);
+        assert_eq!(parse_byte_range("bytes=0-1,4-5", 100), None);
+        assert_eq!(parse_byte_range("items=0-1", 100), None);
+        assert_eq!(parse_byte_range("bytes=0-1", 0), None);
+    }
+
+    #[test]
+    fn historical_seek_role_check_never_treats_a_leader_as_a_follower() {
+        assert!(robot_type_is_follower(Some("so101_follower")));
+        assert!(robot_type_is_follower(Some("SO101_FOLLOWER")));
+        assert!(!robot_type_is_follower(Some("so101_leader")));
+        assert!(!robot_type_is_follower(None));
     }
 
     #[test]

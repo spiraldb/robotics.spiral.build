@@ -1,6 +1,6 @@
 ---
 name: rerobot studio
-description: A compact, one-light control bench for connecting arms, recording episodes, replaying them, and exporting datasets.
+description: A compact, dockable one-light workbench for operating robots and understanding episodes.
 colors:
   canvas: "#ffffff"
   surface: "#ffffff"
@@ -165,6 +165,28 @@ components:
   episode-item-selected:
     backgroundColor: "{colors.selected}"
     textColor: "{colors.ink}"
+  panel-tab:
+    backgroundColor: "{colors.sunken}"
+    textColor: "{colors.ink-soft}"
+    typography: "{typography.label}"
+    padding: "0 9px"
+    height: "32px"
+  panel-tab-active:
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.ink}"
+    typography: "{typography.label}"
+    padding: "0 9px"
+    height: "32px"
+  activity-item:
+    backgroundColor: "transparent"
+    textColor: "{colors.ink-faint}"
+    typography: "{typography.micro}"
+    padding: "0 4px"
+    width: "60px"
+    height: "56px"
+  activity-item-active:
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.accent}"
   notice-card:
     backgroundColor: "{colors.surface}"
     textColor: "{colors.ink}"
@@ -178,174 +200,131 @@ components:
 
 **Creative North Star: "The One-Light Control Bench"**
 
-rerobot studio is one calm, literal workspace: white panels surround a pale
-WebGL bench, and the dataset tools continue the same light material across the
-foot of the shell. Graphite ink, hairline separators, small radii, and tabular
-data make it feel like a precise bench utility rather than a dashboard or a
-diagnostic console. Camera pixels alone keep a dark mat for honest letterboxing.
+rerobot studio is one calm, literal operating workspace. Warm-white panels,
+graphite type, pale WebGL, hairline structure, small radii, and tabular data
+make it feel like a precise bench utility rather than a dashboard. Camera pixels
+alone keep a dark mat for honest letterboxing; application chrome never changes
+visual worlds when the operator changes tasks.
 
-The interaction story is equally direct: connect arms, teleoperate, Record,
-select an episode, Replay it on a compatible arm, then Export the completed
-episodes. Measurement and fault data remain available where they help operate
-the hardware, but judgement, thresholds, and diagnostic dashboards do not
-become competing primary lanes.
+The Studio has only two primary activities: **Live** for operating hardware and
+recording, and **Data** for episodes and query. Everything else is a panel. A
+reusable tab-and-tile system lets the operator attach a panel as a tab, split a
+tile, resize the result, or move it with the keyboard. This borrows VS Code’s
+learned spatial grammar without importing its visual weight: the layout is
+powerful, but the chrome remains Notion-like, compact, and quiet.
 
-The one measurement drawn rather than printed is **Signals**: joint angles
-over the length of a take, under the arm list. It exists because a take is the
-only thing in this studio that has a *shape* — a reach, a grasp, a lift — and
-no column of live numbers can show a shape. It is bound to the take and to
-nothing else: empty before Record, filling while the take runs, held afterwards
-until the next Record replaces it. That binding is what keeps it an instrument
-rather than a dashboard, and it is the only exception to the rule against
-charting telemetry over time.
+The **Timeline is the shared clock**, not a footer or a dataset rail. It is
+registered in both activities and synchronizes recording, replay, camera video,
+historical 3D pose, signals, query selection, and optionally a safety-gated
+physical seek. Signals belongs to the episode on that clock. Full camera images
+belong in camera panels; robot ownership remains explicit through arm and role,
+while Live keeps compact camera status beside the selected robot.
 
 Density is the point, not a side effect. The base face is 12px, ordinary
-controls are 24px tall — the WCAG 2.5.8 target floor, used as a floor rather
-than beaten — and most gaps come from a 2/4/6/8px rhythm. Record is the one
-control held at 28px, because it is reached for with a hand still on the arm.
-The 16px elapsed readout is the largest type in the app and sits on Record's
-own baseline rather than stacked above a caption. Colour is spent on selection,
-safety, connection, and arm identity; structure comes from alignment and
-one-pixel rules.
+controls are 24px tall, and most gaps come from a 2/4/6/8px rhythm. Record is
+the one 28px control because it may be reached with a hand still on the arm.
+The 16px elapsed readout is the largest type in the app. Colour is spent on
+selection, safety, connection, identity, and the one primary action in a local
+region; structure comes from alignment and one-pixel rules.
 
 Density only reads as precision if the surface holds still. Telemetry arrives
-twenty times a second, so every live number sits in a box wide enough for its
-widest value, status reports the exception rather than the resting state, and
-no explanatory sentence unfolds and collapses as the hardware changes. A dense
-instrument that twitches reads as noise; a dense instrument that stays put
-reads as a bench tool.
+continuously, so live numbers reserve their widest width, status reports the
+exception rather than the resting state, and no sentence unfolds under a
+changing value. A dense instrument that twitches reads as noise; one that stays
+put reads as a bench tool.
 
 **Key Characteristics:**
 
-- One light neutral world across shell, panels, WebGL stage, plots, and dataset
-  rail.
-- A persistent three-pane bench with a fixed semantic order and a compact global
-  session region below it; the Robots column is the one that stacks, carrying
-  Signals under the arm list.
-- One literal dataset loop: Record → select an episode → Replay → Export, with
-  the plots reading out the take that loop is capturing.
-- Compact 12px type, 24px controls, small radii, and hairline separators.
+- One light neutral world across menu, activity rail, panels, WebGL, plots,
+  Timeline, settings, and status bar; camera pixels alone use the dark mat.
+- Live and Data are the only primary activities; independent content registers
+  as panels instead of growing one-off shell regions.
+- A persisted tab-and-tile workspace supports docking, tabbing, splitting,
+  resizing, keyboard operation, and hot-plugged panel reconciliation.
+- The default desktop composition is one-third workbench and two-thirds
+  visualization, with Timeline in the lower 42% and camera tabs in a named home.
+- One playhead synchronizes every representation of an episode.
+- Compact 12px type, 24px controls, 32px panel tabs, small radii, and hairlines.
 - Monospace tabular figures for elapsed time, rates, durations, counts, and IDs.
-- Live values in fixed boxes and status that reports only the exception, so the
-  page never twitches under a telemetry stream.
-- Role blue for local primary actions; semantic colour only for real state.
-- Equal-size episode cards favor scanability over proportional visualization.
-- Responsive reflow keeps recording state, actions, blockers, and safety visible.
+- Live values use fixed boxes and exceptional status, so telemetry changes no
+  surrounding geometry.
+- Role blue marks active, selected, primary, and docking-preview states;
+  semantic colour is reserved for real state.
+- Narrow screens replace the desktop tree with one horizontally selectable
+  panel at a time without discarding the saved desktop layout.
 
 ## Colors
 
-The palette is warm-neutral paper and graphite, with a quiet role blue and a
-small set of semantic and identity accents.
+The palette is warm-neutral paper and graphite, with one quiet role blue and a
+small set of semantic, arm, axis, and signal accents.
 
 ### Primary
 
-- **Role Blue** (`{colors.accent}`): Selection, pressed pane controls, Record,
-  Replay, Connect, and the single filled action a region exists to support. Its
-  wash (`{colors.selected}`) marks selection without flooding the workspace.
+- **Role Blue** (`{colors.accent}`): Active activity edge, active panel-tab
+  edge, selection, focused splitters, docking previews, and the single filled
+  action a local region exists to support. Its wash (`{colors.selected}`)
+  previews a drop without flooding the workspace.
 
 ### Secondary
 
-- **Brick Red** (`{colors.danger}`): Destructive actions, recording-in-progress,
-  faults, energized torque, and incomplete episodes. The soft wash carries live
-  or problem state.
-- **Bench Ochre** (`{colors.caution}`): The exceptional operating conditions —
-  simulation, an environment that cannot be verified, a degraded control rate,
-  a lagging follow error, and an arm that still needs calibrating. Physical
-  hardware is the ordinary case and takes no wash at all.
-- **Connection Green** (`{colors.good}`): A 6px connection or completed-state
-  dot; it does not fill whole controls.
+- **Brick Red** (`{colors.danger}`): Destructive actions,
+  recording-in-progress, faults, energized torque, and incomplete episodes.
+  The soft wash carries live danger without changing geometry.
+- **Bench Ochre** (`{colors.caution}`): Simulation, degraded rates,
+  approximate media synchronization, calibration blockers, and other conditions
+  that require attention without meaning failure.
+- **Connection Green** (`{colors.good}`): Small connected, available, or
+  synchronized indicators. It does not fill controls or panels.
 
 ### Tertiary
 
 - **Arm identity accents** (`{colors.arm-1}` through `{colors.arm-4}`): Bind a
-  robot row, viewport legend entry, and rendered arm into one object. The usual
-  leader/follower pair uses blue and violet; orange remains last because the
-  gripper jaws already use orange.
-- **Axis accents** (`{colors.axis-x}`, `{colors.axis-y}`, `{colors.axis-z}`): The
-  small WebGL orientation key only. They are deeper than the lines drawn in the
-  scene because they are 10px *text* on the pale bench and have to clear 4.5:1;
-  the vivid originals measured 2.0–2.8:1.
-- **Joint signal slots** (`{colors.signal-1}` through `{colors.signal-6}`): The
-  six traces on a Signals plot, and the key beside each row of the readout under
-  it. Assigned by joint *name* in kinematic order — pan, lift, elbow, wrist
-  flex, wrist roll, gripper — so an arm missing a motor does not repaint every
-  joint below it, and so the same joint is the same colour on every arm. The
-  order is the safety mechanism, not a preference: it is what holds each
-  adjacent pair apart under protanopia and deuteranopia, measured at worst 9.1
-  simulated and 19.6 unsimulated. Three of the six (aqua, yellow, magenta) sit
-  at 2.2–2.8:1 against paper, which is legal here for exactly one reason: the
-  readout prints every plotted value as text, so no reading depends on telling
-  two 1.5px lines apart. Remove that readout and the palette becomes illegal.
-  These are the only interface colours outside the light neutral world, and
-  they are spent on identity in a plot, never on chrome.
+  robot switcher item, viewport legend, and rendered arm. These colours identify
+  objects; they do not imply health.
+- **Axis accents** (`{colors.axis-x}`, `{colors.axis-y}`, `{colors.axis-z}`):
+  Orientation key only.
+- **Joint signal slots** (`{colors.signal-1}` through `{colors.signal-6}`):
+  Assigned by joint name in kinematic order so the same joint keeps the same
+  trace colour across arms. Every plotted value must also be available as text;
+  colour never becomes the only way to read a signal.
 
 ### Neutral
 
-- **Paper** (`{colors.canvas}` / `{colors.surface}`): The shell, panels, rail,
-  cards, fields, and floating notices.
-- **Pale Bench** (`{colors.viewport}`): The WebGL workspace. It is a light neutral
-  step below paper so pale robot shells remain legible without creating a second
-  visual world.
-- **Camera Mat** (`{colors.camera}`): Camera frames and unavailable-camera
-  placeholders only. It belongs to image content, not application chrome.
-- **Recess** (`{colors.sunken}`): Setup groups, readout cells, disabled filled
-  controls, and the mobile surface switcher trough.
-- **Hairline** (`{colors.line}`): Resting borders, dividers, and slider tracks.
+- **Paper** (`{colors.canvas}` / `{colors.surface}`): Shell, panel content,
+  tabs at rest, cards, fields, settings, and notices.
+- **Recess** (`{colors.sunken}`): Inactive tab bars, grouped controls, compact
+  readout cells, and mobile switcher troughs.
+- **Pale Bench** (`{colors.viewport}`): WebGL and other visualization frames.
+- **Camera Mat** (`{colors.camera}`): Camera frames and camera-unavailable
+  surfaces only.
+- **Hairline** (`{colors.line}`): Panel, tile, settings, table, and control
+  boundaries.
 - **Graphite ramp** (`{colors.ink}` → `{colors.ink-soft}` →
   `{colors.ink-faint}`): Primary labels, secondary text, then metadata.
-- **Hover wash** (`{colors.hover}`): The default hover treatment for quiet
-  controls and rows.
-- **Lift** (`{colors.lift}`): The one shadow colour the studio names for itself,
-  used by the mobile switcher's active tile. Every other shadow comes from the
-  framework's own small and large steps.
+- **Hover wash** (`{colors.hover}`): Quiet hover treatment for controls, tabs,
+  activity items, and rows.
+- **Lift** (`{colors.lift}`): Floating dock compass and compact elevated
+  overlays; never resting panels.
 
 ### Named Rules
 
-**The One-Light-World Rule.** Application chrome, the 3D stage, and the dataset
-rail all belong to one light workspace. Do not reintroduce a fixed-dark viewport
-or dark session rail; only camera pixels use the camera mat.
+**The One-Light-World Rule.** Application chrome, panel content, the 3D stage,
+Timeline, and data tools belong to one light workspace. Only camera pixels use
+the camera mat.
 
-**The Spent-Colour Rule.** Colour means selection, arm identity, connection,
-caution, danger, or a primary action. If none applies, use graphite, a tonal
-step, or a hairline.
+**The Spent-Colour Rule.** Colour means active, selected, primary, identity,
+connection, caution, or danger. If none applies, use graphite, a tonal step, or
+a hairline.
 
-**The Hardware-Owns-Its-Thresholds Rule.** A reading is judged against the limit
-the hardware reported for itself, read once when it connected — never against a
-number written into this repository. The one constant the studio owns is the
-margin: how close to a motor's own limit counts as worth reporting. A motor that
-states no limit gets no verdict, and its own fault bit outranks any margin.
+**The Exceptional-Status Rule.** A chip reports an exception; it does not
+announce the resting state. A mode or torque chip exists while that condition
+is consequential, not merely because the interface has room for another badge.
 
-**The Exceptional-Status Rule.** A chip reports an exception; it never announces
-the resting state. Simulation gets a wash, physical hardware gets a plain faint
-word. A mode chip exists while a mode is running or faulted, not while it is
-stopped. A torque count exists while an arm is energized, not while every arm is
-released. A badge that is always present is a badge nobody reads, which is
-exactly the badge you cannot afford on the row that reports live motors.
-
-**The Dimmest-Surface Rule.** A text colour is judged against the darkest
-surface it can land on, not the lightest. Faint ink appears on paper, on recess,
-and on the pale bench, and danger appears on its own soft wash — so each is
-chosen to clear 4.5:1 on the worst of those, never on white alone.
-
-**The One-Spelling Rule.** Reusable interface colours are declared as
-role-named `--tone-*` properties in `crates/rerobot-studio/tailwind.css`.
-Components refer to roles, never hue names or one-off theme variants. This
-covers shadow colour too: a `box-shadow` in a component rule names a token
-rather than writing its own alpha-black. Renderer-only arm and grid colours
-remain centralized in `viewport.rs` and in the `rerobot-viewport` crate,
-which owns everything drawn on the bench and cannot see the studio at all.
-The joint signal slots follow the same exception for the same reason: they are
-painted into a canvas that never sees a stylesheet, so they live beside the
-code that draws them, in `signals.rs`, and the one piece of HTML that spends
-one — the key beside a value it labels — takes it from `signal_color` rather
-than restating the hex.
-
-That exception covers colours the canvas *owns*. It does not extend to the
-shell's own tokens, which a canvas still needs as strings: the ink, hairline,
-recess, and accent a plot draws with are **read from `:root` at paint time**, so
-moving a `--tone-*` property moves the plots with it. A literal beside one of
-those reads is a fallback for a stylesheet that failed to load, never a second
-spelling of one that did.
+**The One-Spelling Rule.** Reusable interface colours are role-named
+`--tone-*` properties in `crates/rerobot-studio/tailwind.css`. The panel crate
+maps its `--rp-*` roles to those tokens. Renderer-owned arm and signal colours
+remain centralized with the code that paints them; components do not restate
+their literals.
 
 ## Typography
 
@@ -357,552 +336,382 @@ Segoe UI, sans-serif).
 **Label/Mono Font:** `ui-monospace`, SF Mono, JetBrains Mono, Menlo, monospace.
 
 **Character:** The system face is quiet and platform-native. Monospace is
-functional: it stabilizes changing values and makes IDs and rates scan as data.
+functional: it stabilizes changing values and lets IDs and rates scan as data.
 
 ### Hierarchy
 
-Four steps, and four is the whole list. A fifth size is drift, not a decision.
-
-- **Readout** (500, 16px mono, 1): Elapsed recording time beside Record, and
-  nothing else in the studio.
-- **Title** (600, 12px, -0.01em): Wordmark, panel titles, and robot identity.
-- **Body** (400, 12px): Buttons, fields, mode controls, sentences, and ordinary
-  values. **Action** is the same 12px at weight 500 — the Record transport — so
-  emphasis costs weight rather than a size step.
-- **Label** (400–500, 11px): Status, section names, blockers, control labels in
-  the viewport, joint names, and supporting copy. Weight distinguishes headings
-  without adding a new size.
-- **Micro** (400, 10px): IDs, durations, counts, rates, file paths, metadata,
-  and compact device facts. Functional 10px copy is reserved for dense
-  supporting data, never the only label on an action, never a blocker, and
-  never the description of a physical consequence.
+- **Readout** (500, 16px mono, 1): Elapsed episode time and nothing else.
+- **Title** (600, 12px, -0.01em): Wordmark, panel-empty headings, selected robot
+  identity, and compact region titles.
+- **Body** (400, 12px): Buttons, fields, ordinary values, and sentences.
+  **Action** uses the same size at weight 500.
+- **Label** (400–500, 11px): Panel tabs, status, section names, blockers,
+  control labels, table headers, and supporting copy.
+- **Micro** (400, 10px mono): IDs, durations, counts, rates, paths, and compact
+  metadata. It is never the only label on an action or physical consequence.
 
 ### Named Rules
 
-**The Tabular-Numbers Rule.** Any number that changes in place—elapsed time,
-Hz, degrees, duration, frames, counts—uses monospace with tabular figures.
+**The Tabular-Numbers Rule.** Any number that changes in place — elapsed time,
+Hz, degrees, duration, frames, counts — uses tabular figures.
 
-**The Still-Numbers Rule.** Tabular figures equalize digit *widths*; they do not
-equalize digit *counts*. Any value redrawn from telemetry also gets a box wide
-enough for its widest reading, so nothing beside it moves when a hundreds digit
-drops: the elapsed timer holds 56px, the control rate 64px and right-aligned,
-replay progress 96px, a joint angle 44px, and a readout's digits 3.5ch so its
-unit never slides. A number that walks its neighbours across the screen is a
-worse instrument than a number one character narrower.
+**The Still-Numbers Rule.** Tabular figures equalize digit widths, not digit
+counts. Every telemetry-fed value also reserves space for its widest expected
+reading so nothing beside it moves.
 
-**The 16px-Ceiling Rule.** The elapsed timer is the studio's visual maximum at
-16px. Do not restore the former 42px or 22px timer, and do not introduce display
-typography. The rail is instrumentation, not a scoreboard.
-
-**The Four-Sizes Rule.** 16 / 12 / 11 / 10, and every one of them has a job
-above. A new element picks the tier whose job it is doing; it does not
-introduce a size because it wants to feel slightly different from its
-neighbour.
+**The 16px-Ceiling Rule.** The elapsed clock is the Studio’s visual maximum.
+Panel titles do not become page headings merely because a tile grows.
 
 **The Sentence-Case Rule.** Labels are sentence case. Do not add uppercase
-tracked kickers, eyebrows, or decorative display faces.
+tracked kickers, decorative display faces, or all-caps panel titles.
 
 ## Layout
 
-The first viewport is a full-height shell with a 28px minimum header, a stable
-three-pane body, and the Dataset transport spanning the entire width below the
-panes. The full Dataset rail opens on demand; at rest its compact transport
-keeps recording visible without taking the scene's working height.
-The canonical layout is Robots on the left, Scene in the elastic center, and
-Properties on the right. Their order does not change: this is a physical bench,
-not a general editor. The two side panes can be hidden and have pointer- and
-keyboard-resizable separators; the Scene always remains present and absorbs the
-available width. The versioned widths and visibility persist locally. A reset
-control restores the canonical arrangement. Pane toggles, the Signals toggle,
-and the Dataset toggle live in the header; the header and rail remain global
-rather than becoming pane content.
+The first viewport is a full-height application shell:
 
-The Robots column is the one that stacks: the arm list above, Signals below a
-horizontal separator that drags and takes arrow keys like the vertical ones.
-Signals is deliberately not a fourth pane. The arms and the traces they just
-made are one subject seen twice, so the plots sit with the arms, the Scene
-keeps its full working size while a take is read, and the three-part semantic
-order — and the three-part mobile switcher — stay exactly as they were. The
-plots ship on, at 55% of the column; hiding them leaves the column open, and
-asking for them opens the column that holds them.
+- a 32px top menu with the lowercase wordmark plus Settings and About;
+- a body with a 60px activity rail and the remaining area owned by one
+  `PanelWorkspace`;
+- a 20px bottom status bar for connection, environment, activity, recording,
+  torque, rate, and issues;
+- transient notices floating above the shell rather than inserting a new row.
 
-The header is a shallow operating strip: wordmark and pane controls, then a
-right-aligned status cluster. It does not configure teleoperation: Record is the
-single session action that starts both teleoperation and capture. Manual control
-names one arm and lives on that arm's joint panel, next to the sliders it
-enables. At rest the status cluster is a faint environment word, the control
-rate, and the connection state — three items, no badges. Active mode and holding
-appear only while exceptional. Warnings
-show the first issue's own words beside the count, with the rest in an anchored
-details popover — never a full-width banner between the operator and the
-workspace.
+Live and Data are activity changes, not panel tabs. Each activity registers its
+own panel set and uses an independent versioned persistence key. Switching
+activity therefore changes both the operating content and its visualization
+without moving Live camera tabs into Data, or vice versa.
 
-A robot entry is one 24px line reading identity → role → readiness →
-connection, with the role giving way first when the panel narrows. Expanded
-setup is three sections and a file row: motor bus — which owns the port picker,
-Rescan, Identify, and the Connect action on the port's own line — then cameras,
-then calibration, then file maintenance. Connection state is not restated inside
-the setup; the entry line above already carries it as readiness text and a dot,
-and the Connect button's own label carries the rest. Adding an arm and importing
-one share a single quiet row at the foot of the list rather than stacking two
-full-width bars that read as two more robots.
+The canonical first-open desktop layout is:
 
-The joint inspector reads identity and mode controls, two rows of four readout
-cells, an adaptive joint grid, the selected motor's detail card, then cameras.
-Read-only joints use as many 8rem columns as the pane can hold, showing the
-position meter only when an individual cell reaches 11rem; active sliders use a
-wider 20rem minimum. The
-first readout row is where the arm is; the second is how its motors are doing,
-and two of its four cells are thermal because heat is the one reading that does
-not recover when the load comes off. Camera previews are one per row at the panel's full
-width: two side by side in a 320px inspector gave each a 150px picture, which is
-too small to answer the question a preview exists for.
+```text
+┌──────────── one third ────────────┬────────────── two thirds ──────────────┐
+│ Live or Data workbench            │ Scene / Query      │ Camera tabs       │
+│                                   │                    │                   │
+│                                   ├────────────────────┴───────────────────┤
+│                                   │ Timeline — lower 42%                   │
+└───────────────────────────────────┴─────────────────────────────────────────┘
+```
 
-The dataset rail has two horizontal layers and no heading rows. The first is a
-single row holding Record and the 16px timer on its baseline, then the episode
-strip as an elastic middle, then session count, Import, and Export. The strip
-scrolls horizontally through equal 72×36px episode buttons in capture order,
-each carrying three facts on two lines: id and duration share a baseline,
-exportable state sits under them. When the cap hides older takes, a dashed card
-at the head of the strip says how many. The second 28px-minimum row names the
-selected episode, lists duration, frames, rate, and source mode, then Replay —
-replaced by frame progress and Stop while that episode is the one driving an
-arm. Delete belongs to the card and is revealed on hover or focus, so the card's
-own labels keep the full 72px rather than budgeting a permanent gutter around
-them. Card width never encodes duration; values are printed explicitly. The
-selected episode defaults to the newest completed episode when the rail first
-opens.
+Within the visualization’s upper row, the primary panel takes two thirds and
+the named camera tile takes one third. This is a starting composition, not a
+fixed semantic order. Every registered panel may be attached to another tile
+as a tab or docked to an edge to create a horizontal or vertical split.
+Splitters are 8px pointer targets that render as one-pixel hairlines; they clamp
+ratios so neither side collapses. Split buttons may create an explicit empty
+tile as a truthful drop target.
 
-At 900px and below, the header and Dataset detail may wrap. At 760px and below,
-the pane chrome recedes and the body shows one of Robots, Scene, or Properties
-at a time via a three-part surface switcher. The same panel instances stay
-mounted so switching does not restart the scene or a camera. The compact Record
-transport remains outside that switch. Dataset opens above it as a bounded
-bottom work surface, caps at 58dvh, and scrolls internally. Record grows to a
-44px touch target and the selected-episode facts and actions stack to full
-width. Touch has no hover, so revealed actions stay visible there: Delete on an
-episode card, which grows to 120×44px to hold a 44px target without taking the
-room its labels need, and the camera row's unassign mark, which grows to 28px.
+Panel identity is durable and unique. A panel cannot appear in two tiles.
+Camera panels reconcile by named home when cameras are assigned, removed, or
+loaded asynchronously. Content remains keyed by panel ID so moving or tabbing a
+camera does not restart an unrelated feed. Layout mechanics, persistence,
+keyboard behavior, previews, and chrome belong to `rerobot-panels`; the Studio
+owns panel titles, content, safety, and domain state.
+
+The Timeline is always registered in both activities, including empty state.
+Its default lower position gives the system a consistent clock, but the user may
+move it like any other panel. Live review and Data selection are separate state:
+recording updates Live’s inspectable take, while Data owns its selected episode
+and query result.
+
+Live packs Recording before Motors & cameras. Robot identity appears once in a
+compact switcher and once in the selected arm’s control toolbar, not in a stack
+of redundant headings. Setup is global Settings → Robots rather than a
+collapsible section in Live.
+
+Data states `Dataset → Episodes` explicitly. Episodes owns select, replay, and
+delete. Query is a peer tool within Data; its result becomes a primary panel
+while the Timeline keeps the same layout contract. Recorded camera tabs come
+from the selected episode’s media streams, not the currently connected camera
+assignments.
+
+At 760px and below, the split tree is not squeezed into unusable slivers. A
+horizontally scrollable panel switcher presents one registered panel at a time;
+the desktop tree remains persisted and unchanged. At narrower widths, optional
+status facts may drop, but active recording, torque, blockers, and the control
+that stops motion remain reachable.
 
 ### Named Rules
 
-**The Literal-Loop Rule.** The primary session sequence is Record → select an
-episode → Replay → Export. Do not fork it into judgement, diagnostics, or
-analysis lanes. Signals is not a fork of it: it has no actions of its own that
-touch a take, it draws only what Record is capturing or last captured, and the
-loop runs identically with the plots switched off.
+**The Panel-Owns-Content Rule.** If a surface has independent identity, focus,
+or sizing needs, register it as a panel. Do not add another fixed shell region
+or let one component mutate another tile’s tabs.
 
-**The Bound-To-The-Take Rule.** The plots exist for the length of a take and
-for nothing else. No always-on scope, no rolling window over idle arms, no
-second measurement drawn over time because it is now possible to draw one. A
-surface that plots whenever it has numbers is a monitoring dashboard, and this
-is a bench beside two arms.
+**The Timeline-Is-One-Clock Rule.** Live, Episodes, Query, camera media, scene,
+signals, and replay share one playhead contract. Do not create a second timeline
+with different geometry or ownership.
 
-*One take, and the identity of a take is not its name.* A restarted server
-numbers its episodes from one again, so a take is recognized as new when its id
-changes, when recording resumes after a gap, **or when its clock runs backwards**
-— any of the three. Getting this wrong does not merely mix two takes: it leaves
-the shared time column unsorted, and every search over it, every window, and
-every cursor then quietly lies.
+**The Nothing-Load-Bearing-Hidden Rule.** A breakpoint may reflow, switch,
+scroll, or reduce optional status. It may not hide an active recording, safety
+state, blocker, or stop/release control.
 
-**The No-Flung-Pair Rule.** A wide strip does not hold two clusters pinned to
-opposite edges with nothing between them. Either something elastic fills the
-middle — the episode strip does exactly this in the rail's first row — or the
-row packs from the left and simply ends. A lone control a thousand pixels from
-the thing it acts on reads as breakage, not as breathing room.
+**The Consequence-On-The-Page Rule.** Text describing energize, release, stop,
+discard, replay, or physical seek is rendered on the page, never only in a
+tooltip.
 
-**The Equal-Episode Rule.** Every episode button has the same footprint.
-Duration, completion, and capture order are text or state, never proportional
-bar geometry.
-
-**The No-Unfolding-Prose Rule.** Explanatory text does not appear and disappear
-with a live value. A sentence that unfolds when a measurement crosses a
-threshold, or when a mode changes, pushes everything below it down a row and
-back — under a 20Hz telemetry stream that is the whole panel breathing. State
-that changes gets a tint, a chip, or a disabled control; prose is reserved for
-what stays true for as long as the operator is looking at it. The single
-survivor on the joint panel is the uncalibrated-arm line, because it changes
-once, when the arm is calibrated.
-
-**The Nothing-Load-Bearing-Hidden Rule.** A breakpoint may reflow, reorder,
-cap, or scroll. It may not hide a control, safety state, blocker, or active
-recording. Collapsing the rail during recording leaves its transport visible.
-A horizontal scroller counts as hiding: it shears a control off an edge with
-nothing on screen saying the control is still there. At the narrowest widths the
-status cluster may drop the loop rate, and nothing else — the environment,
-outstanding issues, a fault, and any arm holding torque stay on the page,
-because the control that energizes an arm is still there and still enabled.
-
-**The Consequence-On-The-Page Rule.** Anything that describes what a control
-will do to the hardware — energize, release, stop, discard — is rendered text,
-not a `title`. An operator with a hand on the arm has no hand for a hover, and
-on a touch bench the tooltip does not exist at all. Releasing torque is confirmed
-in place with its instruction visible, the same way deleting a take is. The
-boundary is consequence and blockage, not curiosity: what a measurement *means*,
-and a note about a step already completed, may live in a `title`.
+**The No-Unfolding-Prose Rule.** A live value changes tint, chip, or control
+state; it does not insert a sentence that pushes the panel below it.
 
 ## Elevation & Depth
 
-The studio is flat by default. Depth comes from paper, pale-bench, and recess
-tonal steps plus one-pixel hairlines. Selection uses a wash and a coincident
-inset ring so state does not shift layout.
+The Studio is flat by default. Panel and tile hierarchy comes from tonal steps,
+hairlines, active edges, and content mats rather than card shadows. Elevation is
+reserved for an object that genuinely floats above the shell.
 
 ### Shadow Vocabulary
 
-- **Resting lift** (`0 1px 2px rgb(0 0 0 / 0.05)`): Small objects placed above
-  a surface, including the view cube, reconnect card, and slider thumb.
-- **Segment lift** (`0 1px 3px {colors.lift}`): The active mobile surface
-  switcher tile.
-- **Floating notice** (`0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)`): Anchored issue popovers and bottom notices only.
-- **Inset ring** (`inset 0 0 0 1px currentColor`): Selected episode cards and
-  disabled filled actions; it is state, not elevation.
+- **Resting lift** (`0 1px 2px rgb(0 0 0 / 0.05)`): Small controls placed above
+  a visualization, such as the view cube.
+- **Segment lift** (`0 1px 3px rgb(0 0 0 / 0.12)`): Active mobile panel tile.
+- **Dock preview lift** (`0 6px 18px rgb(0 0 0 / 0.08)`): The blue docking
+  footprint while a tab is dragged.
+- **Dock compass lift** (`0 6px 18px rgb(0 0 0 / 0.12)`): The small floating
+  five-zone orientation cue.
+- **Floating notice** (`0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)`):
+  Settings-adjacent popovers and bottom notices only.
+- **Inset state** (`inset 0 0 0 1px currentColor`): Selection and disabled
+  state, not elevation.
 
 ### Named Rules
 
-**The Flat-by-Default Rule.** Resting panels, cards, controls, and the dataset
-rail do not cast shadows. Shadow means an object genuinely floats above the
-shell.
+**The Flat-by-Default Rule.** Resting panels, tabs, cards, controls, Timeline,
+and settings do not cast shadows.
 
 **The Inset-State Rule.** Selection and disabled treatments happen inside the
-existing box with a wash, outline, or inset ring; state changes do not add a
-border that moves adjacent content.
+existing box with a wash, edge, or inset ring. State changes never add geometry.
 
 ## Shapes
 
-Most controls, fields, cards, episode buttons, chips, viewport chrome, and
-popover corners use a small 4px radius. Floating notices use 6px. Status dots,
-slider thumbs, and circular issue marks are fully round. The mobile segmented
-switcher is slightly softer because it is a container around three controls,
-but its active tile remains compact rather than pill-shaped.
+The form language is compact and gently squared: 4px for controls, chips,
+episode items, and tile actions; 6px for floating notices and the dock compass;
+full circles only for status dots, arm marks, and slider thumbs. Panel and tile
+containers remain square so adjacent surfaces meet as one workspace.
 
-Borders are one-pixel role-token hairlines. Icons are inline 16×16 SVGs with a
-1.35px stroke, round caps and joins, and no fill except where the transport mark
-needs a solid record/stop symbol. They draw at 14px in chrome and 12px inside a
-dense row's revealed action. Form follows hierarchy: shallow horizontal groups,
-aligned rows, and compact rectangular targets rather than bubbles, oversized
-cards, or ornamental silhouettes.
+Icons are outline geometry with round caps and joins, normally 16px inside a
+24px target. Panel split icons describe direction rather than decoration.
+Controls remain shallow rectangles; avoid pills, oversized cards, and floating
+islands.
 
 ## Components
 
 ### Buttons
 
-- **Shape:** Compact rectangle, 4px radius, 24px minimum height, 6px horizontal
-  padding, and a transparent resting border so variants share a box. Record is
-  the single 28px exception.
-- **Primary:** Role-blue fill with white text. Use once per local purpose:
-  Connect, Record, or Replay.
-- **Hover / Focus:** Quiet controls gain the hover wash; primary controls
-  brighten without changing hue. All retain the global 2px focus ring at 1px
-  offset — one pixel, not two, because at a 24px control height a 2px gap reaches
-  into the neighbouring control and reads as if both were focused.
-- **Danger:** Red text on transparent, with a red soft wash on hover. Delete
-  requires inline confirmation; it is never a filled red call to action.
-- **Link:** The quiet text action — Rescan, Identify, Export, Delete, Dismiss.
-  11px soft graphite at the 24px target height, with no border or fill,
-  darkening to primary ink on hover. Destructive links take danger ink on hover
-  instead. This is where a rare action belongs, so that being a button never
-  makes the rarest action in a row the loudest thing in it.
-- **Disabled:** A reason appears beside Record, Replay, or Export. The Record
-  fill drops to recess with faint ink and an inset hairline rather than relying
-  on global opacity.
+- **Shape:** Compact rectangle, 4px radius, 24px minimum height, and 6px
+  horizontal padding. Record is the single 28px exception.
+- **Primary:** Role-blue fill with white text, once per local purpose: Record,
+  Replay, Run query, Connect, or Save.
+- **Danger:** Red text on transparent with a soft wash on hover. Delete and
+  Release consequences confirm inline rather than becoming a filled red CTA.
+- **Link:** Quiet 11px text action for Rescan, Identify, Export, Delete, and
+  Dismiss.
+- **Focus:** The global accent focus ring remains visible inside dense chrome.
+  Disabled consequential actions show a reason beside them.
 
 ### Chips
 
-- **Style:** 11px text, 4px radius, 0/4px padding, hover-wash background, and
-  soft graphite ink. Chips stay at 11px rather than dropping to micro: at narrow
-  widths they are the only place torque state appears.
-- **State:** Blue wash for active, ochre wash for simulation or an unverifiable
-  environment, and red wash for fault or torque danger. A 6px dot carries simple
-  connection/completion state.
-- **Presence is meaning.** Per The Exceptional-Status Rule, a chip renders only
-  while its condition is exceptional. In the joint inspector, a teleoperation
-  chip names what the arm is *doing* — "leading", "following" — rather than
-  repeating an identity the arm's own name beside it already gives.
+- **Style:** 11px, 4px radius, compact horizontal padding, graphite ink, and a
+  tonal wash.
+- **State:** Blue for active, ochre for caution, red for fault or torque danger,
+  and a small green dot for simple availability.
+- **Presence:** Per the Exceptional-Status Rule, a chip renders only when its
+  condition matters.
 
-### Readout Cell
+### Panel Tabs, Tiles, and Splits
 
-- **Style:** A recess-filled 4px cell holding a 10px faint label over an 11px
-  tabular mono value, four across, in two rows at the top of the joint inspector
-  and three across inside the selected motor's card.
-- **Unit:** A separate faint element rather than part of the value string, so
-  four cells line their digits up instead of each starting wherever its own
-  label ended. The digits hold 3.5ch so the unit stays at a fixed x as the value
-  changes.
-- **Caution:** An out-of-range reading swaps recess for the ochre wash and
-  graphite for ochre ink. The tint is the entire treatment; nothing is added to
-  the layout.
-- **Threshold:** A cell tints against the limit the hardware reported for
-  itself, never against a number written in this repository. A motor that
-  reports no limit gets no tint, because there is nothing to be near.
+This is the signature component system.
 
-### Motor Detail Card
+- **Tab bar:** 32px recess surface with a one-pixel lower rule. Tabs are 11px,
+  80–224px wide, and horizontally scroll without showing a scrollbar.
+- **Active tab:** Paper surface, primary ink, and a 2px role-blue top edge.
+  Inactive tabs use soft ink and hover wash.
+- **Tile:** Flat paper content frame, minimum 10rem × 5rem on desktop. Empty
+  tiles state that they are drop targets and offer a close action.
+- **Tile actions:** 24px split-right, split-down, and close controls. They reveal
+  by opacity on hover/focus and remain present on non-hover devices.
+- **Splitter:** 8px hit target with a 1px rule. Hover, focus, or active resize
+  changes only the rule to role blue. Double activation restores a 50/50 split;
+  arrows resize, with Shift for a larger step.
+- **Keyboard tabs:** Left/Right, Home, and End change the active tab. Alt+Shift
+  plus arrows splits/docks; Alt+Shift plus Page Up/Down moves between tiles.
+- **Persistence:** Layout mutations store immediately, while pointer resizing
+  stores on release. Invalid saved trees fall back to the canonical layout.
 
-Everything one motor reports, for the one motor the operator picked. White with
-a hairline and 4px corners — the camera property card's treatment, and for the
-same reason: its readouts are recess cells, and a recess block full of recess
-cells is a block with no cells in it.
+### Dock Preview and Motion
 
-- **Presence:** It appears on selection rather than living on the panel. Six
-  more figures for every joint would be a diagnostic console, and the arm-level
-  row above already answers whether anything is wrong.
-- **Head:** The joint's name, then one line that carries either its bus ID and
-  model or, when it is faulted, the motor's own complaint in danger ink. One
-  line either way, so a fault renames what is already there instead of unfolding
-  a row and pushing its own readouts down at the moment they matter most.
+- **Preview:** Dragging a tab exposes five zones on each tile. Center attaches
+  as a tab; left/right/top/bottom creates a split. The selected zone is a blue
+  wash with a blue hairline, inset 4px from its target footprint.
+- **Compass:** A 38px paper square with a 6px radius and blue directional mark.
+- **Timing:** Split basis changes and tile entry use 140ms with
+  `cubic-bezier(.16, 1, .3, 1)`; preview entry uses 120ms with the same curve;
+  colour and reveal changes use 100ms ease-out.
+- **Resize:** Geometry transition is disabled while a splitter is actively
+  dragged so the divider tracks the pointer exactly.
+- **Reduced motion:** All panel transitions and entry animations are removed
+  under `prefers-reduced-motion`.
 
-### The Bench Mark and the Hover Note
+### Application Chrome
 
-Two pieces of chrome that belong to objects rather than to the stage, which is
-why neither is one of the bench's corner clusters.
+- **Menu:** Lowercase wordmark, Settings, and About only. No search field or
+  workspace selector until the product has a real need for them.
+- **Activity rail:** Live and Data only, 60px wide on desktop. Active state uses
+  blue ink, a paper surface, and a 2px left edge.
+- **Status bar:** 20px, 10px type, hairline-separated facts. It owns global
+  connection, environment, current activity, recording, holding, rate, and
+  issue truth.
 
-- **Bench mark:** A 6px ochre or red dot anchored at an unwell motor, ringed in
-  the bench colour so it reads against the arm. The arm-level readouts answer
-  whether anything is wrong; only the bench can answer *which one*, and pointing
-  at the part is how the physical world answers it. Nothing else changes: the
-  arm keeps its identity accent, because a hot elbow is still that arm's elbow.
-- **Hover note:** A small paper card that follows the pointer, carrying a name
-  and at most one reading. It is a glance, not a panel, and it is never the only
-  place a fact lives — an operator with a hand on the arm has no hand for a
-  hover, and a touch bench has no hover at all.
+### Workbench Sections
 
-### Cards / Containers
+- **Robot switcher:** Compact grid of arms with one identity accent and one
+  readiness dot per item.
+- **Selected arm toolbar:** Holds mode and consequential actions once. It does
+  not repeat the same robot name in consecutive headings.
+- **Setup:** Lives in Settings → Robots. Ports, camera assignment, calibration,
+  import/export, and deletion do not compete with active motor control.
 
-- **Panels:** White surfaces divided by hairlines; first headers stick while
-  their content scrolls.
-- **Setup group:** A recess block under an expanded robot entry, divided into
-  hairline-separated sections. Each section opens with the same 24px head — its
-  name on the left, its quiet link actions packed right — and only carries an
-  instruction line where there is still work to do. A satisfied step is its
-  heading and its button, and nothing else.
-- **Episode card:** Fixed 72×36px, white on the rail, with three facts on two
-  lines: short ID and duration on one baseline, completion state beneath — all
-  three fully legible, because the card reserves no permanent room for its
-  delete affordance. Selected cards use the blue wash plus inset blue ring. Live
-  recording uses the danger wash and the 1.6s `take-pulse` on border and
-  background; cancelled legacy episodes use recess and faint ink. Delete appears
-  on hover or focus and confirms in place, in an overlay sized to two full-height
-  buttons rather than to the card.
-- **Camera property card:** White, hairline-bordered, 4px corners, with a 16:9
-  dark camera mat, one per row at the panel's full width. Selection aligns
-  border and inset outline to role blue.
-- **Notice / issue popover:** White, hairline-bordered, modest shadow, and dense
-  text. The desktop issue popover is 320px wide and anchored under the header
-  summary; on mobile it becomes fixed between 8px side gutters. A notice carries
-  its own expiry and comes off the page on its own.
+### Timeline
 
-### Inputs / Fields
-
-- **Style:** 24px minimum height, white fill, graphite ink, 4px radius, 1px
-  hairline, and 0/6px padding.
-- **Focus:** Border shifts to role blue while the global focus ring remains.
-- **Inline variant:** Pickers inside a bordered toolbar group shed their own
-  border and background.
-- **Paired action:** A picker whose purpose is completed by one button shares its
-  line with that button — the port select and Connect — rather than stacking a
-  status row above and an action row below.
-- **Joint position:** Outside Manual mode, label and angle are the compact
-  minimum. A 36px hairline with a square tick appears only when its cell has
-  spare width, reading as telemetry rather than a disabled control. In active
-  Manual mode it becomes the full-width slider: a 3px track and 12px
-  soft-graphite thumb with a 2px paper ring.
-
-### Navigation
-
-There is no site navigation. Panel visibility and layout are application chrome:
-24px icon toggles in the header use role blue on the selected wash, and a quiet
-reset action restores the canonical widths and visibility. Below
-760px, a Robots / Scene / Properties segmented switcher replaces the desktop
-pane controls; the Dataset toggle remains independently available.
-
-### The Dataset Rail
-
-The rail is the signature shipped component because it makes the product loop
-literal without turning recordings into an analysis surface.
-
-- **Record transport:** A 28px blue button with the record mark, “Record,” and
-  `R` shortcut; on mobile it grows to 44px. It automatically starts
-  teleoperation with the ready leader/follower pair. During capture it becomes
-  red and reads “Stop & save.” Save and Cancel both end teleoperation; Cancel
-  remains the secondary escape hatch for a bad take.
-- **Timer:** 16px tabular mono with a 10px supporting label on the same
-  baseline, carrying the shortcut or the live frame count.
-- **Session summary:** Exportable episode count and total duration followed by
-  the outlined Export dataset action. Naming is an inline field only after the
-  operator invokes Export.
-- **Episode strip:** Equal-size, horizontally scrolling buttons in oldest-first
-  capture order, limited to the newest 120 items when necessary, with the
-  remainder counted on a dashed card at the head of the strip. Empty state says
-  to press Record or `R`.
-- **Selected row:** Identity and completion dot, four compact facts, then a
-  target-specific action such as “Replay on follower.” Replay selects a
-  compatible calibrated arm and prints any blocker beside the disabled action.
-  While this episode is the one playing, the action becomes fixed-width frame
-  progress and Stop: the escape from motion stays where the motion was started,
-  and the counter does not walk it sideways as it counts.
-- **Workflow boundary:** Incomplete and cancelled legacy files remain visible
-  and excluded from export, but there is no primary keep/reject judgement lane,
-  tracking trace, error graticule, or quality verdict.
+- **Transport:** Record, Pause/Resume, Stop/Discard, replay transport, and the
+  16px clock occupy one stable toolbar. Record always implies Teleop.
+- **Playhead:** One pointer and keyboard-operable time cursor drives every
+  historical surface. Preview scrubbing updates camera, scene, and signals;
+  physical motion is a separate armed option and commits only on release.
+- **Lanes:** Camera spans and joint signals share the same episode scale.
+  Recording gaps are explicit instead of compressed away.
+- **Episode items:** Equal 72×36px items favor scanability. Duration and state
+  are text/tint, never proportional card geometry.
+- **Empty state:** “Record in Live or select an episode in Data.” It names the
+  two real ways the panel gains content.
 
 ### Signals
 
-Under the arm list, and only ever about a take. Three layers, top to bottom.
+Signals is an episode visualization on the Timeline clock, not an unowned
+dashboard. Traces share one time axis and degree scale across arms. The readout
+prints every plotted value and doubles as the legend. Joint colours are stable
+by joint name, and crosshair/focus changes emphasis without changing layout.
 
-- **The window strip:** the panel name, one fixed slot that is empty at rest,
-  and four presets — 10s / 30s / 2m / All — each a 24px target, set in the body
-  face rather than in mono, because a preset names a window instead of measuring
-  one. The presets are *following* modes: the window keeps up with the newest
-  sample until the operator drags the zoom, which leaves following and puts a
-  **Follow** control in the fixed slot. That control is named for what it does,
-  not for the state it appears in — its presence is the state — because a label
-  reading "Held" leaves the way back in a `title`, which a touch bench and a
-  screen reader both never receive. The slot reports exceptions and nothing
-  else: a parked window, and a take long enough to have lost its oldest samples
-  to the 30-minute plot cap. At rest it is blank, so nothing in the strip moves
-  under a telemetry stream.
-- **The plots:** one grid per arm, stacked, named in 10px graphite at the grid's
-  own left edge. One time axis, one degree scale, one zoom, one crosshair, drawn
-  by one renderer instance — a leader and its follower are aligned by
-  construction rather than by two charts being kept in step. Gridlines are
-  hairlines and the count is chosen from the plot's height, two on a short trace
-  and four on a tall one, because axis labels crowding out the trace is the
-  failure mode of a small multiple. A zoom slider spans the whole take beneath
-  the last plot; it shows no data shadow, because the shadow ECharts offers is
-  one joint of one arm standing in for everything.
-- **The readout:** joints down, arms across. It is the legend, the value table,
-  and the joint switchboard at once, which is why it earns the space three
-  separate components would have taken. Each row is a 24px toggle carrying a
-  short stroke in the joint's own colour — a stroke, not a swatch, because what
-  it labels is a line — and each cell is that arm's angle at the cursor, in
-  tabular mono with the degree sign as its own faint element, in a column wide
-  enough for the widest angle a joint can report. Pointing at or focusing a row
-  lifts that joint's trace on every plot and steps the others back: that is what
-  makes this a legend rather than a colour-coded table, and it changes no
-  geometry, so nothing moves. With no cursor it holds the newest sample in the
-  window, so the numbers are on the page without anyone hovering for them. The
-  corner cell carries the time being read. Once a take stops, a footer names it.
+### Camera Panels
 
-The empty state names the two ways to start: press Record, or press `R`. The
-plots take focus and the arrow keys move the time cursor along the samples,
-because the crosshair is a pointer device and the readout it feeds is the whole
-reason three of the six trace colours are allowed on paper. And the one
-dependency that can be missing says so: a plotting runtime that never loads
-leaves a sentence, not an empty rectangle, and the readout keeps working.
+- **Frame:** Dark 16:9 mat inside light panel chrome, with contained pixels and
+  honest letterboxing.
+- **Identity:** Tab title states Camera/Recorded plus role. Episode camera tabs
+  derive from recorded streams; Live camera tabs derive from current robot
+  assignments.
+- **Lifecycle:** One stable MJPEG image element per assigned Live camera. Moving
+  or tabbing a panel must not fabricate a second connection. Recorded video
+  seeks to the playhead and exposes approximate synchronization as caution.
+- **Failure:** Actionable unavailable/permission text appears in the frame; a
+  green dot never masks a blank image.
 
-### The WebGL Bench
+### Data, Episodes, and Query
 
-The stage uses a pale neutral clear color with broad, low-contrast lighting so
-white printed shells remain distinct. The grid is on by default and remains an
-explicit control: the bench is a physical workspace, and one sparse 20cm rhythm
-plus subdued axes is how reach and clearance get read off the screen. Arm accents
-connect the legend to geometry. Chrome over the bench is two corner clusters and
-two edge notes, not six floating boxes: Grid and Home share one group at the top
-right, the axis key is the last row of the view cube rather than a separate card
-above it, the arm legend sits at the top left, and the interaction hint runs
-along the bottom left. All of it uses the same light surface and graphite
-vocabulary as the rest of the app.
-The cube's faces are spelled out — Top, Front, Right — never abbreviated to
-single letters that would read as keyboard shortcuts beside the ones that are.
+- **Hierarchy:** Dataset owns Episodes. Dataset-level actions include Import and
+  Export; episode-level actions are Select, Replay, and Delete.
+- **Query:** A guarded read-only SQL editor with presets and a row limit in the
+  Data workbench. Results render as a primary panel and may synchronize the
+  selected episode/playhead.
+- **Destination state:** SpiralDB becomes active when its required configuration
+  is complete; do not add a redundant enable switch. Hugging Face remains an
+  explicit optional mirror.
+
+### Settings
+
+Settings is one Codex-style modal: category navigation at left, ordinary forms
+at right, header and footer fixed. Robots is the default section, followed by
+SpiralDB, Hugging Face, and Video. Secrets are entered but never echoed back;
+test results and configuration blockers are rendered beside the responsible
+section.
+
+### Inputs / Fields
+
+- **Style:** 24px minimum height, paper fill, graphite ink, 4px radius, one-pixel
+  hairline, and 6px horizontal padding.
+- **Focus:** Border and focus ring shift to role blue.
+- **Paired action:** A picker and the action that completes it share one row
+  when space allows.
+- **Joint position:** Writable slider only in Hold/Manual. Release keeps normal
+  high-contrast telemetry instead of washed-out disabled sliders.
+
+### WebGL Bench
+
+The stage uses the pale bench clear colour, low-contrast lighting, a sparse
+scale grid, subdued axes, and arm identity accents. Camera geometry may be
+selectable in the scene, but camera pixels remain in camera panels. Corner
+controls are compact and use the same paper/graphite vocabulary as the shell.
+
+### Notices
+
+Transient notices float over the shell, carry their own 4–14 second expiry, and
+keep Dismiss. Failures use alert semantics and a longer reading floor. A notice
+never inserts a persistent banner between menu and workspace.
 
 ### Named Rules
 
-**The Focusable-Reveal Rule.** A control revealed on hover fades in with
-`opacity`; it is never hidden with `visibility` or `display`. A hidden element
-cannot take focus, so hiding one outright puts it beyond a keyboard entirely.
-The episode card survives this because focusing its visible episode button trips
-`:focus-within` on the card, but a row whose only focusable child *is* the
-revealed control has no such escape — so it reveals on its own `:focus` as well
-as the row's hover, and stays permanently visible where there is no hover at all.
+**The Focusable-Reveal Rule.** A hover-revealed control fades with opacity and
+also reveals on focus. It is never removed with `display` or `visibility` when
+it is the only focusable action in its row.
 
-**The Expiring-Notice Rule.** A transient notice carries its own deadline and is
-taken off the page by the studio clock — 4 to 14 seconds, scaled to reading
-length, with a longer floor for a failure that asks for a decision. Dismiss
-stays, for the operator who is faster than the timer. The deadline lives in the
-notice value rather than in the component that draws it, so a notice cannot be
-raised without one.
+**The Expiring-Notice Rule.** A notice cannot be raised without a deadline; the
+deadline belongs to the notice value, not the component that draws it.
 
 ## Do's and Don'ts
 
 ### Do:
 
-- **Do** keep the shell, WebGL bench, plots, and dataset rail in one light
-  neutral world; reserve the dark mat for camera imagery.
-- **Do** print every value a plot draws, in the readout beneath it. It is what
-  makes the trace palette legal, and it is why nothing here needs a hover.
-- **Do** keep the plots bound to a take: empty before Record, live during, held
-  after, replaced by the next one.
-- **Do** keep Record and Replay as the key local filled actions and Export as
-  the session's explicit exit action.
-- **Do** use equal-size episode buttons and print duration explicitly.
+- **Do** keep shell, panels, WebGL, plots, Timeline, settings, and data tools in
+  one light neutral world; reserve the dark mat for camera imagery.
+- **Do** register independent surfaces as panels and give them durable IDs and
+  meaningful home tiles.
+- **Do** preserve the one-third/two-thirds default while treating persisted user
+  layout as the active composition.
+- **Do** give every drag, dock, split, resize, and tab action a keyboard path,
+  visible focus, and reduced-motion behavior.
+- **Do** derive Live camera panels from robot assignments and Data camera panels
+  from episode media streams.
+- **Do** keep one stable camera node per Live feed and preserve panel identity
+  while the layout changes.
+- **Do** keep Timeline synchronized with scene, camera, signals, query selection,
+  replay, and optional physical seek.
+- **Do** print every plotted value and keep joint colours stable by name.
 - **Do** keep the base at 12px with 24px controls and a 2/4/6/8px rhythm.
-- **Do** keep type on the four documented steps; reach for weight and the
-  graphite ramp before reaching for a size.
-- **Do** set changing numbers, IDs, rates, durations, and counts in tabular mono.
-- **Do** give every telemetry-fed value a fixed box, so a dropped digit moves
-  nothing beside it.
-- **Do** render a status chip only while its condition is exceptional; the
-  resting state is plain faint text or nothing.
-- **Do** let transient notices expire on their own while keeping Dismiss.
-- **Do** put disabled-action reasons on the page beside Record, Replay, and
-  Export.
-- **Do** keep the scale grid sparse and user-controlled, on by default.
-- **Do** make things on the bench selectable, hoverable, and answerable — a
-  motor, a camera, an arm — and keep every fact they carry reachable from the
-  inspector without touching the canvas.
-- **Do** judge a reading against the limit its own hardware reported.
-- **Do** place warnings in the compact header popover and keep transient notices
-  floating above the shell.
-- **Do** preserve device hierarchy: identity and readiness first, setup second,
-  file maintenance last.
-- **Do** reflow, cap, and scroll at narrow widths while keeping active recording
-  and safety state visible.
-- **Do** keep `tailwind_input` and `tailwind_output` declared in
-  `Dioxus.toml`; DX owns stylesheet compilation for serve, build, and bundle.
-- **Do** vendor the plotting runtime into the studio's own assets. The machine
-  wired to the arms is not promised an internet connection.
+- **Do** use tabular figures and fixed boxes for changing telemetry.
+- **Do** render exceptional status only when it helps the operator act.
+- **Do** put disabled-action reasons and physical consequences on the page.
+- **Do** move robot and destination configuration into Settings.
+- **Do** make Live/Data layout state, episode selection, and camera ownership
+  independent so switching activities cannot move content between them.
+- **Do** keep `tailwind_input` and `tailwind_output` in `Dioxus.toml`; DX owns
+  stylesheet compilation for serve, build, and bundle.
 
 ### Don't:
 
-- **Don't** reintroduce a fixed-dark viewport or dark dataset rail.
-- **Don't** enlarge the elapsed timer beyond the shipped 16px role.
-- **Don't** add a heading row whose text restates what the region below it
-  obviously is, or a status line whose words the row above already carries.
-- **Don't** pin one control to a strip's far edge when the middle is empty; fill
-  the middle or pack the row left.
-- **Don't** let a value and its unit wrap: units are their own faint element so
-  neighbouring readouts keep their digits aligned.
-- **Don't** unfold a sentence when a live value crosses a threshold or a mode
-  changes; the layout below it must not move under telemetry.
-- **Don't** print an instruction that points at a visible, labelled control a
-  few pixels away.
-- **Don't** hide a hover-revealed control with `visibility` or `display` when it
-  is the only focusable thing in its row.
-- **Don't** make judgement, keep/reject verdicts, thresholds, graticules, or
-  diagnostic dashboards primary dataset UI. Signals plots what a take measured;
-  it does not rule on it.
-- **Don't** encode episode duration or quality in card width or height.
-- **Don't** show persistent warning banners between the header and workspace.
-- **Don't** add dense minor grid lines to the bench.
-- **Don't** put a permanent per-motor table of temperatures, currents, and loads
-  on the inspector. The arm-level row says whether; the bench says which; the
-  selected motor's card says how much.
-- **Don't** chart telemetry over time anywhere but Signals, and there only for
-  the length of a take. A rise rate is still a number, not a graph, and a motor
-  temperature does not get a second plot because a plotting library is now on
-  the page.
-- **Don't** hand the renderer a point per sample. The window is reduced to a
-  fixed budget by extremes — never by averaging, which is the one operation
-  that hides the peak a trace exists to show.
-- **Don't** give two arms two scales. Every plot shares one degree range and
-  one time axis, or comparing a leader to its follower becomes arithmetic.
-- **Don't** put camera pixels in the 3D scene; the bench gets a camera's
-  geometry and identity, the properties panel gets its frames.
-- **Don't** write one-off colour literals or hue-named utilities in components;
-  use the role tokens.
-- **Don't** rely on a `title` attribute as the only explanation for a hardware
-  consequence, a safety state, or a blocker.
-- **Don't** hide a control, state, blocker, or active recording at a breakpoint.
-- **Don't** add a second button, chip, icon, or type vocabulary for a new
-  surface; reuse the compact system.
+- **Don't** restore the retired fixed Robots / Scene / Properties three-pane
+  shell or the full-width dataset rail.
+- **Don't** add fixed one-off panel arrangements in the Studio; extend
+  `rerobot-panels` when the mechanic is generic and register domain content in
+  the Studio.
+- **Don't** turn every tool into primary navigation. Live and Data are
+  activities; panel tabs are spatial grouping inside them.
+- **Don't** let a Data action mutate Live camera tabs, or derive recorded camera
+  tabs from current hardware assignment.
+- **Don't** duplicate a camera stream merely because its panel moved or another
+  panel became visible.
+- **Don't** put robot setup back into the active Live flow.
+- **Don't** add headings or helper labels that restate the visible region below
+  them (“Operate and capture,” “Record always uses Teleop,” “Select an arm”).
+- **Don't** create a second Timeline, change its ownership between Query and
+  Episodes, or restart replay from zero after Pause.
+- **Don't** let scrub move only the playhead; camera, 3D, signals, and video must
+  show the corresponding time.
+- **Don't** animate split geometry while the pointer is dragging or keep panel
+  entry animation under reduced motion.
+- **Don't** hide a consequential action, blocker, active recording, or torque
+  state at a breakpoint.
+- **Don't** use colour alone for status, traces, or docking intent.
+- **Don't** unfold live prose, encode episode quality in card size, or introduce
+  diagnostic dashboards as the primary Data experience.
+- **Don't** put camera pixels inside the 3D scene; the scene owns camera
+  geometry and selection, camera panels own frames.
+- **Don't** write hue-named or one-off colour literals in components; use role
+  tokens.
 - **Don't** add uppercase tracked kickers, decorative display type, pill-shaped
-  containers, or ornamental animation. The live episode pulse is the only
-  authored looping motion and respects reduced-motion preference.
+  containers, a fixed-dark workspace, or ornamental looping animation.

@@ -1,13 +1,14 @@
-//! Live camera properties of the selected robot instance.
+//! Compact camera status for the selected robot instance.
 
 use dioxus::prelude::*;
 use rerobot_core::api::{CameraStatus, RobotSummary};
 
-use crate::api;
 use crate::icons::{CameraOff, Chevron};
 use crate::state::{Selection, studio};
 
-/// The selected robot's assigned camera feeds, grouped in its properties panel.
+/// The selected robot's assigned camera statuses. Full feeds live in the
+/// visualization dock, so this stays a fast switcher instead of a second set
+/// of previews competing for bandwidth and attention.
 #[component]
 pub fn RobotCameras(robot: RobotSummary) -> Element {
     let studio = studio();
@@ -32,16 +33,13 @@ pub fn RobotCameras(robot: RobotSummary) -> Element {
             if open() {
                 div { id: "{region_id}", class: "property-camera-list",
                     if robot.cameras.is_empty() {
-                        p { class: "property-camera-empty",
-                            "No cameras assigned. Add one in this robot's setup."
-                        }
+                        p { class: "property-camera-empty", "No cameras assigned. Add one in Settings." }
                     }
                     for binding in robot.cameras.clone() {
                         CameraProperty {
                             key: "{binding.name}",
                             robot: robot.id.clone(),
                             role: binding.name.clone(),
-                            device: binding.id.clone(),
                             status: known.iter().find(|camera| camera.id == binding.id).cloned(),
                         }
                     }
@@ -52,12 +50,7 @@ pub fn RobotCameras(robot: RobotSummary) -> Element {
 }
 
 #[component]
-fn CameraProperty(
-    robot: String,
-    role: String,
-    device: String,
-    status: Option<CameraStatus>,
-) -> Element {
+fn CameraProperty(robot: String, role: String, status: Option<CameraStatus>) -> Element {
     let mut studio = studio();
     let selected = studio
         .selected
@@ -117,15 +110,7 @@ fn CameraProperty(
                     span { class: "camera-resolution", "{resolution}" }
                 }
             }
-            if trouble.is_none() {
-                div { class: "camera-property-frame",
-                    img {
-                        class: "camera-image",
-                        src: api::camera_stream_url(&device),
-                        alt: "Live view from the {role} camera on {robot}",
-                    }
-                }
-            } else if let Some(trouble) = trouble {
+            if let Some(trouble) = trouble {
                 div { class: "camera-unavailable-card",
                     span { class: "camera-placeholder-icon", CameraOff {} }
                     div { class: "camera-unavailable-copy",
@@ -154,6 +139,6 @@ fn friendly_camera_error(error: &str) -> String {
     } else if lowered.contains("permission") || lowered.contains("access denied") {
         "The studio cannot access this camera. Check camera permissions, then rescan.".to_owned()
     } else {
-        "Rescan devices or assign another camera in this robot's setup.".to_owned()
+        "Rescan devices or assign another camera in Settings.".to_owned()
     }
 }

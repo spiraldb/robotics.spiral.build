@@ -86,57 +86,53 @@ dx serve --args "--simulate --no-cameras"
 Simulated arms drift slowly through their travel, so calibration sweeps and
 teleoperation both work end to end with nothing plugged in.
 
+To connect Studio to a local SpiralDB stack, point both control-plane and SpFS
+clients at it when the backend starts; the ADBC library path alone is not
+enough:
+
+```console
+SPIRALDB_ADBC_DRIVER=/absolute/path/to/libadbc_driver_spiraldb.dylib \
+SPIRAL__SERVER__URL=http://127.0.0.1:4279 \
+SPIRAL__SPFS__URL=http://127.0.0.1:4295 \
+SPIRAL__DEV=1 \
+dx serve
+```
+
+Then open **Settings**, enable SpiralDB, select the service catalog, and enter
+the exact project and dataset. **Test connection** checks both access to that
+project and readiness of its managed catalog; a local `SELECT 1` alone is not a
+useful connectivity test.
+
 ### What the studio does
 
-The studio opens as one three-pane workspace: arms and setup on the left, the 3D
-scene in the middle, and properties for the selected arm on the right. Those
-roles stay fixed: the two side panels can be resized or hidden, while the Scene
-remains the elastic center. The left column splits again, carrying Signals — the
-plots of what those arms just did — under the arm list. Pane widths, heights, and
-visibility persist locally, and the layout-reset control restores the default
-bench. The Dataset rail stays outside the panes, so recording and safety state do
-not move or disappear with a panel.
+The studio is a two-region workbench. The left region owns the task and switches
+between **Live** and **Data**; the right region owns visualization. Drag the
+separator to change the default 40/60 split. The ratio persists locally, and the
+Timeline stays mounted below every visualization so changing tools never loses
+the current playhead.
 
-**The arm list and its setup**, on the left, creates robot instances and
-prepares them. Assign a serial port from the detected list, or use *Identify*:
-the studio records the ports, you pull the arm's USB cable, and it reports the
-one that disappeared. Assign cameras by role — `wrist`, `top`, whatever you
-like — with a live preview of the chosen device before it is bound, so a
-camera is identified by what it sees rather than by a device path. Then
-calibrate: the studio releases torque, you move every joint to both of its
-limits while a bar per joint fills in, and saving writes the measured ranges
-into the robot's file. Each arm can export that complete JSON configuration;
-the list can import one as a new arm without replacing an existing instance.
+**Live** is where an operator works with physical hardware. Select an arm inside
+**Motors & cameras** to see its joints, health, and assigned camera feeds. Hold,
+Release, and Teleop are mutually exclusive control modes. Recording always uses
+Teleop and supports pause, resume, stop, and discard without changing the
+episode identity. Setup in this mode owns ports, camera assignment, and
+calibration.
 
-**Signals**, under the arm list, plots joint angles against time — one chart per
-arm, all six joints on each, every arm on one time axis and one degree scale, so
-you can see the follower tracking the leader rather than reading two numbers and
-subtracting. It is empty until you press Record, fills while the take runs, and
-holds the finished take afterwards so you can look at what you just captured
-before recording another. As a take gets long the window keeps up with the live
-edge — 10s, 30s, 2m, or the whole take — and dragging the zoom, scrolling a
-plot, or pressing the arrow keys parks it there until you press *Follow*. Under
-the plots, a readout lists every joint's angle for every arm at the time the
-cursor is on; hovering a row lifts that joint's trace on every chart, and
-clicking one takes it off them. Toggle the whole region from the header.
+**Data** owns a dataset containing many episodes. Its Episodes tool selects,
+replays, or deletes a take; its Query tool runs guarded read-only SQL against the
+configured SpiralDB dataset. Query results replace the upper visualization
+rather than appearing beside an unrelated live camera.
 
-**The 3D scene** draws every configured arm live from its measured joint
-angles. It is a real 3D view — drag to orbit, shift-drag or right-drag to pan,
-scroll to zoom — and every shape in it comes from a URDF robot description
-rather than from drawing code, so teaching the studio a new arm means adding a
-description rather than a renderer. Arms that are offline or uncalibrated stand
-at their rest pose, faded, rather than vanishing.
+**The visualization region** shows the live 3D scene and selected live camera in
+Live mode, and the recorded pose/camera or query results in Data mode. The 3D
+view supports orbit, pan, zoom, selection, and framing. Camera status reflects
+real image load state and reports an actionable error instead of showing a
+permanently green but blank frame.
 
-**Record**, in the Dataset rail, is also the start of teleoperation. The studio
-chooses the connected, calibrated leader and follower from their robot types,
-releases the leader, holds the follower, and starts capture as one action.
-Stopping or discarding the take ends teleoperation too. Manual control remains
-local to one arm: choose Manual and Hold in its Properties panel to reveal the
-joint sliders.
-
-**The camera strip**, under the scene, previews every detected camera as an
-MJPEG stream. Streams start when a preview is on screen and release the device
-shortly after it leaves.
+**The Timeline** is shared by both modes. During capture it follows new camera
+and joint samples. A paused or completed take can be scrubbed to time-travel the
+3D pose and recorded camera. Moving the physical follower is an explicit,
+safety-gated option and never happens merely by moving the preview playhead.
 
 ### The robot description
 

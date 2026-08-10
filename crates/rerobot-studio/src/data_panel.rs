@@ -8,6 +8,7 @@ use rerobot_core::api::{
 };
 
 use crate::api;
+use crate::setup::RobotPanel;
 use crate::state::studio;
 
 #[component]
@@ -390,6 +391,7 @@ fn QueryResult(result: Option<SpiralQueryResponse>) -> Element {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsSection {
+    Robots,
     Spiral,
     HuggingFace,
     Video,
@@ -400,7 +402,7 @@ pub(crate) fn DataSettingsPanel(on_close: EventHandler<()>, on_saved: EventHandl
     let mut current = use_signal(DataSettings::default);
     let mut loaded = use_signal(|| false);
     let mut load_error = use_signal(|| None::<String>);
-    let mut section = use_signal(|| SettingsSection::Spiral);
+    let mut section = use_signal(|| SettingsSection::Robots);
     let mut hugging_face_token = use_signal(String::new);
     let mut clear_hugging_face = use_signal(|| false);
     let mut saving = use_signal(|| false);
@@ -474,31 +476,46 @@ pub(crate) fn DataSettingsPanel(on_close: EventHandler<()>, on_saved: EventHandl
             autofocus: true,
             onclick: move |event| event.stop_propagation(),
             header { class: "settings-header",
-                div { h2 { id: "data-settings-title", "Settings" } p { "Data destinations are owned by this backend." } }
+                div { h2 { id: "data-settings-title", "Settings" } p { "Robot hardware and backend-owned data destinations." } }
                 button { r#type: "button", class: "icon-button", "aria-label": "Close settings", autofocus: true, onclick: move |_| on_close.call(()), CloseIcon {} }
             }
-            if !loaded() {
-                div { class: "settings-loading", "Loading settings…" }
-            } else if let Some(error) = load_error() {
-                div { class: "settings-loading data-error", "{error}" }
-            } else {
-                div { class: "settings-layout",
-                    nav { class: "settings-nav", "aria-label": "Data settings sections",
-                        SettingsNavButton { label: "SpiralDB", active: section() == SettingsSection::Spiral, onclick: move |_| { section.set(SettingsSection::Spiral); test_result.set(None); } }
-                        SettingsNavButton { label: "Hugging Face", active: section() == SettingsSection::HuggingFace, onclick: move |_| { section.set(SettingsSection::HuggingFace); test_result.set(None); } }
-                        SettingsNavButton { label: "Video", active: section() == SettingsSection::Video, onclick: move |_| { section.set(SettingsSection::Video); test_result.set(None); } }
-                    }
-                    div { class: "settings-content",
+            div { class: "settings-layout",
+                nav { class: "settings-nav", "aria-label": "Settings sections",
+                    SettingsNavButton { label: "Robots", active: section() == SettingsSection::Robots, onclick: move |_| { section.set(SettingsSection::Robots); test_result.set(None); } }
+                    SettingsNavButton { label: "SpiralDB", active: section() == SettingsSection::Spiral, onclick: move |_| { section.set(SettingsSection::Spiral); test_result.set(None); } }
+                    SettingsNavButton { label: "Hugging Face", active: section() == SettingsSection::HuggingFace, onclick: move |_| { section.set(SettingsSection::HuggingFace); test_result.set(None); } }
+                    SettingsNavButton { label: "Video", active: section() == SettingsSection::Video, onclick: move |_| { section.set(SettingsSection::Video); test_result.set(None); } }
+                }
+                div { class: "settings-content",
+                    if section() == SettingsSection::Robots {
+                        ProviderHeading { title: "Robot setup", description: "Configure ports, camera assignments, and calibration for each arm." }
+                        div { class: "robot-settings-panel",
+                            RobotPanel { heading: false }
+                        }
+                    } else if !loaded() {
+                        div { class: "settings-loading", "Loading data settings…" }
+                    } else if let Some(error) = load_error() {
+                        div { class: "settings-loading data-error", "{error}" }
+                    } else {
                         match section() {
+                            SettingsSection::Robots => rsx! {},
                             SettingsSection::Spiral => rsx! {
                                 ProviderHeading { title: "SpiralDB", description: "Primary relational episode store, connected through the standard ADBC interface." }
-                                ToggleField { label: "Publish new episodes to SpiralDB", checked: current().spiral.enabled, onchange: move |value| current.write().spiral.enabled = value }
-                                SettingsField { label: "Connection URI", value: current().spiral.uri, placeholder: "spiraldb://", oninput: move |value| current.write().spiral.uri = value }
+                                label { class: "settings-field",
+                                    span { "Catalog" }
+                                    select {
+                                        class: "field",
+                                        value: "{current().spiral.uri}",
+                                        onchange: move |event| current.write().spiral.uri = event.value(),
+                                        option { value: "spiraldb://", "SpiralDB service" }
+                                        option { value: "spiral:memory:", "Temporary in-memory session" }
+                                    }
+                                }
                                 div { class: "settings-field-row",
-                                    SettingsField { label: "Project", value: current().spiral.project_id, placeholder: "Required hosted; unused in memory", disabled: current().spiral.uri.trim() == "spiral:memory:", oninput: move |value| current.write().spiral.project_id = value }
+                                    SettingsField { label: "Project", value: current().spiral.project_id, placeholder: "Required for a SpiralDB service", disabled: current().spiral.uri.trim() == "spiral:memory:", oninput: move |value| current.write().spiral.project_id = value }
                                     SettingsField { label: "Dataset", value: current().spiral.dataset, placeholder: "rerobot", oninput: move |value| current.write().spiral.dataset = value }
                                 }
-                                p { class: "settings-help", "Use spiral:memory: for a local session. Hosted connections reuse credentials managed by the Spiral CLI/ADBC driver. The backend operator supplies the trusted driver with --spiral-adbc-driver or SPIRALDB_ADBC_DRIVER." }
+                                p { class: "settings-help", "For a local SpiralDB stack, keep the SpiralDB service catalog selected and start this backend with SPIRAL__SERVER__URL and SPIRAL__SPFS__URL pointing at that stack. The in-memory option is disposable and does not connect to the local service. The backend also requires --spiral-adbc-driver or SPIRALDB_ADBC_DRIVER." }
                                 button { r#type: "button", class: "btn btn-outline", disabled: saving() || testing(), onclick: move |_| save(Some("/api/settings/data/test/spiral")), if testing() { "Testing…" } else { "Save and test connection" } }
                             },
                             SettingsSection::HuggingFace => rsx! {
@@ -520,7 +537,14 @@ pub(crate) fn DataSettingsPanel(on_close: EventHandler<()>, on_saved: EventHandl
                         }
                     }
                 }
-                footer { class: "settings-footer",
+            }
+            footer { class: "settings-footer",
+                if section() == SettingsSection::Robots {
+                    span { "Robot changes are saved immediately." }
+                    div {
+                        button { r#type: "button", class: "btn btn-primary", onclick: move |_| on_close.call(()), "Done" }
+                    }
+                } else {
                     span { "Secrets stay on this backend." }
                     div {
                         button { r#type: "button", class: "btn", onclick: move |_| on_close.call(()), "Cancel" }

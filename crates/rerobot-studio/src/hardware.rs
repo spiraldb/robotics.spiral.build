@@ -24,11 +24,12 @@ use std::time::{Duration, Instant};
 use rerobot::bus::{MotorBus, SimulatedBus};
 use rerobot::feetech::{self, FeetechBus, MotorSample};
 
-use crate::episodes::{ArmConditionSummary, EpisodeWriter, Sample};
+use crate::episodes::{ArmConditionSummary, EpisodeCheckpoint, EpisodeWriter, Sample};
 use rerobot_core::api::{
     CAUTION_FOLLOW_ERROR_DEGREES, CalibrationJointProgress, CalibrationProgress, ConnectionStatus,
     EpisodeArm, EpisodeSummary, JointRange, JointTelemetry, ModeSelection, ModeStatus, MotorFault,
-    MotorLimits, PortSettings, RecordingProgress, ReplayProgress, RobotTelemetry, TelemetryFrame,
+    MotorLimits, PortSettings, RecordingGap, RecordingProgress, ReplayProgress, RobotTelemetry,
+    TelemetryFrame,
 };
 use rerobot_core::arm;
 use rerobot_core::calibration::{
@@ -180,6 +181,14 @@ enum Command {
         keep: bool,
         reply: Reply<EpisodeSummary>,
     },
+    SetRecordingPaused {
+        paused: bool,
+        reply: Reply<(Option<EpisodeCheckpoint>, f64)>,
+    },
+    SetReplayPaused {
+        paused: bool,
+        reply: Reply<()>,
+    },
     StartReplay {
         robot: String,
         episode: String,
@@ -197,7 +206,15 @@ struct Recording {
     writer: EpisodeWriter,
     /// Arms sampled, fixed when the take started so every frame has one shape.
     arms: Vec<EpisodeArm>,
+    /// Control mode suspended for review and restored when capture resumes.
+    resume_mode: ModeSelection,
     started: Instant,
+    /// Start of the current wall-clock omission, when capture is paused.
+    paused_at: Option<Instant>,
+    /// Completed pause time omitted from the active sample clock.
+    paused_duration: Duration,
+    /// Deliberate wall-clock omissions, persisted with the finished take.
+    gaps: Vec<RecordingGap>,
     /// Samples handed to the writer.
     frames: u64,
     /// Largest `Follow Δ` since the arm first caught up, in degrees.
@@ -225,6 +242,42 @@ struct Recording {
 }
 
 impl Recording {
+    /// Time represented by samples and media, excluding deliberate pauses.
+    fn active_elapsed(&self, now: Instant) -> Duration {
+        let current_pause = self
+            .paused_at
+            .map_or(Duration::ZERO, |paused_at| now.duration_since(paused_at));
+        now.duration_since(self.started)
+            .saturating_sub(self.paused_duration)
+            .saturating_sub(current_pause)
+    }
+
+    /// All wall time deliberately omitted so far, including an active pause.
+    fn paused_elapsed(&self, now: Instant) -> Duration {
+        self.paused_duration
+            + self
+                .paused_at
+                .map_or(Duration::ZERO, |paused_at| now.duration_since(paused_at))
+    }
+
+    /// Close an active pause and retain its active-time boundary and duration.
+    fn close_pause(&mut self, now: Instant) {
+        let Some(paused_at) = self.paused_at.take() else {
+            return;
+        };
+        let duration = now.duration_since(paused_at);
+        let after_seconds = now
+            .duration_since(self.started)
+            .saturating_sub(self.paused_duration)
+            .saturating_sub(duration)
+            .as_secs_f64();
+        self.paused_duration += duration;
+        self.gaps.push(RecordingGap {
+            after_seconds,
+            duration_seconds: duration.as_secs_f64(),
+        });
+    }
+
     /// Fold one instant's tracking error into the take's summary.
     fn observe(&mut self, error: f64) {
         if !self.settled && error < CAUTION_FOLLOW_ERROR_DEGREES {
@@ -301,6 +354,9 @@ struct Replay {
     phase: ReplayPhase,
     /// Fractional index into `frames`, advanced by real elapsed time.
     position: f64,
+    /// A paused replay keeps its loaded trajectory and current position. The
+    /// arm holds where it is until the same replay resumes.
+    paused: bool,
     /// When the seek started, so a blocked arm gives up instead of pushing.
     seeking_since: Instant,
 }
@@ -474,6 +530,19 @@ impl HardwareHandle {
             .await
     }
 
+    /// Pause or resume sampling while keeping the same open take and ID.
+    pub async fn set_recording_paused(&self, paused: bool) -> Result<f64, String> {
+        let (checkpoint, elapsed_seconds) = self
+            .request(|reply| Command::SetRecordingPaused { paused, reply })
+            .await?;
+        if let Some(checkpoint) = checkpoint {
+            checkpoint.await.map_err(|_| {
+                "the episode writer stopped before the pause was flushed".to_owned()
+            })??;
+        }
+        Ok(elapsed_seconds)
+    }
+
     /// Play a recorded trajectory onto one arm.
     ///
     /// The samples arrive already loaded and already in normalized units, which
@@ -493,6 +562,12 @@ impl HardwareHandle {
             reply,
         })
         .await
+    }
+
+    /// Pause or resume the loaded replay without returning to frame zero.
+    pub async fn set_replay_paused(&self, paused: bool) -> Result<(), String> {
+        self.request(|reply| Command::SetReplayPaused { paused, reply })
+            .await
     }
 
     /// Adopt a calibration that has just been written to disk.
@@ -1110,6 +1185,12 @@ impl Controller {
             Command::StopRecording { keep, reply } => {
                 let _ = reply.send(self.stop_recording(keep));
             }
+            Command::SetRecordingPaused { paused, reply } => {
+                let _ = reply.send(self.set_recording_paused(paused));
+            }
+            Command::SetReplayPaused { paused, reply } => {
+                let _ = reply.send(self.set_replay_paused(paused));
+            }
             Command::StartReplay {
                 robot,
                 episode,
@@ -1169,7 +1250,11 @@ impl Controller {
         self.recording = Some(Recording {
             writer,
             arms,
+            resume_mode: self.mode.selection.clone(),
             started: Instant::now(),
+            paused_at: None,
+            paused_duration: Duration::ZERO,
+            gaps: Vec::new(),
             frames: 0,
             max_follow_error: None,
             settled: false,
@@ -1180,17 +1265,63 @@ impl Controller {
     }
 
     fn stop_recording(&mut self, keep: bool) -> Result<EpisodeSummary, String> {
-        let recording = self
+        let mut recording = self
             .recording
             .take()
             .ok_or_else(|| "no take is being recorded".to_owned())?;
-        let duration = recording.started.elapsed().as_secs_f64();
+        let now = Instant::now();
+        recording.close_pause(now);
+        let duration = recording.active_elapsed(now).as_secs_f64();
         let follow_error = recording.follow_error();
         let condition = recording.condition;
         recording
             .writer
-            .finish(duration, follow_error, !keep, condition)
+            .finish(duration, recording.gaps, follow_error, !keep, condition)
             .map_err(|error| error.to_string())
+    }
+
+    fn set_recording_paused(
+        &mut self,
+        paused: bool,
+    ) -> Result<(Option<EpisodeCheckpoint>, f64), String> {
+        if paused {
+            let (checkpoint, elapsed_seconds) = {
+                let recording = self
+                    .recording
+                    .as_mut()
+                    .ok_or_else(|| "no take is being recorded".to_owned())?;
+                if recording.paused_at.is_none() {
+                    recording.paused_at = Some(Instant::now());
+                }
+                // FIFO ordering means this barrier is processed after every
+                // sample accepted before the pause. The async caller awaits it
+                // without blocking this fixed-rate controller thread.
+                (
+                    recording.writer.checkpoint()?,
+                    recording.active_elapsed(Instant::now()).as_secs_f64(),
+                )
+            };
+            self.set_mode(ModeSelection::Idle)?;
+            return Ok((Some(checkpoint), elapsed_seconds));
+        }
+        let resume_mode = self
+            .recording
+            .as_ref()
+            .ok_or_else(|| "no take is being recorded".to_owned())?
+            .resume_mode
+            .clone();
+        let elapsed_seconds = self
+            .recording
+            .as_ref()
+            .map(|recording| recording.active_elapsed(Instant::now()).as_secs_f64())
+            .unwrap_or_default();
+        self.set_mode(resume_mode)?;
+        if let Some(recording) = self.recording.as_mut()
+            && recording.paused_at.is_some()
+        {
+            recording.close_pause(Instant::now());
+        }
+        Ok((None, elapsed_seconds))
     }
 
     /// Append this cycle's positions to the take in progress.
@@ -1221,7 +1352,11 @@ impl Controller {
             return;
         }
 
-        let seconds = recording.started.elapsed().as_secs_f64();
+        if recording.paused_at.is_some() {
+            return;
+        }
+
+        let seconds = recording.active_elapsed(Instant::now()).as_secs_f64();
         // Cloned once so the loop below can fold this frame into the take's
         // running extremes while it reads. It is two arms of six joint names.
         let arms = recording.arms.clone();
@@ -1329,8 +1464,41 @@ impl Controller {
             frame_period: 1.0 / sample_hz,
             phase: ReplayPhase::Seeking,
             position: 0.0,
+            paused: false,
             seeking_since: Instant::now(),
         });
+        Ok(())
+    }
+
+    fn set_replay_paused(&mut self, paused: bool) -> Result<(), String> {
+        let robot = self
+            .replay
+            .as_ref()
+            .map(|replay| replay.robot.clone())
+            .ok_or_else(|| "no episode is being replayed".to_owned())?;
+        if self
+            .replay
+            .as_ref()
+            .is_some_and(|replay| replay.paused == paused)
+        {
+            return Ok(());
+        }
+        if paused {
+            let arm = self
+                .robots
+                .get_mut(&robot)
+                .ok_or_else(|| format!("robot {robot:?} is not connected"))?;
+            // Freeze the target at the measured pose before suspending the
+            // timeline. This prevents the last queued replay target from
+            // continuing to pull the arm after Pause was acknowledged.
+            arm.follow_measured_positions();
+        }
+        if let Some(replay) = self.replay.as_mut() {
+            replay.paused = paused;
+            if !paused && replay.phase == ReplayPhase::Seeking {
+                replay.seeking_since = Instant::now();
+            }
+        }
         Ok(())
     }
 
@@ -1787,6 +1955,10 @@ impl Controller {
         };
         let (robot_id, episode) = (replay.robot.clone(), replay.episode.clone());
 
+        if replay.paused {
+            return;
+        }
+
         let Some(robot) = self.robots.get(&robot_id) else {
             self.replay = None;
             self.leave_mode_involving(&robot_id, "the arm is no longer connected");
@@ -1931,13 +2103,19 @@ impl Controller {
                     .values()
                     .map(ConnectedRobot::telemetry)
                     .collect(),
-                recording: self.recording.as_ref().map(|recording| RecordingProgress {
-                    episode: recording.writer.id().to_owned(),
-                    frames: recording.frames,
-                    elapsed_seconds: recording.started.elapsed().as_secs_f64(),
-                    arms: recording.arms.iter().map(|arm| arm.id.clone()).collect(),
-                    max_follow_error_degrees: recording.follow_error(),
-                    error: recording.writer.failure(),
+                recording: self.recording.as_ref().map(|recording| {
+                    let now = Instant::now();
+                    RecordingProgress {
+                        episode: recording.writer.id().to_owned(),
+                        frames: recording.frames,
+                        elapsed_seconds: recording.active_elapsed(now).as_secs_f64(),
+                        wall_elapsed_seconds: now.duration_since(recording.started).as_secs_f64(),
+                        paused_seconds: recording.paused_elapsed(now).as_secs_f64(),
+                        paused: recording.paused_at.is_some(),
+                        arms: recording.arms.iter().map(|arm| arm.id.clone()).collect(),
+                        max_follow_error_degrees: recording.follow_error(),
+                        error: recording.writer.failure(),
+                    }
                 }),
                 replay: self.replay.as_ref().map(|replay| ReplayProgress {
                     episode: replay.episode.clone(),
@@ -1954,6 +2132,7 @@ impl Controller {
                         ReplayPhase::Playing => replay.position * replay.frame_period,
                     },
                     duration_seconds: replay.duration_seconds(),
+                    paused: replay.paused,
                 }),
             },
             connections: self.connections.clone(),
@@ -2085,6 +2264,91 @@ mod tests {
     }
 
     #[test]
+    fn pause_keeps_one_take_flushes_history_and_restores_teleoperation() {
+        let mut controller = controller();
+        controller
+            .connect(spec("leader", Some(calibration(2048, 500))))
+            .expect("connect leader");
+        controller
+            .connect(spec("follower", Some(calibration(2048, 500))))
+            .expect("connect follower");
+        let teleoperation = ModeSelection::Teleoperate {
+            leader: "leader".to_owned(),
+            follower: "follower".to_owned(),
+        };
+        controller
+            .set_mode(teleoperation.clone())
+            .expect("start teleoperation");
+
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let store =
+            crate::episodes::EpisodeStore::open(directory.path().join("episodes")).expect("store");
+        let layout = crate::episodes::build_arms(&[
+            ("leader".to_owned(), vec!["gripper".to_owned()]),
+            ("follower".to_owned(), vec!["gripper".to_owned()]),
+        ])
+        .expect("arms");
+        let writer = store
+            .begin(
+                "Teleoperation".to_owned(),
+                None,
+                60.0,
+                layout.clone(),
+                Vec::new(),
+            )
+            .expect("begin");
+        let episode = writer.id().to_owned();
+        controller
+            .start_recording(writer, layout)
+            .expect("start recording");
+        for _ in 0..2 {
+            controller.poll_robots();
+            controller.capture_sample();
+        }
+
+        let (checkpoint, before_pause) = controller
+            .set_recording_paused(true)
+            .expect("pause recording");
+        checkpoint
+            .expect("pause has a writer barrier")
+            .blocking_recv()
+            .expect("writer still running")
+            .expect("partial file flushed");
+        assert_eq!(controller.mode.selection, ModeSelection::Idle);
+        assert!(controller.recording.as_ref().unwrap().paused_at.is_some());
+
+        store.reload().expect("reload flushed partial");
+        assert_eq!(
+            store.timeline_metadata(&episode).unwrap().samples,
+            2,
+            "all pre-pause samples are visible before pause acknowledges"
+        );
+        std::thread::sleep(Duration::from_millis(15));
+        controller.capture_sample();
+        assert_eq!(controller.recording.as_ref().unwrap().frames, 2);
+
+        let (_, resume_at) = controller
+            .set_recording_paused(false)
+            .expect("resume recording");
+        assert_eq!(controller.mode.selection, teleoperation);
+        assert!((resume_at - before_pause).abs() < 0.01);
+        for _ in 0..2 {
+            controller.poll_robots();
+            controller.capture_sample();
+        }
+        let summary = controller.stop_recording(true).expect("finish same take");
+
+        assert_eq!(summary.id, episode);
+        assert_eq!(summary.frames, 4);
+        assert_eq!(summary.recording_gaps.len(), 1);
+        assert!(summary.recording_gaps[0].duration_seconds >= 0.01);
+        assert!(
+            summary.duration_seconds + summary.recording_gaps[0].duration_seconds
+                >= Duration::from_millis(15).as_secs_f64()
+        );
+    }
+
+    #[test]
     fn a_takes_headline_error_ignores_the_arm_getting_into_position() {
         let mut recording = Recording {
             condition: Vec::new(),
@@ -2101,7 +2365,11 @@ mod tests {
                 writer
             },
             arms: Vec::new(),
+            resume_mode: ModeSelection::Idle,
             started: Instant::now(),
+            paused_at: None,
+            paused_duration: Duration::ZERO,
+            gaps: Vec::new(),
             frames: 0,
             max_follow_error: None,
             settled: false,
@@ -2268,6 +2536,75 @@ mod tests {
         assert_eq!(
             controller.mode.error, None,
             "reaching the end of a take is not a fault"
+        );
+    }
+
+    #[test]
+    fn a_paused_replay_resumes_from_the_same_frame() {
+        let mut controller = controller();
+        controller
+            .connect(spec("arm", Some(calibration(2048, 500))))
+            .expect("connect");
+        controller.poll_robots();
+        let frames = (0..24)
+            .map(|step| BTreeMap::from([("gripper".to_owned(), 0.05 + 0.01 * step as f64)]))
+            .collect::<Vec<_>>();
+        controller
+            .start_replay("arm", "episode_000001", frames, 60.0)
+            .expect("start replay");
+
+        for _ in 0..400 {
+            controller.poll_robots();
+            controller.apply_mode();
+            controller.drive_robots();
+            if controller
+                .replay
+                .as_ref()
+                .is_some_and(|replay| replay.phase == ReplayPhase::Playing)
+            {
+                break;
+            }
+        }
+        for _ in 0..4 {
+            controller.poll_robots();
+            controller.apply_mode();
+            controller.drive_robots();
+        }
+        let paused_at = controller
+            .replay
+            .as_ref()
+            .expect("replay is active")
+            .position;
+        assert!(paused_at > 0.0, "the replay advanced before pausing");
+
+        controller.set_replay_paused(true).expect("pause replay");
+        for _ in 0..12 {
+            controller.poll_robots();
+            controller.apply_mode();
+            controller.drive_robots();
+        }
+        assert_eq!(
+            controller
+                .replay
+                .as_ref()
+                .expect("paused replay remains loaded")
+                .position,
+            paused_at,
+            "pause must retain the exact trajectory position"
+        );
+
+        controller.set_replay_paused(false).expect("resume replay");
+        controller.poll_robots();
+        controller.apply_mode();
+        controller.drive_robots();
+        assert!(
+            controller
+                .replay
+                .as_ref()
+                .expect("replay continues")
+                .position
+                > paused_at,
+            "resume continues forward instead of seeking to frame zero"
         );
     }
 
