@@ -1,39 +1,11 @@
 //! The complete rerobot Studio application, compiled by DX for the browser and server.
+//!
+//! Studio-specific code is split into `frontend` and server-gated `backend`
+//! trees. Cross-boundary domain and wire contracts live in `rerobot-core`.
 
-mod api;
-mod app;
-mod commands;
-mod control;
-mod features;
-mod icons;
-mod modes;
-mod recording_signals;
-mod setup;
-mod viewport;
+mod frontend;
 
-pub use app::App;
+pub use frontend::App;
 
 #[cfg(feature = "server")]
-pub mod camera_manager;
-#[cfg(feature = "server")]
-pub mod data_settings;
-#[cfg(feature = "server")]
-pub mod dataset;
-#[cfg(feature = "server")]
-pub mod episodes;
-#[cfg(feature = "server")]
-pub mod hardware;
-#[cfg(feature = "server")]
-pub mod routes;
-#[cfg(feature = "server")]
-pub mod server;
-#[cfg(feature = "server")]
-pub mod spiral_episode;
-#[cfg(feature = "server")]
-pub mod storage_manager;
-#[cfg(feature = "server")]
-pub mod training_manager;
-#[cfg(feature = "server")]
-pub mod video_capture;
-#[cfg(feature = "server")]
-pub mod workspace;
+pub mod backend;

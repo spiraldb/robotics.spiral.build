@@ -2,7 +2,7 @@
 
 #[cfg(feature = "server")]
 fn main() -> std::process::ExitCode {
-    rerobot_studio::server::run()
+    rerobot_studio::backend::run()
 }
 
 #[cfg(all(not(feature = "server"), feature = "web"))]
