@@ -14,6 +14,7 @@ use crate::hardware::{
 };
 use crate::routes::{self, AppState};
 use crate::storage_manager::StorageManager;
+use crate::training_manager::TrainingManager;
 use crate::video_capture::VideoEncoderSettings;
 use crate::workspace::RobotWorkspace;
 use clap::Parser;
@@ -72,6 +73,15 @@ struct Args {
     /// SPIRALDB_ADBC_DRIVER is used when this option is omitted.
     #[arg(long, value_name = "PATH")]
     spiral_adbc_driver: Option<PathBuf>,
+
+    /// Python interpreter for the isolated PyTorch worker. The Nix shell sets
+    /// REROBOT_TRAINING_PYTHON, while an explicit CLI value wins.
+    #[arg(long, value_name = "PATH")]
+    training_python: Option<PathBuf>,
+
+    /// Override the embedded training worker during development.
+    #[arg(long, value_name = "PATH")]
+    training_worker: Option<PathBuf>,
 
     /// Largest change, in encoder counts, applied to a joint per control cycle.
     #[arg(long, default_value_t = DEFAULT_MAX_STEP_COUNTS, value_name = "COUNTS")]
@@ -171,9 +181,33 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
         .spiral_adbc_driver
         .clone()
         .or_else(|| std::env::var_os("SPIRALDB_ADBC_DRIVER").map(PathBuf::from));
+    let training_root = episodes.directory().join("training-runs");
+    std::fs::create_dir_all(&training_root)?;
+    let training_worker = match args.training_worker {
+        Some(path) => path,
+        None => {
+            let path = training_root.join("rerobot_train.py");
+            std::fs::write(&path, include_bytes!("../python/rerobot_train.py"))?;
+            path
+        }
+    };
+    let training_python = args
+        .training_python
+        .or_else(|| std::env::var_os("REROBOT_TRAINING_PYTHON").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("python3"));
     let storage = Arc::new(
         StorageManager::new(data_settings.clone(), episodes.clone(), spiral_adbc_driver)
             .map_err(std::io::Error::other)?,
+    );
+    let training = Arc::new(
+        TrainingManager::open(
+            training_root,
+            training_python,
+            training_worker,
+            storage.clone(),
+        )
+        .await
+        .map_err(std::io::Error::other)?,
     );
     let hardware = Arc::new(HardwareHandle::spawn(ControlSettings {
         max_step_counts: args.max_step,
@@ -236,6 +270,7 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
         cameras: cameras.clone(),
         data_settings,
         storage,
+        training: training.clone(),
         recording_video: Arc::new(tokio::sync::Mutex::new(None)),
         video_encoder: VideoEncoderSettings {
             executable: args.ffmpeg.clone(),
@@ -286,6 +321,7 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
     };
     tracing::info!("releasing motors and cameras");
     let cleanup = async {
+        training.shutdown().await;
         hardware.shutdown().await;
         routes::finish_stale_video_capture(&cleanup_state).await;
         let camera_result = tokio::task::spawn_blocking({

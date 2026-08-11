@@ -25,17 +25,18 @@ when the project is opened. See **Distribution** below.
 ## Product Purpose
 
 rerobot sets up, calibrates, and drives SO-ARM101 arms, records synchronized
-robot and camera data, publishes and queries episodes, and safely replays
-actions on a follower. It does this from a browser or the terminal without
-requiring Python.
+robot and camera data, publishes and queries episodes, trains policies, and
+safely replays actions on a follower. Operators use it from the browser or the
+terminal without managing a Python environment themselves.
 
 The durable scope is the **full robot-learning loop**: connect → calibrate →
-teleoperate → record → inspect/query → publish/export → replay → run a policy.
-Everything through trajectory replay exists today; policy inference does not.
+teleoperate → record → inspect/query → publish/export → train → run a policy.
+Everything through local state-based ACT training exists today; policy
+inference and robot rollout do not.
 
 Success is an ML engineer collecting a usable dataset, understanding any
-episode against one synchronized clock, and replaying it on real hardware
-without writing glue code or installing a Python stack.
+episode against one synchronized clock, training from Spiral, and replaying it
+on real hardware without writing glue code or operating a Python stack.
 
 ## Positioning
 
@@ -43,9 +44,13 @@ without writing glue code or installing a Python stack.
   hardware, safety, recording, media encoding, data services, and replay. The
   browser is an interchangeable operating surface that talks only to that
   backend; it never holds service credentials or drives hardware directly.
-- **Rust-native, no Python.** The motor bus, camera capture, calibration,
-  kinematics, server, data paths, and web interface are Rust, shipped as a
-  backend binary plus browser assets.
+- **Rust owns the system boundary.** The motor bus, camera capture,
+  calibration, kinematics, server, run supervision, data contracts, and web
+  interface are Rust. Policy training uses one isolated PyTorch worker whose
+  Python dependencies are pinned by the Nix flake. Rust retains Spiral ADBC,
+  the bounded Arrow data queue, lifecycle, persistence, and checkpoint ingest;
+  Python is only the model/optimizer compute process, not a second
+  operator-facing system.
 - **One arm is one robot instance is one JSON file.** Serial port, cameras,
   motors, and calibration live in one versioned file. There is no hidden
   calibration cache or second manifest to reconcile, and the Studio notices
@@ -76,6 +81,7 @@ rerobot backend
       ├── recording and MP4 encoding
       ├── local episode recovery
       ├── SpiralDB ingest and read-only queries
+      ├── local policy-training supervision and telemetry
       ├── Hugging Face publishing
       └── episode validation and follower replay
 ```
@@ -115,11 +121,14 @@ applies them; the browser never becomes the motor-control runtime.
 - Three CLIs — `rerobot-find-port`, `rerobot-find-cameras`, and
   `rerobot-calibrate` — cover the Studio’s hardware setup flow for scripting and
   machines without a browser.
-- A fullstack Dioxus Studio with two primary operating activities:
+- A fullstack Dioxus Studio with three primary operating activities:
   - **Live** owns recording, arm selection, Hold / Release / Teleop, joint
     control, health, and camera status.
   - **Data** owns the dataset, its episodes, replay/delete actions, import and
     export, and guarded read-only Spiral SQL.
+  - **Training** owns hosted-Spiral SQL sampling through Rust ADBC, local
+    PyTorch run configuration, learning and resource telemetry, graceful
+    cancellation, and Rust-published Spiral checkpoints.
   - **Settings** owns robot setup (ports, camera assignment, calibration,
     add/import/delete) and backend data destinations. Setup is not mixed into
     the live operating flow.
@@ -171,7 +180,9 @@ action trajectory exists; producing new actions from a model does not.
 
 - **Hardware:** SO-ARM101 only for now, with leader and follower roles. Live
   calibration supports Feetech protocol-0 motors such as the STS3215.
-- **No Python dependencies.** This is a defining constraint, not a preference.
+- **No user-managed Python.** The only Python boundary is the Nix-pinned
+  PyTorch training worker launched and supervised by the Rust backend. It is
+  not given Spiral credentials or an ADBC driver.
 - **Nix flake** provides the development environment and web toolchain (`dx`,
   Tailwind CLI, `wasm-bindgen`, and `wasm-opt`).
 - **Safety is enforced by the server.** Enabling torque first copies measured
@@ -208,8 +219,8 @@ time), and *Follow Δ* (the gap between measured and commanded joint position).
   lowercase.
 - The interface follows the compact, information-dense Notion/Rerun direction
   recorded in `notes.md`, while its panel mechanics use familiar VS Code
-  tab-and-tile behavior. Live and Data are the only primary activities; panels
-  are spatial composition, not a proliferation of navigation modes.
+  tab-and-tile behavior. Live, Data, and Training are the primary activities;
+  panels are spatial composition, not a proliferation of navigation modes.
 - **`notes.md` is the single source of truth for conflicting changes and must
   not be edited unless explicitly requested.**
 - **Distribution:** public open source eventually, but not on the current

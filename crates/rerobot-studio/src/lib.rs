@@ -14,6 +14,7 @@ mod settings_panel;
 mod setup;
 mod state;
 mod studio_timeline;
+mod training;
 mod viewport;
 
 pub use app::App;
@@ -36,6 +37,8 @@ pub mod server;
 pub mod spiral_episode;
 #[cfg(feature = "server")]
 pub mod storage_manager;
+#[cfg(feature = "server")]
+pub mod training_manager;
 #[cfg(feature = "server")]
 pub mod video_capture;
 #[cfg(feature = "server")]

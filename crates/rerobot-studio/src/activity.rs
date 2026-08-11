@@ -9,12 +9,13 @@ use rerobot_core::api::{EpisodeSummary, RecordingProgress};
 
 use crate::data_workbench::{DataIntent, QueryViewModel};
 
-/// The Studio's only two primary activities.
+/// The Studio's three primary activities.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum Activity {
     #[default]
     Live,
     Data,
+    Training,
 }
 
 impl Activity {
@@ -22,6 +23,7 @@ impl Activity {
         match self {
             Self::Live => "Live",
             Self::Data => "Data",
+            Self::Training => "Training",
         }
     }
 }
@@ -52,6 +54,9 @@ impl TimelineSubject {
         let reason = match activity {
             Activity::Live => "Record an episode to begin using the shared clock.",
             Activity::Data => "Select an episode to inspect its shared clock.",
+            Activity::Training => {
+                "Training metrics use optimization steps instead of the episode clock."
+            }
         };
         Self::Empty {
             activity,
@@ -240,6 +245,13 @@ impl ActivityProjection {
                     cameras: CameraRegistrySource::None,
                     timeline: TimelineSubject::empty(activity),
                 },
+            },
+            Activity::Training => Self {
+                activity,
+                primary: PrimaryVisualization::EmptyEpisodes,
+                query: None,
+                cameras: CameraRegistrySource::None,
+                timeline: TimelineSubject::empty(activity),
             },
         }
     }

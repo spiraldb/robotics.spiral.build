@@ -42,6 +42,10 @@
   --tone-caution: #7d6a41;
   --tone-caution-soft: #fbf3db;
   --tone-good: #448361;
+  --tone-series-train: #2a78d6;
+  --tone-series-validation: #d9572b;
+  --tone-series-memory: #7a58a5;
+  --tone-series-transfer: #7560b8;
 
   /* The 3D stage is part of the light workspace. Camera pixels keep their own
      dark mat so letterboxing still reads as image rather than empty UI. */
@@ -425,6 +429,566 @@
     color: var(--tone-danger);
   }
 
+  /* Training ------------------------------------------------------------
+     A curve-first instrument inside the same compact panel grammar. Panels
+     provide the only large containers; their contents stay flat and divided
+     by rhythm and hairlines instead of dashboard cards. */
+  .training-workbench-editor,
+  .training-learning-editor,
+  .training-data-editor,
+  .training-resource-editor {
+    min-height: 0;
+    min-width: 0;
+  }
+
+  .training-workbench {
+    color: var(--tone-ink);
+  }
+
+  .training-run-header,
+  .training-panel-heading,
+  .training-resource-header {
+    @apply flex min-h-11 items-center gap-3 border-b border-line px-3;
+  }
+
+  .training-run-header > div,
+  .training-panel-heading > div,
+  .training-resource-header > div {
+    @apply min-w-0 flex-1;
+  }
+
+  .training-run-header h2,
+  .training-panel-heading h2,
+  .training-resource-header h2 {
+    @apply truncate text-[12px] font-semibold tracking-[-0.01em];
+  }
+
+  .training-run-header p,
+  .training-panel-heading p,
+  .training-resource-header p {
+    @apply mt-0.5 truncate text-[10px] text-ink-faint;
+  }
+
+  .training-policy-chip,
+  .training-phase {
+    @apply inline-flex min-h-5 shrink-0 items-center rounded px-1.5 text-[10px] font-medium;
+    background: var(--tone-hover);
+    color: var(--tone-ink-soft);
+  }
+
+  .training-policy-chip,
+  .training-phase-active {
+    background: var(--tone-selected);
+    color: var(--tone-accent);
+  }
+
+  .training-phase-complete {
+    background: rgb(68 131 97 / 0.1);
+    color: var(--tone-good);
+  }
+
+  .training-phase-failed {
+    background: var(--tone-danger-soft);
+    color: var(--tone-danger);
+  }
+
+  .training-inline-state {
+    @apply mx-3 mt-3 flex flex-col gap-0.5 rounded px-2.5 py-2 text-[11px];
+  }
+
+  .training-inline-state strong {
+    @apply font-semibold;
+  }
+
+  .training-inline-state span {
+    @apply text-[10px];
+  }
+
+  .training-inline-state-caution {
+    background: var(--tone-caution-soft);
+    color: var(--tone-caution);
+  }
+
+  .training-active-run {
+    @apply border-b border-line px-3 py-3;
+    background: var(--tone-sunken);
+  }
+
+  .training-active-heading {
+    @apply flex items-center gap-2;
+  }
+
+  .training-active-heading > div {
+    @apply flex min-w-0 flex-1 items-center gap-2;
+  }
+
+  .training-active-heading strong {
+    @apply truncate text-[11px] font-semibold;
+  }
+
+  .training-step-readout,
+  .training-path-rate,
+  .training-resource-header > span {
+    @apply shrink-0 font-mono text-[10px] tabular-nums text-ink-soft;
+  }
+
+  .training-progress-track {
+    @apply mt-2 h-1 overflow-hidden rounded-full;
+    background: var(--tone-line);
+  }
+
+  .training-progress-fill {
+    @apply h-full rounded-full;
+    background: var(--tone-accent);
+  }
+
+  .training-active-run > p {
+    @apply mt-2 text-[10px] leading-4 text-ink-soft;
+  }
+
+  .training-stop-button {
+    @apply mt-1.5 min-h-7 w-full cursor-pointer rounded border bg-transparent px-2 text-[11px] font-medium transition-colors disabled:cursor-wait disabled:opacity-45;
+    border-color: rgb(190 66 61 / 0.45);
+    color: var(--tone-danger);
+  }
+
+  .training-stop-button:hover:not(:disabled) {
+    background: var(--tone-danger-soft);
+  }
+
+  .training-stop-consequence {
+    @apply mt-2 block text-[10px] leading-4 text-ink-soft;
+  }
+
+  .training-run-result {
+    @apply border-b border-line px-3 py-3 text-[10px];
+    background: var(--tone-sunken);
+  }
+
+  .training-run-result h3 {
+    @apply text-[11px] font-semibold;
+  }
+
+  .training-run-result p {
+    @apply mt-1 leading-4 text-ink-soft;
+  }
+
+  .training-run-result details {
+    @apply mt-2;
+  }
+
+  .training-run-result summary {
+    @apply min-h-6 cursor-pointer select-none py-1 font-medium text-ink-soft outline-none;
+  }
+
+  .training-run-result summary:focus-visible {
+    color: var(--tone-accent);
+  }
+
+  .training-run-result pre {
+    @apply mt-1 max-h-40 overflow-auto rounded bg-surface px-2 py-1.5 font-mono text-[10px] leading-4 text-ink-soft;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .training-run-result code {
+    font: inherit;
+  }
+
+  .training-run-result-failed {
+    background: var(--tone-danger-soft);
+    color: var(--tone-danger);
+  }
+
+  .training-run-result-failed p,
+  .training-run-result-failed summary {
+    color: inherit;
+  }
+
+  .training-form-section,
+  .training-query-section,
+  .training-history {
+    @apply border-b border-line px-3 py-3;
+  }
+
+  .training-form-grid {
+    @apply mt-2 grid grid-cols-2 gap-x-2 gap-y-2;
+  }
+
+  .training-field {
+    @apply flex min-w-0 flex-col gap-1 text-[10px] text-ink-soft;
+  }
+
+  .training-field-wide {
+    @apply w-full;
+  }
+
+  .training-field input,
+  .training-field select,
+  .training-query-section textarea {
+    @apply min-h-7 w-full rounded border border-line bg-surface px-2 text-[11px] text-ink outline-none transition-colors placeholder:text-ink-faint disabled:cursor-not-allowed disabled:bg-sunken disabled:text-ink-faint;
+  }
+
+  .training-field input:focus,
+  .training-field select:focus,
+  .training-query-section textarea:focus {
+    border-color: var(--tone-accent);
+    box-shadow: 0 0 0 1px var(--tone-accent);
+  }
+
+  .training-query-section > header,
+  .training-history > header {
+    @apply mb-2 flex items-start gap-2;
+  }
+
+  .training-query-section > header > div,
+  .training-history > header h3 {
+    @apply min-w-0 flex-1;
+  }
+
+  .training-query-section h3,
+  .training-history h3 {
+    @apply text-[11px] font-semibold;
+  }
+
+  .training-query-section header p {
+    @apply mt-0.5 text-[10px] text-ink-faint;
+  }
+
+  .training-query-section header > span,
+  .training-history header > span {
+    @apply shrink-0 text-[10px] text-ink-faint;
+  }
+
+  .training-query-section textarea {
+    @apply min-h-32 resize-y py-2 font-mono text-[10px] leading-4 tabular-nums;
+  }
+
+  .training-column-row {
+    @apply mt-2 grid grid-cols-2 gap-2;
+  }
+
+  .training-start-button {
+    @apply mx-3 my-3 flex min-h-8 cursor-pointer items-center justify-center rounded px-3 text-[11px] font-semibold text-accent-ink transition-colors disabled:cursor-not-allowed disabled:opacity-45;
+    width: calc(100% - 1.5rem);
+    background: var(--tone-accent);
+  }
+
+  .training-start-button:hover:not(:disabled) {
+    filter: brightness(0.94);
+  }
+
+  .training-history {
+    border-bottom: 0;
+  }
+
+  .training-history-empty {
+    @apply py-2 text-[10px] text-ink-faint;
+  }
+
+  .training-history-row {
+    @apply -mx-1 grid min-h-8 w-[calc(100%+0.5rem)] cursor-pointer grid-cols-[minmax(0,1fr)_auto_3rem] items-center gap-2 rounded px-1 text-left transition-colors hover:bg-hover;
+  }
+
+  .training-history-row-selected {
+    background: var(--tone-selected);
+  }
+
+  .training-history-name {
+    @apply truncate text-[11px];
+  }
+
+  .training-history-step {
+    @apply text-right font-mono text-[10px] tabular-nums text-ink-faint;
+  }
+
+  .training-panel-empty,
+  .training-chart-empty {
+    @apply flex h-full flex-col items-center justify-center gap-1 px-4 text-center;
+  }
+
+  .training-panel-empty strong {
+    @apply text-[12px] font-medium;
+  }
+
+  .training-panel-empty span,
+  .training-chart-empty {
+    @apply text-[11px] text-ink-faint;
+  }
+
+  .training-learning,
+  .training-data-path,
+  .training-resources {
+    @apply flex h-full min-h-0 flex-col bg-surface;
+  }
+
+  .training-data-path {
+    container-type: inline-size;
+  }
+
+  .training-loss-summary {
+    @apply grid shrink-0 grid-cols-3 border-b border-line;
+  }
+
+  .training-loss-summary > div {
+    @apply flex min-h-10 items-center gap-1.5 border-r border-line px-3 last:border-r-0;
+  }
+
+  .training-loss-summary small {
+    @apply text-[10px] text-ink-faint;
+  }
+
+  .training-loss-summary strong {
+    @apply ml-auto font-mono text-[11px] font-medium tabular-nums;
+  }
+
+  .training-series-dot {
+    @apply h-1.5 w-1.5 rounded-full;
+  }
+
+  .training-series-train {
+    background: var(--tone-series-train);
+  }
+
+  .training-series-validation {
+    background: var(--tone-series-validation);
+  }
+
+  .training-chart-wrap {
+    @apply relative min-h-48 flex-1 overflow-hidden px-8 pb-7 pt-3;
+  }
+
+  .training-loss-chart {
+    @apply h-full min-h-40 w-full overflow-visible;
+  }
+
+  .training-grid-line {
+    stroke: var(--tone-line);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .training-line {
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 2;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .training-line-train {
+    stroke: var(--tone-series-train);
+  }
+
+  .training-line-validation {
+    stroke: var(--tone-series-validation);
+  }
+
+  .training-chart-y-labels {
+    @apply pointer-events-none absolute bottom-7 left-1 top-3 flex flex-col justify-between font-mono text-[10px] tabular-nums text-ink-faint;
+  }
+
+  .training-chart-x-labels {
+    @apply pointer-events-none absolute bottom-1 left-8 right-8 flex justify-between font-mono text-[10px] tabular-nums text-ink-faint;
+  }
+
+  .training-event-strip {
+    @apply grid min-h-11 shrink-0 grid-cols-[auto_minmax(5rem,1fr)_auto] items-center gap-3 border-t border-line px-3 text-[10px];
+  }
+
+  .training-event-strip > span {
+    @apply font-semibold;
+  }
+
+  .training-event-track {
+    @apply relative h-4 min-w-20;
+  }
+
+  .training-event-axis {
+    @apply absolute inset-x-0 top-1/2 h-px -translate-y-1/2;
+    background: var(--tone-line);
+  }
+
+  .training-event-tick {
+    @apply absolute top-1/2 h-2.5 w-1 -translate-x-1/2 -translate-y-1/2 rounded-sm;
+    background: var(--tone-series-validation);
+  }
+
+  .training-event-checkpoint {
+    width: 2px;
+    height: 0.875rem;
+    border-radius: 0;
+    background: var(--tone-accent);
+  }
+
+  .training-event-stall {
+    width: 0.375rem;
+    height: 0.375rem;
+    border-radius: 999px;
+    background: var(--tone-danger);
+  }
+
+  .training-event-legend {
+    @apply flex items-center gap-2 text-[10px] text-ink-faint;
+  }
+
+  .training-event-legend small {
+    @apply whitespace-nowrap;
+  }
+
+  .training-event-legend small::before {
+    content: "";
+    @apply mr-1 inline-block h-1.5 w-1 rounded-sm;
+    background: var(--tone-series-validation);
+  }
+
+  .training-event-legend small:nth-child(2)::before {
+    width: 2px;
+    border-radius: 0;
+    background: var(--tone-accent);
+  }
+
+  .training-event-legend small:nth-child(3)::before {
+    @apply rounded-full;
+    background: var(--tone-danger);
+  }
+
+  .training-path-stages {
+    @apply flex min-h-0 flex-1 flex-col px-3 py-2;
+  }
+
+  .training-path-stages li {
+    @apply relative flex min-h-16 items-center gap-2 border-b border-line py-2 last:border-b-0;
+  }
+
+  .training-path-stages li:not(:last-child)::after {
+    content: "";
+    @apply absolute -bottom-1 left-3 z-10 h-2 w-px;
+    background: var(--tone-accent);
+  }
+
+  .training-path-index {
+    @apply flex h-6 w-6 shrink-0 items-center justify-center rounded-full font-mono text-[10px] tabular-nums;
+    background: var(--tone-selected);
+    color: var(--tone-accent);
+  }
+
+  .training-path-stages li > div {
+    @apply flex min-w-0 flex-1 flex-col;
+  }
+
+  .training-path-stages strong {
+    @apply truncate text-[11px] font-semibold;
+  }
+
+  .training-path-stages small {
+    @apply mt-0.5 text-[10px] leading-4 text-ink-faint;
+  }
+
+  .training-path-stages em {
+    @apply shrink-0 not-italic font-mono text-[10px] tabular-nums text-ink-soft;
+  }
+
+  @container (max-width: 280px) {
+    .training-path-stages li {
+      display: grid;
+      grid-template-columns: 1.5rem minmax(0, 1fr);
+      column-gap: 0.5rem;
+    }
+
+    .training-path-index {
+      grid-row: 1 / span 2;
+    }
+
+    .training-path-stages strong {
+      @apply whitespace-normal;
+    }
+
+    .training-path-stages small {
+      overflow-wrap: anywhere;
+    }
+
+    .training-path-stages em {
+      grid-column: 2;
+      justify-self: start;
+    }
+  }
+
+  .training-path-contract {
+    @apply mx-3 mb-3 flex flex-col gap-0.5 rounded bg-sunken px-2.5 py-2;
+  }
+
+  .training-path-contract strong {
+    @apply text-[10px] font-semibold;
+  }
+
+  .training-path-contract span {
+    @apply text-[10px] leading-4 text-ink-soft;
+  }
+
+  .training-resource-grid {
+    @apply grid min-h-0 flex-1 grid-cols-2;
+  }
+
+  .training-resource-lane {
+    @apply flex min-h-28 min-w-0 flex-col border-b border-r border-line p-3 even:border-r-0;
+  }
+
+  .training-resource-lane:nth-last-child(-n + 2) {
+    border-bottom: 0;
+  }
+
+  .training-resource-lane > div {
+    @apply flex items-baseline gap-2;
+  }
+
+  .training-resource-lane span {
+    @apply min-w-0 flex-1 truncate text-[10px] text-ink-soft;
+  }
+
+  .training-resource-lane strong {
+    @apply shrink-0 font-mono text-[11px] font-medium tabular-nums;
+  }
+
+  .training-resource-lane svg {
+    @apply mt-2 min-h-12 flex-1 w-full;
+  }
+
+  .training-resource-baseline {
+    stroke: var(--tone-line);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .training-resource-line {
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.5;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .resource-gpu {
+    color: var(--tone-series-train);
+  }
+
+  .resource-memory {
+    color: var(--tone-series-memory);
+  }
+
+  .resource-cpu {
+    color: var(--tone-good);
+  }
+
+  .resource-transfer {
+    color: var(--tone-series-transfer);
+  }
+
+  .training-resource-lane span {
+    color: var(--tone-ink-soft);
+  }
+
 }
 
 @media (max-width: 980px) {
@@ -453,6 +1017,41 @@
 
   .status-bar-group .status-bar-item:nth-child(n + 3),
   .status-bar-group-right .status-bar-item:nth-child(n + 2) {
+    display: none;
+  }
+
+  .training-form-grid,
+  .training-column-row,
+  .training-resource-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .training-resource-lane {
+    border-right: 0;
+    border-bottom: 1px solid var(--tone-line);
+  }
+
+  .training-resource-lane:nth-last-child(-n + 2) {
+    border-bottom: 1px solid var(--tone-line);
+  }
+
+  .training-resource-lane:last-child {
+    border-bottom: 0;
+  }
+
+  .training-loss-summary {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .training-loss-summary > div:last-child {
+    display: none;
+  }
+
+  .training-event-strip {
+    grid-template-columns: auto minmax(5rem, 1fr);
+  }
+
+  .training-event-legend {
     display: none;
   }
 }

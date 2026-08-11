@@ -28,8 +28,9 @@ use rerobot_core::api::{
     IdentifyPortResponse, ImportResponse, JudgeEpisodeRequest, ModeSelection, PublicationStatus,
     RobotSummary, SerialPortSummary, SetRecordingPausedRequest, SetReplayPausedRequest,
     SpiralQueryRequest, SpiralQueryResponse, StartRecordingRequest, StartReplayRequest,
-    StartSpiralReplayRequest, StopRecordingRequest, StudioSnapshot, TorqueRequest,
-    UpdateDataSettingsRequest, UpdateRobotRequest, default_teleoperation_pair,
+    StartSpiralReplayRequest, StartTrainingRequest, StopRecordingRequest, StudioSnapshot,
+    TorqueRequest, TrainingRun, TrainingSnapshot, UpdateDataSettingsRequest, UpdateRobotRequest,
+    default_teleoperation_pair,
 };
 use rerobot_core::calibration::build_calibration;
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,7 @@ use crate::episodes::{
 };
 use crate::hardware::{HardwareHandle, RobotSpec};
 use crate::storage_manager::StorageManager;
+use crate::training_manager::TrainingManager;
 use crate::video_capture::{
     CameraCaptureSpec, VideoAsset, VideoAssetMetadata, VideoCapture, VideoEncoderSettings,
     load_assets,
@@ -74,6 +76,7 @@ pub struct AppState {
     pub cameras: Arc<CameraManager>,
     pub data_settings: Arc<DataSettingsStore>,
     pub storage: Arc<StorageManager>,
+    pub training: Arc<TrainingManager>,
     pub recording_video: Arc<tokio::sync::Mutex<Option<VideoCapture>>>,
     pub video_encoder: VideoEncoderSettings,
     pub simulated: bool,
@@ -273,6 +276,11 @@ pub fn api_router(state: AppState) -> Router {
         .route("/spiral/query", post(spiral_query))
         .route("/spiral/replay", post(start_spiral_replay))
         .route("/spiral/video.mp4", get(spiral_video))
+        .route(
+            "/training/runs",
+            get(list_training_runs).post(start_training),
+        )
+        .route("/training/runs/{id}/stop", post(stop_training))
         .with_state(state)
 }
 
@@ -362,8 +370,16 @@ async fn events(
     let stream = async_stream::stream! {
         let mut snapshot_timer = tokio::time::interval(SNAPSHOT_INTERVAL);
         let mut telemetry_timer = tokio::time::interval(TELEMETRY_INTERVAL);
+        let (initial_training, mut training) = state.training.subscription();
         let mut last_snapshot: Option<StudioSnapshot> = None;
         let mut last_sequence = 0_u64;
+
+        if let Ok(event) = Event::default()
+            .event("training_snapshot")
+            .json_data(&initial_training)
+        {
+            yield Ok(event);
+        }
 
         loop {
             tokio::select! {
@@ -387,11 +403,54 @@ async fn events(
                         yield Ok(event);
                     }
                 }
+                update = training.recv() => {
+                    match update {
+                        Ok(update) => {
+                            if let Ok(event) = Event::default()
+                                .event("training_update")
+                                .json_data(&update)
+                            {
+                                yield Ok(event);
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            let (snapshot, replacement) = state.training.subscription();
+                            training = replacement;
+                            if let Ok(event) = Event::default()
+                                .event("training_snapshot")
+                                .json_data(&snapshot)
+                            {
+                                yield Ok(event);
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
             }
         }
     };
 
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+async fn list_training_runs(State(state): State<AppState>) -> Json<TrainingSnapshot> {
+    Json(state.training.snapshot())
+}
+
+async fn start_training(
+    State(state): State<AppState>,
+    Json(request): Json<StartTrainingRequest>,
+) -> Result<(StatusCode, Json<TrainingRun>), Failure> {
+    let run = state.training.start(request).await?;
+    Ok((StatusCode::CREATED, Json(run)))
+}
+
+async fn stop_training(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, Failure> {
+    state.training.stop(&id)?;
+    Ok(StatusCode::ACCEPTED)
 }
 
 async fn list_ports(
@@ -908,11 +967,12 @@ async fn update_data_settings(
     State(state): State<AppState>,
     Json(request): Json<UpdateDataSettingsRequest>,
 ) -> Result<Json<DataSettings>, Failure> {
-    state
+    let settings = state
         .data_settings
         .update(request)
-        .map(Json)
-        .map_err(Failure::bad_request)
+        .map_err(Failure::bad_request)?;
+    state.training.refresh_readiness().await;
+    Ok(Json(settings))
 }
 
 async fn test_spiral(State(state): State<AppState>) -> Json<ConnectionTestResponse> {

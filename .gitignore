@@ -11,3 +11,4 @@ crates/rerobot-studio/robots
 crates/rerobot-studio/episodes
 /.agents
 /.impeccable
+__pycache__/

@@ -30,6 +30,17 @@
           pkgs = import nixpkgs {
             inherit system;
             overlays = [ (import rust-overlay) ];
+            # The upstream PyTorch wheel is redistributable but marked unfree
+            # in nixpkgs. Permit only that binary package so entering the shell
+            # does not compile libtorch locally for hours.
+            config.allowUnfreePredicate = pkg: nixpkgs.lib.getName pkg == "torch";
+            # nixpkgs currently marks torch-bin broken globally when its CUDA
+            # bindings lead the CUDA package set, even on macOS where CUDA is
+            # not part of the wheel. Ignore only that macOS false positive and
+            # retain the warning on Linux; CUDA deployments may still override
+            # the worker interpreter explicitly.
+            config.problems.handlers.torch.unsupported-cuda-version =
+              if system == "aarch64-darwin" then "ignore" else "warn";
           };
           llvmPackages = pkgs.llvmPackages_latest;
           # Pin the complete Rust toolchain so development stays aligned.
@@ -64,8 +75,24 @@
           linuxBuildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [
             pkgs.v4l-utils
           ];
+          # The Studio owns orchestration in Rust. This interpreter is only the
+          # isolated tensor/Arrow compute worker: PyTorch trains the model and
+          # PyArrow decodes Rust-framed IPC batches. Spiral ADBC and checkpoint
+          # publication remain entirely in the Rust backend.
+          trainingPython = pkgs.python312.withPackages (ps: [
+            ((ps."torch-bin" or ps.torch).overridePythonAttrs (_: {
+              # The 2.12 wheel metadata caps setuptools below the version in
+              # this nixpkgs revision even though setuptools is not imported
+              # by the worker at runtime. Verify real imports below instead.
+              dontCheckRuntimeDeps = true;
+            }))
+            ps.pyarrow
+            ps.numpy
+          ]);
         in
         {
+          packages.training-python = trainingPython;
+
           devShells.default = pkgs.mkShell {
             packages =
               [
@@ -75,6 +102,7 @@
                 llvmPackages.llvm
                 pkgs.cargo-binutils
                 pkgs.ffmpeg
+                trainingPython
               ]
               ++ webBuildInputs
               ++ linuxNativeBuildInputs
@@ -83,6 +111,12 @@
             # Make `dx` use the tools declared above rather than downloading
             # its own copies at build time.
             NO_DOWNLOADS = "1";
+
+            # Keep the Python boundary reproducible and invisible to Rust
+            # callers. An explicit --training-python still wins when testing a
+            # CUDA-specific environment outside nixpkgs.
+            PYTHONNOUSERSITE = "1";
+            REROBOT_TRAINING_PYTHON = "${trainingPython}/bin/python";
 
             ASAN_SYMBOLIZER_PATH = "${llvmPackages.llvm}/bin/llvm-symbolizer";
             LIBCLANG_PATH = pkgs.lib.optionalString pkgs.stdenv.isLinux "${llvmPackages.libclang.lib}/lib";

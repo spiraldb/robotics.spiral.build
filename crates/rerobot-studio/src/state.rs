@@ -6,7 +6,7 @@ use std::rc::Rc;
 use dioxus::prelude::*;
 use rerobot_core::api::{
     EpisodeSummary, ModeSelection, RecordingProgress, ReplayProgress, RobotSummary, RobotTelemetry,
-    StudioSnapshot, TelemetryFrame,
+    StudioSnapshot, TelemetryFrame, TrainingSnapshot,
 };
 use rerobot_core::urdf::{SO101_URDF, Urdf, UrdfError};
 
@@ -172,6 +172,8 @@ fn default_joint_selection(
 pub struct Studio {
     pub snapshot: Signal<StudioSnapshot>,
     pub telemetry: Signal<TelemetryFrame>,
+    /// Backend-owned lifecycle and metric history for local policy training.
+    pub training: Signal<TrainingSnapshot>,
     /// True while the event stream is connected.
     pub live: Signal<bool>,
     /// Wall-clock time of the last valid event and a periodically updated clock.
@@ -215,6 +217,7 @@ impl Studio {
         let studio = use_context_provider(|| Self {
             snapshot: Signal::new(StudioSnapshot::default()),
             telemetry: Signal::new(TelemetryFrame::default()),
+            training: Signal::new(TrainingSnapshot::default()),
             live: Signal::new(false),
             last_event_ms: Signal::new(0.0),
             // Keep the server's first render identical to the browser's first
@@ -248,6 +251,7 @@ impl Studio {
             let Self {
                 mut snapshot,
                 mut telemetry,
+                mut training,
                 mut live,
                 mut last_event_ms,
                 mut recording_signals,
@@ -263,6 +267,8 @@ impl Studio {
                     last_event_ms.set(js_sys::Date::now());
                     match event {
                         StudioEvent::Snapshot(value) => snapshot.set(*value),
+                        StudioEvent::TrainingSnapshot(value) => training.set(*value),
+                        StudioEvent::TrainingUpdate(update) => training.write().apply(*update),
                         StudioEvent::Telemetry(frame) => {
                             // Only a frame that can change the store touches it.
                             // Idle writes would mark the signal dirty and

@@ -3,7 +3,8 @@
 `rerobot` is a Rust-native robotics toolkit inspired by
 [LeRobot](https://github.com/huggingface/lerobot). It sets up, calibrates, and
 drives SO-ARM101 arms — from a browser or from the terminal — without requiring
-Python.
+operators to manage Python. Rust owns hardware, data, supervision, and the UI;
+the Nix shell supplies one isolated PyTorch worker for policy training.
 
 One arm is one robot instance is one JSON file. That file holds the arm's
 serial port, its cameras, its motors, and its calibration; there are no
@@ -21,10 +22,11 @@ sidecars and no hidden state directories.
 
 Enter the pinned Nix development environment, which provides the Rust
 toolchain and the whole web toolchain — `dx`, the Tailwind CLI,
-`wasm-bindgen`, and `wasm-opt`:
+`wasm-bindgen`, and `wasm-opt` — plus the pinned PyTorch/Arrow training
+interpreter:
 
 ```console
-nix develop path:.
+nix develop .
 ```
 
 Build and test the workspace:
@@ -121,7 +123,7 @@ SELECT COUNT(*) FROM rerobot_v3.video_episode_000017.assets;
 ### What the studio does
 
 The studio is a two-region workbench. The left region owns the task and switches
-between **Live** and **Data**; the right region owns visualization. Drag the
+between **Live**, **Data**, and **Training**; the right region owns visualization. Drag the
 separator to change the default 40/60 split. The ratio persists locally, and the
 Timeline stays mounted below every visualization so changing tools never loses
 the current playhead.
@@ -138,11 +140,36 @@ replays, or deletes a take; its Query tool runs guarded read-only SQL against th
 configured SpiralDB dataset. Query results replace the upper visualization
 rather than appearing beside an unrelated live camera.
 
+**Training** starts a locally supervised PyTorch process from a guarded,
+read-only query against a hosted Spiral project. Training deliberately rejects
+`spiral:memory:` because that catalog is connection-local: the dedicated loader
+could not see data created by another Studio connection. The default
+state-based ACT run reads ordered
+`episode_id`, `stream_id`, `sample_index`, state, and action columns; sequence
+boundaries survive Arrow record-batch boundaries and whole episodes are held
+out for validation. Rust opens Spiral through ADBC, validates the schema, and
+feeds a bounded queue of framed Arrow IPC batches to Python. Typed Arrow numeric
+vectors use PyArrow's direct tensor path when compatible; the current JSON
+joint-vector columns are normalized into typed float32 Arrow by the bounded
+Rust loader, where that compatibility copy can overlap model compute.
+Python owns only tensor conversion, the ACT model, optimizer, model-side
+validation, metrics, and atomic local checkpoint files. Rust validates those
+files and bulk-ingests each configured checkpoint — plus the final checkpoint —
+into `<dataset>.training_checkpoints`. Run state reaches the browser as one
+initial snapshot followed by bounded incremental updates.
+
+The worker is launched automatically inside `nix develop`. To use a separately
+managed CUDA interpreter, pass `--training-python /absolute/path/to/python`;
+the Python environment needs only `torch`, `pyarrow`, and `numpy`. Spiral
+credentials, URIs, and ADBC drivers are never passed to Python.
+
 **The visualization region** shows the live 3D scene and selected live camera in
 Live mode, and the recorded pose/camera or query results in Data mode. The 3D
 view supports orbit, pan, zoom, selection, and framing. Camera status reflects
 real image load state and reports an actionable error instead of showing a
-permanently green but blank frame.
+permanently green but blank frame. Training replaces the episode clock with one
+shared optimizer-step axis across learning curves, resource lanes, checkpoint
+events, and the measured Spiral-to-tensor data path.
 
 **The Timeline** is shared by both modes. During capture it follows new camera
 and joint samples. A paused or completed take can be scrubbed to time-travel the

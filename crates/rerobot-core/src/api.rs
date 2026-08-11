@@ -125,6 +125,326 @@ pub struct SpiralQueryResponse {
     pub elapsed_ms: u64,
 }
 
+/// The policy family executed by the isolated PyTorch worker.
+///
+/// The first vertical slice is deliberately honest about its data contract:
+/// it trains a low-dimensional action-chunking transformer from state/action
+/// columns returned by Spiral. Image-token policies join this enum only after
+/// Spiral exposes a typed camera tensor contract.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrainingPolicy {
+    #[default]
+    Act,
+}
+
+impl TrainingPolicy {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Act => "ACT · state",
+        }
+    }
+}
+
+/// Authoritative lifecycle of one backend-owned training process.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrainingRunPhase {
+    #[default]
+    Starting,
+    Running,
+    Stopping,
+    Completed,
+    Stopped,
+    Failed,
+}
+
+impl TrainingRunPhase {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Starting => "Starting",
+            Self::Running => "Running",
+            Self::Stopping => "Stopping",
+            Self::Completed => "Completed",
+            Self::Stopped => "Stopped",
+            Self::Failed => "Failed",
+        }
+    }
+
+    pub const fn active(self) -> bool {
+        matches!(self, Self::Starting | Self::Running | Self::Stopping)
+    }
+}
+
+/// Everything needed to reproduce one run. Spiral is the only sample source.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct StartTrainingRequest {
+    pub run_name: String,
+    #[serde(default)]
+    pub policy: TrainingPolicy,
+    pub sql: String,
+    #[serde(default = "default_training_state_column")]
+    pub state_column: String,
+    #[serde(default = "default_training_action_column")]
+    pub action_column: String,
+    #[serde(default = "default_training_device")]
+    pub device: String,
+    #[serde(default = "default_training_steps")]
+    pub steps: u64,
+    #[serde(default = "default_training_batch_size")]
+    pub batch_size: usize,
+    #[serde(default = "default_training_learning_rate")]
+    pub learning_rate: f64,
+    #[serde(default = "default_training_checkpoint_every")]
+    pub checkpoint_every: u64,
+    #[serde(default = "default_training_chunk_size")]
+    pub chunk_size: usize,
+    #[serde(default = "default_training_seed")]
+    pub seed: u64,
+}
+
+impl Default for StartTrainingRequest {
+    fn default() -> Self {
+        Self {
+            run_name: "act-run".to_owned(),
+            policy: TrainingPolicy::Act,
+            sql: String::new(),
+            state_column: default_training_state_column(),
+            action_column: default_training_action_column(),
+            device: default_training_device(),
+            steps: default_training_steps(),
+            batch_size: default_training_batch_size(),
+            learning_rate: default_training_learning_rate(),
+            checkpoint_every: default_training_checkpoint_every(),
+            chunk_size: default_training_chunk_size(),
+            seed: default_training_seed(),
+        }
+    }
+}
+
+fn default_training_state_column() -> String {
+    "state".to_owned()
+}
+
+fn default_training_action_column() -> String {
+    "action".to_owned()
+}
+
+fn default_training_device() -> String {
+    "auto".to_owned()
+}
+
+const fn default_training_steps() -> u64 {
+    18_000
+}
+
+const fn default_training_batch_size() -> usize {
+    256
+}
+
+const fn default_training_learning_rate() -> f64 {
+    3.0e-4
+}
+
+const fn default_training_checkpoint_every() -> u64 {
+    1_000
+}
+
+const fn default_training_chunk_size() -> usize {
+    16
+}
+
+const fn default_training_seed() -> u64 {
+    42
+}
+
+/// One sample on the shared training-step axis used by every Studio plot.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct TrainingMetricPoint {
+    pub step: u64,
+    pub train_loss: f64,
+    pub validation_loss: Option<f64>,
+    pub learning_rate: f64,
+    pub gpu_utilization_pct: Option<f64>,
+    pub gpu_memory_bytes: Option<u64>,
+    pub cpu_utilization_pct: f64,
+    pub transfer_bytes_per_second: f64,
+    pub examples_per_second: f64,
+    pub queue_depth: usize,
+    pub elapsed_seconds: f64,
+    #[serde(default)]
+    pub event: Option<String>,
+}
+
+/// A model/optimizer snapshot durably ingested into Spiral.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct TrainingCheckpoint {
+    pub step: u64,
+    pub created_ms: i64,
+    pub validation_loss: Option<f64>,
+    pub spiral_table: String,
+    pub byte_size: u64,
+}
+
+/// Immutable Spiral identity captured when a run starts.
+///
+/// The browser can show where samples and checkpoints belong without learning
+/// credentials or depending on mutable Settings state.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TrainingSource {
+    pub project: String,
+    pub dataset: String,
+    pub checkpoint_table: String,
+}
+
+/// Result of checking every dependency needed before a worker can start.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TrainingReadiness {
+    pub ready: bool,
+    pub python_ready: bool,
+    pub spiral_ready: bool,
+    pub summary: String,
+}
+
+impl Default for TrainingReadiness {
+    fn default() -> Self {
+        Self {
+            ready: false,
+            python_ready: false,
+            spiral_ready: false,
+            summary: "Checking the local training runtime…".to_owned(),
+        }
+    }
+}
+
+/// Browser-safe run state. Checkpoint bytes and process handles never cross the
+/// wire; only their durable Spiral identity does.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct TrainingRun {
+    pub id: String,
+    pub config: StartTrainingRequest,
+    #[serde(default)]
+    pub source: TrainingSource,
+    pub phase: TrainingRunPhase,
+    pub current_step: u64,
+    pub started_ms: i64,
+    pub finished_ms: Option<i64>,
+    pub message: Option<String>,
+    pub metrics: Vec<TrainingMetricPoint>,
+    pub checkpoints: Vec<TrainingCheckpoint>,
+    pub logs: Vec<String>,
+}
+
+/// Complete training state published through the Studio event stream.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct TrainingSnapshot {
+    #[serde(default)]
+    pub readiness: TrainingReadiness,
+    pub worker: String,
+    pub runs: Vec<TrainingRun>,
+}
+
+pub const MAX_TRAINING_METRIC_POINTS: usize = 1_200;
+pub const MAX_TRAINING_LOG_LINES: usize = 120;
+pub const MAX_TRAINING_CHECKPOINTS: usize = 1_000;
+pub const MAX_TRAINING_HISTORY_RUNS: usize = 40;
+
+/// Incremental training event sent after the initial snapshot.
+///
+/// Metrics are intentionally one point at a time: republishing every retained
+/// run for every optimizer step made event bandwidth grow with history.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TrainingUpdate {
+    Readiness {
+        readiness: TrainingReadiness,
+    },
+    RunAdded {
+        run: Box<TrainingRun>,
+    },
+    RunState {
+        run_id: String,
+        phase: TrainingRunPhase,
+        current_step: u64,
+        finished_ms: Option<i64>,
+        message: Option<String>,
+    },
+    Metric {
+        run_id: String,
+        point: Box<TrainingMetricPoint>,
+    },
+    Checkpoint {
+        run_id: String,
+        checkpoint: TrainingCheckpoint,
+    },
+    Log {
+        run_id: String,
+        line: String,
+    },
+}
+
+impl TrainingSnapshot {
+    pub fn active_run(&self) -> Option<&TrainingRun> {
+        self.runs.iter().find(|run| run.phase.active())
+    }
+
+    pub fn apply(&mut self, update: TrainingUpdate) {
+        match update {
+            TrainingUpdate::Readiness { readiness } => self.readiness = readiness,
+            TrainingUpdate::RunAdded { run } => {
+                self.runs.retain(|existing| existing.id != run.id);
+                self.runs.insert(0, *run);
+                self.runs.truncate(MAX_TRAINING_HISTORY_RUNS);
+            }
+            TrainingUpdate::RunState {
+                run_id,
+                phase,
+                current_step,
+                finished_ms,
+                message,
+            } => {
+                if let Some(run) = self.runs.iter_mut().find(|run| run.id == run_id) {
+                    run.phase = phase;
+                    run.current_step = current_step;
+                    run.finished_ms = finished_ms;
+                    run.message = message;
+                }
+            }
+            TrainingUpdate::Metric { run_id, point } => {
+                if let Some(run) = self.runs.iter_mut().find(|run| run.id == run_id) {
+                    run.current_step = point.step;
+                    run.metrics.push(*point);
+                    let excess = run.metrics.len().saturating_sub(MAX_TRAINING_METRIC_POINTS);
+                    if excess > 0 {
+                        run.metrics.drain(..excess);
+                    }
+                }
+            }
+            TrainingUpdate::Checkpoint { run_id, checkpoint } => {
+                if let Some(run) = self.runs.iter_mut().find(|run| run.id == run_id) {
+                    run.checkpoints.push(checkpoint);
+                    let excess = run
+                        .checkpoints
+                        .len()
+                        .saturating_sub(MAX_TRAINING_CHECKPOINTS);
+                    if excess > 0 {
+                        run.checkpoints.drain(..excess);
+                    }
+                }
+            }
+            TrainingUpdate::Log { run_id, line } => {
+                if let Some(run) = self.runs.iter_mut().find(|run| run.id == run_id) {
+                    run.logs.push(line);
+                    let excess = run.logs.len().saturating_sub(MAX_TRAINING_LOG_LINES);
+                    if excess > 0 {
+                        run.logs.drain(..excess);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Replay a trajectory fetched from Spiral instead of the local recovery file.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StartSpiralReplayRequest {
@@ -1200,5 +1520,38 @@ mod tests {
             .max(),
             Some(MotorCondition::Fault)
         );
+    }
+
+    #[test]
+    fn incremental_training_updates_are_bounded_and_change_only_the_target_run() {
+        let mut snapshot = TrainingSnapshot {
+            runs: vec![TrainingRun {
+                id: "run-a".to_owned(),
+                ..TrainingRun::default()
+            }],
+            ..TrainingSnapshot::default()
+        };
+        for step in 0..=MAX_TRAINING_METRIC_POINTS {
+            snapshot.apply(TrainingUpdate::Metric {
+                run_id: "run-a".to_owned(),
+                point: Box::new(TrainingMetricPoint {
+                    step: step as u64,
+                    ..TrainingMetricPoint::default()
+                }),
+            });
+        }
+        for line in 0..=MAX_TRAINING_LOG_LINES {
+            snapshot.apply(TrainingUpdate::Log {
+                run_id: "run-a".to_owned(),
+                line: format!("line {line}"),
+            });
+        }
+
+        let run = &snapshot.runs[0];
+        assert_eq!(run.metrics.len(), MAX_TRAINING_METRIC_POINTS);
+        assert_eq!(run.metrics[0].step, 1);
+        assert_eq!(run.logs.len(), MAX_TRAINING_LOG_LINES);
+        assert_eq!(run.logs[0], "line 1");
+        assert_eq!(run.current_step, MAX_TRAINING_METRIC_POINTS as u64);
     }
 }

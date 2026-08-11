@@ -1,6 +1,6 @@
 ---
 name: rerobot studio
-description: A compact, dockable one-light workbench for operating robots and understanding episodes.
+description: A compact, dockable one-light workbench for operating robots, understanding episodes, and training policies.
 colors:
   canvas: "#ffffff"
   surface: "#ffffff"
@@ -34,6 +34,10 @@ colors:
   signal-4: "#eda100"
   signal-5: "#e87ba4"
   signal-6: "#008300"
+  series-train: "#2a78d6"
+  series-validation: "#d9572b"
+  series-memory: "#7a58a5"
+  series-transfer: "#7560b8"
 typography:
   readout:
     fontFamily: "ui-monospace, SF Mono, JetBrains Mono, Menlo, monospace"
@@ -206,8 +210,9 @@ make it feel like a precise bench utility rather than a dashboard. Camera pixels
 alone keep a dark mat for honest letterboxing; application chrome never changes
 visual worlds when the operator changes tasks.
 
-The Studio has only two primary activities: **Live** for operating hardware and
-recording, and **Data** for episodes and query. Everything else is a panel. A
+The Studio has three primary activities: **Live** for operating hardware and
+recording, **Data** for episodes and query, and **Training** for configuring and
+observing policy runs. Everything else is a panel. A
 reusable tab-and-tile system lets the operator attach a panel as a tab, split a
 tile, resize the result, or move it with the keyboard. This borrows VS Code’s
 learned spatial grammar without importing its visual weight: the layout is
@@ -238,8 +243,8 @@ put reads as a bench tool.
 
 - One light neutral world across activity rail, panels, WebGL, plots,
   Timeline, settings, and status bar; camera pixels alone use the dark mat.
-- Live and Data are the only primary activities; independent content registers
-  as panels instead of growing one-off shell regions.
+- Live, Data, and Training are the primary activities; independent content
+  registers as panels instead of growing one-off shell regions.
 - A persisted tab-and-tile workspace supports docking, tabbing, splitting,
   resizing, keyboard operation, and hot-plugged panel reconciliation.
 - The default desktop composition is one-third workbench and two-thirds
@@ -289,6 +294,10 @@ small set of semantic, arm, axis, and signal accents.
   Assigned by joint name in kinematic order so the same joint keeps the same
   trace colour across arms. Every plotted value must also be available as text;
   colour never becomes the only way to read a signal.
+- **Training series** (`{colors.series-train}`, `{colors.series-validation}`,
+  `{colors.series-memory}`, `{colors.series-transfer}`): Stable semantic roles
+  across learning and resource plots. CPU utilization reuses
+  `{colors.good}`. Legends and text readouts always accompany the traces.
 
 ### Neutral
 
@@ -323,10 +332,10 @@ announce the resting state. A mode or torque chip exists while that condition
 is consequential, not merely because the interface has room for another badge.
 
 **The One-Spelling Rule.** Reusable interface colours are role-named
-`--tone-*` properties in `crates/rerobot-studio/tailwind.css`. The panel crate
-maps its `--rp-*` roles to those tokens. Renderer-owned arm and signal colours
-remain centralized with the code that paints them; components do not restate
-their literals.
+`--tone-*` properties in `crates/rerobot-studio/tailwind.css`, including
+semantic training-series roles. The panel crate maps its `--rp-*` roles to
+those tokens. Renderer-owned arm and signal colours remain centralized with
+the code that paints them; components do not restate their literals.
 
 ## Typography
 
@@ -371,7 +380,7 @@ tracked kickers, decorative display faces, or all-caps panel titles.
 
 The first viewport is a full-height application shell:
 
-- a 60px activity rail spanning the body, with Live/Data at the top and
+- a 60px activity rail spanning the body, with Live/Data/Training at the top and
   Settings anchored at the bottom;
 - the remaining body area owned by one `PanelWorkspace`, without a separate top
   menu row;
@@ -379,10 +388,10 @@ The first viewport is a full-height application shell:
   torque, rate, and issues;
 - transient notices floating above the shell rather than inserting a new row.
 
-Live and Data are activity changes, not panel tabs. Each activity registers its
-own panel set and uses an independent versioned persistence key. Switching
-activity therefore changes both the operating content and its visualization
-without moving Live camera tabs into Data, or vice versa.
+Live, Data, and Training are activity changes, not panel tabs. Each activity
+registers its own panel set and uses an independent versioned persistence key.
+Switching activity therefore changes both the operating content and its
+visualization without moving Live camera tabs into Data, or vice versa.
 
 The canonical first-open desktop layout is:
 
@@ -426,6 +435,12 @@ delete. Query is a peer tool within Data; its result joins the selected
 episode's Scene as a sibling tab and never unregisters that Scene. The Timeline
 keeps the same layout contract. Recorded camera panels come from the selected
 episode’s media streams, not the currently connected camera assignments.
+
+Training is curve-first: its first-open composition gives the learning curve
+the dominant visualization area, keeps the literal data path beside it, and
+places resource lanes below. The run builder remains a peer panel at left, and
+the whole activity persists through the same tab-and-tile workspace mechanics
+as Live and Data.
 
 At 760px and below, the split tree is not squeezed into unusable slivers. A
 horizontally scrollable panel switcher presents one registered panel at a time;
@@ -750,9 +765,9 @@ This is the signature component system.
 ### Application Chrome
 
 - **Activity rail:** 60px wide on desktop and the only global navigation
-  surface. Live and Data stay at the top; Settings stays at the bottom. Active
-  activities use blue ink, a paper surface, and a 2px left edge. There is no
-  separate top menu.
+  surface. Live, Data, and Training stay at the top; Settings stays at the
+  bottom. Active activities use blue ink, a paper surface, and a 2px left edge.
+  There is no separate top menu.
 - **Status bar:** 20px, 10px type, hairline-separated facts. It owns global
   connection, environment, current activity, recording, holding, rate, and
   issue truth.
@@ -797,6 +812,40 @@ Signals is an episode visualization on the Timeline clock, not an unowned
 dashboard. Traces share one time axis and degree scale across arms. The readout
 prints every plotted value and doubles as the legend. Joint colours are stable
 by joint name, and crosshair/focus changes emphasis without changing layout.
+
+### Training
+
+Training is a curve-first operating instrument, not a collection of dashboard
+cards. The dominant learning curve answers whether the policy is improving;
+configuration and run history occupy the workbench, while the data path and
+resource lanes explain whether the input pipeline and machine are feeding it.
+
+- **Shared step axis:** Learning traces, resource lanes, checkpoints,
+  validation, and loader events use optimizer step as one common horizontal
+  identity. A marker keeps the same step everywhere so an operator can relate a
+  loss change to the system condition that accompanied it.
+- **Flat lanes:** Data-path stages and resource series are content within
+  ordinary panels, separated by rhythm and hairlines. They do not introduce
+  nested cards, decorative containers, or resting elevation.
+- **Charts:** Grids, polylines, baselines, and markers are code-native SVG with
+  semantic text summaries and tabular readouts around them. Series colours use
+  the centralized training roles; colour is never the only legend.
+- **Truthful state:** With no run, panels explain how real data appears. After a
+  run starts but before its first metric, they say they are waiting for the
+  first optimizer step. They never draw synthetic telemetry. Unavailable or
+  locked actions remain visible and disabled beside the blocker or active-run
+  context, while Stop remains reachable for the run in progress. Readiness is
+  the backend's combined PyTorch-and-hosted-Spiral probe, not an inference made
+  from settings in the browser. A failed run keeps its terminal reason and the
+  latest worker log lines visible in the workbench.
+- **Owned data path:** The four stages shown are the actual boundaries: Rust
+  Spiral ADBC query, bounded Arrow IPC queue, Python tensor/model compute, and
+  Rust checkpoint ingest. Transfer rate and queue depth are measured values;
+  compatibility copies are named when the Rust loader normalizes JSON vectors.
+
+**The Shared-Optimizer-Step Rule.** Any training view that plots, marks, or
+summarizes run progress keys that evidence to optimizer step so learning and
+system behavior can be compared without correlating unrelated axes by eye.
 
 ### Camera Panels
 
@@ -894,14 +943,21 @@ deadline belongs to the notice value, not the component that draws it.
 - **Do** render exceptional status only when it helps the operator act.
 - **Do** put disabled-action reasons and physical consequences on the page.
 - **Do** move robot and destination configuration into Settings.
-- **Do** make Live/Data layout state, episode selection, and camera ownership
-  independent so switching activities cannot move content between them.
+- **Do** keep Live, Data, and Training layout state independent, and keep
+  episode selection and camera ownership activity-scoped so switching cannot
+  move content between them.
 - **Do** route workbench, Timeline, panel-focus, and backend events through one
   activity controller that derives the complete visible projection.
 - **Do** represent Live, Recorded Loading, Recorded Ready, Recorded Unavailable,
   and Recorded Failed as explicit visualization-source states.
 - **Do** keep one Timeline action vocabulary in every activity and include the
   recording or episode identity in every time or transport action.
+- **Do** keep Training curve-first and align learning, resources, and run events
+  to the shared optimizer-step axis.
+- **Do** author training plots as code-native SVG with semantic text readouts
+  and centralized series roles.
+- **Do** show truthful Training empty, waiting, unavailable, and locked states;
+  never substitute synthetic telemetry for backend evidence.
 - **Do** keep `tailwind_input` and `tailwind_output` in `Dioxus.toml`; DX owns
   stylesheet compilation for serve, build, and bundle.
 
@@ -912,8 +968,8 @@ deadline belongs to the notice value, not the component that draws it.
 - **Don't** add fixed one-off panel arrangements in the Studio; extend
   `rerobot-panels` when the mechanic is generic and register domain content in
   the Studio.
-- **Don't** turn every tool into primary navigation. Live and Data are
-  activities; panel tabs are spatial grouping inside them.
+- **Don't** turn every tool into primary navigation. Live, Data, and Training
+  are activities; panel tabs are spatial grouping inside them.
 - **Don't** let a Data action mutate Live camera tabs, or derive recorded camera
   tabs from current hardware assignment.
 - **Don't** duplicate a camera stream merely because its panel moved or another
@@ -942,5 +998,7 @@ deadline belongs to the notice value, not the component that draws it.
   geometry and selection, camera panels own frames.
 - **Don't** write hue-named or one-off colour literals in components; use role
   tokens.
+- **Don't** turn Training data-path stages or resource lanes into elevated
+  dashboard cards, or give related training evidence unrelated axes.
 - **Don't** add uppercase tracked kickers, decorative display type, pill-shaped
   containers, a fixed-dark workspace, or ornamental looping animation.

@@ -13,7 +13,7 @@ use gloo_net::http::{Method, RequestBuilder};
 use js_sys::Uint8Array;
 use rerobot_core::api::{ApiError, EpisodeSummary};
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
-use rerobot_core::api::{StudioSnapshot, TelemetryFrame};
+use rerobot_core::api::{StudioSnapshot, TelemetryFrame, TrainingSnapshot, TrainingUpdate};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -160,6 +160,8 @@ async fn request(method: Method, path: &str, body: Option<Value>) -> Result<Stri
 pub enum StudioEvent {
     Snapshot(Box<StudioSnapshot>),
     Telemetry(Box<TelemetryFrame>),
+    TrainingSnapshot(Box<TrainingSnapshot>),
+    TrainingUpdate(Box<TrainingUpdate>),
 }
 
 /// Consume the server's event stream, handing every message to `on_event`.
@@ -180,8 +182,17 @@ where
     let telemetry = source
         .subscribe("telemetry")
         .map_err(|error| format!("could not subscribe to telemetry: {error}"))?;
+    let training_snapshots = source
+        .subscribe("training_snapshot")
+        .map_err(|error| format!("could not subscribe to training snapshots: {error}"))?;
+    let training_updates = source
+        .subscribe("training_update")
+        .map_err(|error| format!("could not subscribe to training updates: {error}"))?;
 
-    let mut events = stream::select(snapshots, telemetry);
+    let mut events = stream::select(
+        stream::select(snapshots, telemetry),
+        stream::select(training_snapshots, training_updates),
+    );
     while let Some(Ok((kind, message))) = events.next().await {
         let Some(text) = message.data().as_string() else {
             continue;
@@ -195,6 +206,16 @@ where
             "telemetry" => {
                 if let Ok(frame) = serde_json::from_str(&text) {
                     on_event(StudioEvent::Telemetry(Box::new(frame)));
+                }
+            }
+            "training_snapshot" => {
+                if let Ok(snapshot) = serde_json::from_str(&text) {
+                    on_event(StudioEvent::TrainingSnapshot(Box::new(snapshot)));
+                }
+            }
+            "training_update" => {
+                if let Ok(update) = serde_json::from_str(&text) {
+                    on_event(StudioEvent::TrainingUpdate(Box::new(update)));
                 }
             }
             _ => {}

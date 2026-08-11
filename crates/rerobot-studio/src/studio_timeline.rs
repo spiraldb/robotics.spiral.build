@@ -478,6 +478,7 @@ pub(crate) fn StudioTimeline(
     let timeline_label = match state.subject.activity() {
         Activity::Live => "Live Timeline",
         Activity::Data => "Data Timeline",
+        Activity::Training => "Training step timeline",
     };
 
     rsx! {

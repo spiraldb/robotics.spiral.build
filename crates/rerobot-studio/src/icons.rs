@@ -73,3 +73,17 @@ pub fn DataIcon() -> Element {
         }
     }
 }
+
+/// Local policy training activity: a curve passing through optimization steps.
+#[component]
+pub fn TrainingIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M2.5 12.5h11M3.5 11l2.4-3 2.2 1.4 3.9-5" }
+            circle { cx: "3.5", cy: "11", r: ".75" }
+            circle { cx: "5.9", cy: "8", r: ".75" }
+            circle { cx: "8.1", cy: "9.4", r: ".75" }
+            circle { cx: "12", cy: "4.4", r: ".75" }
+        }
+    }
+}
