@@ -5,14 +5,14 @@
 
 use std::collections::BTreeMap;
 
-#[cfg(feature = "web")]
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
 use futures_util::{StreamExt, stream};
-#[cfg(feature = "web")]
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
 use gloo_net::eventsource::futures::EventSource;
 use gloo_net::http::{Method, RequestBuilder};
 use js_sys::Uint8Array;
 use rerobot_core::api::{ApiError, EpisodeSummary};
-#[cfg(feature = "web")]
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
 use rerobot_core::api::{StudioSnapshot, TelemetryFrame};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -156,7 +156,7 @@ async fn request(method: Method, path: &str, body: Option<Value>) -> Result<Stri
 }
 
 /// One message from the studio's event stream.
-#[cfg(feature = "web")]
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
 pub enum StudioEvent {
     Snapshot(Box<StudioSnapshot>),
     Telemetry(Box<TelemetryFrame>),
@@ -167,7 +167,7 @@ pub enum StudioEvent {
 /// Returns when the connection closes, which the caller treats as a signal to
 /// reconnect. The [`EventSource`] is owned by this future, so dropping the
 /// future closes the connection.
-#[cfg(feature = "web")]
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
 pub async fn stream_events<F>(mut on_event: F) -> Result<(), String>
 where
     F: FnMut(StudioEvent),
@@ -230,20 +230,6 @@ pub fn episode_video_url(episode: &str, stream: &str, segment: u32) -> String {
     )
 }
 
-/// URL of one MP4 stored in Spiral for browser-native preview.
-pub fn spiral_video_url(episode: &str, stream: &str) -> String {
-    format!(
-        "/api/spiral/video.mp4?episode={}&stream={}",
-        encode_query(episode),
-        encode_query(stream)
-    )
-}
-
-/// Endpoint for publishing or retrying one completed local recovery copy.
-pub fn publication_url(episode: &str) -> String {
-    format!("/api/publications/{}", encode_query(episode))
-}
-
 /// Percent-encode a value for use in a query string.
 ///
 /// Camera identifiers are device paths on Linux, so at minimum the separators
@@ -275,10 +261,6 @@ mod tests {
         // macOS reports opaque identifiers that may contain anything at all.
         assert_eq!(encode_query("cam 1&x=2"), "cam%201%26x%3D2");
         assert_eq!(encode_query("plain-id_1.0~"), "plain-id_1.0~");
-        assert_eq!(
-            spiral_video_url("episode 1", "arm/camera"),
-            "/api/spiral/video.mp4?episode=episode%201&stream=arm%2Fcamera"
-        );
         assert_eq!(
             episode_timeline_url("episode 1"),
             "/api/episodes/episode%201/timeline"

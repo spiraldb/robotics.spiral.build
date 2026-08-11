@@ -2,16 +2,14 @@
 //!
 //! This module deliberately owns the narrow operating region and the model it
 //! sends to the visualization region, but not the outer Studio shell. A caller
-//! keeps [`DataVisualization`] in a signal, renders [`QueryResultView`] (or its
+//! keeps the latest [`DataIntent`] in a signal, renders [`QueryResultView`] (or its
 //! own episode visualization) on the right, and mounts [`DataWorkbench`] on the
 //! left. The component uses the existing Studio context and HTTP API, so it can
 //! be integrated without introducing a second source of episode selection.
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use rerobot_core::api::{
-    EpisodeSummary, ImportResponse, SpiralQueryRequest, SpiralQueryResponse, StartReplayRequest,
-};
+use rerobot_core::api::{EpisodeSummary, ImportResponse, SpiralQueryRequest, SpiralQueryResponse};
 
 use crate::api;
 use crate::state::studio;
@@ -33,7 +31,7 @@ pub(crate) enum DataWorkbenchTab {
 /// shell can switch the right side without making the workbench know whether
 /// that side is a tab strip, a dock, or a single contextual canvas.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum DataVisualization {
+pub(crate) enum DataIntent {
     Episode(EpisodeSummary),
     Query(QueryViewModel),
     EmptyEpisodes,
@@ -116,7 +114,7 @@ pub(crate) fn DataWorkbench(
     mut sql: Signal<String>,
     mut max_rows: Signal<usize>,
     mut query: Signal<QueryViewModel>,
-    on_visualization: EventHandler<DataVisualization>,
+    on_intent: EventHandler<DataIntent>,
 ) -> Element {
     let mut studio = studio();
     let mut importing = use_signal(|| false);
@@ -127,17 +125,18 @@ pub(crate) fn DataWorkbench(
     // local selection that could drift from the existing timeline.
     use_effect(move || {
         let episodes = studio.episodes();
-        if studio.selected_episode.read().is_none() {
-            if let Some(episode) = preferred_episode(&episodes) {
-                studio.selected_episode.set(Some(episode.id.clone()));
-            }
+        if studio.selected_episode.read().is_none()
+            && let Some(episode) = preferred_episode(&episodes).cloned()
+        {
+            on_intent.call(DataIntent::Episode(episode));
+            return;
         }
         match studio.focused_episode() {
             Some(episode) if tab() == DataWorkbenchTab::Episodes => {
-                on_visualization.call(DataVisualization::Episode(episode));
+                on_intent.call(DataIntent::Episode(episode));
             }
             None if tab() == DataWorkbenchTab::Episodes => {
-                on_visualization.call(DataVisualization::EmptyEpisodes);
+                on_intent.call(DataIntent::EmptyEpisodes);
             }
             _ => {}
         }
@@ -167,7 +166,7 @@ pub(crate) fn DataWorkbench(
             state: QueryState::Running,
         };
         query.set(running.clone());
-        on_visualization.call(DataVisualization::Query(running));
+        on_intent.call(DataIntent::Query(running));
 
         let request = SpiralQueryRequest {
             sql: statement.clone(),
@@ -185,7 +184,7 @@ pub(crate) fn DataWorkbench(
                 state,
             };
             query.set(completed.clone());
-            on_visualization.call(DataVisualization::Query(completed));
+            on_intent.call(DataIntent::Query(completed));
         });
     };
 
@@ -283,11 +282,11 @@ pub(crate) fn DataWorkbench(
                             tab.set(choice);
                             match choice {
                                 DataWorkbenchTab::Episodes => match studio.focused_episode() {
-                                    Some(episode) => on_visualization.call(DataVisualization::Episode(episode)),
-                                    None => on_visualization.call(DataVisualization::EmptyEpisodes),
+                                    Some(episode) => on_intent.call(DataIntent::Episode(episode)),
+                                    None => on_intent.call(DataIntent::EmptyEpisodes),
                                 },
                                 DataWorkbenchTab::Query => {
-                                    on_visualization.call(DataVisualization::Query(query()));
+                                    on_intent.call(DataIntent::Query(query()));
                                 }
                             }
                         },
@@ -321,10 +320,8 @@ pub(crate) fn DataWorkbench(
                                         confirming_delete: confirming_delete.read().as_deref() == Some(episode.id.as_str()),
                                         on_select: move |chosen: EpisodeSummary| {
                                             confirming_delete.set(None);
-                                            studio.selected_episode.set(Some(chosen.id.clone()));
-                                            on_visualization.call(DataVisualization::Episode(chosen));
+                                            on_intent.call(DataIntent::Episode(chosen));
                                         },
-                                        on_replay: move |chosen: EpisodeSummary| replay_episode(studio, chosen),
                                         on_delete: move |id: String| {
                                             if confirming_delete.read().as_deref() == Some(id.as_str()) {
                                                 confirming_delete.set(None);
@@ -361,7 +358,7 @@ pub(crate) fn DataWorkbench(
                                             sql.set(statement.clone());
                                             let idle = QueryViewModel::idle(statement, max_rows());
                                             query.set(idle.clone());
-                                            on_visualization.call(DataVisualization::Query(idle));
+                                            on_intent.call(DataIntent::Query(idle));
                                         }
                                     },
                                     "{preset.label}"
@@ -379,7 +376,7 @@ pub(crate) fn DataWorkbench(
                                     sql.set(statement.clone());
                                     let idle = QueryViewModel::idle(statement, max_rows());
                                     query.set(idle.clone());
-                                    on_visualization.call(DataVisualization::Query(idle));
+                                    on_intent.call(DataIntent::Query(idle));
                                 },
                                 onkeydown: move |event| {
                                     if event.key() == Key::Enter
@@ -402,7 +399,7 @@ pub(crate) fn DataWorkbench(
                                         max_rows.set(rows);
                                         let idle = QueryViewModel::idle(sql(), rows);
                                         query.set(idle.clone());
-                                        on_visualization.call(DataVisualization::Query(idle));
+                                        on_intent.call(DataIntent::Query(idle));
                                     },
                                     for option in QUERY_ROW_OPTIONS {
                                         option { value: "{option}", selected: max_rows() == option, "{option}" }
@@ -443,10 +440,8 @@ fn EpisodeRow(
     playing: bool,
     confirming_delete: bool,
     on_select: EventHandler<EpisodeSummary>,
-    on_replay: EventHandler<EpisodeSummary>,
     on_delete: EventHandler<String>,
 ) -> Element {
-    let studio = studio();
     let state = if playing {
         "Replaying"
     } else if episode.problem.is_some() {
@@ -456,7 +451,6 @@ fn EpisodeRow(
     } else {
         "Recorded"
     };
-    let replay_blocked = replay_blocker(studio, &episode);
 
     rsx! {
         li {
@@ -482,17 +476,6 @@ fn EpisodeRow(
                 }
                 button {
                     r#type: "button",
-                    class: "btn",
-                    disabled: replay_blocked.is_some(),
-                    title: replay_blocked.unwrap_or("Replay this episode on the connected follower"),
-                    onclick: {
-                        let episode = episode.clone();
-                        move |_| on_replay.call(episode.clone())
-                    },
-                    "Replay"
-                }
-                button {
-                    r#type: "button",
                     class: if confirming_delete { "btn btn-danger bg-danger-soft" } else { "btn btn-danger" },
                     title: if confirming_delete { "Delete permanently — click again to confirm" } else { "Delete this episode" },
                     onclick: {
@@ -506,7 +489,7 @@ fn EpisodeRow(
     }
 }
 
-/// Default rendering for the query half of [`DataVisualization`].
+/// Default rendering for the query consequence of [`DataIntent`].
 ///
 /// Kept independent from [`DataWorkbench`] so the Studio can mount it in the
 /// right visualization region and replace it later with a richer grid without
@@ -608,72 +591,6 @@ fn preferred_episode(episodes: &[EpisodeSummary]) -> Option<&EpisodeSummary> {
         .or_else(|| episodes.last())
 }
 
-fn replay_blocker(studio: crate::state::Studio, episode: &EpisodeSummary) -> Option<&'static str> {
-    if !episode.usable() {
-        Some("This episode did not finish")
-    } else if studio.mode_active() {
-        Some("Stop the current mode first")
-    } else if !studio.controls_available() {
-        Some("Replay is paused while telemetry reconnects")
-    } else if replay_target(studio, episode).is_none() {
-        Some("Connect and calibrate a replay target first")
-    } else {
-        None
-    }
-}
-
-fn replay_target(
-    studio: crate::state::Studio,
-    episode: &EpisodeSummary,
-) -> Option<(String, Option<String>)> {
-    let ready = studio
-        .connected_robots()
-        .into_iter()
-        .filter(|robot| robot.calibrated)
-        .collect::<Vec<_>>();
-    let target = ready
-        .iter()
-        .find(|robot| {
-            robot
-                .robot_type
-                .as_deref()
-                .is_some_and(|kind| kind.contains("follower"))
-        })
-        .or_else(|| ready.first())?
-        .id
-        .clone();
-    let source = episode
-        .arm(&target)
-        .map(|arm| arm.id.clone())
-        .or_else(|| {
-            episode
-                .arms
-                .iter()
-                .find(|arm| arm.id.to_ascii_lowercase().contains("follower"))
-                .map(|arm| arm.id.clone())
-        })
-        .or_else(|| match episode.arms.as_slice() {
-            [only] => Some(only.id.clone()),
-            _ => None,
-        })?;
-    Some((target, Some(source)))
-}
-
-fn replay_episode(studio: crate::state::Studio, episode: EpisodeSummary) {
-    let Some((robot, source_arm)) = replay_target(studio, &episode) else {
-        studio.report("Connect and calibrate a replay target before replaying.");
-        return;
-    };
-    let request = StartReplayRequest {
-        episode: episode.id,
-        robot,
-        source_arm,
-    };
-    studio.run("", async move {
-        api::send(Method::POST, "/api/episodes/replay", Some(&request)).await
-    });
-}
-
 fn delete_episode(studio: crate::state::Studio, id: String) {
     let mut selected = studio.selected_episode;
     let path = format!("/api/episodes/{id}");
@@ -684,7 +601,7 @@ fn delete_episode(studio: crate::state::Studio, id: String) {
     });
 }
 
-fn short_id(id: &str) -> String {
+pub(crate) fn short_id(id: &str) -> String {
     id.strip_prefix("episode_")
         .and_then(|number| number.parse::<u64>().ok())
         .map(|number| format!("#{number}"))

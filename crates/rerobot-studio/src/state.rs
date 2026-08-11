@@ -10,9 +10,9 @@ use rerobot_core::api::{
 };
 use rerobot_core::urdf::{SO101_URDF, Urdf, UrdfError};
 
-#[cfg(feature = "web")]
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
 use crate::api::{self, StudioEvent};
-use crate::signals::SignalStore;
+use crate::recording_signals::SignalStore;
 
 /// The robot description the studio poses, draws, and measures from.
 ///
@@ -61,7 +61,7 @@ impl Notice {
     ///
     /// Only the browser's clock loop asks; the server build never raises a
     /// notice, so it never has one to age out.
-    #[cfg_attr(not(feature = "web"), allow(dead_code))]
+    #[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
     fn expired(&self, now: f64) -> bool {
         now >= self.until_ms
     }
@@ -78,11 +78,11 @@ fn linger_ms(text: &str, failed: bool) -> u32 {
 }
 
 fn now_ms() -> f64 {
-    #[cfg(feature = "web")]
+    #[cfg(all(feature = "web", target_arch = "wasm32"))]
     {
         js_sys::Date::now()
     }
-    #[cfg(not(feature = "web"))]
+    #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
     {
         0.0
     }
@@ -118,16 +118,37 @@ impl Selection {
             } if selected_robot == robot && selected_joint == joint
         )
     }
+}
 
-    pub fn matches_camera(&self, robot: &str, role: &str) -> bool {
-        matches!(
-            self,
-            Selection::Camera {
-                robot: selected_robot,
-                role: selected_role,
-            } if selected_robot == robot && selected_role == role
-        )
+/// Choose the first configured motor only when selection does not already name
+/// a valid object on an available arm. Camera selection remains intentional;
+/// selecting an arm itself, arriving with no selection, or losing a stale
+/// motor selection opens that arm's first motor in the inspector.
+fn default_joint_selection(
+    robots: &[RobotSummary],
+    selected: Option<&Selection>,
+) -> Option<Selection> {
+    let robot = selected
+        .and_then(|selection| robots.iter().find(|robot| robot.id == selection.robot_id()))
+        .or_else(|| robots.first())?;
+
+    match selected {
+        Some(Selection::Camera {
+            robot: selected, ..
+        }) if selected == &robot.id => return None,
+        Some(Selection::Joint {
+            robot: selected,
+            joint,
+        }) if selected == &robot.id && robot.motors.iter().any(|motor| &motor.name == joint) => {
+            return None;
+        }
+        _ => {}
     }
+
+    robot.motors.first().map(|motor| Selection::Joint {
+        robot: robot.id.clone(),
+        joint: motor.name.clone(),
+    })
 }
 
 /// Everything the screens read, published by the server's event stream.
@@ -161,8 +182,8 @@ pub struct Studio {
     /// Filled from the event stream rather than from the panel that draws it:
     /// a take captured with the Signals region collapsed is still a take, and
     /// arriving to find it empty would be the interface deciding what was
-    /// measured. See [`crate::signals`].
-    pub signals: Signal<SignalStore>,
+    /// measured. See [`crate::recording_signals`].
+    pub recording_signals: Signal<SignalStore>,
 }
 
 impl Studio {
@@ -180,21 +201,32 @@ impl Studio {
             selected: Signal::new(None),
             pointed: Signal::new(None),
             selected_episode: Signal::new(None),
-            signals: Signal::new(SignalStore::default()),
+            recording_signals: Signal::new(SignalStore::default()),
         });
-        #[cfg(feature = "web")]
+        let mut default_selection = studio.selected;
+        use_effect(move || {
+            let next = {
+                let snapshot = studio.snapshot.read();
+                let selected = default_selection.read();
+                default_joint_selection(&snapshot.robots, selected.as_ref())
+            };
+            if let Some(next) = next {
+                default_selection.set(Some(next));
+            }
+        });
+        #[cfg(all(feature = "web", target_arch = "wasm32"))]
         let mut studio = studio;
 
         // One long-lived task owns the connection and reconnects if the server
         // restarts, so the page recovers without a manual refresh.
-        #[cfg(feature = "web")]
+        #[cfg(all(feature = "web", target_arch = "wasm32"))]
         use_future(move || async move {
             let Self {
                 mut snapshot,
                 mut telemetry,
                 mut live,
                 mut last_event_ms,
-                mut signals,
+                mut recording_signals,
                 ..
             } = studio;
             loop {
@@ -209,13 +241,10 @@ impl Studio {
                         StudioEvent::Snapshot(value) => snapshot.set(*value),
                         StudioEvent::Telemetry(frame) => {
                             // Only a frame that can change the store touches it.
-                            // Writing on all twenty frames a second marked the
-                            // signal dirty even with nothing recording, which
-                            // re-rendered the whole panel to redraw the same
-                            // empty state — the exact cost its paced paint loop
-                            // exists to avoid.
-                            if frame.recording.is_some() || signals.peek().live() {
-                                signals.write().observe(&frame);
+                            // Idle writes would mark the signal dirty and
+                            // needlessly rebuild the Timeline view model.
+                            if frame.recording.is_some() || recording_signals.peek().live() {
+                                recording_signals.write().observe(&frame);
                             }
                             telemetry.set(*frame);
                         }
@@ -231,7 +260,7 @@ impl Studio {
         // notice is taken back off the page. Expiring it here rather than from
         // the component that draws it means every notice ages the same way, no
         // matter which panel raised it.
-        #[cfg(feature = "web")]
+        #[cfg(all(feature = "web", target_arch = "wasm32"))]
         use_future(move || async move {
             let mut notice = studio.notice;
             loop {
@@ -387,22 +416,6 @@ impl Studio {
         self.mode_active() && matches!(self.mode(), ModeSelection::Manual { robot } if robot == id)
     }
 
-    /// The part this robot plays in a running teleoperation, if any.
-    ///
-    /// Several panels change what they say depending on whether an arm is
-    /// being moved by hand or is copying one that is, and all of them should
-    /// agree about which is which.
-    pub fn teleoperation_role(&self, id: &str) -> Option<&'static str> {
-        if !self.mode_active() {
-            return None;
-        }
-        match self.mode() {
-            ModeSelection::Teleoperate { leader, .. } if leader == id => Some("leader"),
-            ModeSelection::Teleoperate { follower, .. } if follower == id => Some("follower"),
-            _ => None,
-        }
-    }
-
     /// Run a request, reporting the outcome to the operator.
     ///
     /// An empty `success` message means the change is visible on screen and
@@ -472,7 +485,35 @@ pub fn studio() -> Studio {
 
 #[cfg(test)]
 mod tests {
-    use super::{Notice, Selection, linger_ms};
+    use rerobot_core::api::{ConnectionStatus, MotorLimits, MotorSummary, RobotSummary};
+    use rerobot_core::calibration::Direction;
+
+    use super::{Notice, Selection, default_joint_selection, linger_ms};
+
+    fn robot(id: &str, motors: &[&str]) -> RobotSummary {
+        RobotSummary {
+            id: id.to_owned(),
+            file: format!("{id}.json"),
+            robot_type: None,
+            port: None,
+            motors: motors
+                .iter()
+                .enumerate()
+                .map(|(index, name)| MotorSummary {
+                    name: (*name).to_owned(),
+                    id: index as u32 + 1,
+                    direction: Direction::Normal,
+                    model: None,
+                    calibration: None,
+                    limits: MotorLimits::default(),
+                })
+                .collect(),
+            cameras: Vec::new(),
+            calibrated: false,
+            problem: None,
+            connection: ConnectionStatus::default(),
+        }
+    }
 
     #[test]
     fn a_notice_stays_up_long_enough_to_read_and_no_longer() {
@@ -514,7 +555,46 @@ mod tests {
 
         assert_eq!(joint.robot_id(), "arm-a");
         assert!(joint.matches_joint("arm-a", "elbow"));
-        assert!(camera.matches_camera("arm-a", "wrist"));
+        assert_eq!(camera.robot_id(), "arm-a");
         assert!(!camera.matches_robot("arm-b"));
+    }
+
+    #[test]
+    fn the_first_motor_is_the_default_object_on_the_focused_arm() {
+        let robots = vec![
+            robot("follower", &["shoulder_pan", "elbow_flex"]),
+            robot("leader", &["shoulder_lift"]),
+        ];
+
+        assert_eq!(
+            default_joint_selection(&robots, None),
+            Some(Selection::Joint {
+                robot: "follower".into(),
+                joint: "shoulder_pan".into(),
+            })
+        );
+        assert_eq!(
+            default_joint_selection(&robots, Some(&Selection::Robot("leader".into()))),
+            Some(Selection::Joint {
+                robot: "leader".into(),
+                joint: "shoulder_lift".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn an_intentional_camera_or_valid_motor_selection_is_preserved() {
+        let robots = vec![robot("follower", &["shoulder_pan"])];
+        let camera = Selection::Camera {
+            robot: "follower".into(),
+            role: "top".into(),
+        };
+        let joint = Selection::Joint {
+            robot: "follower".into(),
+            joint: "shoulder_pan".into(),
+        };
+
+        assert_eq!(default_joint_selection(&robots, Some(&camera)), None);
+        assert_eq!(default_joint_selection(&robots, Some(&joint)), None);
     }
 }

@@ -128,6 +128,15 @@ struct VideoCaptureRun {
     tasks: Vec<tokio::task::JoinHandle<Result<VideoAsset, String>>>,
 }
 
+/// Immutable configuration for one encoded interval of one camera stream.
+struct CameraSegment {
+    ffmpeg: String,
+    codec: String,
+    output: PathBuf,
+    index: u32,
+    timeline_offset_seconds: f64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CaptureState {
     Recording,
@@ -193,11 +202,13 @@ impl VideoCapture {
                 spec,
                 frames,
                 control.subscribe(),
-                self.ffmpeg.clone(),
-                self.codec.clone(),
-                output,
-                index,
-                timeline_offset_seconds,
+                CameraSegment {
+                    ffmpeg: self.ffmpeg.clone(),
+                    codec: self.codec.clone(),
+                    output,
+                    index,
+                    timeline_offset_seconds,
+                },
             )));
         }
         self.next_segment += 1;
@@ -255,14 +266,10 @@ async fn record_camera(
     spec: CameraCaptureSpec,
     mut frames: watch::Receiver<Option<Arc<Frame>>>,
     mut control: watch::Receiver<CaptureState>,
-    ffmpeg: String,
-    codec: String,
-    output: PathBuf,
-    segment_index: u32,
-    timeline_offset_seconds: f64,
+    segment: CameraSegment,
 ) -> Result<VideoAsset, String> {
     let rate = spec.fps.clamp(1, 120).to_string();
-    let mut child = tokio::process::Command::new(&ffmpeg)
+    let mut child = tokio::process::Command::new(&segment.ffmpeg)
         .args([
             "-hide_banner",
             "-loglevel",
@@ -277,20 +284,20 @@ async fn record_camera(
             "pipe:0",
             "-an",
             "-c:v",
-            &codec,
+            &segment.codec,
             "-pix_fmt",
             "yuv420p",
             "-movflags",
             "+faststart",
             "-y",
         ])
-        .arg(&output)
+        .arg(&segment.output)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|error| format!("could not start {ffmpeg:?}: {error}"))?;
+        .map_err(|error| format!("could not start {:?}: {error}", segment.ffmpeg))?;
     let mut stdin = child
         .stdin
         .take()
@@ -355,12 +362,12 @@ async fn record_camera(
             }
         ));
     }
-    let bytes = tokio::fs::metadata(&output)
+    let bytes = tokio::fs::metadata(&segment.output)
         .await
         .map(|metadata| metadata.len())
         .unwrap_or(0);
     if written == 0 || bytes == 0 {
-        let _ = tokio::fs::remove_file(&output).await;
+        let _ = tokio::fs::remove_file(&segment.output).await;
         return Err(format!(
             "camera {} delivered no video frames",
             spec.stream_id
@@ -369,13 +376,13 @@ async fn record_camera(
     Ok(VideoAsset {
         stream_id: spec.stream_id,
         camera_id: spec.camera_id,
-        path: output,
+        path: segment.output,
         width: spec.width,
         height: spec.height,
         fps: spec.fps,
         frames: written,
-        segment_index,
-        timeline_offset_seconds: Some(timeline_offset_seconds),
+        segment_index: segment.index,
+        timeline_offset_seconds: Some(segment.timeline_offset_seconds),
     })
 }
 

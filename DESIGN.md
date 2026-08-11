@@ -218,7 +218,8 @@ registered in both activities and synchronizes recording, replay, camera video,
 historical 3D pose, signals, query selection, and optionally a safety-gated
 physical seek. Signals belongs to the episode on that clock. Full camera images
 belong in camera panels; robot ownership remains explicit through arm and role,
-while Live keeps compact camera status beside the selected robot.
+and actionable camera failures stay inside the affected frame rather than being
+duplicated in the Live workbench.
 
 Density is the point, not a side effect. The base face is 12px, ordinary
 controls are 24px tall, and most gaps come from a 2/4/6/8px rhythm. Record is
@@ -235,14 +236,15 @@ put reads as a bench tool.
 
 **Key Characteristics:**
 
-- One light neutral world across menu, activity rail, panels, WebGL, plots,
+- One light neutral world across activity rail, panels, WebGL, plots,
   Timeline, settings, and status bar; camera pixels alone use the dark mat.
 - Live and Data are the only primary activities; independent content registers
   as panels instead of growing one-off shell regions.
 - A persisted tab-and-tile workspace supports docking, tabbing, splitting,
   resizing, keyboard operation, and hot-plugged panel reconciliation.
 - The default desktop composition is one-third workbench and two-thirds
-  visualization, with Timeline in the lower 42% and camera tabs in a named home.
+  visualization, with Timeline in the lower 42% and each camera visible in its
+  own row of the named camera column.
 - One playhead synchronizes every representation of an episode.
 - Compact 12px type, 24px controls, 32px panel tabs, small radii, and hairlines.
 - Monospace tabular figures for elapsed time, rates, durations, counts, and IDs.
@@ -369,9 +371,10 @@ tracked kickers, decorative display faces, or all-caps panel titles.
 
 The first viewport is a full-height application shell:
 
-- a 32px top menu with the lowercase wordmark plus Settings and About;
-- a body with a 60px activity rail and the remaining area owned by one
-  `PanelWorkspace`;
+- a 60px activity rail spanning the body, with Live/Data at the top and
+  Settings anchored at the bottom;
+- the remaining body area owned by one `PanelWorkspace`, without a separate top
+  menu row;
 - a 20px bottom status bar for connection, environment, activity, recording,
   torque, rate, and issues;
 - transient notices floating above the shell rather than inserting a new row.
@@ -385,7 +388,7 @@ The canonical first-open desktop layout is:
 
 ```text
 ┌──────────── one third ────────────┬────────────── two thirds ──────────────┐
-│ Live or Data workbench            │ Scene / Query      │ Camera tabs       │
+│ Live or Data workbench            │ Scene + Query tab  │ Camera tabs       │
 │                                   │                    │                   │
 │                                   ├────────────────────┴───────────────────┤
 │                                   │ Timeline — lower 42%                   │
@@ -413,16 +416,16 @@ move it like any other panel. Live review and Data selection are separate state:
 recording updates Live’s inspectable take, while Data owns its selected episode
 and query result.
 
-Live packs Recording before Motors & cameras. Robot identity appears once in a
-compact switcher and once in the selected arm’s control toolbar, not in a stack
-of redundant headings. Setup is global Settings → Robots rather than a
-collapsible section in Live.
+Live begins with Control; recording identity, status, and capture transport stay
+in the Timeline and global status bar. Robot identity appears once in a compact
+switcher. There is no selected-arm toolbar beneath it. Setup is global Settings
+→ Robots rather than a collapsible section in Live.
 
 Data states `Dataset → Episodes` explicitly. Episodes owns select, replay, and
-delete. Query is a peer tool within Data; its result becomes a primary panel
-while the Timeline keeps the same layout contract. Recorded camera tabs come
-from the selected episode’s media streams, not the currently connected camera
-assignments.
+delete. Query is a peer tool within Data; its result joins the selected
+episode's Scene as a sibling tab and never unregisters that Scene. The Timeline
+keeps the same layout contract. Recorded camera panels come from the selected
+episode’s media streams, not the currently connected camera assignments.
 
 At 760px and below, the split tree is not squeezed into unusable slivers. A
 horizontally scrollable panel switcher presents one registered panel at a time;
@@ -450,6 +453,201 @@ tooltip.
 
 **The No-Unfolding-Prose Rule.** A live value changes tint, chip, or control
 state; it does not insert a sentence that pushes the panel below it.
+
+## Component Ownership & Data Flow
+
+This section defines behavioral ownership, independently of Rust modules,
+crates, or file structure. A **panel** is a movable spatial container. A
+**component** is the owner of a user behavior, state transition, or rendering
+contract. Moving a component's panel changes where it appears, never what the
+component means or which behavior it owns.
+
+### Behavioral Component Hierarchy
+
+```text
+StudioShell
+├── StudioBody
+│   ├── ActivityRail                         Live / Data selection; Settings access
+│   └── PanelWorkspace                       layout mechanics only
+│       ├── SemanticWorkbenchPanel
+│       │   ├── LiveWorkbench                operate / record semantics
+│       │   └── DataWorkbench                episode / query semantics
+│       ├── PrimaryVisualizationPanel
+│       │   ├── Scene
+│       │   ├── QueryResult
+│       │   └── EmptyOrLoadingState
+│       ├── CameraPanel(s)
+│       └── TimelinePanel                    one shared clock contract
+├── StatusBar
+└── OverlayLayer                             settings / notices / confirmations
+```
+
+`StudioShell` owns the application frame. `ActivityRail` chooses the active
+activity and owns the bottom-anchored Settings entry. `PanelWorkspace` owns
+tabs, docking, splits, resizing, mobile panel switching, reconciliation, and
+persistence. It does not know what an episode, camera, robot, query, or
+playhead means.
+
+The workbench, primary visualization, camera panels, and Timeline are peers in
+the panel registry even when the default layout places the workbench on the
+left, visualization on the upper right, and Timeline on the lower right.
+
+### Semantic Intent and Activity Projection
+
+The left workbench is the **semantic surface**: it expresses what the operator
+means to inspect or operate. The right side is the **visual consequence** of
+that meaning. The workbench never reaches across the layout to construct,
+replace, or mutate another panel directly.
+
+One logical **Activity Controller** sits between user intent, backend state, and
+rendering. It may be implemented as a reducer or model rather than as a visible
+component. It receives:
+
+- activity selection from the Activity Rail;
+- semantic intents from the Live or Data workbench;
+- time and transport intents from the Timeline;
+- typed panel-focus intents, such as choosing a camera stream;
+- authoritative snapshots, telemetry, and request results from the backend.
+
+It produces one atomic **Activity Projection**:
+
+```text
+Workbench intent ──────┐
+Timeline action ───────┼──→ Activity Controller ──→ Activity Projection
+Panel focus intent ────┤                                  ├── Primary visualization
+Backend event ─────────┘                                  ├── Camera panels
+                                                          ├── Signal lanes
+                                                          └── Timeline model
+```
+
+An Activity Projection is a coherent description of the complete active
+workspace, not a collection of independently mutable panel states. Changing a
+Data selection, for example, derives the Scene, optional additive Query result,
+recorded camera registry, signal source, Timeline subject, and playhead
+together. A Query result may keep an explicitly named episode context or have
+no episode context; it never replaces the Scene panel identity, and the Scene,
+cameras, and Timeline must all report the same choice.
+
+Live and Data own independent controller state. Switching activities restores
+the target activity's semantic selection, projection, playhead subject, and
+panel layout without letting hidden activity state mutate the visible one.
+
+### Visualization Source Boundary
+
+Scene, Camera, and Signals are data-driven renderers. They receive an explicit
+source from the Activity Projection and do not choose a source from ambient
+global selection or from the absence of another value.
+
+```text
+VisualizationSource
+├── Live
+│   └── stable stream identity + current frame/state
+└── Recorded
+    ├── episode identity + requested episode time
+    └── Loading | Ready | Unavailable | Failed
+```
+
+`Loading`, `Unavailable`, and `Failed` are real recorded-source states. They are
+not aliases for Live. When a recorded sample or clip is missing, the panel shows
+that recorded-source state and never substitutes current live telemetry or a
+live camera frame. This prevents a panel titled for an episode from displaying
+the robot's present physical state.
+
+Live camera panels derive from the current Live robot assignments. Recorded
+camera panels derive from the selected episode's stream identities. Activating
+a camera panel emits that typed live-camera or recorded-stream identity; domain
+meaning is never recovered by parsing a panel ID string.
+
+### Timeline Interface Contract
+
+There is one canonical Timeline component and one action vocabulary in Live,
+Data, review, query-context, loading, and empty states. The Timeline is never
+replaced by a second empty-state component with a smaller behavioral boundary.
+Unavailable actions remain part of the interface and are disabled with a
+specific reason.
+
+The Timeline owns:
+
+- the visible episode clock and playhead;
+- pointer drag and keyboard seek interaction;
+- Record, Pause/Resume, Stop, and Discard capture transport;
+- one icon-only Play/Pause transport with an accessible action name;
+- Follow Live while an episode is growing;
+- signal lanes and explicit recording gaps;
+- one explicit **Sync robot** option that applies to playback and committed seek.
+
+Every Timeline action carries the identity of the recording or episode it acts
+upon. Timeline transport never discovers its target from an unrelated ambient
+selection. With **Sync robot** off, Play/Pause and seeking change recorded
+visualizations only. With it on, the same Play/Pause control drives the
+compatible robot and committed seeks move it through the server-owned safety
+path. Turning the option off stops active robot motion; there is no second
+Replay/Pause/Resume/Stop transport competing with the Timeline clock.
+
+A committed physical seek may use a bounded one-frame replay inside the
+hardware controller. That one-frame consequence never owns preview transport,
+changes the Timeline playhead, or replaces the stable toolbar while the arm is
+travelling to the requested pose.
+
+Dragging or keyboard-seeking emits preview updates while the pointer or key is
+moving, then a committed seek at release or commit. Each accepted playhead
+change produces one synchronized projection for the Scene, every recorded
+Camera panel, Signals, and the Timeline itself. When **Sync robot** is enabled,
+physical motion is sent only for the committed seek.
+
+### State Ownership
+
+| State | Owner | Consumers |
+|---|---|---|
+| Active activity | `StudioShell` / Activity host | Activity Rail, active controller, Status Bar |
+| Live robot and camera selection | Live Activity Controller | Live Workbench, Scene, Live camera registry |
+| Live recording and review subject | Live Activity Controller, reconciled with backend truth | Live Workbench, Timeline, recorded preview surfaces |
+| Data tool, selected episode, and query | Data Activity Controller | Data Workbench and the complete Data projection |
+| Timeline subject, playhead, preview playback, and Follow Live | Timeline Controller within the active activity | Scene, Cameras, Signals, Timeline |
+| Panel geometry and active tab | `PanelWorkspace` | Panel chrome and persisted layout only |
+| Hardware, recording, replay, storage, and safety state | Backend | Activity Controller through the wire API |
+
+Primary visualization content, camera content, and Timeline content are derived
+projection outputs. They are not additional independent sources of semantic
+truth.
+
+### Required Interaction Flows
+
+**Select an episode:** `DataWorkbench → SelectEpisode(id) → Data Activity
+Controller → Recorded source → Scene + Cameras + Signals + Timeline`.
+
+**Open Query:** `DataWorkbench → ShowQuery(query) → Data Activity Controller →
+preserved Scene + active QueryResult sibling tab + explicit episode context or
+explicit no-episode context`.
+
+**Seek or rewind:** `Timeline → Seek(subject, time, phase) → Activity Controller
+→ one synchronized historical projection`. A committed, explicitly armed
+physical seek additionally becomes a backend request.
+
+**Receive live telemetry:** `Backend event → Live Activity Controller → Live
+projection → Scene + Cameras + Signals + Timeline`.
+
+### Named Rules
+
+**The Semantic-to-Projection Rule.** Workbenches emit intent; they do not mutate
+visualization components. One controller derives the complete visible
+consequence.
+
+**The Atomic-Projection Rule.** Primary visualization, cameras, signals, and
+Timeline are updated from one coherent activity projection. No surface may
+retain an incompatible interpretation of the current semantic selection.
+
+**The Explicit-Source Rule.** A visualization receives Live or Recorded as an
+explicit source with explicit loading and failure states. Missing recorded data
+never falls back to Live.
+
+**The No-Ambient-Identity Rule.** An action names the episode, stream, robot, or
+query it affects. A component never guesses its target from another activity's
+selection or from a panel ID naming convention.
+
+**The Timeline-Owns-Time Rule.** Timeline owns the user-facing time operation;
+the Activity Controller owns the synchronized projection caused by that
+operation; the backend owns any physical consequence.
 
 ## Elevation & Depth
 
@@ -551,10 +749,10 @@ This is the signature component system.
 
 ### Application Chrome
 
-- **Menu:** Lowercase wordmark, Settings, and About only. No search field or
-  workspace selector until the product has a real need for them.
-- **Activity rail:** Live and Data only, 60px wide on desktop. Active state uses
-  blue ink, a paper surface, and a 2px left edge.
+- **Activity rail:** 60px wide on desktop and the only global navigation
+  surface. Live and Data stay at the top; Settings stays at the bottom. Active
+  activities use blue ink, a paper surface, and a 2px left edge. There is no
+  separate top menu.
 - **Status bar:** 20px, 10px type, hairline-separated facts. It owns global
   connection, environment, current activity, recording, holding, rate, and
   issue truth.
@@ -563,20 +761,31 @@ This is the signature component system.
 
 - **Robot switcher:** Compact grid of arms with one identity accent and one
   readiness dot per item.
-- **Selected arm toolbar:** Holds mode and consequential actions once. It does
-  not repeat the same robot name in consecutive headings.
+- **Control ownership:** The Control section exclusively owns Hold, Release,
+  and Teleop, including the inline Release confirmation. Hold enters Manual for
+  the selected arm before energizing it; Release leaves the active mode and
+  drops torque. There is no second selected-arm toolbar.
+- **Motor default:** Selecting an arm, or opening Live without an object
+  selection, selects that arm's first configured motor so its diagnostic detail
+  is immediately visible. An intentional camera selection is preserved.
+- **Camera ownership:** Camera panels own camera identity, pixels, and failure
+  state. Live does not repeat them as a camera list under joint controls.
 - **Setup:** Lives in Settings → Robots. Ports, camera assignment, calibration,
   import/export, and deletion do not compete with active motor control.
 
 ### Timeline
 
-- **Transport:** Record, Pause/Resume, Stop/Discard, replay transport, and the
-  16px clock occupy one stable toolbar. Record always implies Teleop.
+- **Transport:** Record, Pause/Resume, Stop/Discard, one icon-only Play/Pause,
+  **Sync robot**, and the 16px clock occupy one stable toolbar. Record always
+  implies Teleop. Play/Pause affects visualizations only until robot sync is
+  explicitly enabled.
 - **Playhead:** One pointer and keyboard-operable time cursor drives every
-  historical surface. Preview scrubbing updates camera, scene, and signals;
-  physical motion is a separate armed option and commits only on release.
-- **Lanes:** Camera spans and joint signals share the same episode scale.
-  Recording gaps are explicit instead of compressed away.
+  historical surface. Scrubbing updates camera, scene, and signals; with robot
+  sync enabled, physical motion commits only on release.
+- **Lanes:** Joint signals share the episode scale and make recording gaps
+  explicit instead of compressing them away. Camera pixels and media state
+  belong exclusively to Camera panels; the Timeline does not embed a camera
+  row or thumbnail.
 - **Episode items:** Equal 72×36px items favor scanability. Duration and state
   are text/tint, never proportional card geometry.
 - **Empty state:** “Record in Live or select an episode in Data.” It names the
@@ -593,9 +802,15 @@ by joint name, and crosshair/focus changes emphasis without changing layout.
 
 - **Frame:** Dark 16:9 mat inside light panel chrome, with contained pixels and
   honest letterboxing.
+- **Default composition:** Each available camera starts in its own row of the
+  right-hand camera column so no feed is hidden behind a tab. Docking or tabbing
+  remains an explicit user layout choice.
 - **Identity:** Tab title states Camera/Recorded plus role. Episode camera tabs
   derive from recorded streams; Live camera tabs derive from current robot
   assignments.
+- **Live frame:** The image begins directly beneath its identifying panel tab.
+  Do not repeat “role · Live” in an internal metadata row. Unavailable streams
+  keep their actionable error inside the frame.
 - **Lifecycle:** One stable MJPEG image element per assigned Live camera. Moving
   or tabbing a panel must not fabricate a second connection. Recorded video
   seeks to the playhead and exposes approximate synchronization as caution.
@@ -607,8 +822,8 @@ by joint name, and crosshair/focus changes emphasis without changing layout.
 - **Hierarchy:** Dataset owns Episodes. Dataset-level actions include Import and
   Export; episode-level actions are Select, Replay, and Delete.
 - **Query:** A guarded read-only SQL editor with presets and a row limit in the
-  Data workbench. Results render as a primary panel and may synchronize the
-  selected episode/playhead.
+  Data workbench. Results render as the active sibling tab beside the preserved
+  Scene and may synchronize the selected episode/playhead.
 - **Destination state:** SpiralDB becomes active when its required configuration
   is complete; do not add a redundant enable switch. Hugging Face remains an
   explicit optional mirror.
@@ -637,12 +852,14 @@ The stage uses the pale bench clear colour, low-contrast lighting, a sparse
 scale grid, subdued axes, and arm identity accents. Camera geometry may be
 selectable in the scene, but camera pixels remain in camera panels. Corner
 controls are compact and use the same paper/graphite vocabulary as the shell.
+Recorded playback samples the episode at a 30Hz visual cadence, and every
+accepted recorded-source update is an explicit canvas redraw dependency.
 
 ### Notices
 
 Transient notices float over the shell, carry their own 4–14 second expiry, and
 keep Dismiss. Failures use alert semantics and a longer reading floor. A notice
-never inserts a persistent banner between menu and workspace.
+never inserts a persistent banner above the workspace.
 
 ### Named Rules
 
@@ -679,6 +896,12 @@ deadline belongs to the notice value, not the component that draws it.
 - **Do** move robot and destination configuration into Settings.
 - **Do** make Live/Data layout state, episode selection, and camera ownership
   independent so switching activities cannot move content between them.
+- **Do** route workbench, Timeline, panel-focus, and backend events through one
+  activity controller that derives the complete visible projection.
+- **Do** represent Live, Recorded Loading, Recorded Ready, Recorded Unavailable,
+  and Recorded Failed as explicit visualization-source states.
+- **Do** keep one Timeline action vocabulary in every activity and include the
+  recording or episode identity in every time or transport action.
 - **Do** keep `tailwind_input` and `tailwind_output` in `Dioxus.toml`; DX owns
   stylesheet compilation for serve, build, and bundle.
 
@@ -702,6 +925,12 @@ deadline belongs to the notice value, not the component that draws it.
   Episodes, or restart replay from zero after Pause.
 - **Don't** let scrub move only the playhead; camera, 3D, signals, and video must
   show the corresponding time.
+- **Don't** let a workbench mutate visualization panels independently; derive
+  primary content, cameras, signals, and Timeline from one activity projection.
+- **Don't** treat missing recorded data as permission to show live telemetry or
+  a live camera inside a recorded episode context.
+- **Don't** infer an action target from ambient selection or by parsing a panel
+  ID; carry the episode, stream, robot, or query identity in the action.
 - **Don't** animate split geometry while the pointer is dragging or keep panel
   entry animation under reduced motion.
 - **Don't** hide a consequential action, blocker, active recording, or torque

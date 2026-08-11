@@ -7,14 +7,11 @@ use std::rc::Rc;
 use dioxus::prelude::*;
 use gloo_net::http::Method;
 use rerobot_core::api::{
-    GoalRequest, JointTelemetry, ModeSelection, MotorCondition, MotorLimits, RobotSummary,
-    RobotTelemetry,
+    GoalRequest, JointTelemetry, MotorCondition, MotorLimits, RobotSummary, RobotTelemetry,
 };
 use rerobot_core::arm::{self, JointAngles};
 
 use crate::api;
-use crate::cameras::RobotCameras;
-use crate::setup::set_torque;
 use crate::state::{Selection, studio};
 use crate::viewport::tool_position;
 
@@ -36,7 +33,10 @@ impl PendingGoals {
 }
 
 #[component]
-pub fn JointPanel() -> Element {
+pub fn JointPanel(
+    on_select: EventHandler<Option<Selection>>,
+    on_point: EventHandler<Option<Selection>>,
+) -> Element {
     let studio = studio();
     let Some(robot) = studio.focused() else {
         return rsx! {
@@ -46,141 +46,10 @@ pub fn JointPanel() -> Element {
 
     let telemetry = studio.robot_telemetry(&robot.id);
     let torque = telemetry.as_ref().is_some_and(|robot| robot.torque);
-    // The arm has to stay free to move by hand during a sweep, so the server
-    // refuses to energize it; do not offer a button that cannot work.
-    let calibrating = telemetry
-        .as_ref()
-        .is_some_and(|robot| robot.calibration.is_some());
     let drivable = studio.is_manual_target(&robot.id) && torque && robot.calibrated;
-    let role = studio.teleoperation_role(&robot.id);
-    // Releasing is guarded the way deleting a take already is, because it is the
-    // one control on this panel with a physical consequence.
-    let mut confirming_release = use_signal(|| false);
-    let id = robot.id.clone();
-    let hold_id = robot.id.clone();
-    let manual_id = robot.id.clone();
-    let manual = studio.is_manual_target(&robot.id);
-    // Taking manual control of one arm cannot happen behind a running pair or a
-    // replay, and an uncalibrated arm cannot be commanded at all — the server
-    // refuses normalized goals for one, so offering the toggle would only
-    // produce a refusal.
-    let manual_blocked = if manual {
-        None
-    } else if telemetry.is_none() {
-        Some("Connect this arm first")
-    } else if !robot.calibrated {
-        Some("Calibrate this arm before driving its joints")
-    } else if role.is_some() {
-        Some("Stop teleoperation first")
-    } else if matches!(studio.mode(), ModeSelection::Replay { .. }) {
-        Some("Stop the replay first")
-    } else if !studio.controls_available() {
-        Some("Controls are paused while telemetry reconnects")
-    } else {
-        None
-    };
 
     rsx! {
         div { class: "flex flex-col",
-            // The arm switcher immediately above already owns identity and
-            // connection state. This toolbar contains only state that changes
-            // how the selected arm can move.
-            header {
-                class: "selected-arm-toolbar",
-                "aria-label": "Controls for {robot.id}",
-                if telemetry.is_none() {
-                    span { class: "chip", "offline" }
-                }
-                // What this arm is doing in the running pair, not what it is
-                // called: on a bench whose arms are named `leader` and
-                // `follower`, a chip repeating the name beside the name is a
-                // word printed twice.
-                if let Some(role) = role {
-                    span {
-                        class: "chip",
-                        title: if role == "leader" { "Hand-guided; the follower copies it" } else { "Energized and copying the leader" },
-                        {if role == "leader" { "leading" } else { "following" }}
-                    }
-                }
-                // Torque is the one state where a wrong assumption moves an
-                // arm, so it is the one state on this panel worth colouring.
-                if torque {
-                    span { class: "chip chip-danger", "torque on" }
-                }
-                // Releasing drops a powered arm under its own weight, so the
-                // consequence is printed on the page at the moment it applies
-                // rather than left in a tooltip the operator — who has a hand on
-                // the arm and none on the mouse — will never hover.
-                if torque && confirming_release() {
-                    span { class: "release-confirm",
-                        span { class: "release-warning",
-                            {match role {
-                                Some("follower") => "Support the arm. This also stops it following the leader.",
-                                _ => "Support the arm — it goes limp when released.",
-                            }}
-                        }
-                        button {
-                            r#type: "button",
-                            class: "btn btn-danger",
-                            onclick: move |_| {
-                                confirming_release.set(false);
-                                set_torque(studio, &id, false);
-                            },
-                            "Release"
-                        }
-                        button {
-                            r#type: "button",
-                            class: "btn",
-                            onclick: move |_| confirming_release.set(false),
-                            "Keep holding"
-                        }
-                    }
-                } else {
-                    // Which arm the sliders drive is a property of this panel,
-                    // not of the header: it names one arm, and this is the one
-                    // arm's panel. It used to be a picker in the mode bar, so
-                    // moving a joint meant setting a target in one place and
-                    // energizing it in another.
-                    button {
-                        r#type: "button",
-                        class: "btn btn-outline selected-arm-primary-action",
-                        "aria-pressed": manual,
-                        disabled: manual_blocked.is_some(),
-                        title: match (manual_blocked, manual) {
-                            (Some(reason), _) => reason,
-                            (None, true) => "Stop driving this arm from the sliders",
-                            (None, false) => "Drive this arm's joints from the sliders below",
-                        },
-                        onclick: move |_| crate::modes::set_mode(
-                            studio,
-                            if manual { ModeSelection::Idle } else { ModeSelection::Manual { robot: manual_id.clone() } },
-                        ),
-                        "Manual"
-                    }
-                    button {
-                        r#type: "button",
-                        class: if torque { "btn btn-danger" } else { "btn btn-outline" },
-                        disabled: telemetry.is_none() || (calibrating && !torque),
-                        title: match (calibrating && !torque, torque) {
-                            (true, _) => "Finish or cancel calibration first",
-                            (_, true) => "Let this arm go limp",
-                            _ => "Energize the motors so the arm holds its position",
-                        },
-                        onclick: move |_| {
-                            if torque {
-                                confirming_release.set(true);
-                            } else {
-                                // A stale confirmation from a previous hold
-                                // must not greet the next one.
-                                confirming_release.set(false);
-                                set_torque(studio, &hold_id, true);
-                            }
-                        },
-                        {if torque { "Release" } else { "Hold" }}
-                    }
-                }
-            }
-
             if let Some(error) = telemetry.as_ref().and_then(|robot| robot.error.clone()) {
                 p { class: "mx-2 mt-1 rounded bg-danger-soft px-1.5 py-1 text-[11px] text-danger",
                     "{error}"
@@ -201,14 +70,14 @@ pub fn JointPanel() -> Element {
                 robot: robot.clone(),
                 telemetry: telemetry.clone(),
                 drivable,
+                on_select,
+                on_point,
             }
 
             MotorDetail {
                 robot: robot.clone(),
                 telemetry: telemetry.clone(),
             }
-
-            RobotCameras { robot: robot.clone() }
 
         }
     }
@@ -540,8 +409,10 @@ fn JointControls(
     robot: RobotSummary,
     telemetry: Option<RobotTelemetry>,
     drivable: bool,
+    on_select: EventHandler<Option<Selection>>,
+    on_point: EventHandler<Option<Selection>>,
 ) -> Element {
-    let mut studio = studio();
+    let studio = studio();
     // While a slider is being dragged the arm is still catching up, so the
     // commanded value is shown until the measurement agrees with it. That echo
     // is only meaningful for as long as this arm is actually being driven, so
@@ -624,10 +495,8 @@ fn JointControls(
             class: if drivable { "joint-list joint-list-drivable" } else { "joint-list" },
             // The one blocker this panel cannot answer for itself: an
             // uncalibrated arm refuses every command, and the control that fixes
-            // it lives in the robot explorer. "Press Manual", "press Hold" and
-            // "stop the teleoperation you just started" were sentences pointing
-            // at buttons forty pixels above them — and each one appeared and
-            // vanished under the joint list as the mode changed.
+            // it lives in the robot explorer. Mode and torque transitions belong
+            // to the workbench Control section rather than this detail panel.
             if !robot.calibrated {
                 p { class: "joint-blocked joint-list-wide",
                     "Calibrate this arm in the robot explorer to command its joints."
@@ -654,17 +523,19 @@ fn JointControls(
                     },
                     on_select: {
                         let (robot_id, joint_name) = (id.clone(), joint.name.clone());
-                        move |_| studio.selected.set(Some(Selection::Joint {
+                        move |_| on_select.call(Some(Selection::Joint {
                             robot: robot_id.clone(),
                             joint: joint_name.clone(),
                         }))
                     },
                     on_point: {
                         let (robot_id, joint_name) = (id.clone(), joint.name.clone());
-                        move |pointing: bool| studio.pointed.set(pointing.then(|| Selection::Joint {
-                            robot: robot_id.clone(),
-                            joint: joint_name.clone(),
-                        }))
+                        move |pointing: bool| {
+                            on_point.call(pointing.then(|| Selection::Joint {
+                                robot: robot_id.clone(),
+                                joint: joint_name.clone(),
+                            }))
+                        }
                     }
                 }
             }

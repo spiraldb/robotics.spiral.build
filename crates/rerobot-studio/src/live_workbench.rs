@@ -2,40 +2,55 @@
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use rerobot_core::api::{ModeSelection, SetRecordingPausedRequest, default_teleoperation_pair};
+use rerobot_core::api::{ModeSelection, TorqueRequest, default_teleoperation_pair};
 
 use crate::api;
 use crate::control::JointPanel;
 use crate::modes::set_mode;
-use crate::setup::set_torque;
 use crate::state::{Selection, studio};
+
+/// Semantic changes requested by the Live workbench. The shell applies these
+/// to the activity projection; this component does not reach into selection
+/// state behind the visualization's back.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum LiveIntent {
+    Select(Option<Selection>),
+    Point(Option<Selection>),
+}
 
 /// The complete left-hand workbench for operating a connected pair.
 #[component]
-pub fn LiveWorkbench() -> Element {
+pub fn LiveWorkbench(on_intent: EventHandler<LiveIntent>) -> Element {
     let studio = studio();
     let robots = studio.snapshot.read().robots.clone();
-    let recording = studio.recording();
 
     rsx! {
         div { class: "studio-workbench-scroll live-workbench",
-            RecordingSection { recording }
             ControlSection {}
 
             section { class: "workbench-section live-properties",
                 header { class: "workbench-section-heading",
-                    h3 { "Motors & cameras" }
+                    h3 { "Motors" }
                 }
-                RobotRoster { robots }
-                JointPanel {}
+                RobotRoster {
+                    robots,
+                    on_select: move |selection| on_intent.call(LiveIntent::Select(selection)),
+                }
+                JointPanel {
+                    on_select: move |selection| on_intent.call(LiveIntent::Select(selection)),
+                    on_point: move |selection| on_intent.call(LiveIntent::Point(selection)),
+                }
             }
         }
     }
 }
 
 #[component]
-fn RobotRoster(robots: Vec<rerobot_core::api::RobotSummary>) -> Element {
-    let mut studio = studio();
+fn RobotRoster(
+    robots: Vec<rerobot_core::api::RobotSummary>,
+    on_select: EventHandler<Option<Selection>>,
+) -> Element {
+    let studio = studio();
     let focused = studio.focused().map(|robot| robot.id);
     let empty = robots.is_empty();
 
@@ -73,7 +88,7 @@ fn RobotRoster(robots: Vec<rerobot_core::api::RobotSummary>) -> Element {
                             "aria-selected": selected,
                             "aria-label": "{accessible_label}",
                             title: "{state}",
-                            onclick: move |_| studio.selected.set(Some(Selection::Robot(id.clone()))),
+                            onclick: move |_| on_select.call(Some(Selection::Robot(id.clone()))),
                             span {
                                 class: "live-robot-accent",
                                 style: "background: {accent}",
@@ -94,94 +109,6 @@ fn RobotRoster(robots: Vec<rerobot_core::api::RobotSummary>) -> Element {
                 p { class: "workbench-empty", "Add an arm in Settings to begin." }
             }
         }
-    }
-}
-
-#[component]
-fn RecordingSection(recording: Option<rerobot_core::api::RecordingProgress>) -> Element {
-    let studio = studio();
-    let can_record = studio.controls_available()
-        && default_teleoperation_pair(&studio.snapshot.read().robots).is_some()
-        && !matches!(studio.mode(), ModeSelection::Replay { .. });
-    let paused = recording.as_ref().is_some_and(|progress| progress.paused);
-
-    rsx! {
-        section { class: "workbench-section recording-section",
-            header { class: "workbench-section-heading",
-                h3 { "Recording" }
-                if paused {
-                    span { class: "capture-state", "Paused · same episode" }
-                } else if recording.is_some() {
-                    span { class: "capture-state capture-state-live",
-                        span { class: "capture-dot" }
-                        "Teleop recording"
-                    }
-                }
-            }
-
-            if let Some(progress) = recording {
-                div { class: "capture-readout",
-                    div {
-                        strong { "{progress.episode}" }
-                        span {
-                            if progress.paused_seconds > 0.0 {
-                                "{progress.frames} samples · {format_elapsed(progress.paused_seconds)} omitted"
-                            } else {
-                                "{progress.frames} samples"
-                            }
-                        }
-                    }
-                    time {
-                        role: "timer",
-                        title: "Active captured time; deliberate pauses are excluded",
-                        "{format_elapsed(progress.elapsed_seconds)} active"
-                    }
-                }
-                div { class: "capture-actions capture-actions-active",
-                    button {
-                        r#type: "button", class: "studio-button",
-                        disabled: progress.paused && !studio.controls_available(),
-                        onclick: move |_| {
-                            set_recording_paused(studio, !progress.paused);
-                        },
-                        if progress.paused { "Resume" } else { "Pause" }
-                    }
-                    button {
-                        r#type: "button", class: "studio-button",
-                        onclick: move |_| crate::timeline::stop_recording(studio, true),
-                        "Stop"
-                    }
-                    button {
-                        r#type: "button", class: "studio-button studio-button-danger-quiet",
-                        onclick: move |_| crate::timeline::stop_recording(studio, false),
-                        "Delete"
-                    }
-                }
-            } else {
-                button {
-                    r#type: "button",
-                    class: "record-start-button",
-                    disabled: !can_record,
-                    title: if can_record { "Start leader-to-follower teleoperation and record" } else { "Connect and calibrate a compatible leader and follower first" },
-                    onclick: move |_| crate::timeline::start_recording(studio),
-                    span { class: "capture-dot" }
-                    "Record episode"
-                }
-            }
-        }
-    }
-}
-
-fn set_recording_paused(studio: crate::state::Studio, paused: bool) {
-    let request = SetRecordingPausedRequest { paused };
-    let future =
-        async move { api::send(Method::POST, "/api/episodes/record/pause", Some(&request)).await };
-    if paused {
-        // Pausing moves the system toward less capture, so it remains usable
-        // when browser telemetry is stale but the HTTP command path is alive.
-        studio.run_safety("Recording paused. The episode remains open.", future);
-    } else {
-        studio.run("Recording resumed in the same episode.", future);
     }
 }
 
@@ -210,7 +137,7 @@ fn ControlSection() -> Element {
                     disabled: focused.is_none() || telemetry.is_none(),
                     onclick: {
                         let id = focused.as_ref().map(|robot| robot.id.clone());
-                        move |_| if let Some(id) = id.as_deref() { set_torque(studio, id, true); }
+                        move |_| if let Some(id) = id.as_deref() { hold_robot(studio, id); }
                     },
                     "Hold"
                 }
@@ -242,7 +169,7 @@ fn ControlSection() -> Element {
                             let id = focused.as_ref().map(|robot| robot.id.clone());
                             move |_| {
                                 confirm_release.set(false);
-                                if let Some(id) = id.as_deref() { set_torque(studio, id, false); }
+                                if let Some(id) = id.as_deref() { release_robot(studio, id); }
                             }
                         },
                         "Release"
@@ -254,6 +181,41 @@ fn ControlSection() -> Element {
     }
 }
 
+/// Hold is the operator-facing form of Manual: select the focused arm as the
+/// command target, then energize it. Keeping the requests in one ordered task
+/// prevents the removed arm-local Manual control from remaining a hidden
+/// prerequisite for writable sliders.
+fn hold_robot(studio: crate::state::Studio, id: &str) {
+    let id = id.to_owned();
+    studio.run("", async move {
+        let mode = ModeSelection::Manual { robot: id.clone() };
+        api::send(Method::POST, "/api/mode", Some(&mode)).await?;
+        api::send(
+            Method::POST,
+            &format!("/api/robots/{id}/torque"),
+            Some(&TorqueRequest { enabled: true }),
+        )
+        .await
+    });
+}
+
+/// Release always attempts the physical release even if leaving the current
+/// mode fails. Torque-off is the safety consequence; an Idle transition is the
+/// semantic cleanup and may report its own failure afterward.
+fn release_robot(studio: crate::state::Studio, id: &str) {
+    let id = id.to_owned();
+    studio.run_safety("Motors released.", async move {
+        let idle = api::send(Method::POST, "/api/mode", Some(&ModeSelection::Idle)).await;
+        api::send(
+            Method::POST,
+            &format!("/api/robots/{id}/torque"),
+            Some(&TorqueRequest { enabled: false }),
+        )
+        .await?;
+        idle
+    });
+}
+
 fn role_label(kind: &str) -> &'static str {
     let kind = kind.to_ascii_lowercase();
     if kind.contains("follower") {
@@ -263,10 +225,4 @@ fn role_label(kind: &str) -> &'static str {
     } else {
         "arm"
     }
-}
-
-fn format_elapsed(seconds: f64) -> String {
-    let minutes = (seconds / 60.0).floor() as u64;
-    let remainder = seconds - minutes as f64 * 60.0;
-    format!("{minutes:02}:{remainder:04.1}")
 }

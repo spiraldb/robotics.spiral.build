@@ -215,6 +215,7 @@ impl LayoutNode {
 pub struct PanelPlacement {
     pub panel: PanelId,
     pub home: TileId,
+    pub zone: DockZone,
 }
 
 impl PanelPlacement {
@@ -222,7 +223,15 @@ impl PanelPlacement {
         Self {
             panel: panel.into(),
             home: home.into(),
+            zone: DockZone::Center,
         }
+    }
+
+    /// Choose how a newly registered panel joins an occupied home tile.
+    /// Existing panels keep their persisted position regardless of this hint.
+    pub fn with_zone(mut self, zone: DockZone) -> Self {
+        self.zone = zone;
+        self
     }
 }
 
@@ -292,7 +301,23 @@ impl PanelLayout {
             } else {
                 first_tile_id(&self.root).clone()
             };
-            if attach_to_tile(&mut self.root, &target, placement.panel.clone()) {
+            let home_is_empty = self
+                .tile(&target)
+                .is_some_and(|tile| tile.panels.is_empty());
+            let attached = if placement.zone == DockZone::Center || home_is_empty {
+                attach_to_tile(&mut self.root, &target, placement.panel.clone())
+            } else {
+                let tile_id = self.allocate_tile_id();
+                let split_id = self.allocate_split_id();
+                insert_split(
+                    &mut self.root,
+                    &target,
+                    split_id,
+                    Tile::new(tile_id, [placement.panel.clone()]),
+                    placement.zone,
+                )
+            };
+            if attached {
                 seen.insert(placement.panel.clone());
             }
         }
@@ -573,7 +598,7 @@ fn find_panel_tile<'a>(node: &'a LayoutNode, panel: &PanelId) -> Option<&'a Tile
     }
 }
 
-fn find_split<'a>(node: &'a LayoutNode, id: &SplitId) -> Option<(SplitAxis, f64)> {
+fn find_split(node: &LayoutNode, id: &SplitId) -> Option<(SplitAxis, f64)> {
     match node {
         LayoutNode::Tile(_) => None,
         LayoutNode::Split {
@@ -790,6 +815,28 @@ mod tests {
             Some(TileId::from("right"))
         );
         assert!(layout.tile_for_panel(&PanelId::from("signals")).is_none());
+    }
+
+    #[test]
+    fn a_split_home_hint_keeps_late_camera_feeds_visible() {
+        let mut layout = PanelLayout::single("cameras", "camera-empty");
+        layout.reconcile(&[
+            PanelPlacement::new("camera-gripper", "cameras").with_zone(DockZone::Bottom),
+            PanelPlacement::new("camera-top", "cameras").with_zone(DockZone::Bottom),
+        ]);
+
+        let gripper = layout.tile_for_panel(&PanelId::from("camera-gripper"));
+        let top = layout.tile_for_panel(&PanelId::from("camera-top"));
+        assert_eq!(gripper, Some(TileId::from("cameras")));
+        assert_ne!(gripper, top);
+        assert!(matches!(
+            layout.root,
+            LayoutNode::Split {
+                axis: SplitAxis::Vertical,
+                ..
+            }
+        ));
+        assert!(layout.valid());
     }
 
     #[test]

@@ -11,7 +11,7 @@ use dioxus::prelude::*;
 use gloo_net::http::Method;
 use rerobot_core::api::{
     CameraBinding, CameraStatus, CreateRobotRequest, IdentifyPortRequest, IdentifyPortResponse,
-    PortSettings, RobotSummary, SerialPortSummary, TorqueRequest, UpdateRobotRequest,
+    PortSettings, RobotSummary, SerialPortSummary, UpdateRobotRequest,
 };
 
 use crate::api;
@@ -817,18 +817,4 @@ fn CameraOption(camera: CameraStatus, selected: bool) -> Element {
             "{camera.name} — {camera.width}×{camera.height} @ {camera.fps} fps"
         }
     }
-}
-
-/// Turn a torque toggle into a request, shared by the setup and joint panels.
-pub fn set_torque(studio: Studio, id: &str, enabled: bool) {
-    let id = id.to_owned();
-    let request = TorqueRequest { enabled };
-    studio.run("", async move {
-        api::send(
-            Method::POST,
-            &format!("/api/robots/{id}/torque"),
-            Some(&request),
-        )
-        .await
-    });
 }

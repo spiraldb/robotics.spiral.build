@@ -7,7 +7,7 @@ publish = false
 
 [features]
 default = []
-web = ["dioxus/web", "dep:charming", "rerobot-panels/web"]
+web = ["dioxus/web", "rerobot-panels/web"]
 server = [
     "dioxus/cli-config",
     "dioxus/server",
@@ -58,14 +58,12 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 js-sys = "0.3"
 wasm-bindgen = "=0.2.126"
 web-sys = { version = "0.3", features = [
-    "CssStyleDeclaration",
     "Document",
     "DomRect",
     "Element",
     "EventTarget",
     "HtmlCanvasElement",
     "PointerEvent",
-    "Storage",
     "WebGl2RenderingContext",
     "WebGlBuffer",
     "WebGlProgram",
@@ -84,7 +82,6 @@ arrow-array = { version = "58.4.0", optional = true }
 arrow-schema = { version = "58.4.0", optional = true }
 parquet = { version = "58.4.0", default-features = false, features = ["arrow", "snap"], optional = true }
 zip = { version = "2.4.2", default-features = false, features = ["deflate"], optional = true }
-charming = { version = "0.6.0", default-features = false, features = ["wasm"], optional = true }
 arrow-json = { version = "58.4.0", optional = true }
 adbc_core = { version = "0.24.0", optional = true }
 adbc_driver_manager = { version = "0.24.0", optional = true }

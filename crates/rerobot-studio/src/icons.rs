@@ -39,34 +39,6 @@ pub fn Trash() -> Element {
     }
 }
 
-/// A rail across the foot of the workspace.
-#[component]
-pub fn Rail() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            rect { x: "1.5", y: "2", width: "13", height: "12", rx: "2" }
-            path { d: "M1.5 10.5h13" }
-        }
-    }
-}
-
-/// A camera that cannot be opened: the lens, struck through.
-///
-/// Drawn rather than set as a `×` glyph. The character version was the one mark
-/// in the studio that was type instead of an icon, which made it the one mark
-/// that answered to the type scale — and it sat at 16px, a size this surface
-/// otherwise reserves for the elapsed timer.
-#[component]
-pub fn CameraOff() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "M2.5 4.5h6l1-1.5h2l1 1.5h1v7h-2M9.5 11.5h-8v-7" }
-            circle { cx: "6.5", cy: "8", r: "2" }
-            path { d: "M2 2l12 12" }
-        }
-    }
-}
-
 /// The robot explorer: a compact arm silhouette rather than a generic sidebar.
 #[component]
 pub fn RobotPanelIcon() -> Element {
@@ -80,47 +52,24 @@ pub fn RobotPanelIcon() -> Element {
     }
 }
 
-/// The central spatial scene.
+/// Global configuration at the foot of the activity rail.
 #[component]
-pub fn ScenePanel() -> Element {
+pub fn SettingsIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "m8 2 5 3v6l-5 3-5-3V5zM3 5l5 3 5-3M8 8v6" }
+            circle { cx: "8", cy: "8", r: "2.25" }
+            path { d: "M8 1.75v1.5M8 12.75v1.5M1.75 8h1.5M12.75 8h1.5M3.58 3.58l1.06 1.06M11.36 11.36l1.06 1.06M12.42 3.58l-1.06 1.06M4.64 11.36l-1.06 1.06" }
         }
     }
 }
 
-/// Measurement over time: an axis with a trace running across it.
+/// Recorded dataset activity.
 #[component]
-pub fn SignalsPanelIcon() -> Element {
+pub fn DataIcon() -> Element {
     rsx! {
         svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "M2.5 2.5v11h11" }
-            path { d: "M4.5 10.5 7 6.5l2 3 3-6.5" }
-        }
-    }
-}
-
-/// Contextual properties and joint controls.
-#[component]
-pub fn PropertiesPanel() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "M3 4h10M3 8h10M3 12h10" }
-            circle { cx: "6", cy: "4", r: "1.25", class: "ui-icon-knob" }
-            circle { cx: "10", cy: "8", r: "1.25", class: "ui-icon-knob" }
-            circle { cx: "7", cy: "12", r: "1.25", class: "ui-icon-knob" }
-        }
-    }
-}
-
-/// Restore the canonical pane widths and visibility.
-#[component]
-pub fn LayoutReset() -> Element {
-    rsx! {
-        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-            rect { x: "2", y: "2.5", width: "12", height: "11", rx: "1.5" }
-            path { d: "M6 2.5v11M10.5 8.5a3 3 0 1 1-1-2.2M10.5 5v2.5H8" }
+            ellipse { cx: "8", cy: "3.5", rx: "5", ry: "2" }
+            path { d: "M3 3.5v4c0 1.1 2.2 2 5 2s5-.9 5-2v-4M3 7.5v4c0 1.1 2.2 2 5 2s5-.9 5-2v-4" }
         }
     }
 }

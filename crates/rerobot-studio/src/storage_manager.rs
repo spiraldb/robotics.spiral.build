@@ -1283,8 +1283,13 @@ mod tests {
             timeline_offset_seconds: Some(0.0),
         };
 
-        publish_spiral_blocking(&mut adbc.connection, &settings, &episode, &[video.clone()])
-            .unwrap();
+        publish_spiral_blocking(
+            &mut adbc.connection,
+            &settings,
+            &episode,
+            std::slice::from_ref(&video),
+        )
+        .unwrap();
         // A completed retry is idempotent even though Spiral's disposable
         // memory catalog intentionally does not support SQL DELETE.
         publish_spiral_blocking(&mut adbc.connection, &settings, &episode, &[video]).unwrap();

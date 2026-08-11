@@ -2,116 +2,40 @@
 //!
 //! This component owns presentation and interaction intent only. Recording,
 //! playback, seeking, and motor motion remain server-owned operations. In
-//! particular, a scrub can request physical motion only when the caller passes
-//! an allowed [`TimelineMotionGate`] and the operator has explicitly enabled
-//! “Move arm on release”.
+//! particular, playback and a committed scrub can request physical motion only
+//! when the caller passes an allowed robot-sync [`TimelineGate`] and the
+//! operator has explicitly enabled “Sync robot”.
 
 use dioxus::prelude::*;
-use rerobot_core::api::{EpisodeSummary, RecordingProgress};
 use rerobot_core::arm::SO101_JOINTS;
 use serde::Deserialize;
 
-use crate::signals::{SignalStore, signal_color};
+use crate::activity::{Activity, TimelineSubject, TimelineTarget};
+use crate::recording_signals::{SignalStore, signal_color};
 
 const TRACE_WIDTH: f64 = 1_000.0;
 const TRACE_HEIGHT: f64 = 32.0;
 const TRACE_POINT_BUDGET: usize = 256;
 
-/// The episode the timeline is presenting.
+/// Whether the Timeline clock is stopped, previewing recorded data, or being
+/// driven by the server-owned consequence of robot synchronization.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum TimelinePlayback {
+    #[default]
+    Stopped,
+    PreviewPlaying,
+    RobotSyncPlaying,
+    RobotSyncPaused,
+}
+
+/// Controlled interaction state shared by every Timeline subject.
 #[derive(Clone, Debug, PartialEq)]
-pub enum TimelineSource {
-    /// A take that is still growing at its live edge.
-    Recording(RecordingProgress),
-    /// A completed or recoverable episode selected for inspection.
-    Review(EpisodeSummary),
-}
-
-impl TimelineSource {
-    pub fn episode_id(&self) -> &str {
-        match self {
-            Self::Recording(progress) => &progress.episode,
-            Self::Review(episode) => &episode.id,
-        }
-    }
-
-    pub fn duration_seconds(&self) -> f64 {
-        match self {
-            Self::Recording(progress) => progress.elapsed_seconds,
-            Self::Review(episode) => episode.duration_seconds,
-        }
-        .max(0.0)
-    }
-
-    pub fn frames(&self) -> u64 {
-        match self {
-            Self::Recording(progress) => progress.frames,
-            Self::Review(episode) => episode.frames,
-        }
-    }
-
-    pub fn is_recording(&self) -> bool {
-        matches!(self, Self::Recording(_))
-    }
-
-    pub fn is_paused(&self) -> bool {
-        matches!(self, Self::Recording(progress) if progress.paused)
-    }
-
-    pub fn available(&self) -> bool {
-        match self {
-            Self::Recording(progress) => progress.error.is_none(),
-            Self::Review(episode) => episode.usable(),
-        }
-    }
-
-    pub fn problem(&self) -> Option<&str> {
-        match self {
-            Self::Recording(progress) => progress.error.as_deref(),
-            Self::Review(episode) => episode.problem.as_deref(),
-        }
-    }
-}
-
-/// Controlled interaction state shared by Live and Data timeline hosts.
-#[derive(Clone, Debug, PartialEq)]
-pub struct StudioTimelineState {
-    pub source: TimelineSource,
-    pub playhead_seconds: f64,
-    /// In Live this pauses or resumes the view; in Data it pauses or resumes
-    /// episode playback. It never starts or stops recording.
-    pub playing: bool,
-    pub follow_live: bool,
-    pub move_arm_on_release: bool,
-}
-
-/// One contiguous recorded portion of the camera lane.
-#[derive(Clone, Debug, PartialEq)]
-pub struct TimelineVideoSpan {
-    pub start_seconds: f64,
-    pub end_seconds: f64,
-    /// Optional local label for a clip or camera change.
-    pub label: Option<String>,
-}
-
-/// The recorded frame nearest the shared episode playhead.
-#[derive(Clone, Debug, PartialEq)]
-pub struct TimelineVideoPreview {
-    pub url: String,
-    pub video_seconds: f64,
-    pub episode_seconds: f64,
-    pub label: String,
-    pub approximate: bool,
-}
-
-/// Camera media aligned to the episode clock.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct TimelineVideoLane {
-    pub label: String,
-    pub spans: Vec<TimelineVideoSpan>,
-    pub preview: Option<TimelineVideoPreview>,
-    /// Printed when there are no spans, so an absent recording never looks
-    /// like a loading failure.
-    pub empty_reason: Option<String>,
+pub(crate) struct StudioTimelineState {
+    pub(crate) subject: TimelineSubject,
+    pub(crate) playhead_seconds: f64,
+    pub(crate) playback: TimelinePlayback,
+    pub(crate) follow_live: bool,
+    pub(crate) sync_robot: bool,
 }
 
 /// One measured point. `None` creates a visible gap rather than bridging a
@@ -218,16 +142,6 @@ pub async fn load_recorded_timeline_traces(
     crate::api::get(&path).await
 }
 
-/// Convenience for hosts that only need the renderable six-lane model.
-pub async fn load_recorded_signal_lanes(
-    episode: &str,
-    buckets: usize,
-) -> Result<[TimelineSignalLane; 6], String> {
-    load_recorded_timeline_traces(episode, buckets)
-        .await
-        .map(|response| response.signal_lanes())
-}
-
 /// Convert the studio's existing take signal store into the timeline's fixed
 /// six-lane view model. Each lane overlays the arms that reported that joint.
 pub fn signal_lanes_from_store(store: &SignalStore) -> [TimelineSignalLane; 6] {
@@ -266,23 +180,23 @@ pub fn signal_lanes_from_store(store: &SignalStore) -> [TimelineSignalLane; 6] {
     })
 }
 
-/// The backend's answer to whether a seek may command hardware.
+/// Whether a Timeline action is currently available, with a concrete recovery
+/// path when it is not.
 #[derive(Clone, Debug, PartialEq)]
-pub struct TimelineMotionGate {
-    pub allowed: bool,
-    /// A concrete recovery path when motion is blocked.
-    pub reason: Option<String>,
+pub(crate) struct TimelineGate {
+    pub(crate) allowed: bool,
+    pub(crate) reason: Option<String>,
 }
 
-impl TimelineMotionGate {
-    pub fn allowed() -> Self {
+impl TimelineGate {
+    pub(crate) fn allowed() -> Self {
         Self {
             allowed: true,
             reason: None,
         }
     }
 
-    pub fn blocked(reason: impl Into<String>) -> Self {
+    pub(crate) fn blocked(reason: impl Into<String>) -> Self {
         Self {
             allowed: false,
             reason: Some(reason.into()),
@@ -290,38 +204,112 @@ impl TimelineMotionGate {
     }
 }
 
-/// A committed seek. `move_arm` can only be true after both the backend gate
-/// and the operator-controlled toggle have passed.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct TimelineSeekRequest {
-    pub seconds: f64,
-    pub move_arm: bool,
-    /// False for a live scrub preview, true once the range control commits.
-    /// Hardware motion is only legal for committed requests.
-    pub committed: bool,
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TimelineCapabilities {
+    pub(crate) record: TimelineGate,
+    pub(crate) preview: TimelineGate,
+    pub(crate) seek: TimelineGate,
+    /// Whether full-episode playback may drive the compatible robot.
+    pub(crate) synced_playback: TimelineGate,
+    /// Whether this Timeline subject may be armed to drive the robot.
+    pub(crate) robot_sync: TimelineGate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TimelineCaptureAction {
+    Start,
+    Pause,
+    Resume,
+    Stop,
+    Discard,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TimelinePreviewAction {
+    Play,
+    Pause,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TimelineRobotSyncAction {
+    Start,
+    Pause,
+    Resume,
+}
+
+/// One seek against a named recording or episode. `move_robot` can only be true
+/// after the robot-sync gate and operator option have both passed.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TimelineSeekRequest {
+    pub(crate) target: TimelineTarget,
+    pub(crate) seconds: f64,
+    pub(crate) move_robot: bool,
+    pub(crate) committed: bool,
+}
+
+/// The Timeline's one user-operation vocabulary in every activity and state.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum TimelineAction {
+    Capture {
+        episode: Option<String>,
+        action: TimelineCaptureAction,
+    },
+    Preview {
+        episode: String,
+        action: TimelinePreviewAction,
+    },
+    RobotSyncTransport {
+        episode: String,
+        action: TimelineRobotSyncAction,
+    },
+    Seek(TimelineSeekRequest),
+    SetFollowLive(bool),
+    SetRobotSync {
+        target: TimelineTarget,
+        enabled: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TimelineTransportIntent {
+    Preview(TimelinePreviewAction),
+    RobotSync(TimelineRobotSyncAction),
+}
+
+fn transport_intent(playback: TimelinePlayback, sync_robot: bool) -> TimelineTransportIntent {
+    match playback {
+        TimelinePlayback::PreviewPlaying => {
+            TimelineTransportIntent::Preview(TimelinePreviewAction::Pause)
+        }
+        TimelinePlayback::RobotSyncPlaying => {
+            TimelineTransportIntent::RobotSync(TimelineRobotSyncAction::Pause)
+        }
+        TimelinePlayback::RobotSyncPaused => {
+            TimelineTransportIntent::RobotSync(TimelineRobotSyncAction::Resume)
+        }
+        TimelinePlayback::Stopped if sync_robot => {
+            TimelineTransportIntent::RobotSync(TimelineRobotSyncAction::Start)
+        }
+        TimelinePlayback::Stopped => TimelineTransportIntent::Preview(TimelinePreviewAction::Play),
+    }
 }
 
 /// The canonical timeline visualization shared by Live and Data.
 ///
-/// The component is controlled: the host owns playback, follow-live, and
-/// motion-toggle state, and should feed each callback's requested value back
-/// through [`StudioTimelineState`]. Scrubbing is held locally until the range
-/// control commits, so physical motion is never requested for every pointer
-/// move.
+/// The component is controlled: the activity controller owns the projection and
+/// feeds requested actions back through [`StudioTimelineState`]. Scrubbing is
+/// held locally until the range control commits, so physical motion is never
+/// requested for every pointer move.
 #[component]
-pub fn StudioTimeline(
+pub(crate) fn StudioTimeline(
     state: StudioTimelineState,
-    video: TimelineVideoLane,
     signal_lanes: [TimelineSignalLane; 6],
-    motion_gate: TimelineMotionGate,
-    on_play_pause: EventHandler<bool>,
-    on_seek: EventHandler<TimelineSeekRequest>,
-    on_follow_live: EventHandler<bool>,
-    on_move_arm_on_release: EventHandler<bool>,
+    capabilities: TimelineCapabilities,
+    on_action: EventHandler<TimelineAction>,
 ) -> Element {
-    let recording = state.source.is_recording();
-    let duration = state.source.duration_seconds();
-    let external_playhead = if recording && state.follow_live {
+    let recording = state.subject.recording().cloned();
+    let duration = state.subject.duration_seconds();
+    let external_playhead = if recording.is_some() && state.follow_live {
         duration
     } else {
         state.playhead_seconds.clamp(0.0, duration)
@@ -340,45 +328,188 @@ pub fn StudioTimeline(
     } else {
         external_playhead
     };
-    let episode_id = state.source.episode_id().to_owned();
-    let frames = state.source.frames();
-    let playing = state.playing;
+    let episode_id = state
+        .subject
+        .episode_id()
+        .unwrap_or("No episode")
+        .to_owned();
+    let frames = state.subject.frames();
+    let playback = state.playback;
+    let preview_playing = playback == TimelinePlayback::PreviewPlaying;
+    let robot_sync_playing = state.playback == TimelinePlayback::RobotSyncPlaying;
+    let transport_playing = preview_playing || robot_sync_playing;
     let follow_live = state.follow_live;
     let range_max = duration.max(0.001);
-    let video_label = if video.label.is_empty() {
-        "Video".to_owned()
-    } else {
-        video.label.clone()
-    };
     let playhead_percent = percent(shown_playhead, duration);
-    let move_arm = motion_gate.allowed && state.move_arm_on_release;
-    let subject_label = if recording { "Recording" } else { "Episode" };
-    let play_label = match (recording, state.playing) {
-        (true, true) => "Pause recording",
-        (true, false) => "Resume recording",
-        (false, true) => "Pause episode",
-        (false, false) => "Play episode",
+    let sync_robot = capabilities.robot_sync.allowed && state.sync_robot;
+    let subject_label = match &state.subject {
+        TimelineSubject::Empty { activity, .. } => activity.label(),
+        TimelineSubject::Recording(_) => "Recording",
+        TimelineSubject::Episode { .. } => "Episode",
     };
+    let empty_reason = match &state.subject {
+        TimelineSubject::Empty { reason, .. } => Some(reason.clone()),
+        _ => None,
+    };
+    let status = match &state.subject {
+        TimelineSubject::Empty { .. } => None,
+        _ => state.subject.problem().map(str::to_owned),
+    };
+    let target = state.subject.target();
     let ticks = timeline_ticks(duration);
-    let status = state.source.problem().map(str::to_owned);
-    let source_available = state.source.available();
+
+    let record_title = capabilities
+        .record
+        .reason
+        .clone()
+        .unwrap_or_else(|| "Start Teleop and record a new episode".to_owned());
+    let transport_allowed = match state.playback {
+        TimelinePlayback::RobotSyncPlaying | TimelinePlayback::RobotSyncPaused => true,
+        TimelinePlayback::Stopped if sync_robot => capabilities.synced_playback.allowed,
+        TimelinePlayback::Stopped | TimelinePlayback::PreviewPlaying => {
+            capabilities.preview.allowed
+        }
+    };
+    let transport_title = match state.playback {
+        TimelinePlayback::PreviewPlaying => "Pause preview playback".to_owned(),
+        TimelinePlayback::RobotSyncPlaying => "Pause synchronized robot playback".to_owned(),
+        TimelinePlayback::RobotSyncPaused => "Resume synchronized robot playback".to_owned(),
+        TimelinePlayback::Stopped if sync_robot => capabilities
+            .synced_playback
+            .reason
+            .clone()
+            .unwrap_or_else(|| {
+                "Play the episode with the compatible robot synchronized".to_owned()
+            }),
+        TimelinePlayback::Stopped => capabilities
+            .preview
+            .reason
+            .clone()
+            .unwrap_or_else(|| "Play the recorded episode in the visualizations".to_owned()),
+    };
+    let transport_label = match state.playback {
+        TimelinePlayback::PreviewPlaying | TimelinePlayback::RobotSyncPlaying => "Pause",
+        TimelinePlayback::RobotSyncPaused => "Resume",
+        TimelinePlayback::Stopped => "Play",
+    };
+    let sync_title = capabilities.robot_sync.reason.clone().unwrap_or_else(|| {
+        "Keep the compatible robot synchronized while playing or seeking".to_owned()
+    });
+    let seek_title =
+        capabilities.seek.reason.clone().unwrap_or_else(|| {
+            "Drag or use the keyboard to seek the shared episode clock".to_owned()
+        });
+    let input_target = target.clone();
+    let commit_target = target.clone();
+    let preview_episode = state.subject.episode_id().map(str::to_owned);
+    let sync_target = target.clone();
+    let scrub_sync_episode = preview_episode.clone();
+    let next_transport = transport_intent(playback, sync_robot);
+    let capture_episode = recording.as_ref().map(|progress| progress.episode.clone());
+    let capture_paused = recording.as_ref().is_some_and(|progress| progress.paused);
+    let timeline_label = match state.subject.activity() {
+        Activity::Live => "Live Timeline",
+        Activity::Data => "Data Timeline",
+    };
 
     rsx! {
         section {
             class: "studio-timeline flex min-h-0 flex-col border-t border-line bg-canvas text-ink",
-            "aria-label": "Timeline for {episode_id}",
+            "aria-label": "{timeline_label} for {episode_id}",
 
             header { class: "flex min-h-9 flex-wrap items-center gap-2 border-b border-line px-2 py-1",
+                if let Some(episode) = capture_episode.clone() {
+                    button {
+                        r#type: "button",
+                        class: "btn btn-outline",
+                        onclick: move |_| on_action.call(TimelineAction::Capture {
+                            episode: Some(episode.clone()),
+                            action: if capture_paused { TimelineCaptureAction::Resume } else { TimelineCaptureAction::Pause },
+                        }),
+                        if capture_paused { "Resume recording" } else { "Pause recording" }
+                    }
+                    button {
+                        r#type: "button",
+                        class: "btn btn-outline",
+                        onclick: {
+                            let episode = capture_episode.clone();
+                            move |_| on_action.call(TimelineAction::Capture {
+                                episode: episode.clone(),
+                                action: TimelineCaptureAction::Stop,
+                            })
+                        },
+                        "Stop"
+                    }
+                    button {
+                        r#type: "button",
+                        class: "btn btn-danger",
+                        onclick: {
+                            let episode = capture_episode.clone();
+                            move |_| on_action.call(TimelineAction::Capture {
+                                episode: episode.clone(),
+                                action: TimelineCaptureAction::Discard,
+                            })
+                        },
+                        "Discard"
+                    }
+                } else {
+                    button {
+                        r#type: "button",
+                        class: "btn btn-primary",
+                        disabled: !capabilities.record.allowed,
+                        title: "{record_title}",
+                        onclick: move |_| on_action.call(TimelineAction::Capture {
+                            episode: None,
+                            action: TimelineCaptureAction::Start,
+                        }),
+                        "Record"
+                    }
+                }
+
                 button {
                     r#type: "button",
-                    class: "btn btn-outline inline-flex min-w-24 items-center gap-1",
-                    disabled: !source_available,
-                    "aria-label": play_label,
-                    title: play_label,
-                    onclick: move |_| on_play_pause.call(!playing),
-                    PlaybackIcon { playing }
-                    span { "{play_label}" }
+                    class: "btn btn-outline h-6 w-6 px-0",
+                    disabled: !transport_allowed,
+                    title: "{transport_title}",
+                    "aria-label": "{transport_label}",
+                    onclick: {
+                        let episode = preview_episode.clone();
+                        move |_| if let Some(episode) = episode.clone() {
+                            match next_transport {
+                                TimelineTransportIntent::Preview(action) => on_action.call(TimelineAction::Preview {
+                                    episode,
+                                    action,
+                                }),
+                                TimelineTransportIntent::RobotSync(action) => on_action.call(TimelineAction::RobotSyncTransport {
+                                    episode,
+                                    action,
+                                }),
+                            }
+                        }
+                    },
+                    PlaybackIcon { playing: transport_playing }
                 }
+
+                label {
+                    class: if capabilities.robot_sync.allowed { "flex min-h-6 cursor-pointer items-center gap-1 text-[11px]" } else { "flex min-h-6 items-center gap-1 text-[11px] text-ink-faint" },
+                    title: "{sync_title}",
+                    input {
+                        r#type: "checkbox",
+                        checked: state.sync_robot,
+                        disabled: !capabilities.robot_sync.allowed,
+                        onchange: {
+                            let target = sync_target.clone();
+                            move |event| if let Some(target) = target.clone() {
+                                on_action.call(TimelineAction::SetRobotSync {
+                                    target,
+                                    enabled: event.checked(),
+                                });
+                            }
+                        },
+                    }
+                    span { "Sync robot" }
+                }
+
                 div { class: "flex min-w-0 items-baseline gap-1",
                     strong { class: "truncate text-[12px]", "{episode_id}" }
                     span { class: "text-[10px] text-ink-faint", "{subject_label}" }
@@ -388,18 +519,23 @@ pub fn StudioTimeline(
                     span { class: "text-[10px] text-ink-faint", "/ {format_clock(duration)}" }
                     span { class: "ml-1 text-[10px] text-ink-faint", "{frames} frames" }
                 }
-                if recording {
+                if recording.is_some() {
                     button {
                         r#type: "button",
                         class: if follow_live { "btn btn-outline text-accent" } else { "btn btn-outline" },
                         "aria-pressed": follow_live,
                         title: if follow_live { "Stop following the newest recorded sample" } else { "Return the playhead to the newest recorded sample" },
-                        onclick: move |_| on_follow_live.call(!follow_live),
+                        onclick: move |_| on_action.call(TimelineAction::SetFollowLive(!follow_live)),
                         if follow_live { "Following live" } else { "Follow live" }
                     }
                 }
             }
 
+            if let Some(reason) = empty_reason {
+                p { class: "m-0 border-b border-line bg-sunken px-2 py-1 text-[11px] text-ink-soft", role: "status",
+                    "{reason}"
+                }
+            }
             if let Some(problem) = status {
                 p { class: "m-0 border-b border-line bg-danger-soft px-2 py-1 text-[11px] text-danger", role: "alert",
                     "{problem}"
@@ -415,7 +551,7 @@ pub fn StudioTimeline(
                     div { class: "relative h-8 border-b border-line bg-sunken",
                         for tick in ticks.iter() {
                             div {
-                                key: "tick-{tick.seconds}",
+                                key: "tick-{tick.ordinal}",
                                 class: "absolute inset-y-0 border-l border-line",
                                 style: "left: {tick.position:.4}%",
                                 span {
@@ -431,48 +567,54 @@ pub fn StudioTimeline(
                             max: "{range_max}",
                             step: "0.001",
                             value: "{shown_playhead}",
-                            disabled: duration <= 0.0,
+                            disabled: duration <= 0.0 || !capabilities.seek.allowed,
+                            title: "{seek_title}",
                             "aria-label": "Episode playhead",
                             "aria-valuetext": "{format_clock(shown_playhead)} of {format_clock(duration)}",
                             oninput: move |event| {
                                 if let Ok(seconds) = event.value().parse::<f64>() {
+                                    let beginning_scrub = !scrubbing();
                                     scrubbing.set(true);
+                                    if beginning_scrub && robot_sync_playing
+                                        && let Some(episode) = scrub_sync_episode.clone()
+                                    {
+                                        on_action.call(TimelineAction::RobotSyncTransport {
+                                            episode,
+                                            action: TimelineRobotSyncAction::Pause,
+                                        });
+                                    }
                                     let seconds = seconds.clamp(0.0, duration);
                                     draft_playhead.set(seconds);
-                                    on_seek.call(TimelineSeekRequest {
-                                        seconds,
-                                        move_arm: false,
-                                        committed: false,
-                                    });
+                                    if let Some(target) = input_target.clone() {
+                                        on_action.call(TimelineAction::Seek(TimelineSeekRequest {
+                                            target,
+                                            seconds,
+                                            move_robot: false,
+                                            committed: false,
+                                        }));
+                                    }
                                 }
                             },
                             onchange: move |_| {
                                 let seconds = draft_playhead().clamp(0.0, duration);
                                 scrubbing.set(false);
-                                if recording && follow_live && seconds + 0.025 < duration {
-                                    on_follow_live.call(false);
+                                if recording.is_some() && follow_live && seconds + 0.025 < duration {
+                                    on_action.call(TimelineAction::SetFollowLive(false));
                                 }
-                                on_seek.call(TimelineSeekRequest {
-                                    seconds,
-                                    move_arm,
-                                    committed: true,
-                                });
+                                if let Some(target) = commit_target.clone() {
+                                    on_action.call(TimelineAction::Seek(TimelineSeekRequest {
+                                        target,
+                                        seconds,
+                                        move_robot: sync_robot,
+                                        committed: true,
+                                    }));
+                                }
                             },
                             onpointercancel: move |_| {
                                 scrubbing.set(false);
                                 draft_playhead.set(external_playhead);
                             },
                         }
-                    }
-
-                    div { class: "flex items-center border-b border-r border-line px-2 text-[11px]",
-                        span { class: "truncate", "{video_label}" }
-                    }
-                    VideoLaneTrack {
-                        lane: video,
-                        duration,
-                        playhead_seconds: shown_playhead,
-                        playing,
                     }
 
                     for lane in signal_lanes.iter() {
@@ -501,152 +643,8 @@ pub fn StudioTimeline(
                 }
             }
 
-            footer { class: "flex min-h-8 flex-wrap items-center gap-x-2 gap-y-1 border-t border-line px-2 py-1",
-                label {
-                    class: if motion_gate.allowed { "flex items-center gap-1 text-[11px]" } else { "flex items-center gap-1 text-[11px] text-ink-faint" },
-                    title: motion_gate.reason.as_deref().unwrap_or("Command the compatible replay arm after a committed seek"),
-                    input {
-                        r#type: "checkbox",
-                        checked: move_arm,
-                        disabled: !motion_gate.allowed,
-                        onchange: move |event| on_move_arm_on_release.call(event.checked()),
-                    }
-                    span { "Move arm on release" }
-                }
-                if let Some(reason) = motion_gate.reason.as_deref() {
-                    span { class: "text-[10px] text-ink-faint", "{reason}" }
-                } else if move_arm {
-                    span { class: "text-[10px] text-caution", "The compatible replay arm will move after the playhead is released." }
-                } else {
-                    span { class: "text-[10px] text-ink-faint", "Seeking changes the preview only." }
-                }
-            }
         }
     }
-}
-
-#[component]
-fn VideoLaneTrack(
-    lane: TimelineVideoLane,
-    duration: f64,
-    playhead_seconds: f64,
-    playing: bool,
-) -> Element {
-    let preview_position = percent(playhead_seconds, duration);
-
-    rsx! {
-        div { class: "relative min-h-14 overflow-hidden border-b border-line bg-sunken/40",
-            if lane.spans.is_empty() {
-                span { class: "absolute inset-0 flex items-center px-2 text-[10px] text-ink-faint",
-                    {lane.empty_reason.as_deref().unwrap_or("No recorded video")}
-                }
-            } else {
-                for (index, span) in lane.spans.iter().enumerate() {
-                    {
-                        let start = percent(span.start_seconds, duration);
-                        let end = percent(span.end_seconds, duration).max(start);
-                        let width = (end - start).max(0.15);
-                        rsx! {
-                            div {
-                                key: "video-{index}",
-                                class: "absolute bottom-1 top-1 overflow-hidden rounded-sm border border-line bg-camera text-white",
-                                style: "left: {start:.6}%; width: {width:.6}%",
-                                title: span.label.as_deref().unwrap_or("Recorded camera video"),
-                                div { class: "flex h-full items-start gap-1 px-1.5 pt-1",
-                                    VideoIcon {}
-                                    if let Some(label) = &span.label {
-                                        span { class: "truncate text-[10px]", "{label}" }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            if let Some(preview) = lane.preview {
-                div {
-                    class: "pointer-events-none absolute bottom-1 top-1 z-10 w-20 overflow-hidden rounded-sm border border-white/70 bg-camera shadow-sm",
-                    style: "left: clamp(0px, calc({preview_position:.6}% - 2.5rem), calc(100% - 5rem));",
-                    video {
-                        key: "{preview.url}",
-                        id: "timeline-camera-preview",
-                        class: "h-full w-full object-cover",
-                        src: "{preview.url}",
-                        preload: "auto",
-                        autoplay: playing,
-                        muted: true,
-                        playsinline: true,
-                        onloadedmetadata: move |_| sync_timeline_video(
-                            "timeline-camera-preview",
-                            preview.video_seconds,
-                            playing,
-                        ),
-                        "aria-label": if preview.approximate {
-                            format!(
-                                "Approximate recorded {} camera frame at {}",
-                                preview.label,
-                                format_clock(preview.episode_seconds),
-                            )
-                        } else {
-                            format!(
-                                "Recorded {} camera frame at {}",
-                                preview.label,
-                                format_clock(preview.episode_seconds),
-                            )
-                        },
-                    }
-                    span {
-                        class: "absolute bottom-0 inset-x-0 truncate bg-black/60 px-1 py-0.5 text-[10px] text-white",
-                        "{preview.label}"
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn sync_timeline_video(element_id: &str, video_seconds: f64, should_play: bool) {
-    #[cfg(feature = "web")]
-    {
-        use wasm_bindgen::{JsCast as _, JsValue};
-
-        let Some(element) = web_sys::window()
-            .and_then(|window| window.document())
-            .and_then(|document| document.get_element_by_id(element_id))
-        else {
-            return;
-        };
-        let target = video_seconds.max(0.0);
-        let current = js_sys::Reflect::get(element.as_ref(), &JsValue::from_str("currentTime"))
-            .ok()
-            .and_then(|value| value.as_f64())
-            .unwrap_or(0.0);
-        let threshold = if should_play { 0.25 } else { 0.005 };
-        if (current - target).abs() > threshold {
-            let _ = js_sys::Reflect::set(
-                element.as_ref(),
-                &JsValue::from_str("currentTime"),
-                &JsValue::from_f64(target),
-            );
-        }
-        let paused = js_sys::Reflect::get(element.as_ref(), &JsValue::from_str("paused"))
-            .ok()
-            .and_then(|value| value.as_bool())
-            .unwrap_or(!should_play);
-        let method = match (should_play, paused) {
-            (true, true) => Some("play"),
-            (false, false) => Some("pause"),
-            _ => None,
-        };
-        if let Some(method) = method
-            && let Ok(function) = js_sys::Reflect::get(element.as_ref(), &JsValue::from_str(method))
-                .and_then(|value| value.dyn_into::<js_sys::Function>())
-        {
-            let _ = function.call0(element.as_ref());
-        }
-    }
-    #[cfg(not(feature = "web"))]
-    let _ = (element_id, video_seconds, should_play);
 }
 
 #[component]
@@ -703,18 +701,9 @@ fn PlaybackIcon(playing: bool) -> Element {
     }
 }
 
-#[component]
-fn VideoIcon() -> Element {
-    rsx! {
-        svg { class: "ui-icon shrink-0", view_box: "0 0 16 16", "aria-hidden": "true",
-            rect { x: "2.5", y: "3.5", width: "8", height: "9", rx: "1" }
-            path { d: "m10.5 6 3-1.5v7l-3-1.5" }
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 struct TimelineTick {
+    ordinal: u8,
     seconds: f64,
     position: f64,
     label: String,
@@ -722,11 +711,12 @@ struct TimelineTick {
 
 fn timeline_ticks(duration: f64) -> Vec<TimelineTick> {
     let duration = duration.max(0.0);
-    (0..=4)
+    (0_u8..=4)
         .map(|index| {
             let fraction = f64::from(index) / 4.0;
             let seconds = duration * fraction;
             TimelineTick {
+                ordinal: index,
                 seconds,
                 position: fraction * 100.0,
                 label: format_clock(seconds),
@@ -855,6 +845,42 @@ mod tests {
         assert_eq!(format_clock(61.25), "1:01.2");
         assert_eq!(percent(5.0, 10.0), 50.0);
         assert_eq!(percent(5.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn one_transport_routes_through_the_robot_only_when_sync_is_enabled() {
+        assert_eq!(
+            transport_intent(TimelinePlayback::Stopped, false),
+            TimelineTransportIntent::Preview(TimelinePreviewAction::Play)
+        );
+        assert_eq!(
+            transport_intent(TimelinePlayback::Stopped, true),
+            TimelineTransportIntent::RobotSync(TimelineRobotSyncAction::Start)
+        );
+        assert_eq!(
+            transport_intent(TimelinePlayback::PreviewPlaying, false),
+            TimelineTransportIntent::Preview(TimelinePreviewAction::Pause)
+        );
+        assert_eq!(
+            transport_intent(TimelinePlayback::RobotSyncPlaying, true),
+            TimelineTransportIntent::RobotSync(TimelineRobotSyncAction::Pause)
+        );
+        assert_eq!(
+            transport_intent(TimelinePlayback::RobotSyncPaused, true),
+            TimelineTransportIntent::RobotSync(TimelineRobotSyncAction::Resume)
+        );
+    }
+
+    #[test]
+    fn empty_timeline_ticks_keep_unique_render_identities() {
+        let ticks = timeline_ticks(0.0);
+        let identities = ticks
+            .iter()
+            .map(|tick| tick.ordinal)
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(ticks.len(), 5);
+        assert_eq!(identities.len(), ticks.len());
     }
 
     #[test]

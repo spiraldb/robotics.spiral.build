@@ -34,6 +34,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 use web_sys::HtmlCanvasElement;
 
+use crate::activity::RecordedSource;
 use crate::api::{TimelineArmSample, TimelineSample};
 use crate::state::{Selection, studio};
 
@@ -85,12 +86,41 @@ struct Hover {
     at: (f64, f64),
 }
 
+/// The scene's data boundary. Recorded scenes never fall through to live
+/// telemetry while their episode is loading or unavailable.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SceneSource {
+    Live,
+    Recorded(RecordedSource<TimelineSample>),
+}
+
+impl SceneSource {
+    fn is_live(&self) -> bool {
+        matches!(self, Self::Live)
+    }
+
+    fn sample(&self) -> Option<&TimelineSample> {
+        match self {
+            Self::Live => None,
+            Self::Recorded(source) => source.renderable(),
+        }
+    }
+
+    fn recorded_status(&self) -> Option<(bool, Option<&str>)> {
+        match self {
+            Self::Live => None,
+            Self::Recorded(source) => Some((source.state.is_loading(), source.state.reason())),
+        }
+    }
+}
+
 #[component]
 pub fn Viewport(
-    #[props(default)] historical: Option<TimelineSample>,
+    source: SceneSource,
     #[props(default)] resize_revision: u64,
+    on_select: EventHandler<Option<Selection>>,
 ) -> Element {
-    let mut studio = studio();
+    let studio = studio();
     let urdf = crate::state::description();
     let bench = use_hook(|| Rc::new(RefCell::new(Option::<Bench>::None)));
     let mut camera = use_signal(Camera::default);
@@ -120,10 +150,9 @@ pub fn Viewport(
 
     let draw_bench = bench.clone();
     let draw_urdf = urdf.clone();
-    let draw_historical = historical.clone();
     use_effect(use_reactive(
-        (&resize_revision,),
-        move |(_resize_revision,)| {
+        (&resize_revision, &source),
+        move |(_resize_revision, draw_source)| {
             // A workbench divider changes this canvas without changing the
             // browser window. Its host increments the revision while dragging
             // so WebGL redraws against the canvas's new CSS bounds instead of
@@ -140,7 +169,7 @@ pub fn Viewport(
                 urdf,
                 &studio,
                 grid,
-                draw_historical.as_ref(),
+                &draw_source,
                 hovered.as_ref().map(|it| &it.entity),
             );
 
@@ -171,12 +200,13 @@ pub fn Viewport(
     // Where each unwell motor sits on the canvas right now. Computed from the
     // scene the crate just drew, so a mark cannot drift away from the part it
     // is about as the camera moves.
-    let marks = if historical.is_some() {
-        Vec::new()
-    } else {
+    let marks = if source.is_live() {
         condition_marks(&urdf, &studio, &bench, camera(), show_grid())
+    } else {
+        Vec::new()
     };
-    let historical_active = historical.is_some();
+    let historical_active = !source.is_live();
+    let recorded_status = source.recorded_status();
 
     rsx! {
         div { class: "relative h-full w-full overflow-hidden bg-viewport",
@@ -216,7 +246,7 @@ pub fn Viewport(
                 onpointermove: {
                     let bench = bench.clone();
                     let urdf = urdf.clone();
-                    let historical = historical.clone();
+                    let source = source.clone();
                     move |event| {
                         let position = point(&event);
                         if let Some((pointer, _)) = touch(&event)
@@ -248,7 +278,7 @@ pub fn Viewport(
                             &bench,
                             camera(),
                             show_grid(),
-                            historical.as_ref(),
+                            &source,
                             position,
                         ));
                     }
@@ -256,7 +286,7 @@ pub fn Viewport(
                 onpointerup: {
                     let bench = bench.clone();
                     let urdf = urdf.clone();
-                    let historical = historical.clone();
+                    let source = source.clone();
                     move |event| {
                         if let Some((pointer, _)) = touch(&event) {
                             touches.write().remove(&pointer);
@@ -272,14 +302,12 @@ pub fn Viewport(
                                 &bench,
                                 camera(),
                                 show_grid(),
-                                historical.as_ref(),
+                                &source,
                                 position,
                             );
                             // Clicking bare bench clears the selection, the way
                             // clicking empty space does everywhere else.
-                            studio
-                                .selected
-                                .set(picked.map(|hit| selection_of(&hit.entity)));
+                            on_select.call(picked.map(|hit| selection_of(&hit.entity)));
                         }
                         drag.set(None);
                     }
@@ -358,11 +386,19 @@ pub fn Viewport(
                 if let Some(hovered) = hover() {
                     HoverNote { hover: hovered, historical: historical_active }
                 }
-                Legend { arms }
-                if let Some(sample) = &historical {
+                Legend { arms, on_select }
+                if let Some(sample) = source.sample() {
                     div {
                         class: "pointer-events-none absolute left-1/2 top-2 z-20 -translate-x-1/2 rounded-sm border border-line bg-surface px-2 py-1 font-mono text-[10px] tabular-nums text-ink-soft",
                         "History · {format_history_time(sample.seconds)}"
+                    }
+                } else if let Some((loading, reason)) = recorded_status {
+                    div {
+                        class: "pointer-events-none absolute left-1/2 top-2 z-20 -translate-x-1/2 rounded-sm border border-line bg-surface px-2 py-1 text-[10px] text-ink-soft",
+                        if loading { "Loading recorded scene…" } else { "Recorded scene unavailable" }
+                        if let Some(reason) = reason {
+                            span { class: "ml-1 text-ink-faint", "· {reason}" }
+                        }
                     }
                 }
                 div { class: "viewport-help",
@@ -494,21 +530,22 @@ fn compose(
     urdf: &rerobot_core::urdf::Urdf,
     studio: &crate::state::Studio,
     grid: bool,
-    historical: Option<&TimelineSample>,
+    source: &SceneSource,
     hovered: Option<&RobotEntity>,
 ) -> RobotScene {
     let selected = studio.selected.read().clone();
     // Hovering a joint row in the inspector lights the motor on the bench, the
     // same way hovering the motor lights the row: one object, seen twice.
     let pointed = studio.pointed.read().clone();
-    let conditions = historical
-        .is_none()
-        .then(|| motor_conditions(studio))
-        .unwrap_or_default();
+    let conditions = if source.is_live() {
+        motor_conditions(studio)
+    } else {
+        Default::default()
+    };
 
     robot::build(
         urdf,
-        &placements(studio, historical),
+        &placements(studio, source),
         grid,
         |entity| {
             if matches_selection(selected.as_ref(), entity) {
@@ -578,7 +615,7 @@ fn condition_marks(
     let Some(bench) = slot.as_ref() else {
         return Vec::new();
     };
-    let scene = compose(urdf, studio, grid, None, None);
+    let scene = compose(urdf, studio, grid, &SceneSource::Live, None);
     let rect = canvas().map(|canvas| canvas.get_bounding_client_rect());
     let (left, top) = rect.map_or((0.0, 0.0), |rect| (rect.left(), rect.top()));
 
@@ -612,13 +649,13 @@ fn hovered(
     bench: &Rc<RefCell<Option<Bench>>>,
     camera: Camera,
     grid: bool,
-    historical: Option<&TimelineSample>,
+    source: &SceneSource,
     at: (f64, f64),
 ) -> Option<Hover> {
     let urdf = urdf.as_ref().as_ref().ok()?;
     let slot = bench.try_borrow().ok()?;
     let bench = slot.as_ref()?;
-    let scene = compose(urdf, studio, grid, historical, None);
+    let scene = compose(urdf, studio, grid, source, None);
     let key = bench.pick(&camera, &scene.scene, at)?;
     let rect = canvas()?.get_bounding_client_rect();
     Some(Hover {
@@ -628,10 +665,7 @@ fn hovered(
 }
 
 /// Every arm on the bench, posed from what it is currently reporting.
-fn placements(
-    studio: &crate::state::Studio,
-    historical: Option<&TimelineSample>,
-) -> Vec<ArmPlacement> {
+fn placements(studio: &crate::state::Studio, source: &SceneSource) -> Vec<ArmPlacement> {
     let arms = studio.snapshot.read().robots.clone();
     let count = arms.len();
     arms.iter()
@@ -640,11 +674,12 @@ fn placements(
             // An arm that is offline or uncalibrated has no angles worth
             // drawing, so it stands at its rest pose and is faded rather than
             // left out — an empty bench says less than a greyed-out one.
-            let historical_angles = historical
+            let historical_angles = source
+                .sample()
                 .and_then(|sample| sample.arms.iter().find(|sample| sample.arm == arm.id))
                 .and_then(|sample| historical_angles(arm, sample));
-            let telemetry = historical
-                .is_none()
+            let telemetry = source
+                .is_live()
                 .then(|| studio.robot_telemetry(&arm.id).filter(|_| arm.calibrated))
                 .flatten();
             let angles = historical_angles.or_else(|| {
@@ -721,8 +756,8 @@ fn mount_of(binding: &rerobot_core::api::CameraBinding) -> Option<CameraMount> {
 
 /// Which arm is which colour in the scene.
 #[component]
-fn Legend(arms: Vec<RobotSummary>) -> Element {
-    let mut studio = studio();
+fn Legend(arms: Vec<RobotSummary>, on_select: EventHandler<Option<Selection>>) -> Element {
+    let studio = studio();
     if arms.is_empty() {
         return rsx! {
             div { class: "pointer-events-none absolute inset-0 flex items-center justify-center",
@@ -741,7 +776,7 @@ fn Legend(arms: Vec<RobotSummary>) -> Element {
                         title: "Select {arm.id}; press F to frame it",
                         onclick: {
                             let id = arm.id.clone();
-                            move |_| studio.selected.set(Some(Selection::Robot(id.clone())))
+                            move |_| on_select.call(Some(Selection::Robot(id.clone())))
                         },
                         span { class: "h-1.5 w-1.5 shrink-0 rounded-full", style: "background: {accent_css(index)}" }
                         span { "{arm.id}" }

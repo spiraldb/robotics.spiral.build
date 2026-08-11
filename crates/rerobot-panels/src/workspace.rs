@@ -18,6 +18,7 @@ pub struct Panel {
     pub id: PanelId,
     pub title: String,
     pub home: TileId,
+    pub home_zone: DockZone,
     pub class: String,
     pub content: Element,
 }
@@ -33,6 +34,7 @@ impl Panel {
             id: id.into(),
             title: title.into(),
             home: home.into(),
+            home_zone: DockZone::Center,
             class: String::new(),
             content,
         }
@@ -43,8 +45,15 @@ impl Panel {
         self
     }
 
+    /// Split a newly registered panel beside its occupied home instead of
+    /// hiding it as another tab. Persisted user placement still wins.
+    pub fn with_home_zone(mut self, zone: DockZone) -> Self {
+        self.home_zone = zone;
+        self
+    }
+
     fn placement(&self) -> PanelPlacement {
-        PanelPlacement::new(self.id.clone(), self.home.clone())
+        PanelPlacement::new(self.id.clone(), self.home.clone()).with_zone(self.home_zone)
     }
 }
 
