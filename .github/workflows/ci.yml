@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Nix / Rust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
+
+      - name: Cache Nix store
+        uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      - name: Lint workflow
+        run: nix develop .#ci --command actionlint
+
+      - name: Validate flake
+        run: nix flake check --all-systems --show-trace
+
+      - name: Check formatting
+        run: nix develop .#ci --command cargo fmt --all -- --check
+
+      - name: Lint
+        run: |
+          nix develop .#ci --command cargo clippy --workspace --all-targets -- -D warnings -A clippy::suspicious-else-formatting
+          nix develop .#ci --command cargo clippy -p spiral-robotics-studio --all-targets --features server -- -D warnings -A clippy::suspicious-else-formatting
+
+      - name: Test
+        run: |
+          nix develop .#ci --command cargo test --workspace --no-fail-fast
+          nix develop .#ci --command cargo test -p spiral-robotics-studio --features server --no-fail-fast
+
+      - name: Check web target
+        run: nix develop .#ci --command cargo check -p spiral-robotics-studio --features web --target wasm32-unknown-unknown
+
+      - name: Validate training worker
+        run: nix develop .#ci --command python -m py_compile crates/spiral-robotics-studio/python/spiral_robotics_train.py
