@@ -7,9 +7,13 @@
 //! left. The component uses the existing Studio context and HTTP API, so it can
 //! be integrated without introducing a second source of episode selection.
 
+use std::collections::BTreeMap;
+
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_core::api::{EpisodeSummary, ImportResponse, SpiralQueryResponse};
+use spiral_robotics_core::api::{
+    EpisodeSummary, ImportResponse, PublicationStatus, SpiralQueryResponse,
+};
 use spiral_robotics_core::spiral::QueryPreset;
 
 use crate::frontend::api::http as api;
@@ -107,6 +111,12 @@ pub(crate) fn DataWorkbench(
         .count();
     let selected = studio.selected_episode.read().clone();
     let replaying = studio.replay();
+    let publications = controller
+        .publications()
+        .into_iter()
+        .map(|status| (status.episode_id.clone(), status))
+        .collect::<BTreeMap<_, _>>();
+    let publication_error = controller.publication_error();
 
     let run_query = move || controller.run_query(studio, query_available, on_intent);
 
@@ -211,6 +221,12 @@ pub(crate) fn DataWorkbench(
             match controller.tab() {
                 DataWorkbenchTab::Episodes => rsx! {
                     div { class: "min-h-0 flex-1 overflow-y-auto",
+                        if let Some(error) = publication_error {
+                            div { class: "mx-2 mt-2 rounded bg-danger-soft px-2 py-1.5 text-[11px] text-danger", role: "alert",
+                                strong { class: "block font-medium", "Storage state unavailable" }
+                                span { "{error}" }
+                            }
+                        }
                         if episodes.is_empty() {
                             div { class: "px-3 py-8 text-center",
                                 strong { class: "block text-[12px] font-medium text-ink", "No episodes yet" }
@@ -228,6 +244,8 @@ pub(crate) fn DataWorkbench(
                                     EpisodeRow {
                                         key: "{episode.id}",
                                         episode: episode.clone(),
+                                        storage_status: publications.get(&episode.id).cloned(),
+                                        spiral_available: query_available,
                                         selected: selected.as_deref() == Some(episode.id.as_str()),
                                         playing: replaying.as_ref().is_some_and(|progress| progress.episode == episode.id),
                                         confirming_delete: confirming_delete.read().as_deref() == Some(episode.id.as_str()),
@@ -242,6 +260,9 @@ pub(crate) fn DataWorkbench(
                                             } else {
                                                 confirming_delete.set(Some(id));
                                             }
+                                        },
+                                        on_push: move |id: String| {
+                                            controller.push_to_spiral(studio, id);
                                         },
                                     }
                                 }
@@ -339,11 +360,14 @@ impl DataWorkbenchTab {
 #[component]
 fn EpisodeRow(
     episode: EpisodeSummary,
+    storage_status: Option<PublicationStatus>,
+    spiral_available: bool,
     selected: bool,
     playing: bool,
     confirming_delete: bool,
     on_select: EventHandler<EpisodeSummary>,
     on_delete: EventHandler<String>,
+    on_push: EventHandler<String>,
 ) -> Element {
     let state = if playing {
         "Replaying"
@@ -354,11 +378,30 @@ fn EpisodeRow(
     } else {
         "Recorded"
     };
+    let storage_state = episode_storage_state(storage_status.as_ref());
+    let storage_class = storage_state.class_name();
+    let storage_title = episode_storage_title(storage_status.as_ref());
+    let can_push = episode.usable() && !episode.discarded;
+    let push_disabled = !spiral_available || !can_push;
+    let push_title = if !spiral_available {
+        "Configure SpiralDB in Settings before pushing this episode"
+    } else if !can_push {
+        "Only complete, kept episodes can be pushed to SpiralDB"
+    } else if storage_state == EpisodeStorageState::Failed {
+        "Retry pushing this episode to SpiralDB"
+    } else {
+        "Push this local episode to SpiralDB"
+    };
+    let delete_title = if storage_state == EpisodeStorageState::Synced {
+        "Remove this local copy; the persisted SpiralDB episode is kept"
+    } else {
+        "Delete this local episode"
+    };
 
     rsx! {
         li {
             class: if selected { "bg-selected" } else { "bg-surface hover:bg-hover" },
-            article { class: "flex min-h-12 items-center gap-1 px-1.5 py-1",
+            article { class: "data-episode-row flex min-h-12 items-center gap-1 px-1.5 py-1",
                 button {
                     r#type: "button",
                     class: "min-w-0 flex-1 rounded px-1 py-0.5 text-left focus-visible:outline-offset-0",
@@ -370,6 +413,7 @@ fn EpisodeRow(
                     span { class: "flex items-baseline gap-1.5",
                         strong { class: "truncate font-mono text-[11px] font-medium text-ink", "{short_id(&episode.id)}" }
                         span { class: if playing { "text-[10px] text-accent" } else { "text-[10px] text-ink-faint" }, "{state}" }
+                        span { class: "data-storage-state {storage_class}", title: "{storage_title}", "{storage_state.label()}" }
                         span { class: "ml-auto shrink-0 font-mono text-[10px] text-ink-soft", "{format_duration(episode.duration_seconds)}" }
                     }
                     span { class: "mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] text-ink-faint",
@@ -377,18 +421,92 @@ fn EpisodeRow(
                         span { class: "ml-auto shrink-0 font-mono", "{episode.frames}f · {episode.sample_hz:.0}Hz" }
                     }
                 }
-                button {
-                    r#type: "button",
-                    class: if confirming_delete { "btn btn-danger bg-danger-soft" } else { "btn btn-danger" },
-                    title: if confirming_delete { "Delete permanently — click again to confirm" } else { "Delete this episode" },
-                    onclick: {
-                        let id = episode.id.clone();
-                        move |_| on_delete.call(id.clone())
-                    },
-                    if confirming_delete { "Delete?" } else { "Delete" }
+                div { class: "data-episode-actions",
+                    if matches!(storage_state, EpisodeStorageState::Local | EpisodeStorageState::Failed) {
+                        button {
+                            r#type: "button",
+                            class: "btn data-push-action",
+                            disabled: push_disabled,
+                            title: push_title,
+                            onclick: {
+                                let id = episode.id.clone();
+                                move |_| on_push.call(id.clone())
+                            },
+                            if storage_state == EpisodeStorageState::Failed { "Retry" } else { "Push" }
+                        }
+                    }
+                    button {
+                        r#type: "button",
+                        class: if confirming_delete { "btn btn-danger bg-danger-soft" } else { "btn btn-danger" },
+                        title: if confirming_delete { "Delete the local copy permanently — click again to confirm" } else { delete_title },
+                        onclick: {
+                            let id = episode.id.clone();
+                            move |_| on_delete.call(id.clone())
+                        },
+                        if confirming_delete { "Delete?" } else { "Delete" }
+                    }
                 }
             }
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EpisodeStorageState {
+    Local,
+    Queued,
+    Pushing,
+    Synced,
+    Failed,
+}
+
+impl EpisodeStorageState {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Local => "Local",
+            Self::Queued => "Queued",
+            Self::Pushing => "Pushing…",
+            Self::Synced => "Synced",
+            Self::Failed => "Failed",
+        }
+    }
+
+    const fn class_name(self) -> &'static str {
+        match self {
+            Self::Local => "data-storage-local",
+            Self::Queued | Self::Pushing => "data-storage-active",
+            Self::Synced => "data-storage-synced",
+            Self::Failed => "data-storage-failed",
+        }
+    }
+}
+
+fn episode_storage_state(status: Option<&PublicationStatus>) -> EpisodeStorageState {
+    let Some(status) = status else {
+        return EpisodeStorageState::Local;
+    };
+    match status.spiral.as_deref() {
+        Some("queued") => EpisodeStorageState::Queued,
+        Some("publishing") => EpisodeStorageState::Pushing,
+        Some("published") => EpisodeStorageState::Synced,
+        Some(value) if value.starts_with("failed:") => EpisodeStorageState::Failed,
+        _ => EpisodeStorageState::Local,
+    }
+}
+
+fn episode_storage_title(status: Option<&PublicationStatus>) -> String {
+    match episode_storage_state(status) {
+        EpisodeStorageState::Local => "Stored only in the local staging buffer".to_owned(),
+        EpisodeStorageState::Queued => "Waiting to push to SpiralDB".to_owned(),
+        EpisodeStorageState::Pushing => "Pushing this episode to SpiralDB".to_owned(),
+        EpisodeStorageState::Synced => "Persisted in the configured SpiralDB dataset".to_owned(),
+        EpisodeStorageState::Failed => status
+            .and_then(|status| status.spiral.as_deref())
+            .and_then(|value| value.strip_prefix("failed:"))
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+            .unwrap_or("The last SpiralDB push failed; retry when the destination is available")
+            .to_owned(),
     }
 }
 
@@ -552,5 +670,53 @@ mod tests {
     fn generated_episode_ids_read_as_take_numbers() {
         assert_eq!(short_id("episode_000024"), "#24");
         assert_eq!(short_id("imported-pass"), "imported-pass");
+    }
+
+    #[test]
+    fn spiral_storage_state_keeps_episode_order_independent_from_location() {
+        let status = |state: &str, spiral: Option<&str>| PublicationStatus {
+            episode_id: "episode_000024".to_owned(),
+            state: state.to_owned(),
+            spiral: spiral.map(str::to_owned),
+            ..PublicationStatus::default()
+        };
+
+        assert_eq!(episode_storage_state(None), EpisodeStorageState::Local);
+        assert_eq!(
+            episode_storage_state(Some(&status("queued", Some("queued")))),
+            EpisodeStorageState::Queued
+        );
+        assert_eq!(
+            episode_storage_state(Some(&status("publishing", Some("publishing")))),
+            EpisodeStorageState::Pushing
+        );
+        assert_eq!(
+            episode_storage_state(Some(&status("published", Some("published")))),
+            EpisodeStorageState::Synced
+        );
+        assert_eq!(
+            episode_storage_state(Some(&status("failed", Some("failed: unavailable")))),
+            EpisodeStorageState::Failed
+        );
+        // A success at a different configured destination must not claim the
+        // episode is present in SpiralDB.
+        assert_eq!(
+            episode_storage_state(Some(&status("published", None))),
+            EpisodeStorageState::Local
+        );
+    }
+
+    #[test]
+    fn failed_spiral_status_explains_the_retry() {
+        let status = PublicationStatus {
+            episode_id: "episode_000024".to_owned(),
+            state: "failed".to_owned(),
+            spiral: Some("failed: destination unavailable".to_owned()),
+            ..PublicationStatus::default()
+        };
+        assert_eq!(
+            episode_storage_title(Some(&status)),
+            "destination unavailable"
+        );
     }
 }

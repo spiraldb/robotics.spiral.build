@@ -7,7 +7,7 @@
 use std::fmt;
 
 /// Schema version written into every completed episode row.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Marker used to distinguish Spiral Robotics' managed dataset namespace resource.
 pub const DATASET_NAMESPACE_MARKER: &str = "_spiral_robotics_dataset_key_v1";
@@ -60,7 +60,7 @@ impl Table {
                 column::EPISODE_ID,
                 column::STREAM_ID,
                 column::MODALITY,
-                column::JOINT_NAMES_JSON,
+                column::JOINT_NAMES,
                 column::CAMERA_ID,
                 column::WIDTH,
                 column::HEIGHT,
@@ -71,11 +71,11 @@ impl Table {
                 column::STREAM_ID,
                 column::SAMPLE_INDEX,
                 column::EPISODE_TIME_NS,
-                column::STATE_POSITION_JSON,
-                column::ACTION_POSITION_JSON,
-                column::RAW_POSITION_JSON,
-                column::VELOCITY_JSON,
-                column::EFFORT_JSON,
+                column::STATE_POSITION,
+                column::ACTION_POSITION,
+                column::RAW_POSITION,
+                column::VELOCITY,
+                column::EFFORT,
                 column::FOLLOW_ERROR_DEGREES,
             ],
             Self::VideoAssets => &[
@@ -115,7 +115,6 @@ impl fmt::Display for Table {
 pub mod column {
     pub const ACTION: &str = "action";
     pub const ACTION_POSITION: &str = "action_position";
-    pub const ACTION_POSITION_JSON: &str = "action_position_json";
     pub const BYTE_SIZE: &str = "byte_size";
     pub const CAMERA_ID: &str = "camera_id";
     pub const CHECKPOINT: &str = "checkpoint";
@@ -124,21 +123,19 @@ pub mod column {
     pub const DISCARDED: &str = "discarded";
     pub const DURATION_NS: &str = "duration_ns";
     pub const EFFORT: &str = "effort";
-    pub const EFFORT_JSON: &str = "effort_json";
     pub const EPISODE_ID: &str = "episode_id";
     pub const EPISODE_TIME_NS: &str = "episode_time_ns";
     pub const FOLLOW_ERROR_DEGREES: &str = "follow_error_degrees";
     pub const FPS: &str = "fps";
     pub const FRAMES: &str = "frames";
     pub const HEIGHT: &str = "height";
-    pub const JOINT_NAMES_JSON: &str = "joint_names_json";
+    pub const JOINT_NAMES: &str = "joint_names";
     pub const MAX_FOLLOW_ERROR_DEGREES: &str = "max_follow_error_degrees";
     pub const MODALITY: &str = "modality";
     pub const NOTE: &str = "note";
     pub const PAYLOAD: &str = "payload";
     pub const POLICY: &str = "policy";
     pub const RAW_POSITION: &str = "raw_position";
-    pub const RAW_POSITION_JSON: &str = "raw_position_json";
     pub const REPLAY_POSITION: &str = "replay_position";
     pub const RUN_ID: &str = "run_id";
     pub const RUN_NAME: &str = "run_name";
@@ -150,13 +147,11 @@ pub mod column {
     pub const STARTED_MS: &str = "started_ms";
     pub const STATE: &str = "state";
     pub const STATE_POSITION: &str = "state_position";
-    pub const STATE_POSITION_JSON: &str = "state_position_json";
     pub const STEP: &str = "step";
     pub const STREAM_ID: &str = "stream_id";
     pub const TIMELINE_OFFSET_NS: &str = "timeline_offset_ns";
     pub const VALIDATION_LOSS: &str = "validation_loss";
     pub const VELOCITY: &str = "velocity";
-    pub const VELOCITY_JSON: &str = "velocity_json";
     pub const WIDTH: &str = "width";
 }
 
@@ -239,13 +234,13 @@ pub fn relation(dataset: &str, table: Table) -> String {
 pub fn default_training_sql(dataset: &str) -> String {
     let relation = relation(dataset, Table::JointSamples);
     format!(
-        "SELECT {episode_id}, {stream_id}, {sample_index},\n       {state_json} AS {state},\n       {action_json} AS {action}\nFROM {relation}\nWHERE {action_json} IS NOT NULL\nORDER BY {episode_id}, {stream_id}, {sample_index}",
+        "SELECT {episode_id}, {stream_id}, {sample_index},\n       {state_position} AS {state},\n       {action_position} AS {action}\nFROM {relation}\nWHERE {action_position} IS NOT NULL\nORDER BY {episode_id}, {stream_id}, {sample_index}",
         episode_id = column::EPISODE_ID,
         stream_id = column::STREAM_ID,
         sample_index = column::SAMPLE_INDEX,
-        state_json = column::STATE_POSITION_JSON,
+        state_position = column::STATE_POSITION,
         state = column::STATE,
-        action_json = column::ACTION_POSITION_JSON,
+        action_position = column::ACTION_POSITION,
         action = column::ACTION,
     )
 }
@@ -284,14 +279,10 @@ mod tests {
             "FROM {}",
             relation("robotics", Table::JointSamples)
         )));
+        assert!(sql.contains(&format!("{} AS {}", column::STATE_POSITION, column::STATE)));
         assert!(sql.contains(&format!(
             "{} AS {}",
-            column::STATE_POSITION_JSON,
-            column::STATE
-        )));
-        assert!(sql.contains(&format!(
-            "{} AS {}",
-            column::ACTION_POSITION_JSON,
+            column::ACTION_POSITION,
             column::ACTION
         )));
     }

@@ -2,6 +2,7 @@
 2. use nix flake to setup dev env.
 3. try not to use python dependencies.
 4. use any rust crate as you see fit.
+5. if you find a bug/inconsistency in upstream spiral, stop and ask, don't workaround it.
 
 ## Trade offs
 - For now, we will only support so-arm-101, support both leader and follower.

@@ -62,8 +62,8 @@ on real hardware without writing glue code or operating a Python stack.
 - **SpiralDB is the primary connected data path.** Completed episodes can be
   published as relational Arrow tables plus managed MP4 data through ADBC,
   queried from the Studio, and brought back through the backend for safe local
-  replay. Hugging Face is an optional publishing mirror; local JSONL/MP4 remains
-  the current durable recovery and interchange layer.
+  replay. Hugging Face is an optional publishing mirror; local JSONL/MP4 is the
+  operator-cleared staging and recovery buffer, not a second connected dataset.
 - **The robot description is the single source of truth.** Geometry, joint
   limits, and the rendered model come from URDF rather than duplicated drawing
   constants.
@@ -124,8 +124,9 @@ applies them; the browser never becomes the motor-control runtime.
 - A fullstack Dioxus Studio with three primary operating activities:
   - **Live** owns recording, arm selection, Hold / Release / Teleop, joint
     control, health, and camera status.
-  - **Data** owns the dataset, its episodes, replay/delete actions, import and
-    export, and guarded read-only Spiral SQL.
+  - **Data** owns the local episode buffer, per-episode Local / Synced state,
+    explicit SpiralDB push, replay/delete actions, import and export, and
+    guarded read-only Spiral SQL.
   - **Training** owns hosted-Spiral SQL sampling through Rust ADBC, local
     PyTorch run configuration, learning and resource telemetry, graceful
     cancellation, and Rust-published Spiral checkpoints.
@@ -148,7 +149,8 @@ applies them; the browser never becomes the motor-control runtime.
 - Episode recording during Teleop with server-owned start, pause, resume, stop,
   and discard. Pause/resume preserves one episode identity and records explicit
   time gaps. Assigned cameras can be encoded by the backend into browser-
-  playable MP4 segments with episode-clock offsets.
+  playable MP4 segments with episode-clock offsets. A completed recording is
+  staged locally until the operator pushes it to SpiralDB.
 - One canonical **Timeline** in both Live and Data. During capture it follows
   new joint and camera data. A paused or completed episode can be scrubbed to
   synchronize recorded camera frames, historical 3D pose, signals, and the
@@ -162,12 +164,12 @@ applies them; the browser never becomes the motor-control runtime.
 - Replay ramps a compatible calibrated follower to the first pose before
   playback. Pause/resume keeps the current replay frame rather than restarting
   the episode.
-- Configured SpiralDB publication writes completed episode metadata, streams,
-  joint samples, actions, and MP4 payloads as Arrow relations through a trusted
-  ADBC driver. Hosted configurations maintain a reusable managed video dataset;
-  memory mode exposes equivalent MP4 functions without durable managed dataset
-  resources. The Studio exposes row-limited, read-only query preview and video
-  retrieval through the backend.
+- An explicit per-episode SpiralDB push writes completed episode metadata,
+  streams, joint samples, actions, and MP4 payloads as Arrow relations through
+  a trusted ADBC driver. Hosted configurations maintain a reusable managed
+  video dataset; memory mode exposes equivalent MP4 functions without durable
+  managed dataset resources. The Studio exposes row-limited, read-only query
+  preview and video retrieval through the backend.
 - Optional Hugging Face publishing mirrors completed episodes as Parquet,
   metadata, and MP4 files using a backend-held write token.
 - A `--simulate` mode with emulated motors allows calibration, teleoperation,

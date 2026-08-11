@@ -117,6 +117,7 @@ fn TrainingRunBuilder(
     let request = controller.request();
     let selected_run = controller.selected_run();
     let starting = controller.starting();
+    let start_error = controller.start_error();
     let stopping = controller.stopping();
     let can_start = readiness.ready && active_run.is_none() && !starting;
     let active_id = active_run.as_ref().map(|run| run.id.clone());
@@ -130,18 +131,17 @@ fn TrainingRunBuilder(
 
     rsx! {
         div { class: "training-workbench studio-workbench-scroll",
-            header { class: "training-run-header",
-                div {
-                    h2 { "Train a policy" }
-                    p { "Spiral streams in. Checkpoints return to Spiral." }
-                }
-                span { class: "training-policy-chip", "ACT · state" }
-            }
-
             if !readiness.ready {
                 div { class: "training-inline-state training-inline-state-caution",
                     strong { "Training is not ready" }
                     span { "{readiness.summary}" }
+                }
+            }
+
+            if let Some(error) = start_error {
+                div { class: "training-inline-state training-inline-state-danger", role: "alert",
+                    strong { "Training could not start" }
+                    span { "{error}" }
                 }
             }
 
@@ -154,18 +154,25 @@ fn TrainingRunBuilder(
                         }
                         span { class: "training-step-readout", "{run.current_step} / {run.config.steps}" }
                     }
-                    div { class: "training-progress-track", "aria-label": "Training progress",
+                    div {
+                        class: "training-progress-track",
+                        role: "progressbar",
+                        "aria-label": "Training progress",
+                        "aria-valuemin": "0",
+                        "aria-valuemax": "{run.config.steps}",
+                        "aria-valuenow": "{run.current_step}",
+                        "aria-valuetext": "Step {run.current_step} of {run.config.steps}",
                         div { class: "training-progress-fill", style: "width: {progress.unwrap_or_default().clamp(0.0, 100.0):.2}%" }
                     }
-                    if let Some(message) = run.message {
+                    if run.phase != TrainingRunPhase::Running {
+                        if let Some(message) = run.message {
                         p { "{message}" }
-                    }
-                    small { class: "training-stop-consequence",
-                        "Finishes the current optimizer step and publishes a final checkpoint. The backend force-stops the worker after 10 seconds."
+                        }
                     }
                     button {
                         r#type: "button",
                         class: "training-stop-button",
+                        title: "Stop after the current optimizer step and publish a checkpoint",
                         disabled: run.phase == TrainingRunPhase::Stopping || stopping.is_some(),
                         onclick: move |_| {
                             let id = active_id.clone().unwrap_or_default();
@@ -184,7 +191,7 @@ fn TrainingRunBuilder(
                     p { {run.message.clone().unwrap_or_else(|| "The run ended without a status message.".to_owned())} }
                     if !run.logs.is_empty() {
                         details { open: run.phase == TrainingRunPhase::Failed,
-                            summary { "Worker log · {run.logs.len()} lines" }
+                            summary { "Logs ({run.logs.len()})" }
                             pre {
                                 for line in run.logs.iter().rev().take(12).rev() {
                                     code { "{line}\n" }
@@ -281,44 +288,44 @@ fn TrainingRunBuilder(
                 }
             }
 
-            section { class: "training-query-section",
-                header {
-                    div {
-                        h3 { "Spiral sample query" }
-                        p { "Must return equal-width state and action vectors." }
+            details { class: "training-query-section",
+                summary {
+                    span { "Data query" }
+                    small { "{dataset}" }
+                }
+                div { class: "training-query-body",
+                    textarea {
+                        "aria-label": "Spiral SQL query",
+                        spellcheck: "false",
+                        value: request.sql.clone(),
+                        disabled: active_run.is_some(),
+                        oninput: move |event| {
+                            let value = event.value();
+                            controller.edit_request(move |request| request.sql = value);
+                        },
                     }
-                    span { "{dataset}" }
-                }
-                textarea {
-                    spellcheck: "false",
-                    value: request.sql.clone(),
-                    disabled: active_run.is_some(),
-                    oninput: move |event| {
-                        let value = event.value();
-                        controller.edit_request(move |request| request.sql = value);
-                    },
-                }
-                div { class: "training-column-row",
-                    label { class: "training-field",
-                        span { "State column" }
-                        input {
-                            value: request.state_column.clone(),
-                            disabled: active_run.is_some(),
-                            oninput: move |event| {
-                                let value = event.value();
-                                controller.edit_request(move |request| request.state_column = value);
-                            },
+                    div { class: "training-column-row",
+                        label { class: "training-field",
+                            span { "State column" }
+                            input {
+                                value: request.state_column.clone(),
+                                disabled: active_run.is_some(),
+                                oninput: move |event| {
+                                    let value = event.value();
+                                    controller.edit_request(move |request| request.state_column = value);
+                                },
+                            }
                         }
-                    }
-                    label { class: "training-field",
-                        span { "Action column" }
-                        input {
-                            value: request.action_column.clone(),
-                            disabled: active_run.is_some(),
-                            oninput: move |event| {
-                                let value = event.value();
-                                controller.edit_request(move |request| request.action_column = value);
-                            },
+                        label { class: "training-field",
+                            span { "Action column" }
+                            input {
+                                value: request.action_column.clone(),
+                                disabled: active_run.is_some(),
+                                oninput: move |event| {
+                                    let value = event.value();
+                                    controller.edit_request(move |request| request.action_column = value);
+                                },
+                            }
                         }
                     }
                 }
@@ -328,7 +335,7 @@ fn TrainingRunBuilder(
                 r#type: "button",
                 class: "training-start-button",
                 disabled: !can_start,
-                title: if active_run.is_some() { "Stop the active run first".to_owned() } else if !readiness.ready { readiness.summary.clone() } else { "Start local PyTorch training".to_owned() },
+                title: if active_run.is_some() { "Stop the active run first".to_owned() } else if !readiness.ready { readiness.summary.clone() } else { "Start training".to_owned() },
                 onclick: move |_| {
                     controller.start(studio);
                 },
@@ -338,10 +345,9 @@ fn TrainingRunBuilder(
             section { class: "training-history",
                 header {
                     h3 { "Run history" }
-                    span { "{history.len()} backend records" }
                 }
                 if history.is_empty() {
-                    p { class: "training-history-empty", "Completed and failed runs will remain here." }
+                    p { class: "training-history-empty", "No runs yet." }
                 }
                 for run in history {
                     button {
@@ -366,8 +372,8 @@ fn TrainingLearning(run: Option<TrainingRun>) -> Element {
     let Some(run) = run else {
         return rsx! {
             div { class: "training-panel-empty",
-                strong { "No learning curve yet" }
-                span { "Start a run to plot loss against the shared training-step axis." }
+                strong { "No run" }
+                span { "Start training to see loss." }
             }
         };
     };
@@ -390,7 +396,7 @@ fn TrainingLearning(run: Option<TrainingRun>) -> Element {
             header { class: "training-panel-heading",
                 div {
                     h2 { "{run.config.run_name}" }
-                    p { "{run.config.policy.label()} · {run.config.device} · step {run.current_step} of {run.config.steps}" }
+                    p { "{run.config.policy.label()} · {run.config.device} · {run.current_step}/{run.config.steps}" }
                 }
                 span { class: phase_class(run.phase), "{run.phase.label()}" }
             }
@@ -414,11 +420,11 @@ fn TrainingLearning(run: Option<TrainingRun>) -> Element {
                 if run.metrics.is_empty() {
                     div { class: "training-chart-empty",
                         if run.phase == TrainingRunPhase::Failed {
-                            "No optimizer metrics were produced before this run failed."
+                            "No metrics."
                         } else if run.phase.active() {
-                            "Waiting for the first optimizer step…"
+                            "Waiting for step 1…"
                         } else {
-                            "This run ended before producing optimizer metrics."
+                            "No metrics."
                         }
                     }
                 }
@@ -451,7 +457,6 @@ fn TrainingLearning(run: Option<TrainingRun>) -> Element {
                 }
             }
             div { class: "training-event-strip",
-                span { "Events" }
                 div { class: "training-event-track",
                     i { class: "training-event-axis" }
                     for checkpoint in &run.checkpoints {
@@ -472,9 +477,9 @@ fn TrainingLearning(run: Option<TrainingRun>) -> Element {
                     }
                 }
                 div { class: "training-event-legend",
-                    small { "Validation" }
+                    small { "Val" }
                     small { "Checkpoint" }
-                    small { "Loader stall" }
+                    small { "Stall" }
                 }
             }
         }
@@ -510,44 +515,29 @@ fn TrainingDataPath(dataset: String, run: Option<TrainingRun>) -> Element {
         .filter(|table| !table.is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| spiral::relation(&dataset, Table::TrainingCheckpoints));
-    let json_fallback = run
-        .as_ref()
-        .is_some_and(|run| run.logs.iter().any(|line| line.contains("JSON vectors")));
-
     rsx! {
         section { class: "training-data-path",
-            header { class: "training-panel-heading",
-                div {
-                    h2 { "Spiral → PyTorch" }
-                    p { "One columnar path, supervised by Rust." }
-                }
-                span { class: "training-path-rate", "{transfer}" }
-            }
             ol { class: "training-path-stages",
                 li {
                     span { class: "training-path-index", "1" }
-                    div { strong { "Spiral query" } small { "{source_dataset} · source frozen when the run starts" } }
-                    em { "Rust ADBC" }
+                    div { strong { "Spiral" } small { "{source_dataset}" } }
+                    em { "{transfer}" }
                 }
                 li {
                     span { class: "training-path-index", "2" }
-                    div { strong { "Bounded Arrow IPC queue" } small { if json_fallback { "Rust normalized JSON vectors to float32" } else { "Typed float buffers use the direct tensor path" } } }
+                    div { strong { "Arrow queue" } small { "float32" } }
                     em { "depth {queue_depth}" }
                 }
                 li {
                     span { class: "training-path-index", "3" }
-                    div { strong { "PyTorch compute worker" } small { "Arrow → tensor · model · optimizer only" } }
+                    div { strong { "PyTorch" } }
                     em { "{examples}" }
                 }
                 li {
                     span { class: "training-path-index", "4" }
-                    div { strong { "Rust checkpoint publish" } small { "{checkpoint_table}" } }
-                    em { "{checkpoint_count} durable" }
+                    div { strong { "Checkpoints" } small { "{checkpoint_table}" } }
+                    em { "{checkpoint_count}" }
                 }
-            }
-            div { class: "training-path-contract",
-                strong { "Rust owns the run" }
-                span { "Spiral access, cancellation, checkpoint ingest, durable history, and browser events stay in the Studio backend." }
             }
         }
     }
@@ -578,15 +568,6 @@ fn TrainingResources(run: Option<TrainingRun>) -> Element {
 
     rsx! {
         section { class: "training-resources",
-            header { class: "training-resource-header",
-                div {
-                    h2 { "Machine and input pipeline" }
-                    p { "Aligned to the same optimizer-step axis as loss." }
-                }
-                if let Some(point) = last {
-                    span { "{format_elapsed(point.elapsed_seconds)} elapsed" }
-                }
-            }
             div { class: "training-resource-grid",
                 ResourceLane { label: "GPU utilization", value: gpu, points: resource_points(metrics, total_steps, ResourceSeries::Gpu), class: "resource-gpu" }
                 ResourceLane { label: "GPU memory", value: memory, points: resource_points(metrics, total_steps, ResourceSeries::Memory), class: "resource-memory" }
@@ -779,18 +760,6 @@ fn format_rate(bytes_per_second: f64) -> String {
     }
 }
 
-fn format_elapsed(seconds: f64) -> String {
-    let total = seconds.max(0.0).round() as u64;
-    let hours = total / 3_600;
-    let minutes = total % 3_600 / 60;
-    let seconds = total % 60;
-    if hours > 0 {
-        format!("{hours}h {minutes:02}m")
-    } else {
-        format!("{minutes}:{seconds:02}")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -802,10 +771,7 @@ mod tests {
             "FROM {}",
             spiral::relation("robotics", Table::JointSamples)
         )));
-        assert!(sql.contains(&format!(
-            "{} IS NOT NULL",
-            spiral::column::ACTION_POSITION_JSON
-        )));
+        assert!(sql.contains(&format!("{} IS NOT NULL", spiral::column::ACTION_POSITION)));
     }
 
     #[test]

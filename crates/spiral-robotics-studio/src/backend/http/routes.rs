@@ -131,8 +131,8 @@ pub async fn monitor_video_recording(state: AppState) {
     }
 }
 
-/// Close and publish any capture whose corresponding control-loop recording
-/// has already ended. Also used during graceful backend shutdown.
+/// Close and stage any capture whose corresponding control-loop recording has
+/// already ended. Also used during graceful backend shutdown.
 pub async fn finish_stale_video_capture(state: &AppState) {
     let capture = state.recording_video.lock().await.take();
     let Some(capture) = capture else {
@@ -143,7 +143,7 @@ pub async fn finish_stale_video_capture(state: &AppState) {
     if let Err(error) = state.episodes.reload() {
         tracing::warn!(episode = %episode_id, "could not reload automatically stopped episode: {error}");
     }
-    state.storage.queue_publish(episode_id, videos);
+    state.storage.stage_local(episode_id, videos);
 }
 
 async fn finish_video_capture(state: &AppState, capture: VideoCapture) -> Vec<VideoAsset> {
@@ -275,6 +275,10 @@ pub fn api_router(state: AppState) -> Router {
         .route("/settings/data/test/hugging-face", post(test_hugging_face))
         .route("/publications", get(list_publications))
         .route("/publications/{episode}", post(publish_existing_episode))
+        .route(
+            "/spiral/publications/{episode}",
+            post(sync_existing_episode_to_spiral),
+        )
         .route("/spiral/query", post(spiral_query))
         .route("/spiral/replay", post(start_spiral_replay))
         .route("/spiral/video.mp4", get(spiral_video))
@@ -1000,6 +1004,17 @@ async fn publish_existing_episode(
     Ok(StatusCode::ACCEPTED)
 }
 
+async fn sync_existing_episode_to_spiral(
+    State(state): State<AppState>,
+    Path(episode): Path<String>,
+) -> Result<StatusCode, Failure> {
+    state
+        .storage
+        .sync_spiral_existing(episode)
+        .map_err(Failure::bad_request)?;
+    Ok(StatusCode::ACCEPTED)
+}
+
 async fn spiral_query(
     State(state): State<AppState>,
     Json(request): Json<SpiralQueryRequest>,
@@ -1299,7 +1314,7 @@ async fn stop_recording(
     // never have to repair storage before motion commands can stop.
     // Claim the video first. If the control thread publishes its stopped state
     // while this request is awaiting the reply, the automatic monitor must not
-    // race this explicit stop and publish a second copy without its video.
+    // race this explicit stop and stage a second copy without its video.
     let capture = state.recording_video.lock().await.take();
     let recording = state.hardware.stop_recording(request.keep).await;
     let idle = state.hardware.set_mode(ModeSelection::Idle).await;
@@ -1316,27 +1331,27 @@ async fn stop_recording(
             // The take only exists under its final name now, so the cache has
             // to catch up before anything lists it.
             state.episodes.reload().map_err(Failure::from)?;
-            state.storage.queue_publish(summary.id.clone(), videos);
+            state.storage.stage_local(summary.id.clone(), videos);
             Ok(Json(summary))
         }
         (Ok(summary), Err(mode_error)) => {
             // The file did finish, so make it visible even though the safety
             // transition needs attention.
             state.episodes.reload().map_err(Failure::from)?;
-            state.storage.queue_publish(summary.id, videos);
+            state.storage.stage_local(summary.id, videos);
             Err(Failure::from(format!(
                 "the recording ended, but teleoperation could not stop: {mode_error}"
             )))
         }
         (Err(recording_error), Ok(())) => {
             if let Some(episode) = capture_episode {
-                state.storage.queue_publish(episode, videos);
+                state.storage.stage_local(episode, videos);
             }
             Err(Failure::from(recording_error))
         }
         (Err(recording_error), Err(mode_error)) => {
             if let Some(episode) = capture_episode {
-                state.storage.queue_publish(episode, videos);
+                state.storage.stage_local(episode, videos);
             }
             Err(Failure::from(format!(
                 "{recording_error}; teleoperation also could not stop: {mode_error}"

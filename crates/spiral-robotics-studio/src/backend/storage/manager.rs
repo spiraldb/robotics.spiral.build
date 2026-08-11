@@ -14,8 +14,8 @@ use adbc_core::{Connection as _, Database as _, Driver as _, Optionable as _, St
 use adbc_driver_manager::{ManagedConnection, ManagedDatabase, ManagedDriver};
 use arrow_array::{
     Array as _, ArrayRef, BinaryArray, BinaryViewArray, FixedSizeListArray, Float32Array,
-    Float64Array, Int64Array, LargeBinaryArray, LargeStringArray, RecordBatch, StringArray,
-    UInt32Array, UInt64Array,
+    Float64Array, Int64Array, LargeBinaryArray, LargeListArray, LargeListViewArray, ListArray,
+    ListViewArray, RecordBatch, StringArray, UInt32Array, UInt64Array,
 };
 use arrow_json::writer::{JsonArray, WriterBuilder};
 use arrow_schema::{DataType, Field, Schema};
@@ -24,6 +24,7 @@ use hf_hub::repository::CommitOperation;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use spiral_robotics_core::api::{
     ConnectionTestResponse, PublicationStatus, QueryColumn, SpiralQueryResponse, TrainingSource,
@@ -33,7 +34,7 @@ use spiral_robotics_core::spiral::{self, Table, column as db};
 use crate::backend::recording::episodes::{CompletedEpisode, EpisodeStore};
 use crate::backend::recording::spiral::{
     SpiralEpisodeEncoder, VideoStreamRow, episode_completion_batch, episode_streams_batch,
-    joint_samples_batch, joint_samples_schema, spiral_joint_samples_batch, video_streams_batch,
+    joint_samples_batch, joint_samples_schema, video_streams_batch,
 };
 use crate::backend::robotics::video::{VideoAsset, load_assets, save_assets};
 use crate::backend::storage::settings::{
@@ -44,6 +45,7 @@ use crate::backend::storage::sql::{self, ReadOnlyMode};
 const MAX_QUERY_ROWS: usize = 1_000;
 const MAX_REPLAY_ROWS: usize = 250_000;
 const JOINT_BATCH_ROWS: usize = 512;
+const SPIRAL_RECEIPT: &str = "spiral.json";
 
 /// One database batch ready for the bounded Rust → Python Arrow pipe.
 pub struct TrainingDataBatch {
@@ -53,7 +55,6 @@ pub struct TrainingDataBatch {
     pub loader_seconds: f64,
     pub source_bytes: u64,
     pub queue_depth: usize,
-    pub normalized_json: bool,
 }
 
 pub enum TrainingDataMessage {
@@ -78,6 +79,21 @@ pub struct StorageManager {
     driver_path: Option<PathBuf>,
     adbc: Arc<Mutex<Option<CachedAdbc>>>,
     publications: Mutex<BTreeMap<String, PublicationStatus>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PublicationScope {
+    AllConfigured,
+    SpiralOnly,
+    HuggingFaceOnly,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct SpiralPublicationReceipt {
+    uri: String,
+    project_id: String,
+    dataset: String,
+    updated_ms: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -110,43 +126,141 @@ impl StorageManager {
     }
 
     pub fn statuses(&self) -> Vec<PublicationStatus> {
-        lock(&self.publications).values().cloned().collect()
+        let episodes = self.episodes.list();
+        let mut statuses = lock(&self.publications).clone();
+        statuses.retain(|episode_id, _| episodes.iter().any(|episode| &episode.id == episode_id));
+        let destination = self.settings.get().spiral;
+        for episode in episodes {
+            let existing = statuses.remove(&episode.id);
+            let active_or_failed = existing.as_ref().is_some_and(|status| {
+                matches!(status.state.as_str(), "queued" | "publishing")
+                    || status
+                        .spiral
+                        .as_deref()
+                        .is_some_and(|value| value.starts_with("failed:"))
+            });
+            let status = if active_or_failed {
+                existing.expect("active publication status must exist")
+            } else if load_spiral_receipt(self.episodes.directory(), &episode.id)
+                .ok()
+                .flatten()
+                .is_some_and(|receipt| receipt.matches(&destination))
+            {
+                let hugging_face = existing.and_then(|status| status.hugging_face);
+                let failed = hugging_face
+                    .as_deref()
+                    .is_some_and(|value| value.starts_with("failed:"));
+                PublicationStatus {
+                    episode_id: episode.id,
+                    state: if failed { "failed" } else { "published" }.to_owned(),
+                    spiral: Some("published".to_owned()),
+                    hugging_face,
+                    updated_ms: 0,
+                }
+            } else {
+                let hugging_face = existing.and_then(|status| status.hugging_face);
+                let failed = hugging_face
+                    .as_deref()
+                    .is_some_and(|value| value.starts_with("failed:"));
+                PublicationStatus {
+                    episode_id: episode.id,
+                    state: if failed { "failed" } else { "local" }.to_owned(),
+                    hugging_face,
+                    updated_ms: 0,
+                    ..PublicationStatus::default()
+                }
+            };
+            statuses.insert(status.episode_id.clone(), status);
+        }
+        statuses.into_values().collect()
     }
 
-    /// Queue completed publication after the local file and camera files have
-    /// closed. Robot control is already idle before this task performs I/O.
-    pub fn queue_publish(self: &Arc<Self>, episode_id: String, videos: Vec<VideoAsset>) {
+    /// Finish the backend-owned recording transaction without crossing the
+    /// network boundary. Completed JSONL and camera assets form the local
+    /// staging buffer until the operator explicitly pushes the episode.
+    pub fn stage_local(self: &Arc<Self>, episode_id: String, videos: Vec<VideoAsset>) {
         if let Err(error) = save_assets(self.episodes.directory(), &episode_id, &videos) {
-            tracing::warn!(episode = %episode_id, "could not persist video publication manifest: {error}");
+            tracing::warn!(episode = %episode_id, "could not persist local video manifest: {error}");
         }
         self.set_status(PublicationStatus {
+            episode_id: episode_id.clone(),
+            state: "local".to_owned(),
+            updated_ms: unix_millis(),
+            ..PublicationStatus::default()
+        });
+        if self.settings.get().hugging_face.enabled {
+            self.queue_publish(episode_id, videos, PublicationScope::HuggingFaceOnly);
+        }
+    }
+
+    fn queue_publish(
+        self: &Arc<Self>,
+        episode_id: String,
+        videos: Vec<VideoAsset>,
+        scope: PublicationScope,
+    ) {
+        let mut status = PublicationStatus {
             episode_id: episode_id.clone(),
             state: "queued".to_owned(),
             updated_ms: unix_millis(),
             ..PublicationStatus::default()
-        });
+        };
+        match scope {
+            PublicationScope::SpiralOnly => status.spiral = Some("queued".to_owned()),
+            PublicationScope::HuggingFaceOnly => status.hugging_face = Some("queued".to_owned()),
+            PublicationScope::AllConfigured => {}
+        }
+        self.set_status(status);
         let manager = self.clone();
         tokio::spawn(async move {
-            manager.publish(episode_id, videos).await;
+            manager.publish(episode_id, videos, scope).await;
         });
     }
 
     pub fn publish_existing(self: &Arc<Self>, episode_id: String) -> Result<(), String> {
+        self.ensure_not_publishing(&episode_id)?;
+        let videos = self.prepare_existing(&episode_id)?;
+        self.queue_publish(episode_id, videos, PublicationScope::AllConfigured);
+        Ok(())
+    }
+
+    pub fn sync_spiral_existing(self: &Arc<Self>, episode_id: String) -> Result<(), String> {
+        let outcome = (|| {
+            self.ensure_not_publishing(&episode_id)?;
+            if !self.settings.get().spiral.configured() {
+                return Err(
+                    "Configure a Spiral catalog, project, and dataset in Settings before pushing"
+                        .to_owned(),
+                );
+            }
+            let videos = self.prepare_existing(&episode_id)?;
+            self.queue_publish(episode_id.clone(), videos, PublicationScope::SpiralOnly);
+            Ok(())
+        })();
+        if let Err(error) = &outcome {
+            self.set_spiral_failed(&episode_id, error);
+        }
+        outcome
+    }
+
+    fn ensure_not_publishing(&self, episode_id: &str) -> Result<(), String> {
         if lock(&self.publications)
-            .get(&episode_id)
+            .get(episode_id)
             .is_some_and(|status| matches!(status.state.as_str(), "queued" | "publishing"))
         {
             return Err(format!("{episode_id} is already being published"));
         }
-        self.episodes
-            .completed(&episode_id)
-            .map_err(|error| error.to_string())?;
-        let videos = load_assets(self.episodes.directory(), &episode_id)?;
-        self.queue_publish(episode_id, videos);
         Ok(())
     }
 
-    async fn publish(&self, episode_id: String, videos: Vec<VideoAsset>) {
+    fn prepare_existing(&self, episode_id: &str) -> Result<Vec<VideoAsset>, String> {
+        self.episodes
+            .completed(episode_id)
+            .map_err(|error| error.to_string())?;
+        load_assets(self.episodes.directory(), episode_id)
+    }
+
+    async fn publish(&self, episode_id: String, videos: Vec<VideoAsset>, scope: PublicationScope) {
         let mut status = PublicationStatus {
             episode_id: episode_id.clone(),
             state: "publishing".to_owned(),
@@ -166,7 +280,23 @@ impl StorageManager {
             }
         };
 
-        if !settings.spiral.configured() && !settings.hugging_face.enabled {
+        if scope == PublicationScope::SpiralOnly && !settings.spiral.configured() {
+            status.state = "failed".to_owned();
+            status.spiral = Some("failed: SpiralDB is not configured".to_owned());
+            status.updated_ms = unix_millis();
+            self.set_status(status);
+            return;
+        }
+        if scope == PublicationScope::HuggingFaceOnly && !settings.hugging_face.enabled {
+            status.state = "local".to_owned();
+            status.updated_ms = unix_millis();
+            self.set_status(status);
+            return;
+        }
+        if !settings.spiral.configured()
+            && (scope == PublicationScope::SpiralOnly
+                || (scope != PublicationScope::HuggingFaceOnly && !settings.hugging_face.enabled))
+        {
             status.state = "local".to_owned();
             status.updated_ms = unix_millis();
             self.set_status(status);
@@ -182,7 +312,7 @@ impl StorageManager {
             return;
         }
 
-        if settings.spiral.configured() {
+        if scope != PublicationScope::HuggingFaceOnly && settings.spiral.configured() {
             status.spiral = Some("publishing".to_owned());
             status.updated_ms = unix_millis();
             self.set_status(status.clone());
@@ -191,12 +321,20 @@ impl StorageManager {
                     .publish_spiral(&settings.spiral, &completed, &videos)
                     .await
                 {
-                    Ok(()) => "published".to_owned(),
+                    Ok(()) => {
+                        let receipt = SpiralPublicationReceipt::new(&settings.spiral);
+                        if let Err(error) =
+                            save_spiral_receipt(self.episodes.directory(), &episode_id, &receipt)
+                        {
+                            tracing::warn!(episode = %episode_id, "could not persist SpiralDB sync receipt: {error}");
+                        }
+                        "published".to_owned()
+                    }
                     Err(error) => format!("failed: {error}"),
                 },
             );
         }
-        if settings.hugging_face.enabled {
+        if scope != PublicationScope::SpiralOnly && settings.hugging_face.enabled {
             status.hugging_face = Some("publishing".to_owned());
             status.updated_ms = unix_millis();
             self.set_status(status.clone());
@@ -492,10 +630,9 @@ impl StorageManager {
                         .iter()
                         .map(|column| column.get_buffer_memory_size() as u64)
                         .sum();
-                    let normalize_started = Instant::now();
-                    let (batch, normalized_json) =
-                        normalize_training_batch(batch, &state_column, &action_column)?;
-                    let loader_seconds = fetch_seconds + normalize_started.elapsed().as_secs_f64();
+                    let prepare_started = Instant::now();
+                    let batch = prepare_training_batch(batch, &state_column, &action_column)?;
+                    let loader_seconds = fetch_seconds + prepare_started.elapsed().as_secs_f64();
                     let queue_depth = sender.max_capacity().saturating_sub(sender.capacity());
                     if sender
                         .blocking_send(TrainingDataMessage::Batch(TrainingDataBatch {
@@ -505,7 +642,6 @@ impl StorageManager {
                             loader_seconds,
                             source_bytes,
                             queue_depth,
-                            normalized_json,
                         }))
                         .is_err()
                     {
@@ -566,21 +702,17 @@ impl StorageManager {
         for row in result.rows {
             sample_hz = sample_hz.or_else(|| row.get(db::SAMPLE_HZ).and_then(JsonValue::as_f64));
             let names = row
-                .get(db::JOINT_NAMES_JSON)
-                .and_then(JsonValue::as_str)
-                .ok_or_else(|| format!("Spiral trajectory is missing {}", db::JOINT_NAMES_JSON))?;
-            let names: Vec<String> = serde_json::from_str(names)
-                .map_err(|error| format!("decoding Spiral {}: {error}", db::JOINT_NAMES_JSON))?;
+                .get(db::JOINT_NAMES)
+                .and_then(JsonValue::as_array)
+                .ok_or_else(|| format!("Spiral trajectory is missing {}", db::JOINT_NAMES))?;
             let values = row
                 .get(db::REPLAY_POSITION)
-                .and_then(JsonValue::as_str)
+                .and_then(JsonValue::as_array)
                 .ok_or_else(|| format!("Spiral trajectory is missing {}", db::REPLAY_POSITION))?;
-            let values: Vec<Option<f64>> = serde_json::from_str(values)
-                .map_err(|error| format!("decoding Spiral {}: {error}", db::REPLAY_POSITION))?;
             let pose = names
                 .iter()
-                .zip(&values)
-                .filter_map(|(name, value)| Some((name.clone(), (*value)?)))
+                .zip(values)
+                .filter_map(|(name, value)| Some((name.as_str()?.to_owned(), value.as_f64()?)))
                 .collect::<BTreeMap<_, _>>();
             if !pose.is_empty() {
                 trajectory.push(pose);
@@ -657,6 +789,16 @@ impl StorageManager {
     fn set_status(&self, status: PublicationStatus) {
         lock(&self.publications).insert(status.episode_id.clone(), status);
     }
+
+    fn set_spiral_failed(&self, episode_id: &str, error: &str) {
+        self.set_status(PublicationStatus {
+            episode_id: episode_id.to_owned(),
+            state: "failed".to_owned(),
+            spiral: Some(format!("failed: {error}")),
+            updated_ms: unix_millis(),
+            ..PublicationStatus::default()
+        });
+    }
 }
 
 impl AdbcConnectionKey {
@@ -666,6 +808,23 @@ impl AdbcConnectionKey {
             uri: settings.uri.clone(),
             project_id: settings.project_id.clone(),
         }
+    }
+}
+
+impl SpiralPublicationReceipt {
+    fn new(settings: &StoredSpiralSettings) -> Self {
+        Self {
+            uri: settings.uri.clone(),
+            project_id: settings.project_id.clone(),
+            dataset: settings.dataset.clone(),
+            updated_ms: unix_millis(),
+        }
+    }
+
+    fn matches(&self, settings: &StoredSpiralSettings) -> bool {
+        self.uri == settings.uri
+            && self.project_id == settings.project_id
+            && self.dataset == settings.dataset
     }
 }
 
@@ -928,7 +1087,7 @@ fn publish_spiral_blocking(
     for sample in &episode.samples {
         rows.extend(encoder.encode(sample).map_err(|error| error.to_string())?);
         if rows.len() >= JOINT_BATCH_ROWS {
-            let batch = spiral_joint_samples_batch(&rows).map_err(|error| error.to_string())?;
+            let batch = joint_samples_batch(&rows).map_err(|error| error.to_string())?;
             ingest_batch(
                 connection,
                 &sql::relation(&settings.dataset, Table::JointSamples),
@@ -938,7 +1097,7 @@ fn publish_spiral_blocking(
         }
     }
     if !rows.is_empty() {
-        let batch = spiral_joint_samples_batch(&rows).map_err(|error| error.to_string())?;
+        let batch = joint_samples_batch(&rows).map_err(|error| error.to_string())?;
         ingest_batch(
             connection,
             &sql::relation(&settings.dataset, Table::JointSamples),
@@ -1127,14 +1286,14 @@ fn validate_training_schema(
     }
 }
 
-/// Convert Spiral's scalar JSON compatibility columns into the typed float32
-/// vectors the worker contract prefers. This work stays in the bounded Rust
-/// loader and overlaps with PyTorch compute; Python never parses database JSON.
-fn normalize_training_batch(
+/// Validate native Arrow list columns and present equal-width float32 vectors
+/// to the Python worker. This stays in the bounded Rust loader and overlaps
+/// with PyTorch compute.
+fn prepare_training_batch(
     batch: RecordBatch,
     state_column: &str,
     action_column: &str,
-) -> Result<(RecordBatch, bool), String> {
+) -> Result<RecordBatch, String> {
     let mut fields = batch
         .schema()
         .fields()
@@ -1142,93 +1301,125 @@ fn normalize_training_batch(
         .map(|field| field.as_ref().clone())
         .collect::<Vec<_>>();
     let mut columns = batch.columns().to_vec();
-    let mut normalized = false;
     for name in [state_column, action_column] {
         let index = batch
             .schema()
             .index_of(name)
             .map_err(|error| format!("finding training column {name:?}: {error}"))?;
-        let replacement = match columns[index].data_type() {
-            DataType::Utf8 => {
-                let array = columns[index]
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .expect("Utf8 column must be a StringArray");
-                Some(training_json_vectors(
-                    name,
-                    (0..array.len()).map(|row| (!array.is_null(row)).then(|| array.value(row))),
-                )?)
-            }
-            DataType::LargeUtf8 => {
-                let array = columns[index]
-                    .as_any()
-                    .downcast_ref::<LargeStringArray>()
-                    .expect("LargeUtf8 column must be a LargeStringArray");
-                Some(training_json_vectors(
-                    name,
-                    (0..array.len()).map(|row| (!array.is_null(row)).then(|| array.value(row))),
-                )?)
-            }
-            _ => None,
-        };
-        if let Some(array) = replacement {
-            fields[index] = Field::new(name, array.data_type().clone(), false);
-            columns[index] = array;
-            normalized = true;
-        }
-    }
-    if !normalized {
-        return Ok((batch, false));
+        let array = training_list_vectors(name, &columns[index])?;
+        fields[index] = Field::new(name, array.data_type().clone(), false);
+        columns[index] = array;
     }
     let schema = Arc::new(Schema::new_with_metadata(
         fields,
         batch.schema().metadata().clone(),
     ));
     RecordBatch::try_new(schema, columns)
-        .map(|batch| (batch, true))
-        .map_err(|error| format!("building the normalized training batch: {error}"))
+        .map_err(|error| format!("building the prepared training batch: {error}"))
 }
 
-fn training_json_vectors<'a>(
-    name: &str,
-    rows: impl Iterator<Item = Option<&'a str>>,
-) -> Result<ArrayRef, String> {
+fn training_list_vectors(name: &str, array: &ArrayRef) -> Result<ArrayRef, String> {
+    let rows = match array.data_type() {
+        DataType::List(_) => {
+            let lists = array
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .expect("List column must be a ListArray");
+            (0..lists.len())
+                .map(|row| (!lists.is_null(row)).then(|| lists.value(row)))
+                .collect::<Vec<_>>()
+        }
+        DataType::LargeList(_) => {
+            let lists = array
+                .as_any()
+                .downcast_ref::<LargeListArray>()
+                .expect("LargeList column must be a LargeListArray");
+            (0..lists.len())
+                .map(|row| (!lists.is_null(row)).then(|| lists.value(row)))
+                .collect::<Vec<_>>()
+        }
+        DataType::ListView(_) => {
+            let lists = array
+                .as_any()
+                .downcast_ref::<ListViewArray>()
+                .expect("ListView column must be a ListViewArray");
+            (0..lists.len())
+                .map(|row| (!lists.is_null(row)).then(|| lists.value(row)))
+                .collect::<Vec<_>>()
+        }
+        DataType::LargeListView(_) => {
+            let lists = array
+                .as_any()
+                .downcast_ref::<LargeListViewArray>()
+                .expect("LargeListView column must be a LargeListViewArray");
+            (0..lists.len())
+                .map(|row| (!lists.is_null(row)).then(|| lists.value(row)))
+                .collect::<Vec<_>>()
+        }
+        DataType::FixedSizeList(_, _) => {
+            let lists = array
+                .as_any()
+                .downcast_ref::<FixedSizeListArray>()
+                .expect("FixedSizeList column must be a FixedSizeListArray");
+            (0..lists.len())
+                .map(|row| (!lists.is_null(row)).then(|| lists.value(row)))
+                .collect::<Vec<_>>()
+        }
+        data_type => {
+            return Err(format!(
+                "training column {name:?} must be a native Arrow list, got {data_type}"
+            ));
+        }
+    };
+
     let mut width = None;
     let mut values = Vec::new();
-    for (row, encoded) in rows.enumerate() {
-        let encoded = encoded.ok_or_else(|| {
+    for (row, components) in rows.into_iter().enumerate() {
+        let components = components.ok_or_else(|| {
             format!("training column {name:?} contains a null vector at batch row {row}")
         })?;
-        let decoded: Vec<Option<f32>> = serde_json::from_str(encoded).map_err(|error| {
-            format!("decoding training column {name:?} at batch row {row}: {error}")
-        })?;
-        if decoded.is_empty() {
+        if components.is_empty() {
             return Err(format!(
                 "training column {name:?} contains an empty vector at batch row {row}"
             ));
         }
         match width {
-            Some(width) if width != decoded.len() => {
+            Some(width) if width != components.len() => {
                 return Err(format!(
                     "training column {name:?} changes width from {width} to {} at batch row {row}",
-                    decoded.len()
+                    components.len()
                 ));
             }
-            None => width = Some(decoded.len()),
+            None => width = Some(components.len()),
             _ => {}
         }
-        for (component, value) in decoded.into_iter().enumerate() {
-            let value = value.ok_or_else(|| {
-                format!(
-                    "training column {name:?} contains a null component at batch row {row}, component {component}"
-                )
-            })?;
-            if !value.is_finite() {
+        match components.data_type() {
+            DataType::Float32 => {
+                let components = components
+                    .as_any()
+                    .downcast_ref::<Float32Array>()
+                    .expect("Float32 values must be a Float32Array");
+                append_training_components(name, row, components.iter(), &mut values)?;
+            }
+            DataType::Float64 => {
+                let components = components
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .expect("Float64 values must be a Float64Array");
+                append_training_components(
+                    name,
+                    row,
+                    components
+                        .iter()
+                        .map(|value| value.map(|value| value as f32)),
+                    &mut values,
+                )?;
+            }
+            data_type => {
                 return Err(format!(
-                    "training column {name:?} contains a non-finite component at batch row {row}, component {component}"
+                    "training column {name:?} must contain float32 or float64 values, got {data_type}"
                 ));
             }
-            values.push(value);
         }
     }
     let width = width.ok_or_else(|| format!("training column {name:?} contains no vectors"))?;
@@ -1238,6 +1429,28 @@ fn training_json_vectors<'a>(
     FixedSizeListArray::try_new(item, width, Arc::new(Float32Array::from(values)), None)
         .map(|array| Arc::new(array) as ArrayRef)
         .map_err(|error| format!("building typed training column {name:?}: {error}"))
+}
+
+fn append_training_components(
+    name: &str,
+    row: usize,
+    components: impl Iterator<Item = Option<f32>>,
+    values: &mut Vec<f32>,
+) -> Result<(), String> {
+    for (component, value) in components.enumerate() {
+        let value = value.ok_or_else(|| {
+            format!(
+                "training column {name:?} contains a null component at batch row {row}, component {component}"
+            )
+        })?;
+        if !value.is_finite() {
+            return Err(format!(
+                "training column {name:?} contains a non-finite component at batch row {row}, component {component}"
+            ));
+        }
+        values.push(value);
+    }
+    Ok(())
 }
 
 fn training_checkpoint_batch(checkpoint: TrainingCheckpointWrite) -> Result<RecordBatch, String> {
@@ -1542,6 +1755,39 @@ fn unix_millis() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
+fn save_spiral_receipt(
+    root: &Path,
+    episode_id: &str,
+    receipt: &SpiralPublicationReceipt,
+) -> Result<(), String> {
+    let directory = root.join("videos").join(episode_id);
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
+    let path = directory.join(SPIRAL_RECEIPT);
+    let temporary = directory.join("spiral.json.tmp");
+    let bytes = serde_json::to_vec_pretty(receipt)
+        .map_err(|error| format!("could not encode SpiralDB sync receipt: {error}"))?;
+    std::fs::write(&temporary, bytes)
+        .map_err(|error| format!("could not write {}: {error}", temporary.display()))?;
+    std::fs::rename(&temporary, &path)
+        .map_err(|error| format!("could not publish {}: {error}", path.display()))
+}
+
+fn load_spiral_receipt(
+    root: &Path,
+    episode_id: &str,
+) -> Result<Option<SpiralPublicationReceipt>, String> {
+    let path = root.join("videos").join(episode_id).join(SPIRAL_RECEIPT);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&path)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|error| format!("could not parse {}: {error}", path.display()))
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
@@ -1550,6 +1796,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use arrow_array::builder::{Float64Builder, ListBuilder};
     use bytes::Bytes;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use spiral_robotics_core::api::EpisodeArm;
@@ -1586,7 +1833,17 @@ mod tests {
     }
 
     #[test]
-    fn training_loader_normalizes_spiral_json_vectors_to_typed_float32() {
+    fn training_loader_prepares_native_lists_as_typed_float32() {
+        let mut state = ListBuilder::new(Float64Builder::new());
+        let mut action = ListBuilder::new(Float64Builder::new());
+        for values in [[0.1, 0.2], [0.3, 0.4]] {
+            state.values().append_slice(&values);
+            state.append(true);
+        }
+        for values in [[0.5, 0.6], [0.7, 0.8]] {
+            action.values().append_slice(&values);
+            action.append(true);
+        }
         let batch = RecordBatch::try_from_iter(vec![
             (
                 db::EPISODE_ID,
@@ -1600,19 +1857,12 @@ mod tests {
                 db::SAMPLE_INDEX,
                 Arc::new(UInt64Array::from(vec![0, 1])) as ArrayRef,
             ),
-            (
-                db::STATE,
-                Arc::new(StringArray::from(vec!["[0.1,0.2]", "[0.3,0.4]"])) as ArrayRef,
-            ),
-            (
-                db::ACTION,
-                Arc::new(StringArray::from(vec!["[0.5,0.6]", "[0.7,0.8]"])) as ArrayRef,
-            ),
+            (db::STATE, Arc::new(state.finish()) as ArrayRef),
+            (db::ACTION, Arc::new(action.finish()) as ArrayRef),
         ])
         .unwrap();
 
-        let (batch, normalized) = normalize_training_batch(batch, db::STATE, db::ACTION).unwrap();
-        assert!(normalized);
+        let batch = prepare_training_batch(batch, db::STATE, db::ACTION).unwrap();
         let state = batch
             .column_by_name(db::STATE)
             .unwrap()
@@ -1626,9 +1876,21 @@ mod tests {
     }
 
     #[test]
-    fn training_loader_rejects_null_json_components_before_python() {
-        let error = training_json_vectors("state", [Some("[0.1,null]")].into_iter()).unwrap_err();
+    fn training_loader_rejects_null_list_components_before_python() {
+        let mut values = ListBuilder::new(Float64Builder::new());
+        values.values().append_value(0.1);
+        values.values().append_null();
+        values.append(true);
+        let error =
+            training_list_vectors("state", &(Arc::new(values.finish()) as ArrayRef)).unwrap_err();
         assert!(error.contains("null component"));
+    }
+
+    #[test]
+    fn training_loader_rejects_string_vectors() {
+        let vectors = Arc::new(StringArray::from(vec!["[0.1,0.2]"])) as ArrayRef;
+        let error = training_list_vectors("state", &vectors).unwrap_err();
+        assert!(error.contains("must be a native Arrow list"));
     }
 
     #[test]
@@ -1641,6 +1903,74 @@ mod tests {
         ]);
         let error = validate_training_schema(&schema, db::STATE, db::ACTION).unwrap_err();
         assert!(error.contains(db::ACTION));
+    }
+
+    #[test]
+    fn completed_recordings_stage_locally_until_an_explicit_push() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings = Arc::new(DataSettingsStore::open(directory.path()).unwrap());
+        let episodes = Arc::new(EpisodeStore::open(directory.path().to_path_buf()).unwrap());
+        let manager = Arc::new(StorageManager::new(settings, episodes, None).unwrap());
+
+        manager.stage_local("episode_000024".to_owned(), Vec::new());
+
+        let publications = lock(&manager.publications);
+        let status = publications.get("episode_000024").unwrap();
+        assert_eq!(status.state, "local");
+        assert_eq!(status.spiral, None);
+        assert!(
+            directory
+                .path()
+                .join("videos/episode_000024/assets.json")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn spiral_sync_receipts_survive_restart_and_are_destination_specific() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = StoredSpiralSettings {
+            enabled: true,
+            uri: "spiraldb://".to_owned(),
+            project_id: "project-a".to_owned(),
+            dataset: "robot_data".to_owned(),
+        };
+        let receipt = SpiralPublicationReceipt::new(&destination);
+
+        save_spiral_receipt(directory.path(), "episode_000024", &receipt).unwrap();
+        let restored = load_spiral_receipt(directory.path(), "episode_000024")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(restored, receipt);
+        assert!(restored.matches(&destination));
+        assert!(!restored.matches(&StoredSpiralSettings {
+            dataset: "other_dataset".to_owned(),
+            ..destination
+        }));
+    }
+
+    #[test]
+    fn spiral_push_preflight_is_retained_as_a_row_level_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings = Arc::new(DataSettingsStore::open(directory.path()).unwrap());
+        let episodes = Arc::new(EpisodeStore::open(directory.path().to_path_buf()).unwrap());
+        let manager = Arc::new(StorageManager::new(settings, episodes, None).unwrap());
+
+        let error = manager
+            .sync_spiral_existing("episode_000024".to_owned())
+            .unwrap_err();
+
+        assert!(error.contains("Configure a Spiral"));
+        let publications = lock(&manager.publications);
+        let status = publications.get("episode_000024").unwrap();
+        assert_eq!(status.state, "failed");
+        assert!(
+            status
+                .spiral
+                .as_deref()
+                .is_some_and(|message| message.contains("Configure a Spiral"))
+        );
     }
 
     /// Loads the real Spiral ADBC shared library but keeps all database state
@@ -1834,8 +2164,8 @@ mod tests {
             let connection = manager.test_spiral().await;
             assert!(connection.ok, "{}", connection.message);
 
-            // This is the exact asynchronous path used after recording stops
-            // and by POST /api/data/episodes/:episode/publish.
+            // This is the exact asynchronous path used by an explicit
+            // publication request for an already staged local episode.
             manager.publish_existing(episode_id.clone()).unwrap();
             tokio::time::timeout(std::time::Duration::from_secs(15), async {
                 loop {

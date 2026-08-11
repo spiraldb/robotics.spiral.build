@@ -29,7 +29,7 @@ FRAME_BATCH = 1
 FRAME_ERROR = 2
 FRAME_EPOCH_END = 3
 FRAME_END = 4
-FRAME_HEADER = struct.Struct("<BQQQQQIB")
+FRAME_HEADER = struct.Struct("<BQQQQQI")
 
 
 def emit(kind: str, **values: Any) -> None:
@@ -57,7 +57,6 @@ class Frame:
     source_bytes: int
     loader_seconds: float
     queue_depth: int
-    normalized_json: bool
 
 
 def frames(stream: BinaryIO) -> Iterator[Frame]:
@@ -67,7 +66,7 @@ def frames(stream: BinaryIO) -> Iterator[Frame]:
             return
         if len(header) != FRAME_HEADER.size:
             header += read_exact(stream, FRAME_HEADER.size - len(header))
-        kind, payload_size, epoch, fetch_ns, source_bytes, loader_ns, queue_depth, flags = (
+        kind, payload_size, epoch, fetch_ns, source_bytes, loader_ns, queue_depth = (
             FRAME_HEADER.unpack(header)
         )
         payload = read_exact(stream, payload_size)
@@ -79,7 +78,6 @@ def frames(stream: BinaryIO) -> Iterator[Frame]:
             source_bytes=source_bytes,
             loader_seconds=float(loader_ns) / 1_000_000_000.0,
             queue_depth=queue_depth,
-            normalized_json=bool(flags & 1),
         )
 
 
@@ -93,8 +91,8 @@ def arrow_primitive_tensor(array: pa.Array) -> torch.Tensor:
         return torch.from_numpy(values)
 
 
-def vector_tensor(array: pa.Array, name: str) -> tuple[torch.Tensor, bool]:
-    """Return [row, feature] float32 values and whether JSON caused a copy."""
+def vector_tensor(array: pa.Array, name: str) -> torch.Tensor:
+    """Return one native Arrow list column as [row, feature] float32 values."""
     value_type = array.type
     if pa.types.is_fixed_size_list(value_type):
         if array.null_count:
@@ -103,32 +101,22 @@ def vector_tensor(array: pa.Array, name: str) -> tuple[torch.Tensor, bool]:
         # `values` is the unsliced child array. Account for the parent offset.
         child = array.values.slice(array.offset * width, len(array) * width)
         tensor = arrow_primitive_tensor(child).reshape(len(array), width)
-        return tensor.to(dtype=torch.float32), False
+        return tensor.to(dtype=torch.float32)
     if pa.types.is_list(value_type) or pa.types.is_large_list(value_type):
         if array.null_count:
             raise ValueError(f"{name} cannot contain null vectors")
         offsets = array.offsets.to_numpy(zero_copy_only=True)
         widths = np.diff(offsets)
         if len(widths) == 0:
-            return torch.empty((0, 0), dtype=torch.float32), False
+            return torch.empty((0, 0), dtype=torch.float32)
         if not np.all(widths == widths[0]):
             raise ValueError(f"{name} vectors must all have the same width")
         start = int(offsets[0])
         length = int(offsets[-1]) - start
         child = array.values.slice(start, length)
         values = arrow_primitive_tensor(child)
-        return values.reshape(len(array), int(widths[0])).to(torch.float32), False
-    if pa.types.is_string(value_type) or pa.types.is_large_string(value_type):
-        decoded = [json.loads(value) for value in array.to_pylist()]
-        values = np.asarray(decoded, dtype=np.float32)
-        if values.ndim != 2:
-            raise ValueError(f"{name} JSON values must be equal-width numeric vectors")
-        return torch.from_numpy(values), True
-    if pa.types.is_floating(value_type) or pa.types.is_integer(value_type):
-        return arrow_primitive_tensor(array).reshape(len(array), 1).to(torch.float32), False
-    raise ValueError(
-        f"{name} must be an Arrow numeric vector, list, fixed-size list, or JSON string; got {value_type}"
-    )
+        return values.reshape(len(array), int(widths[0])).to(torch.float32)
+    raise ValueError(f"{name} must be a native Arrow list; got {value_type}")
 
 
 @dataclass
@@ -142,7 +130,6 @@ class SourceBatch:
     loader_seconds: float
     transfer_bytes_per_second: float
     queue_depth: int
-    used_json_fallback: bool
 
 
 def decode_batch(frame: Frame, request: dict[str, Any]) -> SourceBatch:
@@ -159,11 +146,11 @@ def decode_batch(frame: Frame, request: dict[str, Any]) -> SourceBatch:
     if missing:
         raise ValueError(f"Rust sent an invalid training batch; missing {', '.join(missing)}")
 
-    state, state_json = vector_tensor(
+    state = vector_tensor(
         record_batch.column(record_batch.schema.get_field_index(request["state_column"])),
         request["state_column"],
     )
-    action, action_json = vector_tensor(
+    action = vector_tensor(
         record_batch.column(record_batch.schema.get_field_index(request["action_column"])),
         request["action_column"],
     )
@@ -187,7 +174,6 @@ def decode_batch(frame: Frame, request: dict[str, Any]) -> SourceBatch:
         loader_seconds=frame.loader_seconds,
         transfer_bytes_per_second=float(frame.source_bytes) / elapsed,
         queue_depth=frame.queue_depth,
-        used_json_fallback=frame.normalized_json or state_json or action_json,
     )
 
 
@@ -420,7 +406,6 @@ def train(config: dict[str, Any], stream: BinaryIO) -> None:
     step = 0
     last_validation: float | None = None
     pending_validation: float | None = None
-    json_notice_sent = False
     start_wall = time.perf_counter()
     metric_wall = start_wall
     metric_cpu = time.process_time()
@@ -593,15 +578,6 @@ def train(config: dict[str, Any], stream: BinaryIO) -> None:
         last_transfer = source.transfer_bytes_per_second
         last_queue_depth = source.queue_depth
         loader_stall_pending = loader_stall_pending or source.loader_seconds >= 2.0
-        if source.used_json_fallback and not json_notice_sent:
-            emit(
-                "log",
-                message=(
-                    "Spiral returned JSON vectors. Rust normalized this compatibility "
-                    "path to typed float32 Arrow before the PyTorch boundary."
-                ),
-            )
-            json_notice_sent = True
         for window in assembler.feed(source):
             epoch_windows += window.state.shape[0]
             process(window)
@@ -631,20 +607,20 @@ def train(config: dict[str, Any], stream: BinaryIO) -> None:
 
 
 def self_test() -> None:
-    assert FRAME_HEADER.size == 46
+    assert FRAME_HEADER.size == 45
     fixed = pa.array(
         [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]],
         type=pa.list_(pa.float32(), 2),
     ).slice(1, 2)
-    fixed_tensor, copied = vector_tensor(fixed, "fixed")
-    assert not copied and fixed_tensor.tolist() == [[3.0, 4.0], [5.0, 6.0]]
+    fixed_tensor = vector_tensor(fixed, "fixed")
+    assert fixed_tensor.tolist() == [[3.0, 4.0], [5.0, 6.0]]
 
     variable = pa.array(
         [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]],
         type=pa.list_(pa.float32()),
     ).slice(1, 2)
-    variable_tensor, copied = vector_tensor(variable, "variable")
-    assert not copied and variable_tensor.tolist() == [[3.0, 4.0], [5.0, 6.0]]
+    variable_tensor = vector_tensor(variable, "variable")
+    assert variable_tensor.tolist() == [[3.0, 4.0], [5.0, 6.0]]
 
     def source(start: int, rows: int) -> SourceBatch:
         values = torch.arange(start, start + rows, dtype=torch.float32).reshape(-1, 1)
@@ -658,7 +634,6 @@ def self_test() -> None:
             loader_seconds=0.01,
             transfer_bytes_per_second=1.0,
             queue_depth=1,
-            used_json_fallback=False,
         )
 
     assembler = SequenceAssembler(3)

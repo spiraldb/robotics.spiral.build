@@ -58,9 +58,9 @@ pub fn trajectory(dataset: &str, episode_id: &str, stream_id: &str) -> String {
          WHERE e.{episode_id} = {episode_value} AND s.{stream_id} = {stream_value} \
          ORDER BY j.{sample_index}",
         sample_hz = column::SAMPLE_HZ,
-        joint_names = column::JOINT_NAMES_JSON,
-        action = column::ACTION_POSITION_JSON,
-        state = column::STATE_POSITION_JSON,
+        joint_names = column::JOINT_NAMES,
+        action = column::ACTION_POSITION,
+        state = column::STATE_POSITION,
         replay = column::REPLAY_POSITION,
         episode_id = column::EPISODE_ID,
         stream_id = column::STREAM_ID,

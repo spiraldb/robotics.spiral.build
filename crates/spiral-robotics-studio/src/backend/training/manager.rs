@@ -39,7 +39,7 @@ const FRAME_BATCH: u8 = 1;
 const FRAME_ERROR: u8 = 2;
 const FRAME_EPOCH_END: u8 = 3;
 const FRAME_END: u8 = 4;
-const FRAME_HEADER_BYTES: usize = 46;
+const FRAME_HEADER_BYTES: usize = 45;
 static RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Default)]
@@ -49,7 +49,6 @@ struct FrameMetadata {
     source_bytes: u64,
     loader_ns: u64,
     queue_depth: usize,
-    normalized_json: bool,
 }
 
 #[derive(Clone)]
@@ -901,7 +900,6 @@ async fn write_batch_frame(stdin: &mut ChildStdin, batch: TrainingDataBatch) -> 
             source_bytes: batch.source_bytes,
             loader_ns,
             queue_depth: batch.queue_depth,
-            normalized_json: batch.normalized_json,
         },
     )
     .await
@@ -922,7 +920,6 @@ async fn write_frame(
     header[33..41].copy_from_slice(&metadata.loader_ns.to_le_bytes());
     header[41..45]
         .copy_from_slice(&(metadata.queue_depth.min(u32::MAX as usize) as u32).to_le_bytes());
-    header[45] = u8::from(metadata.normalized_json);
     stdin
         .write_all(&header)
         .await

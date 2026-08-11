@@ -18,6 +18,7 @@ pub(crate) struct TrainingController {
     generated_sql: Signal<String>,
     selected_run: Signal<Option<String>>,
     starting: Signal<bool>,
+    start_error: Signal<Option<String>>,
     stopping: Signal<Option<String>>,
 }
 
@@ -36,6 +37,7 @@ pub(crate) fn use_training_controller(
         generated_sql: use_signal(move || initial_sql),
         selected_run: use_signal(|| None),
         starting: use_signal(|| false),
+        start_error: use_signal(|| None),
         stopping: use_signal(|| None),
     };
     let dataset_dependency = dataset.to_owned();
@@ -61,6 +63,7 @@ impl TrainingController {
             rebase_generated_sql(&mut request.sql, &previous, &next);
         }
         self.generated_sql.set(next);
+        self.start_error.set(None);
     }
 
     pub fn request(&self) -> StartTrainingRequest {
@@ -69,6 +72,7 @@ impl TrainingController {
 
     pub fn edit_request(mut self, edit: impl FnOnce(&mut StartTrainingRequest)) {
         edit(&mut self.request.write());
+        self.start_error.set(None);
     }
 
     pub fn selected_run(&self) -> Option<String> {
@@ -77,6 +81,10 @@ impl TrainingController {
 
     pub fn starting(&self) -> bool {
         self.starting.read().to_owned()
+    }
+
+    pub fn start_error(&self) -> Option<String> {
+        self.start_error.read().clone()
     }
 
     pub fn stopping(&self) -> Option<String> {
@@ -92,8 +100,10 @@ impl TrainingController {
             return;
         }
         self.starting.set(true);
+        self.start_error.set(None);
         let request = (self.request)();
         let mut starting = self.starting;
+        let mut start_error = self.start_error;
         studio.run_utility("Training started.", async move {
             let result = api::send_json::<_, TrainingRun>(
                 Method::POST,
@@ -103,6 +113,7 @@ impl TrainingController {
             .await
             .map(|_| ());
             starting.set(false);
+            start_error.set(result.as_ref().err().cloned());
             result
         });
     }

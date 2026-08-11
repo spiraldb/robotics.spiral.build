@@ -21,6 +21,7 @@ colors:
   caution: "#7d6a41"
   caution-soft: "#fbf3db"
   good: "#448361"
+  good-soft: "rgb(68 131 97 / 0.1)"
   arm-1: "#4a90d9"
   arm-2: "#9a6dd7"
   arm-3: "#4dab9a"
@@ -841,7 +842,13 @@ resource lanes explain whether the input pipeline and machine are feeding it.
 - **Owned data path:** The four stages shown are the actual boundaries: Rust
   Spiral ADBC query, bounded Arrow IPC queue, Python tensor/model compute, and
   Rust checkpoint ingest. Transfer rate and queue depth are measured values;
-  compatibility copies are named when the Rust loader normalizes JSON vectors.
+  the bounded Rust loader validates native Arrow lists and presents fixed-width
+  float32 vectors to Python.
+- **Terse operating copy:** Panel tabs name the regions, so their contents do
+  not repeat those names with explanatory headlines. Configuration uses field
+  labels, run state uses measured facts, and the SQL plus column mapping stays
+  available under one collapsed **Data query** disclosure. Data-path stages use
+  short noun labels paired with their live values instead of architecture prose.
 
 **The Shared-Optimizer-Step Rule.** Any training view that plots, marks, or
 summarizes run progress keys that evidence to optimizer step so learning and
@@ -870,6 +877,18 @@ system behavior can be compared without correlating unrelated axes by eye.
 
 - **Hierarchy:** Dataset owns Episodes. Dataset-level actions include Import and
   Export; episode-level actions are Select, Replay, and Delete.
+- **Local staging:** Episodes remain one newest-first ledger; storage location
+  never creates a second grouping or navigation mode. Every row states its
+  SpiralDB status as Local, Queued, Pushing, Synced, or Failed beside the
+  recording state.
+- **Push semantics:** Local rows expose Push, failed SpiralDB attempts expose
+  Retry, and Synced rows need no redundant action. Push/Retry targets only the
+  configured SpiralDB destination; unrelated Hugging Face activity cannot
+  change the row's SpiralDB state. Removing a Synced row deletes only its local
+  copy and leaves the persisted SpiralDB episode intact.
+- **Form decision:** This is an incumbent-surface extension, exempt from a
+  concept roll because the operator explicitly retained the existing ordered
+  episode list and rejected location grouping or a new transfer composition.
 - **Query:** A guarded read-only SQL editor with presets and a row limit in the
   Data workbench. Results render as the active sibling tab beside the preserved
   Scene and may synchronize the selected episode/playhead.
