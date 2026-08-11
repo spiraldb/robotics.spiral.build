@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use tempfile::tempdir;
 
 fn calibrate_command(config: &Path, input: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rerobot-calibrate"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_spiral-robotics-calibrate"));
     command
         .arg("--config")
         .arg(config)

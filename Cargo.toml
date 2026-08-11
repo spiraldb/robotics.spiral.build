@@ -1,9 +1,9 @@
 [workspace]
 members = [
-    "crates/rerobot-core",
-    "crates/rerobot-panels",
-    "crates/rerobot-studio",
-    "crates/rerobot-viewport",
+    "crates/spiral-robotics-core",
+    "crates/spiral-robotics-panels",
+    "crates/spiral-robotics-studio",
+    "crates/spiral-robotics-viewport",
 ]
 exclude = ["patches/block"]
 
@@ -13,10 +13,10 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
-rerobot = { path = "." }
-rerobot-core = { path = "crates/rerobot-core" }
-rerobot-panels = { path = "crates/rerobot-panels" }
-rerobot-viewport = { path = "crates/rerobot-viewport" }
+spiral-robotics = { path = "." }
+spiral-robotics-core = { path = "crates/spiral-robotics-core" }
+spiral-robotics-panels = { path = "crates/spiral-robotics-panels" }
+spiral-robotics-viewport = { path = "crates/spiral-robotics-viewport" }
 clap = { version = "4.5", features = ["derive"] }
 dioxus = { version = "0.7.10", default-features = false }
 glam = { version = "0.33", default-features = false, features = ["std"] }
@@ -29,14 +29,14 @@ serialport = { version = "4.9", default-features = false }
 tempfile = "3.27"
 
 [package]
-name = "rerobot"
+name = "spiral-robotics"
 version.workspace = true
 edition.workspace = true
 description = "Rust-native tools for real-world robotics"
 publish = false
 
 [dependencies]
-rerobot-core.workspace = true
+spiral-robotics-core.workspace = true
 clap.workspace = true
 image.workspace = true
 nokhwa.workspace = true
@@ -70,13 +70,13 @@ strip = "debuginfo"
 inherits = "release"
 
 [[bin]]
-name = "rerobot-find-port"
+name = "spiral-robotics-find-port"
 path = "src/bin/find_port.rs"
 
 [[bin]]
-name = "rerobot-find-cameras"
+name = "spiral-robotics-find-cameras"
 path = "src/bin/find_cameras.rs"
 
 [[bin]]
-name = "rerobot-calibrate"
+name = "spiral-robotics-calibrate"
 path = "src/bin/calibrate.rs"

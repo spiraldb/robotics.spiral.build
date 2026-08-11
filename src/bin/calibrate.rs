@@ -10,13 +10,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use rerobot::calibration::{
+use serde_json::{Map, Value};
+use spiral_robotics::calibration::{
     Calibration, CalibrationInput, Direction, MotorSpec, RangeTracker, build_calibration,
     validate_motor_specs,
 };
-use rerobot::feetech::FeetechBus;
-use rerobot::robot_config::RobotConfig;
-use serde_json::{Map, Value};
+use spiral_robotics::feetech::FeetechBus;
+use spiral_robotics::robot_config::RobotConfig;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 

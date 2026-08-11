@@ -1,0 +1,13 @@
+# The Dioxus CLI injects its own title into whatever `<title>` it finds in
+# index.html, so the static title is configured here rather than written there.
+# The app also sets it at runtime; this is what the tab says before the bundle
+# has loaded.
+[application]
+name = "spiral-robotics-studio"
+# Let DX own the stylesheet pipeline too. Both `dx serve` and `dx bundle`
+# compile it before the client is built, with no checked-in generated CSS.
+tailwind_input = "tailwind.css"
+tailwind_output = "assets/tailwind.css"
+
+[web.app]
+title = "Spiral Robotics Studio"

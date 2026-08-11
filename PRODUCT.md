@@ -9,14 +9,14 @@ web
 ## Users
 
 The primary user is an **ML engineer building robot policies**. Their real job
-is collecting data, training models, and evaluating behavior; rerobot is the
-hardware and data layer they need to stop fighting. They judge it on how
-quickly and reliably they can get from “arms on the bench” to synchronized,
+is collecting data, training models, and evaluating behavior; Spiral Robotics
+is the hardware and data layer they need to stop fighting. They judge it on
+how quickly and reliably they can get from “arms on the bench” to synchronized,
 queryable episodes, and on whether the system stays predictable once physical
 motion begins.
 
 They work with a pair of SO-ARM101 arms — one leader and one follower — wired
-to the rerobot backend, with one or more cameras observing the workspace. The
+to the Spiral Robotics backend, with one or more cameras observing the workspace. The
 browser may be on the same machine or elsewhere on the network.
 
 Secondary, and not yet a design target: other SO-101 owners who will arrive
@@ -24,7 +24,7 @@ when the project is opened. See **Distribution** below.
 
 ## Product Purpose
 
-rerobot sets up, calibrates, and drives SO-ARM101 arms, records synchronized
+Spiral Robotics sets up, calibrates, and drives SO-ARM101 arms, records synchronized
 robot and camera data, publishes and queries episodes, trains policies, and
 safely replays actions on a follower. Operators use it from the browser or the
 terminal without managing a Python environment themselves.
@@ -76,7 +76,7 @@ The deployment boundary is deliberately simple:
 Browser frontend
       │ HTTP + event stream
       ▼
-rerobot backend
+Spiral Robotics backend
       ├── robot connections and safety
       ├── recording and MP4 encoding
       ├── local episode recovery
@@ -87,8 +87,8 @@ rerobot backend
 ```
 
 - **The browser can run anywhere.** It renders the interface, WebGL scene,
-  charts, tables, and native video. It connects only to the rerobot backend and
-  does not connect directly to robots, SpiralDB, or Hugging Face.
+  charts, tables, and native video. It connects only to the Spiral Robotics
+  backend and does not connect directly to robots, SpiralDB, or Hugging Face.
 - **The backend is the one consequential system.** It normally runs near the
   arms and owns all hardware connections, the control loop, safety decisions,
   camera capture, video encoding, durable episode files, service credentials,
@@ -111,15 +111,15 @@ during calibration or teleoperation. Releasing torque lets an arm fall under
 its own weight, so controls and consequences must remain reachable and stable.
 
 Policy inference is not built. A future external inference service may produce
-actions, but the rerobot backend remains the authority that validates and
+actions, but the Spiral Robotics backend remains the authority that validates and
 applies them; the browser never becomes the motor-control runtime.
 
 ## Capabilities and Constraints
 
 **Shipped today**
 
-- Three CLIs — `rerobot-find-port`, `rerobot-find-cameras`, and
-  `rerobot-calibrate` — cover the Studio’s hardware setup flow for scripting and
+- Three CLIs — `spiral-robotics-find-port`, `spiral-robotics-find-cameras`, and
+  `spiral-robotics-calibrate` — cover the Studio’s hardware setup flow for scripting and
   machines without a browser.
 - A fullstack Dioxus Studio with three primary operating activities:
   - **Live** owns recording, arm selection, Hold / Release / Teleop, joint
@@ -132,7 +132,7 @@ applies them; the browser never becomes the motor-control runtime.
   - **Settings** owns robot setup (ports, camera assignment, calibration,
     add/import/delete) and backend data destinations. Setup is not mixed into
     the live operating flow.
-- A reusable `rerobot-panels` crate supplies tabbed tiles, horizontal and
+- A reusable `spiral-robotics-panels` crate supplies tabbed tiles, horizontal and
   vertical splits, drag docking with five-zone previews, split resizing,
   keyboard equivalents, persistence, panel reconciliation, and compact shared
   chrome. Live and Data keep independent saved layouts. The default desktop
@@ -215,8 +215,8 @@ time), and *Follow Δ* (the gap between measured and commanded joint position).
 
 ## Brand Commitments
 
-- The name is **rerobot**; the web interface is **rerobot studio**, styled
-  lowercase.
+- The name is **Spiral Robotics**; the web interface is **Spiral Robotics
+  Studio**.
 - The interface follows the compact, information-dense Notion/Rerun direction
   recorded in `notes.md`, while its panel mechanics use familiar VS Code
   tab-and-tile behavior. Live, Data, and Training are the primary activities;
@@ -231,14 +231,14 @@ time), and *Follow Δ* (the gap between measured and commanded joint position).
 
 Real, in-repo:
 
-- `crates/rerobot-core/assets/so101.urdf` — the shipped robot description.
-- `crates/rerobot-panels/` — the reusable panel, tile, docking, persistence,
+- `crates/spiral-robotics-core/assets/so101.urdf` — the shipped robot description.
+- `crates/spiral-robotics-panels/` — the reusable panel, tile, docking, persistence,
   keyboard, and motion system used by the Studio.
 - `examples/robot.json`, `examples/calibration-input.json` — real configuration
   and calibration input.
 - `robots/leader.json`, `robots/follower.json` — a working two-arm setup.
-- `crates/rerobot-studio/src/spiral_episode.rs` — the relational episode schema.
-- `crates/rerobot-studio/src/video_capture.rs` — server-owned MP4 capture and
+- `crates/spiral-robotics-studio/src/spiral_episode.rs` — the relational episode schema.
+- `crates/spiral-robotics-studio/src/video_capture.rs` — server-owned MP4 capture and
   timeline-aligned segment manifests.
 - A detailed `README.md` maintained in the repository.
 

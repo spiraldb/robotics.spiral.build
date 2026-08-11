@@ -7,7 +7,7 @@ use std::time::Duration;
 use clap::{Parser, ValueEnum};
 use nokhwa::native_api_backend;
 use nokhwa::utils::ApiBackend;
-use rerobot::cameras::{self, DetectedCamera, ProbeOutcome};
+use spiral_robotics::cameras::{self, DetectedCamera, ProbeOutcome};
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 

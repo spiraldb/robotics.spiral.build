@@ -65,7 +65,7 @@
             pkgs.dioxus-cli # fullstack dx bundle / dx serve
             tailwind # compiles tailwind.css
             # Must match the `wasm-bindgen` version pinned in
-            # crates/rerobot-studio/Cargo.toml; wasm-bindgen refuses a mismatch.
+            # crates/spiral-robotics-studio/Cargo.toml; wasm-bindgen refuses a mismatch.
             pkgs.wasm-bindgen-cli_0_2_126
             pkgs.binaryen # wasm-opt, used for release builds
           ];
@@ -116,7 +116,7 @@
             # callers. An explicit --training-python still wins when testing a
             # CUDA-specific environment outside nixpkgs.
             PYTHONNOUSERSITE = "1";
-            REROBOT_TRAINING_PYTHON = "${trainingPython}/bin/python";
+            SPIRAL_ROBOTICS_TRAINING_PYTHON = "${trainingPython}/bin/python";
 
             ASAN_SYMBOLIZER_PATH = "${llvmPackages.llvm}/bin/llvm-symbolizer";
             LIBCLANG_PATH = pkgs.lib.optionalString pkgs.stdenv.isLinux "${llvmPackages.libclang.lib}/lib";

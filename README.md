@@ -1,11 +1,11 @@
-# Rerobot
+# Spiral Robotics
 
-Rerobot is a robotics development platform inspired by
+Spiral Robotics is a robotics development platform inspired by
 [LeRobot](https://github.com/huggingface/lerobot) and [Rerun](https://github.com/rerun-io/rerun).
 
-But unlike LeRobot and Rerun, Rerobot is a one-stop-shop for the end-to-end robotics development pipeline, meaning that you can manupulate physical robots, collect data, train models, and deploy models all in one place.
+Unlike LeRobot and Rerun, Spiral Robotics is a one-stop-shop for the end-to-end robotics development pipeline, meaning that you can manupulate physical robots, collect data, train models, and deploy models all in one place.
 
-SpiralDB (by design) is the only storage layer for ReRobot, this means that all the telemetry, training epsiodes, and model checkpoints are stored in SpiralDB.
+SpiralDB (by design) is the only storage layer for Spiral Robotics, this means that all the telemetry, training epsiodes, and model checkpoints are stored in SpiralDB.
 
 ## Development
 
@@ -17,7 +17,7 @@ nix develop .
 
 Start the studio by:
 ```
-cd crates/rerobot-studio
+cd crates/spiral-robotics-studio
 dx serve --release
 ```
 
@@ -36,4 +36,3 @@ To try the interface without hardware, pass server arguments through DX:
 ```console
 dx serve --args "--simulate --no-cameras"
 ```
-

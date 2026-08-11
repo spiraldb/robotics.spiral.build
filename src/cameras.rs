@@ -35,10 +35,10 @@ type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 const CAMERA_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const CAPTURE_GRACE_PERIOD: Duration = Duration::from_secs(10);
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(20);
-const WORKER_MODE_ENV: &str = "REROBOT_INTERNAL_CAMERA_WORKER";
-const WORKER_REQUEST_ENV: &str = "REROBOT_INTERNAL_CAMERA_REQUEST";
-const WORKER_RESPONSE_ENV: &str = "REROBOT_INTERNAL_CAMERA_RESPONSE";
-const WORKER_IMAGE_ENV: &str = "REROBOT_INTERNAL_CAMERA_IMAGE";
+const WORKER_MODE_ENV: &str = "SPIRAL_ROBOTICS_INTERNAL_CAMERA_WORKER";
+const WORKER_REQUEST_ENV: &str = "SPIRAL_ROBOTICS_INTERNAL_CAMERA_REQUEST";
+const WORKER_RESPONSE_ENV: &str = "SPIRAL_ROBOTICS_INTERNAL_CAMERA_RESPONSE";
+const WORKER_IMAGE_ENV: &str = "SPIRAL_ROBOTICS_INTERNAL_CAMERA_IMAGE";
 
 /// JPEG quality used when a camera's frames have to be re-encoded.
 pub const DEFAULT_JPEG_QUALITY: u8 = 80;
@@ -231,7 +231,7 @@ pub fn capture_still(
 ) -> Result<PathBuf> {
     let identifier = sanitize_camera_identifier(&detected.identifier());
     let output_path = output_dir.join(format!("opencv_{identifier}.png"));
-    let workspace = private_workspace(Some(output_dir), ".rerobot-camera-capture-")?;
+    let workspace = private_workspace(Some(output_dir), ".spiral-robotics-camera-capture-")?;
     let image_path = workspace.path().join("image.png");
     let request_path = workspace.path().join("request.json");
     let response_path = workspace.path().join("response.txt");
@@ -361,7 +361,7 @@ fn encode_jpeg(image: &RgbImage, quality: u8) -> Result<Vec<u8>> {
 }
 
 fn probe_in_worker(info: CameraInfo) -> Result<ProbeResponse> {
-    let workspace = private_workspace(None, "rerobot-camera-probe-")?;
+    let workspace = private_workspace(None, "spiral-robotics-camera-probe-")?;
     let request_path = workspace.path().join("request.json");
     let response_path = workspace.path().join("response.json");
 
@@ -593,7 +593,7 @@ fn promote_capture(temporary: &Path, output: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
-    const SLEEPING_CHILD_ENV: &str = "REROBOT_TEST_SLEEPING_CAMERA_CHILD";
+    const SLEEPING_CHILD_ENV: &str = "SPIRAL_ROBOTICS_TEST_SLEEPING_CAMERA_CHILD";
 
     #[test]
     fn makes_camera_identifiers_safe_for_paths() {
@@ -610,9 +610,9 @@ mod tests {
 
     #[test]
     fn creates_distinct_private_workspaces() {
-        let first = private_workspace(None, "rerobot-camera-test-")
+        let first = private_workspace(None, "spiral-robotics-camera-test-")
             .expect("first workspace should be created");
-        let second = private_workspace(None, "rerobot-camera-test-")
+        let second = private_workspace(None, "spiral-robotics-camera-test-")
             .expect("second workspace should be created");
         assert_ne!(first.path(), second.path());
 

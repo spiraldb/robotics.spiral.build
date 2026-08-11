@@ -1,0 +1,33 @@
+[package]
+name = "spiral-robotics-panels"
+version.workspace = true
+edition.workspace = true
+description = "Tiled, dockable Dioxus panel workspace for Spiral Robotics applications"
+publish = false
+
+[features]
+default = []
+web = ["dep:wasm-bindgen", "dep:web-sys"]
+
+[dependencies]
+dioxus = { workspace = true, features = [
+    "asset",
+    "document",
+    "hooks",
+    "html",
+    "macro",
+    "signals",
+] }
+serde.workspace = true
+serde_json.workspace = true
+wasm-bindgen = { version = "=0.2.126", optional = true }
+web-sys = { version = "0.3", features = [
+    "Document",
+    "DomRect",
+    "Element",
+    "EventTarget",
+    "HtmlElement",
+    "PointerEvent",
+    "Storage",
+    "Window",
+], optional = true }

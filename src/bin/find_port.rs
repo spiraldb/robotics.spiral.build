@@ -5,8 +5,10 @@ use std::thread;
 use std::time::Duration;
 
 use clap::Parser;
-use rerobot::serial_ports::{available_ports, disconnected_ports, port_description, port_names};
 use serialport::SerialPortInfo;
+use spiral_robotics::serial_ports::{
+    available_ports, disconnected_ports, port_description, port_names,
+};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 

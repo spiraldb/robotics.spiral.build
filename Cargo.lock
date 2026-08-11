@@ -4357,92 +4357,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rerobot"
-version = "0.1.0"
-dependencies = [
- "clap",
- "image",
- "libc",
- "nokhwa",
- "rerobot-core",
- "serde",
- "serde_json",
- "serialport",
- "tempfile",
- "v4l",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "rerobot-core"
-version = "0.1.0"
-dependencies = [
- "glam",
- "roxmltree",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "rerobot-panels"
-version = "0.1.0"
-dependencies = [
- "dioxus",
- "serde",
- "serde_json",
- "wasm-bindgen",
- "web-sys",
-]
-
-[[package]]
-name = "rerobot-studio"
-version = "0.1.0"
-dependencies = [
- "adbc_core",
- "adbc_driver_manager",
- "arrow-array",
- "arrow-ipc",
- "arrow-json",
- "arrow-schema",
- "async-stream",
- "axum",
- "bytes",
- "clap",
- "dioxus",
- "futures-util",
- "gloo-net 0.7.0",
- "gloo-timers",
- "hf-hub",
- "js-sys",
- "parquet",
- "rerobot",
- "rerobot-core",
- "rerobot-panels",
- "rerobot-viewport",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tower-http 0.7.0",
- "tracing",
- "tracing-subscriber",
- "wasm-bindgen",
- "web-sys",
- "zip",
-]
-
-[[package]]
-name = "rerobot-viewport"
-version = "0.1.0"
-dependencies = [
- "js-sys",
- "rerobot-core",
- "wasm-bindgen",
- "web-sys",
-]
-
-[[package]]
 name = "rgb"
 version = "0.8.53"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4980,6 +4894,92 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 dependencies = [
  "lock_api",
+]
+
+[[package]]
+name = "spiral-robotics"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "image",
+ "libc",
+ "nokhwa",
+ "serde",
+ "serde_json",
+ "serialport",
+ "spiral-robotics-core",
+ "tempfile",
+ "v4l",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "spiral-robotics-core"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "roxmltree",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "spiral-robotics-panels"
+version = "0.1.0"
+dependencies = [
+ "dioxus",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
+name = "spiral-robotics-studio"
+version = "0.1.0"
+dependencies = [
+ "adbc_core",
+ "adbc_driver_manager",
+ "arrow-array",
+ "arrow-ipc",
+ "arrow-json",
+ "arrow-schema",
+ "async-stream",
+ "axum",
+ "bytes",
+ "clap",
+ "dioxus",
+ "futures-util",
+ "gloo-net 0.7.0",
+ "gloo-timers",
+ "hf-hub",
+ "js-sys",
+ "parquet",
+ "serde",
+ "serde_json",
+ "spiral-robotics",
+ "spiral-robotics-core",
+ "spiral-robotics-panels",
+ "spiral-robotics-viewport",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tower-http 0.7.0",
+ "tracing",
+ "tracing-subscriber",
+ "wasm-bindgen",
+ "web-sys",
+ "zip",
+]
+
+[[package]]
+name = "spiral-robotics-viewport"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "spiral-robotics-core",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]

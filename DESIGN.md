@@ -1,5 +1,5 @@
 ---
-name: rerobot studio
+name: Spiral Robotics Studio
 description: A compact, dockable one-light workbench for operating robots, understanding episodes, and training policies.
 colors:
   canvas: "#ffffff"
@@ -198,13 +198,13 @@ components:
     padding: "4px 8px"
 ---
 
-# Design System: rerobot studio
+# Design System: Spiral Robotics Studio
 
 ## Overview
 
 **Creative North Star: "The One-Light Control Bench"**
 
-rerobot studio is one calm, literal operating workspace. Warm-white panels,
+Spiral Robotics Studio is one calm, literal operating workspace. Warm-white panels,
 graphite type, pale WebGL, hairline structure, small radii, and tabular data
 make it feel like a precise bench utility rather than a dashboard. Camera pixels
 alone keep a dark mat for honest letterboxing; application chrome never changes
@@ -332,7 +332,7 @@ announce the resting state. A mode or torque chip exists while that condition
 is consequential, not merely because the interface has room for another badge.
 
 **The One-Spelling Rule.** Reusable interface colours are role-named
-`--tone-*` properties in `crates/rerobot-studio/tailwind.css`, including
+`--tone-*` properties in `crates/spiral-robotics-studio/tailwind.css`, including
 semantic training-series roles. The panel crate maps its `--rp-*` roles to
 those tokens. Renderer-owned arm and signal colours remain centralized with
 the code that paints them; components do not restate their literals.
@@ -416,7 +416,7 @@ Panel identity is durable and unique. A panel cannot appear in two tiles.
 Camera panels reconcile by named home when cameras are assigned, removed, or
 loaded asynchronously. Content remains keyed by panel ID so moving or tabbing a
 camera does not restart an unrelated feed. Layout mechanics, persistence,
-keyboard behavior, previews, and chrome belong to `rerobot-panels`; the Studio
+keyboard behavior, previews, and chrome belong to `spiral-robotics-panels`; the Studio
 owns panel titles, content, safety, and domain state.
 
 The Timeline is always registered in both activities, including empty state.
@@ -966,7 +966,7 @@ deadline belongs to the notice value, not the component that draws it.
 - **Don't** restore the retired fixed Robots / Scene / Properties three-pane
   shell or the full-width dataset rail.
 - **Don't** add fixed one-off panel arrangements in the Studio; extend
-  `rerobot-panels` when the mechanic is generic and register domain content in
+  `spiral-robotics-panels` when the mechanic is generic and register domain content in
   the Studio.
 - **Don't** turn every tool into primary navigation. Live, Data, and Training
   are activities; panel tabs are spatial grouping inside them.
