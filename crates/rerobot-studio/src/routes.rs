@@ -970,6 +970,7 @@ async fn start_spiral_replay(
 struct SpiralVideoQuery {
     episode: String,
     stream: String,
+    segment: Option<u32>,
 }
 
 async fn spiral_video(
@@ -978,7 +979,7 @@ async fn spiral_video(
 ) -> Result<Response, Failure> {
     let bytes = state
         .storage
-        .video_asset(&query.episode, &query.stream)
+        .video_asset(&query.episode, &query.stream, query.segment)
         .await
         .map_err(Failure::bad_gateway)?;
     let mut response = Body::from(bytes).into_response();

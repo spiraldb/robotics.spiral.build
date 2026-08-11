@@ -83,7 +83,25 @@ pub fn save_assets(root: &Path, episode_id: &str, assets: &[VideoAsset]) -> Resu
         .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
     let path = directory.join(ASSET_MANIFEST);
     let temporary = directory.join("assets.json.tmp");
-    let bytes = serde_json::to_vec_pretty(assets)
+    let portable = assets
+        .iter()
+        .cloned()
+        .map(|mut asset| {
+            asset.path = asset
+                .path
+                .strip_prefix(root)
+                .map(Path::to_path_buf)
+                .map_err(|error| {
+                    format!(
+                        "video asset {} is outside episode directory {}: {error}",
+                        asset.path.display(),
+                        root.display()
+                    )
+                })?;
+            Ok(asset)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let bytes = serde_json::to_vec_pretty(&portable)
         .map_err(|error| format!("could not encode episode video manifest: {error}"))?;
     std::fs::write(&temporary, bytes)
         .map_err(|error| format!("could not write {}: {error}", temporary.display()))?;
@@ -98,15 +116,50 @@ pub fn load_assets(root: &Path, episode_id: &str) -> Result<Vec<VideoAsset>, Str
     }
     let bytes = std::fs::read(&path)
         .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-    let assets: Vec<VideoAsset> = serde_json::from_slice(&bytes)
+    let mut assets: Vec<VideoAsset> = serde_json::from_slice(&bytes)
         .map_err(|error| format!("could not parse {}: {error}", path.display()))?;
-    for asset in &assets {
-        if !asset.path.starts_with(root) || !asset.path.is_file() {
+    for asset in &mut assets {
+        let relative = if asset.path.is_absolute() {
+            asset.path.strip_prefix(root).map(Path::to_path_buf)
+        } else if let Ok(relative) = asset.path.strip_prefix(root) {
+            // Older manifests written with a relative episode root contain
+            // `episodes/videos/...` instead of `videos/...`.
+            Ok(relative.to_path_buf())
+        } else if let Some(root_name) = root
+            .file_name()
+            .filter(|root_name| asset.path.starts_with(Path::new(root_name)))
+        {
+            asset
+                .path
+                .strip_prefix(Path::new(root_name))
+                .map(Path::to_path_buf)
+        } else {
+            Ok(asset.path.clone())
+        }
+        .map_err(|_| {
+            format!(
+                "video manifest asset {} is outside episode directory {}",
+                asset.path.display(),
+                root.display()
+            )
+        })?;
+        if relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
             return Err(format!(
                 "video manifest contains an unavailable asset {}",
                 asset.path.display()
             ));
         }
+        let resolved = root.join(relative);
+        if !resolved.is_file() {
+            return Err(format!(
+                "video manifest contains an unavailable asset {}",
+                asset.path.display()
+            ));
+        }
+        asset.path = resolved;
     }
     Ok(assets)
 }
@@ -432,12 +485,41 @@ mod tests {
             timeline_offset_seconds: Some(4.5),
         }];
         save_assets(directory.path(), "episode_000001", &assets).unwrap();
+        let manifest = std::fs::read_to_string(video_directory.join(ASSET_MANIFEST)).unwrap();
+        assert!(manifest.contains(r#""path": "videos/episode_000001/wrist.mp4""#));
+        assert!(!manifest.contains(directory.path().to_string_lossy().as_ref()));
         let loaded = load_assets(directory.path(), "episode_000001").unwrap();
         assert_eq!(loaded[0].stream_id, assets[0].stream_id);
         assert_eq!(loaded[0].frames, 10);
         assert_eq!(loaded[0].metadata().duration_seconds, 10.0 / 30.0);
         assert_eq!(loaded[0].metadata().segment_index, 2);
         assert_eq!(loaded[0].metadata().timeline_offset_seconds, Some(4.5));
+    }
+
+    #[test]
+    fn cwd_prefixed_legacy_manifest_resolves_against_the_episode_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("episodes");
+        let video_directory = root.join("videos/episode_000001");
+        std::fs::create_dir_all(&video_directory).unwrap();
+        std::fs::write(video_directory.join("wrist.mp4"), b"mp4").unwrap();
+        std::fs::write(
+            video_directory.join(ASSET_MANIFEST),
+            serde_json::to_vec(&serde_json::json!([{
+                "stream_id": "follower.camera.wrist",
+                "camera_id": "camera-1",
+                "path": "episodes/videos/episode_000001/wrist.mp4",
+                "width": 640,
+                "height": 480,
+                "fps": 30,
+                "frames": 10
+            }]))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let loaded = load_assets(&root, "episode_000001").unwrap();
+        assert_eq!(loaded[0].path, video_directory.join("wrist.mp4"));
     }
 
     #[test]

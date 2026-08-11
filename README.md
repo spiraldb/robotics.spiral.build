@@ -101,7 +101,22 @@ dx serve
 Then open **Settings**, enable SpiralDB, select the service catalog, and enter
 the exact project and dataset. **Test connection** checks both access to that
 project and readiness of its managed catalog; a local `SELECT 1` alone is not a
-useful connectivity test.
+useful connectivity test. Use a dataset name reserved for rerobot: the first
+publication creates that root resource, its relational child tables, and one
+immutable managed MP4 Dataset per completed episode.
+
+For a dataset named `rerobot_v3`, a completed `episode_000017` is queryable as
+relational data and through Spiral's native MP4 index:
+
+```sql
+SELECT episode_id, frames FROM rerobot_v3.episodes;
+
+SELECT v.episode_id, v.stream_id, tracks.*
+FROM rerobot_v3_episode_000017_video_sources AS v
+CROSS JOIN LATERAL spql.mp4.tracks(v.source) AS tracks;
+
+SELECT COUNT(*) FROM rerobot_v3.video_episode_000017.assets;
+```
 
 ### What the studio does
 

@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use arrow_array::builder::{Float64Builder, Int64Builder, ListBuilder, StringBuilder};
+use arrow_array::builder::{Float64Builder, Int64Builder, ListBuilder};
 use arrow_array::{
     ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray, UInt32Array,
     UInt64Array,
@@ -17,7 +17,7 @@ use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use crate::episodes::{EpisodeCompletion, EpisodeError, EpisodeStart, Sample};
 
 /// First schema version published by ReRobot.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// A completed episode. Presence in this table is the publication marker.
 pub const EPISODES_TABLE: &str = "episodes";
@@ -172,11 +172,7 @@ pub fn episode_streams_schema() -> SchemaRef {
         Field::new("episode_id", DataType::Utf8, false),
         Field::new("stream_id", DataType::Utf8, false),
         Field::new("modality", DataType::Utf8, false),
-        Field::new(
-            "joint_names",
-            DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
-            true,
-        ),
+        Field::new("joint_names_json", DataType::Utf8, true),
         Field::new("camera_id", DataType::Utf8, true),
         Field::new("width", DataType::UInt32, true),
         Field::new("height", DataType::UInt32, true),
@@ -186,17 +182,11 @@ pub fn episode_streams_schema() -> SchemaRef {
 
 /// Describe every joint stream before its samples are appended.
 pub fn episode_streams_batch(start: &EpisodeStart) -> Result<RecordBatch, EpisodeError> {
-    let mut joint_names = ListBuilder::new(StringBuilder::new()).with_field(Arc::new(Field::new(
-        "item",
-        DataType::Utf8,
-        false,
-    )));
-    for arm in &start.arms {
-        for joint in &arm.joints {
-            joint_names.values().append_value(joint);
-        }
-        joint_names.append(true);
-    }
+    let joint_names = start
+        .arms
+        .iter()
+        .map(|arm| encode_json("joint names", &arm.joints))
+        .collect::<Result<Vec<_>, _>>()?;
     let columns: Vec<ArrayRef> = vec![
         Arc::new(StringArray::from_iter_values(
             start.arms.iter().map(|_| start.id.as_str()),
@@ -207,7 +197,7 @@ pub fn episode_streams_batch(start: &EpisodeStart) -> Result<RecordBatch, Episod
         Arc::new(StringArray::from_iter_values(
             start.arms.iter().map(|_| "joint"),
         )),
-        Arc::new(joint_names.finish()),
+        Arc::new(StringArray::from_iter_values(joint_names)),
         Arc::new(StringArray::from(vec![None::<&str>; start.arms.len()])),
         Arc::new(UInt32Array::from(vec![None; start.arms.len()])),
         Arc::new(UInt32Array::from(vec![None; start.arms.len()])),
@@ -219,14 +209,6 @@ pub fn episode_streams_batch(start: &EpisodeStart) -> Result<RecordBatch, Episod
 
 /// Describe camera streams using the same keyed stream table as robot joints.
 pub fn video_streams_batch(rows: &[VideoStreamRow]) -> Result<RecordBatch, EpisodeError> {
-    let mut joint_names = ListBuilder::new(StringBuilder::new()).with_field(Arc::new(Field::new(
-        "item",
-        DataType::Utf8,
-        false,
-    )));
-    for _ in rows {
-        joint_names.append(false);
-    }
     let columns: Vec<ArrayRef> = vec![
         Arc::new(StringArray::from_iter_values(
             rows.iter().map(|row| row.episode_id.as_str()),
@@ -235,7 +217,7 @@ pub fn video_streams_batch(rows: &[VideoStreamRow]) -> Result<RecordBatch, Episo
             rows.iter().map(|row| row.stream_id.as_str()),
         )),
         Arc::new(StringArray::from_iter_values(rows.iter().map(|_| "video"))),
-        Arc::new(joint_names.finish()),
+        Arc::new(StringArray::from(vec![None::<&str>; rows.len()])),
         Arc::new(StringArray::from_iter_values(
             rows.iter().map(|row| row.camera_id.as_str()),
         )),
@@ -271,6 +253,24 @@ pub fn joint_samples_schema() -> SchemaRef {
         ),
         Field::new("velocity", nullable_f64_list(), true),
         Field::new("effort", nullable_f64_list(), true),
+        Field::new("follow_error_degrees", DataType::Float64, true),
+    ]))
+}
+
+/// List-free schema used for durable Spiral/Arbor publication. Ordered joint
+/// vectors remain lossless JSON scalars because the current hosted Arbor
+/// reader cannot reliably scan Arrow List attachments after mixed appends.
+pub fn spiral_joint_samples_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("episode_id", DataType::Utf8, false),
+        Field::new("stream_id", DataType::Utf8, false),
+        Field::new("sample_index", DataType::UInt64, false),
+        Field::new("episode_time_ns", DataType::UInt64, false),
+        Field::new("state_position_json", DataType::Utf8, false),
+        Field::new("action_position_json", DataType::Utf8, true),
+        Field::new("raw_position_json", DataType::Utf8, false),
+        Field::new("velocity_json", DataType::Utf8, true),
+        Field::new("effort_json", DataType::Utf8, true),
         Field::new("follow_error_degrees", DataType::Float64, true),
     ]))
 }
@@ -322,6 +322,80 @@ pub fn joint_samples_batch(rows: &[JointSampleRow]) -> Result<RecordBatch, Episo
     ];
     RecordBatch::try_new(joint_samples_schema(), columns)
         .map_err(|error| invalid(format!("building Spiral joint sample batch: {error}")))
+}
+
+/// Convert rows to the scalar-only representation persisted in Spiral.
+pub fn spiral_joint_samples_batch(rows: &[JointSampleRow]) -> Result<RecordBatch, EpisodeError> {
+    let state_position = rows
+        .iter()
+        .map(|row| encode_json("state position", &row.state_position))
+        .collect::<Result<Vec<_>, _>>()?;
+    let action_position = rows
+        .iter()
+        .map(|row| {
+            row.action_position
+                .as_ref()
+                .map(|values| encode_json("action position", values))
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let raw_position = rows
+        .iter()
+        .map(|row| encode_json("raw position", &row.raw_position))
+        .collect::<Result<Vec<_>, _>>()?;
+    let velocity = rows
+        .iter()
+        .map(|row| {
+            row.velocity
+                .as_ref()
+                .map(|values| encode_json("velocity", values))
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let effort = rows
+        .iter()
+        .map(|row| {
+            row.effort
+                .as_ref()
+                .map(|values| encode_json("effort", values))
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|row| row.episode_id.as_str()),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|row| row.stream_id.as_str()),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            rows.iter().map(|row| row.sample_index),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            rows.iter().map(|row| row.episode_time_ns),
+        )),
+        Arc::new(StringArray::from_iter_values(state_position)),
+        Arc::new(StringArray::from_iter(
+            action_position.iter().map(Option::as_deref),
+        )),
+        Arc::new(StringArray::from_iter_values(raw_position)),
+        Arc::new(StringArray::from_iter(
+            velocity.iter().map(Option::as_deref),
+        )),
+        Arc::new(StringArray::from_iter(effort.iter().map(Option::as_deref))),
+        Arc::new(Float64Array::from_iter(
+            rows.iter().map(|row| row.follow_error_degrees),
+        )),
+    ];
+    RecordBatch::try_new(spiral_joint_samples_schema(), columns).map_err(|error| {
+        invalid(format!(
+            "building scalar Spiral joint sample batch: {error}"
+        ))
+    })
+}
+
+fn encode_json<T: serde::Serialize>(label: &str, value: &T) -> Result<String, EpisodeError> {
+    serde_json::to_string(value).map_err(|error| invalid(format!("encoding {label}: {error}")))
 }
 
 fn append_nullable_values(
@@ -555,6 +629,30 @@ mod tests {
     }
 
     #[test]
+    fn spiral_batches_use_scalar_json_for_ordered_joint_vectors() {
+        let mut encoder = SpiralEpisodeEncoder::new(start()).unwrap();
+        let rows = encoder.encode(&sample(0.25)).unwrap();
+        let batch = spiral_joint_samples_batch(&rows).unwrap();
+
+        assert!(batch.column_by_name("state_position").is_none());
+        let states = batch
+            .column_by_name("state_position_json")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(states.value(0), "[0.1,null]");
+        let actions = batch
+            .column_by_name("action_position_json")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert!(actions.is_null(0));
+        assert_eq!(actions.value(1), "[0.25,0.5]");
+    }
+
+    #[test]
     fn completion_row_is_the_episode_visibility_marker() {
         let start = start();
         let completion = EpisodeCompletion {
@@ -587,15 +685,12 @@ mod tests {
     fn stream_rows_keep_joint_order() {
         let batch = episode_streams_batch(&start()).unwrap();
         let joint_names = batch
-            .column_by_name("joint_names")
+            .column_by_name("joint_names_json")
             .unwrap()
             .as_any()
-            .downcast_ref::<ListArray>()
+            .downcast_ref::<StringArray>()
             .unwrap();
-        let leader = joint_names.value(0);
-        let leader = leader.as_any().downcast_ref::<StringArray>().unwrap();
-        assert_eq!(leader.value(0), "shoulder");
-        assert_eq!(leader.value(1), "elbow");
+        assert_eq!(joint_names.value(0), r#"["shoulder","elbow"]"#);
     }
 
     #[test]
@@ -610,7 +705,7 @@ mod tests {
         }])
         .unwrap();
         assert_eq!(batch.num_rows(), 1);
-        assert!(batch.column_by_name("joint_names").unwrap().is_null(0));
+        assert!(batch.column_by_name("joint_names_json").unwrap().is_null(0));
         let modality = batch
             .column_by_name("modality")
             .unwrap()

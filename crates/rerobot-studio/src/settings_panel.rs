@@ -144,7 +144,7 @@ pub(crate) fn SettingsPanel(on_close: EventHandler<()>, on_saved: EventHandler<(
                                     SettingsField { label: "Project", value: current().spiral.project_id, placeholder: "Required for a SpiralDB service", disabled: current().spiral.uri.trim() == "spiral:memory:", oninput: move |value| current.write().spiral.project_id = value }
                                     SettingsField { label: "Dataset", value: current().spiral.dataset, placeholder: "rerobot", oninput: move |value| current.write().spiral.dataset = value }
                                 }
-                                p { class: "settings-help", "For a local SpiralDB stack, keep the SpiralDB service catalog selected and start this backend with SPIRAL__SERVER__URL and SPIRAL__SPFS__URL pointing at that stack. The in-memory option is disposable and does not connect to the local service. The backend also requires --spiral-adbc-driver or SPIRALDB_ADBC_DRIVER." }
+                                p { class: "settings-help", "For a local SpiralDB stack, keep the SpiralDB service catalog selected and start this backend with SPIRAL__SERVER__URL and SPIRAL__SPFS__URL pointing at that stack. Reserve the dataset name for rerobot so it can create the root resource and child tables. The in-memory option is disposable and does not connect to the local service. The backend also requires --spiral-adbc-driver or SPIRALDB_ADBC_DRIVER." }
                                 button { r#type: "button", class: "btn btn-outline", disabled: saving() || testing(), onclick: move |_| save(Some("/api/settings/data/test/spiral")), if testing() { "Testing…" } else { "Save and test connection" } }
                             },
                             SettingsSection::HuggingFace => rsx! {
@@ -158,7 +158,7 @@ pub(crate) fn SettingsPanel(on_close: EventHandler<()>, on_saved: EventHandler<(
                             SettingsSection::Video => rsx! {
                                 ProviderHeading { title: "Video", description: "Cameras are encoded on the backend, then indexed with Spiral's MP4 and video plugins." }
                                 ToggleField { label: "Record assigned cameras with each episode", checked: current().video.enabled, onchange: move |value| current.write().video.enabled = value }
-                                p { class: "settings-help", "The backend operator chooses FFmpeg and its codec at server startup. MP4 payloads are ingested through ADBC. Hosted projects maintain a reusable managed video index; memory sessions expose the same MP4 and video functions ad hoc." }
+                                p { class: "settings-help", "The backend operator chooses FFmpeg and its codec at server startup. MP4 payloads are ingested through ADBC. Service projects maintain one immutable managed MP4 index per completed episode; memory sessions expose the same MP4 and video functions ad hoc." }
                             },
                         }
                         if let Some(response) = test_result() {

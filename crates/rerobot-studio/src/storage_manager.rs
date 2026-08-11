@@ -32,7 +32,7 @@ use crate::episodes::{CompletedEpisode, EpisodeStore};
 use crate::spiral_episode::{
     EPISODE_STREAMS_TABLE, EPISODES_TABLE, JOINT_SAMPLES_TABLE, SpiralEpisodeEncoder,
     VIDEO_ASSETS_TABLE, VideoStreamRow, episode_completion_batch, episode_streams_batch,
-    joint_samples_batch, joint_samples_schema, video_streams_batch,
+    joint_samples_batch, joint_samples_schema, spiral_joint_samples_batch, video_streams_batch,
 };
 use crate::video_capture::{VideoAsset, load_assets, save_assets};
 
@@ -251,7 +251,7 @@ impl StorageManager {
         // readable project catalog. Pin the actual catalog without requiring
         // any rerobot table to exist so Test connection predicts Query and
         // publication instead of returning a false positive.
-        if settings.uri == "spiraldb://" {
+        if uses_managed_catalog(&settings) {
             let catalog_project = project.clone();
             let table_filter = format!("{}.{}", settings.dataset, EPISODES_TABLE);
             if let Err(error) = self
@@ -340,8 +340,8 @@ impl StorageManager {
         validate_safe_value("stream", stream)?;
         let table = |name: &str| format!("{}.{}", settings.dataset, name);
         let sql = format!(
-            "SELECT e.sample_hz, s.joint_names, \
-             COALESCE(j.action_position, j.state_position) AS replay_position \
+            "SELECT e.sample_hz, s.joint_names_json, \
+             COALESCE(j.action_position_json, j.state_position_json) AS replay_position_json \
              FROM {} e JOIN {} s ON e.episode_id = s.episode_id \
              JOIN {} j ON j.episode_id = s.episode_id AND j.stream_id = s.stream_id \
              WHERE e.episode_id = '{}' AND s.stream_id = '{}' ORDER BY j.sample_index",
@@ -366,17 +366,21 @@ impl StorageManager {
         for row in result.rows {
             sample_hz = sample_hz.or_else(|| row.get("sample_hz").and_then(JsonValue::as_f64));
             let names = row
-                .get("joint_names")
-                .and_then(JsonValue::as_array)
-                .ok_or_else(|| "Spiral trajectory is missing joint_names".to_owned())?;
+                .get("joint_names_json")
+                .and_then(JsonValue::as_str)
+                .ok_or_else(|| "Spiral trajectory is missing joint_names_json".to_owned())?;
+            let names: Vec<String> = serde_json::from_str(names)
+                .map_err(|error| format!("decoding Spiral joint_names_json: {error}"))?;
             let values = row
-                .get("replay_position")
-                .and_then(JsonValue::as_array)
-                .ok_or_else(|| "Spiral trajectory is missing replay_position".to_owned())?;
+                .get("replay_position_json")
+                .and_then(JsonValue::as_str)
+                .ok_or_else(|| "Spiral trajectory is missing replay_position_json".to_owned())?;
+            let values: Vec<Option<f64>> = serde_json::from_str(values)
+                .map_err(|error| format!("decoding Spiral replay_position_json: {error}"))?;
             let pose = names
                 .iter()
-                .zip(values)
-                .filter_map(|(name, value)| Some((name.as_str()?.to_owned(), value.as_f64()?)))
+                .zip(&values)
+                .filter_map(|(name, value)| Some((name.clone(), (*value)?)))
                 .collect::<BTreeMap<_, _>>();
             if !pose.is_empty() {
                 trajectory.push(pose);
@@ -391,13 +395,22 @@ impl StorageManager {
     /// Fetch one original MP4 payload for browser preview. Spiral's managed
     /// video dataset remains the compute/index surface; the byte asset is the
     /// correct browser delivery format and avoids decoding/re-encoding frames.
-    pub async fn video_asset(&self, episode: &str, stream: &str) -> Result<Vec<u8>, String> {
+    pub async fn video_asset(
+        &self,
+        episode: &str,
+        stream: &str,
+        segment: Option<u32>,
+    ) -> Result<Vec<u8>, String> {
         let settings = self.settings.get().spiral;
         validate_safe_value("episode", episode)?;
         validate_safe_value("stream", stream)?;
+        let segment_filter = segment
+            .map(|segment| format!(" AND segment_index = {segment}"))
+            .unwrap_or_default();
         let sql = format!(
-            "SELECT payload FROM {}.{} WHERE episode_id = '{}' AND stream_id = '{}' LIMIT 1",
-            settings.dataset, VIDEO_ASSETS_TABLE, episode, stream
+            "SELECT payload FROM {}.{} WHERE episode_id = '{}' AND stream_id = '{}'{} \
+             ORDER BY segment_index LIMIT 1",
+            settings.dataset, VIDEO_ASSETS_TABLE, episode, stream, segment_filter
         );
         self.run_adbc(settings, move |connection| {
             run_binary_query(connection, &sql)
@@ -531,6 +544,10 @@ fn spiral_server_endpoint() -> String {
         .unwrap_or_else(|_| "the configured hosted SpiralDB service".to_owned())
 }
 
+fn uses_managed_catalog(settings: &StoredSpiralSettings) -> bool {
+    settings.uri == "spiraldb://"
+}
+
 async fn publish_hugging_face(
     settings: &StoredDataSettings,
     episode: &CompletedEpisode,
@@ -649,6 +666,9 @@ fn publish_spiral_blocking(
     videos: &[VideoAsset],
 ) -> Result<(), String> {
     validate_safe_value("episode", &episode.start.id)?;
+    if uses_managed_catalog(settings) {
+        ensure_dataset_namespace(connection, &settings.dataset)?;
+    }
     if settings.uri == "spiral:memory:" {
         // The driver's offline catalog intentionally has no mutable relation
         // catalog, so SQL DELETE is unavailable there. A completed retry is
@@ -690,14 +710,21 @@ fn publish_spiral_blocking(
     if !videos.is_empty() {
         let streams = videos
             .iter()
-            .map(|video| VideoStreamRow {
-                episode_id: episode.start.id.clone(),
-                stream_id: video.stream_id.clone(),
-                camera_id: video.camera_id.clone(),
-                width: video.width,
-                height: video.height,
-                fps: video.fps,
+            .map(|video| {
+                (
+                    video.stream_id.clone(),
+                    VideoStreamRow {
+                        episode_id: episode.start.id.clone(),
+                        stream_id: video.stream_id.clone(),
+                        camera_id: video.camera_id.clone(),
+                        width: video.width,
+                        height: video.height,
+                        fps: video.fps,
+                    },
+                )
             })
+            .collect::<BTreeMap<_, _>>()
+            .into_values()
             .collect::<Vec<_>>();
         ingest_batch(
             connection,
@@ -711,7 +738,7 @@ fn publish_spiral_blocking(
     for sample in &episode.samples {
         rows.extend(encoder.encode(sample).map_err(|error| error.to_string())?);
         if rows.len() >= JOINT_BATCH_ROWS {
-            let batch = joint_samples_batch(&rows).map_err(|error| error.to_string())?;
+            let batch = spiral_joint_samples_batch(&rows).map_err(|error| error.to_string())?;
             ingest_batch(
                 connection,
                 &table_name(&settings.dataset, JOINT_SAMPLES_TABLE),
@@ -721,7 +748,7 @@ fn publish_spiral_blocking(
         }
     }
     if !rows.is_empty() {
-        let batch = joint_samples_batch(&rows).map_err(|error| error.to_string())?;
+        let batch = spiral_joint_samples_batch(&rows).map_err(|error| error.to_string())?;
         ingest_batch(
             connection,
             &table_name(&settings.dataset, JOINT_SAMPLES_TABLE),
@@ -738,40 +765,62 @@ fn publish_spiral_blocking(
         // The view turns durable binary MP4 payloads into Spiral Blob values;
         // the managed dataset then persists the MP4/video index used by
         // `spql.video.*` frame selection and decode.
-        let sources = format!("{}.video_sources", settings.dataset);
+        let sources = video_sources_name(settings, &episode.start.id);
         let assets = format!("{}.{}", settings.dataset, VIDEO_ASSETS_TABLE);
-        let dataset = format!("{}.video", settings.dataset);
+        let dataset = managed_video_dataset_name(settings, &episode.start.id);
+        let source_filter = uses_managed_catalog(settings)
+            .then(|| format!(" WHERE assets.episode_id = '{}'", episode.start.id))
+            .unwrap_or_default();
         execute_update_sql(
             connection,
             &format!(
-                "CREATE OR REPLACE VIEW {sources} AS SELECT episode_id, stream_id, \
-             spql.blob.inline(payload, byte_size, 'video/mp4') AS source FROM {assets}"
+                "CREATE OR REPLACE VIEW {sources} AS SELECT assets.episode_id, assets.stream_id, \
+             assets.segment_index, assets.timeline_offset_ns, \
+             spql.blob.inline(assets.payload, assets.byte_size, 'video/mp4') AS source \
+             FROM {assets} AS assets{source_filter}"
             ),
         )
         .map_err(|error| format!("creating Spiral video source view: {error}"))?;
         // The offline ADBC catalog supports tables, views, and all ad-hoc MP4
         // functions, but managed Dataset resources require a Spiral project
-        // catalog. Hosted connections get the durable reusable video index;
-        // memory-mode tests exercise the same MP4 plugin directly below.
-        if settings.uri != "spiral:memory:" {
-            if !table_exists(connection, &format!("{}.video.assets", settings.dataset))? {
-                let created = execute_update_sql(
-                    connection,
-                    &format!(
-                        "CREATE DATASET {dataset} USING spql.mp4.dataset FROM {sources} \
+        // catalog. Service connections get a durable index per immutable
+        // episode; memory-mode tests exercise the same MP4 plugin directly.
+        if uses_managed_catalog(settings) {
+            // Completed episodes are immutable, so each has one immutable
+            // managed MP4 Dataset. This also avoids flattening the native
+            // VideoIndex extension through ADBC metadata or relying on output
+            // replacement, which REFRESH does not yet support.
+            let created = execute_update_sql(
+                connection,
+                &format!(
+                    "CREATE DATASET {dataset} USING spql.mp4.dataset FROM {sources} \
                      WITH (blob = 'source', index_tier = 'dependency')"
-                    ),
-                );
-                // A previous process may have committed the Dataset definition
-                // but stopped before its first refresh produced `assets`.
-                if let Err(error) = created
-                    && !error.contains("already exists")
-                {
-                    return Err(format!("creating Spiral MP4 dataset: {error}"));
+                ),
+            );
+            let needs_refresh = match created {
+                Ok(()) => true,
+                Err(error) if error.contains("already exists") => {
+                    let output = format!("{dataset}.assets");
+                    match run_query(
+                        connection,
+                        &format!("SELECT COUNT(*) AS rows FROM {output}"),
+                        1,
+                    ) {
+                        Ok(_) => false,
+                        Err(error) if error.contains("unknown table") => true,
+                        Err(error) => {
+                            return Err(format!(
+                                "checking Spiral MP4 dataset output {output}: {error}"
+                            ));
+                        }
+                    }
                 }
+                Err(error) => return Err(format!("creating Spiral MP4 dataset: {error}")),
+            };
+            if needs_refresh {
+                execute_update_sql(connection, &format!("REFRESH DATASET {dataset}"))
+                    .map_err(|error| format!("refreshing Spiral MP4 dataset: {error}"))?;
             }
-            execute_update_sql(connection, &format!("REFRESH DATASET {dataset}"))
-                .map_err(|error| format!("refreshing Spiral MP4 dataset: {error}"))?;
         }
     }
     // Inserted last: readers never see an episode whose streams or media only
@@ -783,6 +832,36 @@ fn publish_spiral_blocking(
             .map_err(|error| error.to_string())?,
     )?;
     Ok(())
+}
+
+/// Spiral's managed catalog is a resource tree: `rerobot.episodes` can only
+/// be created after a live `rerobot` parent exists. Until the catalog exposes
+/// a standalone namespace resource, a tiny durable root table is the parent
+/// container for every rerobot table, view, and managed Dataset.
+fn ensure_dataset_namespace(
+    connection: &mut ManagedConnection,
+    dataset: &str,
+) -> Result<(), String> {
+    const MARKER: &str = "_rerobot_dataset_key_v1";
+    match connection.get_table_schema(None, None, dataset) {
+        Ok(schema) if schema.field_with_name(MARKER).is_ok() => return Ok(()),
+        Ok(_) => {
+            return Err(format!(
+                "Spiral dataset namespace {dataset} exists but is not a rerobot v1 namespace; choose a new dataset name or remove that resource"
+            ));
+        }
+        Err(error) if error.status == AdbcStatus::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "checking Spiral dataset namespace {dataset}: {error}"
+            ));
+        }
+    }
+    execute_update_sql(
+        connection,
+        &format!("CREATE TABLE {dataset} AS SELECT '{dataset}' AS {MARKER}"),
+    )
+    .map_err(|error| format!("creating Spiral dataset namespace {dataset}: {error}"))
 }
 
 fn clear_episode_rows(
@@ -803,11 +882,15 @@ fn clear_episode_rows(
         if !table_exists(connection, &target)? {
             continue;
         }
-        execute_update_sql(
+        let cleared = execute_update_sql(
             connection,
             &format!("DELETE FROM {target} WHERE episode_id = '{episode_id}'"),
-        )
-        .map_err(|error| format!("clearing prior Spiral rows in {target}: {error}"))?;
+        );
+        if let Err(error) = cleared
+            && !error.contains("finished without any affected rows")
+        {
+            return Err(format!("clearing prior Spiral rows in {target}: {error}"));
+        }
     }
     Ok(())
 }
@@ -874,6 +957,39 @@ fn table_name(dataset: &str, table: &str) -> String {
     format!("{dataset}.{table}")
 }
 
+fn video_sources_name(settings: &StoredSpiralSettings, episode_id: &str) -> String {
+    if uses_managed_catalog(settings) {
+        format!(
+            "{}_{}_video_sources",
+            settings.dataset,
+            sql_identifier_component(episode_id)
+        )
+    } else {
+        format!("{}.video_sources", settings.dataset)
+    }
+}
+
+fn managed_video_dataset_name(settings: &StoredSpiralSettings, episode_id: &str) -> String {
+    format!(
+        "{}.video_{}",
+        settings.dataset,
+        sql_identifier_component(episode_id)
+    )
+}
+
+fn sql_identifier_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 fn video_assets_batch(episode_id: &str, videos: &[VideoAsset]) -> Result<RecordBatch, String> {
     let payloads = videos
         .iter()
@@ -882,9 +998,35 @@ fn video_assets_batch(episode_id: &str, videos: &[VideoAsset]) -> Result<RecordB
                 .map_err(|error| format!("could not read {}: {error}", video.path.display()))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let timeline_offsets = videos
+        .iter()
+        .map(|video| {
+            video
+                .timeline_offset_seconds
+                .map(|seconds| {
+                    if !seconds.is_finite() || seconds < 0.0 {
+                        return Err(format!(
+                            "video timeline offset for {} must be finite and non-negative",
+                            video.stream_id
+                        ));
+                    }
+                    let nanos = seconds * 1_000_000_000.0;
+                    if nanos > u64::MAX as f64 {
+                        return Err(format!(
+                            "video timeline offset for {} is too large",
+                            video.stream_id
+                        ));
+                    }
+                    Ok(nanos.round() as u64)
+                })
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let schema = Arc::new(Schema::new(vec![
         Field::new("episode_id", DataType::Utf8, false),
         Field::new("stream_id", DataType::Utf8, false),
+        Field::new("segment_index", DataType::UInt32, false),
+        Field::new("timeline_offset_ns", DataType::UInt64, true),
         Field::new("camera_id", DataType::Utf8, false),
         Field::new("payload", DataType::Binary, false),
         Field::new("byte_size", DataType::UInt64, false),
@@ -900,6 +1042,10 @@ fn video_assets_batch(episode_id: &str, videos: &[VideoAsset]) -> Result<RecordB
         Arc::new(StringArray::from_iter_values(
             videos.iter().map(|video| video.stream_id.as_str()),
         )),
+        Arc::new(UInt32Array::from_iter_values(
+            videos.iter().map(|video| video.segment_index),
+        )),
+        Arc::new(UInt64Array::from(timeline_offsets)),
         Arc::new(StringArray::from_iter_values(
             videos.iter().map(|video| video.camera_id.as_str()),
         )),
@@ -1322,6 +1468,173 @@ mod tests {
         )
         .unwrap();
         assert!(!payload.is_empty());
+    }
+
+    /// Publishes one real, locally recorded episode to a running SpiralDB
+    /// service, then reads its relational rows, MP4 metadata/index, and
+    /// original browser payload back through the same ADBC connection.
+    ///
+    /// Run explicitly from `crates/rerobot-studio` with the service endpoints,
+    /// driver, project, episode directory, and episode ID in the environment.
+    #[test]
+    #[ignore = "requires a running SpiralDB service and mutates the selected project dataset"]
+    fn spiral_adbc_service_round_trips_recorded_episode_and_video() {
+        let driver_path = PathBuf::from(std::env::var("SPIRALDB_ADBC_DRIVER").unwrap());
+        let project_id = std::env::var("REROBOT_SPIRAL_PROJECT").unwrap();
+        let dataset =
+            std::env::var("REROBOT_SPIRAL_DATASET").unwrap_or_else(|_| "rerobot".to_owned());
+        let episode_id = std::env::var("REROBOT_TEST_EPISODE").unwrap();
+        let episode_directory =
+            std::env::var("REROBOT_TEST_EPISODES").unwrap_or_else(|_| "episodes".to_owned());
+        let episode_directory = PathBuf::from(episode_directory);
+        let store = EpisodeStore::open(episode_directory.clone()).unwrap();
+        let episode = store.completed(&episode_id).unwrap();
+        let videos = load_assets(store.directory(), &episode_id).unwrap();
+        assert!(
+            !videos.is_empty(),
+            "the service round trip needs recorded MP4 media"
+        );
+        let settings = StoredSpiralSettings {
+            enabled: true,
+            uri: "spiraldb://".to_owned(),
+            project_id,
+            dataset: dataset.clone(),
+        };
+        let mut adbc = open_adbc(AdbcConnectionKey::new(&settings, driver_path.clone())).unwrap();
+
+        publish_spiral_blocking(&mut adbc.connection, &settings, &episode, &videos).unwrap();
+
+        let query_count = |connection: &mut ManagedConnection, table: &str| {
+            run_query(
+                connection,
+                &format!(
+                    "SELECT COUNT(*) AS rows FROM {dataset}.{table} WHERE episode_id = '{episode_id}'"
+                ),
+                1,
+            )
+            .unwrap()
+            .rows[0]["rows"]
+                .as_u64()
+                .unwrap()
+        };
+        assert_eq!(query_count(&mut adbc.connection, EPISODES_TABLE), 1);
+        assert_eq!(
+            query_count(&mut adbc.connection, JOINT_SAMPLES_TABLE),
+            (episode.samples.len() * episode.start.arms.len()) as u64
+        );
+        assert_eq!(
+            query_count(&mut adbc.connection, VIDEO_ASSETS_TABLE),
+            videos.len() as u64
+        );
+
+        let tracks = run_query(
+            &mut adbc.connection,
+            &format!(
+                "SELECT v.episode_id, v.stream_id, tracks.* FROM {} v \
+                 CROSS JOIN LATERAL spql.mp4.tracks(v.source) AS tracks \
+                 WHERE v.episode_id = '{episode_id}'",
+                video_sources_name(&settings, &episode_id)
+            ),
+            100,
+        )
+        .unwrap();
+        assert!(tracks.rows.len() >= videos.len());
+
+        if uses_managed_catalog(&settings) {
+            let indexed = run_query(
+                &mut adbc.connection,
+                &format!(
+                    "SELECT COUNT(*) AS rows FROM {}.assets",
+                    managed_video_dataset_name(&settings, &episode_id)
+                ),
+                1,
+            )
+            .unwrap();
+            assert!(indexed.rows[0]["rows"].as_u64().unwrap() >= videos.len() as u64);
+        }
+
+        let selected = &videos[0];
+        let payload = run_binary_query(
+            &mut adbc.connection,
+            &format!(
+                "SELECT payload FROM {dataset}.{VIDEO_ASSETS_TABLE} \
+                 WHERE episode_id = '{episode_id}' AND stream_id = '{}' \
+                 AND segment_index = {} LIMIT 1",
+                selected.stream_id, selected.segment_index
+            ),
+        )
+        .unwrap();
+        assert_eq!(payload, std::fs::read(&selected.path).unwrap());
+
+        // Exercise the same settings, connection cache, query/replay, and
+        // browser-video methods used by the HTTP route layer.
+        let data_settings = Arc::new(DataSettingsStore::open(&episode_directory).unwrap());
+        let configured = data_settings.get().spiral;
+        assert_eq!(configured.project_id, settings.project_id);
+        assert_eq!(configured.dataset, settings.dataset);
+        let manager = Arc::new(
+            StorageManager::new(
+                data_settings,
+                Arc::new(EpisodeStore::open(episode_directory).unwrap()),
+                Some(driver_path),
+            )
+            .unwrap(),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let connection = manager.test_spiral().await;
+            assert!(connection.ok, "{}", connection.message);
+
+            // This is the exact asynchronous path used after recording stops
+            // and by POST /api/data/episodes/:episode/publish.
+            manager.publish_existing(episode_id.clone()).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                loop {
+                    let status = manager
+                        .statuses()
+                        .into_iter()
+                        .find(|status| status.episode_id == episode_id)
+                        .unwrap();
+                    if status.state == "published" {
+                        break;
+                    }
+                    assert_ne!(status.state, "failed", "{status:?}");
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("queued Spiral publication timed out");
+
+            let queried = manager
+                .query(
+                    &format!(
+                        "SELECT episode_id, frames FROM {dataset}.{EPISODES_TABLE} \
+                         WHERE episode_id = '{episode_id}'"
+                    ),
+                    10,
+                )
+                .await
+                .unwrap();
+            assert_eq!(queried.rows.len(), 1);
+            assert_eq!(queried.rows[0]["episode_id"], episode_id);
+
+            let stream = &episode.start.arms[0].id;
+            let (_, trajectory) = manager.trajectory(&episode_id, stream).await.unwrap();
+            assert_eq!(trajectory.len(), episode.samples.len());
+
+            let delivered = manager
+                .video_asset(
+                    &episode_id,
+                    &selected.stream_id,
+                    Some(selected.segment_index),
+                )
+                .await
+                .unwrap();
+            assert_eq!(delivered, std::fs::read(&selected.path).unwrap());
+        });
     }
 
     #[test]
