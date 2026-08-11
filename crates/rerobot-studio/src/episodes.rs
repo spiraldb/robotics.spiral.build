@@ -50,6 +50,16 @@ const FOOTER_TAIL_BYTES: u64 = 4_096;
 /// front of a stalled disk turns a recording into a memory leak.
 const SAMPLE_QUEUE_DEPTH: usize = 2_048;
 
+type NormalizedPose = BTreeMap<String, f64>;
+type TimestampedPose = (f64, NormalizedPose);
+
+/// A commandable trajectory and the recorded sample nearest a requested time.
+pub(crate) struct ReplayTrajectory {
+    pub(crate) frames: Vec<NormalizedPose>,
+    pub(crate) start_frame: usize,
+    pub(crate) resolved_start_seconds: f64,
+}
+
 /// Something went wrong reading or writing the episode store.
 #[derive(Debug)]
 pub enum EpisodeError {
@@ -731,6 +741,82 @@ impl EpisodeStore {
         id: &str,
         arm: &str,
     ) -> Result<Vec<BTreeMap<String, f64>>, EpisodeError> {
+        self.timestamped_trajectory(id, arm)
+            .map(|samples| samples.into_iter().map(|(_, pose)| pose).collect())
+    }
+
+    /// One arm's trajectory plus the commandable frame nearest a Timeline time.
+    ///
+    /// Frames without any calibrated values are excluded from replay, so the
+    /// start cursor must be resolved against the timestamps of the remaining
+    /// commandable frames rather than inferred from `sample_hz`.
+    pub(crate) fn trajectory_at(
+        &self,
+        id: &str,
+        arm: &str,
+        seconds: f64,
+    ) -> Result<ReplayTrajectory, EpisodeError> {
+        if !seconds.is_finite() || seconds < 0.0 {
+            return Err(EpisodeError::Invalid(
+                "replay start time must be a finite, non-negative number of seconds".to_owned(),
+            ));
+        }
+        let samples = self.timestamped_trajectory(id, arm)?;
+        let start_frame = samples
+            .iter()
+            .enumerate()
+            .min_by(
+                |(left_index, (left_seconds, _)), (right_index, (right_seconds, _))| {
+                    (seconds - left_seconds)
+                        .abs()
+                        .total_cmp(&(seconds - right_seconds).abs())
+                        .then_with(|| left_index.cmp(right_index))
+                },
+            )
+            .map(|(index, _)| index)
+            .expect("timestamped trajectories are never empty");
+        let resolved_seconds = samples[start_frame].0;
+        let frames = samples.into_iter().map(|(_, pose)| pose).collect();
+        Ok(ReplayTrajectory {
+            frames,
+            start_frame,
+            resolved_start_seconds: resolved_seconds,
+        })
+    }
+
+    fn timestamped_trajectory(
+        &self,
+        id: &str,
+        arm: &str,
+    ) -> Result<Vec<TimestampedPose>, EpisodeError> {
+        if self.get(id).is_ok_and(|summary| {
+            summary.file.ends_with(".jsonl.part") && !self.directory.join(&summary.file).exists()
+        }) {
+            // A stale partial summary reports "recording did not finish"
+            // before the reader reaches File::open, so refresh proactively
+            // when its temporary path has already been published away.
+            self.reload()?;
+        }
+        let first = self.timestamped_trajectory_once(id, arm);
+        if !matches!(
+            &first,
+            Err(EpisodeError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound
+        ) {
+            return first;
+        }
+
+        // A server-driven recording stop can publish the final filename before
+        // the next store refresh. Resolve the stable episode ID once more so a
+        // Replay click cannot retain the vanished `.part` path.
+        self.reload()?;
+        self.timestamped_trajectory_once(id, arm)
+    }
+
+    fn timestamped_trajectory_once(
+        &self,
+        id: &str,
+        arm: &str,
+    ) -> Result<Vec<TimestampedPose>, EpisodeError> {
         validate_episode_id(id)?;
         let summary = self.get(id)?;
         if let Some(problem) = &summary.problem {
@@ -752,7 +838,7 @@ impl EpisodeStore {
         let mut frames = Vec::with_capacity(summary.frames as usize);
         for line in BufReader::new(file).lines().skip(1) {
             let line = line.map_err(|source| EpisodeError::io(&path, source))?;
-            let Some(frame) = parse_frame(&line) else {
+            let Some(frame) = parse_frame(&line).filter(|frame| frame.t.is_finite()) else {
                 continue;
             };
             let Some(values) = frame.n.get(index) else {
@@ -767,7 +853,7 @@ impl EpisodeStore {
             // commandable pose; skipping it is honest, and a take with none
             // leaves an empty trajectory the caller refuses.
             if !pose.is_empty() {
-                frames.push(pose);
+                frames.push((frame.t, pose));
             }
         }
 
@@ -825,7 +911,16 @@ impl EpisodeStore {
         };
         let point = index.points[frame];
         let path = self.directory.join(&summary.file);
-        let mut file = File::open(&path).map_err(|source| EpisodeError::io(&path, source))?;
+        let mut file = match File::open(&path) {
+            Ok(file) => file,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                // The part-to-final rename can occur after `timeline_index`
+                // opened the old name but before this independent sample read.
+                self.reload()?;
+                return self.sample_at(id, seconds);
+            }
+            Err(source) => return Err(EpisodeError::io(&path, source)),
+        };
         file.seek(SeekFrom::Start(point.offset))
             .map_err(|source| EpisodeError::io(&path, source))?;
         let mut line = String::new();
@@ -945,7 +1040,14 @@ impl EpisodeStore {
 
         if bucket_count > 0 {
             let path = self.directory.join(&summary.file);
-            let file = File::open(&path).map_err(|source| EpisodeError::io(&path, source))?;
+            let file = match File::open(&path) {
+                Ok(file) => file,
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                    self.reload()?;
+                    return self.timeline_traces(id, buckets);
+                }
+                Err(source) => return Err(EpisodeError::io(&path, source)),
+            };
             let start = start_seconds.unwrap_or_default();
             let end = end_seconds.unwrap_or(start);
             for line in BufReader::new(file).lines().skip(1) {
@@ -1092,6 +1194,26 @@ impl EpisodeStore {
 
     fn timeline_index(&self, id: &str) -> Result<(EpisodeSummary, TimelineIndex), EpisodeError> {
         validate_episode_id(id)?;
+        let first = self.timeline_index_once(id);
+        if !matches!(
+            &first,
+            Err(EpisodeError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound
+        ) {
+            return first;
+        }
+
+        // Finishing a recording atomically renames `.jsonl.part` to `.jsonl`.
+        // A historical read may have captured the temporary summary just
+        // before that rename; refresh once and resolve the same stable episode
+        // ID to its durable filename instead of surfacing a transient ENOENT.
+        self.reload()?;
+        self.timeline_index_once(id)
+    }
+
+    fn timeline_index_once(
+        &self,
+        id: &str,
+    ) -> Result<(EpisodeSummary, TimelineIndex), EpisodeError> {
         let summary = self.get(id)?;
         let path = self.directory.join(&summary.file);
         let metadata = fs::metadata(&path).map_err(|source| EpisodeError::io(&path, source))?;
@@ -2033,6 +2155,46 @@ mod tests {
     }
 
     #[test]
+    fn replay_start_uses_commandable_sample_timestamps_after_missing_frames() {
+        let (_directory, store) = store();
+        let writer = store
+            .begin("Teleoperation".to_owned(), None, 1.0, arms(), Vec::new())
+            .expect("begin take");
+        for frame in 0..5 {
+            let shoulder = (frame != 1).then_some(frame as f64 / 10.0);
+            assert!(writer.push(Sample {
+                seconds: frame as f64,
+                normalized: vec![vec![shoulder, None]],
+                raw: vec![vec![2048 + frame as i64, 1024]],
+                ..Sample::default()
+            }));
+        }
+        writer
+            .finish(4.0, Vec::new(), None, false, Vec::new())
+            .expect("finish take");
+        store.reload().expect("reload");
+
+        let trajectory = store
+            .trajectory_at("episode_000001", "follower", 3.1)
+            .expect("timestamped trajectory");
+
+        assert_eq!(
+            trajectory.frames.len(),
+            4,
+            "one uncommandable frame is excluded"
+        );
+        assert_eq!(
+            trajectory.start_frame, 2,
+            "3.1s resolves to the commandable 3.0s pose"
+        );
+        assert_eq!(trajectory.resolved_start_seconds, 3.0);
+        assert_eq!(
+            trajectory.frames[trajectory.start_frame]["shoulder_pan"],
+            0.3
+        );
+    }
+
+    #[test]
     fn timeline_samples_are_random_access_and_choose_the_nearest_frame() {
         let (_directory, store) = store();
         record(&store, 4);
@@ -2068,6 +2230,64 @@ mod tests {
                 .expect("clamped last sample")
                 .frame,
             3
+        );
+    }
+
+    #[test]
+    fn timeline_reads_follow_a_recording_from_part_to_final_name() {
+        let (_directory, store) = store();
+        let partial = store.directory().join("episode_000001.jsonl.part");
+        let final_path = store.directory().join("episode_000001.jsonl");
+        let take = "{\"rerobot_episode\":1,\"id\":\"episode_000001\",\"started_ms\":0,\
+             \"sample_hz\":60.0,\"source\":\"Teleoperation\",\"arms\":[{\"id\":\"follower\",\
+             \"joints\":[\"shoulder_pan\",\"gripper\"]}]}\n\
+             {\"t\":0.0,\"n\":[[0.1,0.5]],\"raw\":[[2048,1024]]}\n";
+        fs::write(&partial, take).expect("write partial take");
+        store.reload().expect("cache partial take");
+        assert!(store.get("episode_000001").unwrap().file.ends_with(".part"));
+
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&partial)
+            .expect("open partial take");
+        file.write_all(b"{\"rerobot_episode_end\":1,\"frames\":1,\"duration_seconds\":0.016}\n")
+            .expect("append footer");
+        drop(file);
+        fs::rename(&partial, &final_path).expect("publish final take");
+
+        let sample = store
+            .sample_at("episode_000001", 0.0)
+            .expect("stale part identity refreshes to the final file");
+        assert_eq!(sample.frame, 0);
+        assert_eq!(
+            store.get("episode_000001").unwrap().file,
+            "episode_000001.jsonl"
+        );
+    }
+
+    #[test]
+    fn replay_reads_follow_a_recording_from_part_to_final_name() {
+        let (_directory, store) = store();
+        let partial = store.directory().join("episode_000001.jsonl.part");
+        let final_path = store.directory().join("episode_000001.jsonl");
+        let take = "{\"rerobot_episode\":1,\"id\":\"episode_000001\",\"started_ms\":0,\
+             \"sample_hz\":60.0,\"source\":\"Teleoperation\",\"arms\":[{\"id\":\"follower\",\
+             \"joints\":[\"shoulder_pan\",\"gripper\"]}]}\n\
+             {\"t\":0.0,\"n\":[[0.1,0.5]],\"raw\":[[2048,1024]]}\n\
+             {\"rerobot_episode_end\":1,\"frames\":1,\"duration_seconds\":0.016}\n";
+        fs::write(&partial, take).expect("write partial take");
+        store.reload().expect("cache partial take");
+        fs::rename(&partial, &final_path).expect("publish final take");
+
+        let trajectory = store
+            .trajectory_at("episode_000001", "follower", 0.0)
+            .expect("stale replay identity refreshes to the final file");
+
+        assert_eq!(trajectory.frames.len(), 1);
+        assert_eq!(trajectory.frames[0]["shoulder_pan"], 0.1);
+        assert_eq!(
+            store.get("episode_000001").unwrap().file,
+            "episode_000001.jsonl"
         );
     }
 

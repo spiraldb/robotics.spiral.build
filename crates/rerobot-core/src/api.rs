@@ -722,6 +722,27 @@ pub struct RecordingGap {
     pub duration_seconds: f64,
 }
 
+/// Why a replay trajectory is loaded.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayPurpose {
+    /// User-facing episode transport controlled by Play/Pause.
+    #[default]
+    Timeline,
+    /// One committed Timeline scrub moving the robot to a single pose.
+    PhysicalSeek,
+}
+
+/// Whether a replay is positioning the arm or advancing through the episode.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayPhase {
+    Seeking,
+    /// Default preserves the behavior of progress sent by an older backend.
+    #[default]
+    Playing,
+}
+
 /// An episode being played back right now.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ReplayProgress {
@@ -733,6 +754,12 @@ pub struct ReplayProgress {
     pub frames: u64,
     pub elapsed_seconds: f64,
     pub duration_seconds: f64,
+    /// Whether this is Timeline transport or a one-pose physical seek.
+    #[serde(default)]
+    pub purpose: ReplayPurpose,
+    /// Positioning never advances the episode clock or recorded media.
+    #[serde(default)]
+    pub phase: ReplayPhase,
     /// Whether playback is holding its current frame without discarding the
     /// loaded trajectory. Resuming continues from this exact position.
     #[serde(default)]
@@ -778,7 +805,7 @@ pub struct JudgeEpisodeRequest {
 }
 
 /// Play a stored episode back onto one arm.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct StartReplayRequest {
     pub episode: String,
     /// The arm to drive. It must be connected and calibrated.
@@ -787,6 +814,10 @@ pub struct StartReplayRequest {
     /// one. Defaults to the arm being driven, then to the take's only arm.
     #[serde(default)]
     pub source_arm: Option<String>,
+    /// Episode-clock position where replay should begin. Older clients omit
+    /// this and retain the original frame-zero behavior.
+    #[serde(default)]
+    pub start_seconds: f64,
 }
 
 /// Write the kept takes out as a dataset.
@@ -1003,6 +1034,25 @@ mod tests {
 
         let update: UpdateRobotRequest = serde_json::from_str("{}").unwrap();
         assert_eq!(update, UpdateRobotRequest::default());
+    }
+
+    #[test]
+    fn older_replay_progress_defaults_to_timeline_playback() {
+        let replay: ReplayProgress = serde_json::from_str(
+            r#"{
+                "episode":"episode_000001",
+                "robot":"follower",
+                "frame":12,
+                "frames":60,
+                "elapsed_seconds":0.2,
+                "duration_seconds":1.0
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(replay.purpose, ReplayPurpose::Timeline);
+        assert_eq!(replay.phase, ReplayPhase::Playing);
+        assert!(!replay.paused);
     }
 
     #[test]

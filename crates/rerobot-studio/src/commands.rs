@@ -147,7 +147,7 @@ pub(crate) fn replay_blocker(studio: Studio, episode: &EpisodeSummary) -> Option
     }
 }
 
-pub(crate) fn start_replay(studio: Studio, episode: &EpisodeSummary) {
+pub(crate) fn start_replay(studio: Studio, episode: &EpisodeSummary, start_seconds: f64) {
     if let Some(reason) = replay_blocker(studio, episode) {
         studio.report(reason);
         return;
@@ -159,6 +159,7 @@ pub(crate) fn start_replay(studio: Studio, episode: &EpisodeSummary) {
         episode: episode.id.clone(),
         robot,
         source_arm,
+        start_seconds,
     };
     studio.run("", async move {
         api::send(Method::POST, "/api/episodes/replay", Some(&request)).await

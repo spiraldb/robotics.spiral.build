@@ -1,7 +1,7 @@
 //! The studio shell: global session rails around a persisted tiled workbench.
 
 use dioxus::prelude::*;
-use rerobot_core::api::{DataSettings, ModeSelection};
+use rerobot_core::api::{DataSettings, ModeSelection, ReplayPhase, ReplayPurpose};
 use rerobot_panels::{
     DockZone, LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis,
 };
@@ -86,13 +86,18 @@ pub fn App() -> Element {
     // One reactive clock drives every recorded video element. Child component
     // effects only observed signals they owned, so a prop-only historical
     // sample update could change the printed time without seeking the media.
-    // Reading these two App signals here makes frame and playback changes
-    // explicit dependencies and keeps hidden mounted tabs synchronized too.
+    // Reading the controller clock and playback state here makes frame and
+    // transport changes explicit dependencies and keeps hidden mounted tabs
+    // synchronized too.
     #[cfg(feature = "web")]
     use_effect(move || {
         let source = historical_state();
-        let should_play =
-            preview_playing() || studio.replay().is_some_and(|progress| !progress.paused);
+        let controller_seconds = playhead();
+        let should_play = preview_playing()
+            || studio
+                .replay()
+                .as_ref()
+                .is_some_and(replay_drives_recorded_media);
         let Some(preview) = source
             .as_ref()
             .and_then(RecordedSource::renderable)
@@ -102,7 +107,9 @@ pub fn App() -> Element {
         };
 
         for camera in assigned_cameras() {
-            if let Some(recorded) = historical_camera(&preview, Some(&camera)) {
+            if let Some(recorded) =
+                historical_camera_at(&preview, Some(&camera), controller_seconds)
+            {
                 sync_recorded_camera(
                     &recorded_camera_element_id(&camera_panel_id(&camera)),
                     recorded.video_seconds,
@@ -111,7 +118,9 @@ pub fn App() -> Element {
             }
         }
         for (stream_id, label) in recorded_camera_streams(&preview) {
-            if let Some(recorded) = historical_camera_for_stream(&preview, &stream_id, &label) {
+            if let Some(recorded) =
+                historical_camera_for_stream_at(&preview, &stream_id, &label, controller_seconds)
+            {
                 sync_recorded_camera(
                     &recorded_camera_element_id(&format!("episode-camera:{stream_id}")),
                     recorded.video_seconds,
@@ -179,10 +188,11 @@ pub fn App() -> Element {
     // samples are bounded to a smooth visual cadence so the canvas receives
     // enough distinct poses without issuing duplicate requests for the same
     // display frame; browser-native video runs on its own media clock.
-    // One-frame Replay states belong to physical scrub seeks and deliberately
-    // stay owned by the explicit timeline request instead of resetting to 0s.
+    // Physical scrub seeks deliberately stay owned by the explicit timeline
+    // request instead of replacing it with replay telemetry. Replay purpose is
+    // explicit because a valid timeline replay can contain only one frame.
     use_effect(move || {
-        let Some(replay) = studio.replay().filter(|replay| replay.frames > 1) else {
+        let Some(replay) = studio.replay().filter(replay_owns_timeline_transport) else {
             sampled_replay_slot.set(None);
             return;
         };
@@ -286,19 +296,38 @@ pub fn App() -> Element {
         data_intent.read().as_ref(),
         data_episode_context,
     );
-    let projected_recorded_episode = projection.timeline.recorded_episode().map(str::to_owned);
+    let projected_recorded_identity = match &projection.timeline {
+        TimelineSubject::Recording(recording) if recording.paused => Some((
+            recording.episode.clone(),
+            "recording-open".to_owned(),
+            recording.elapsed_seconds,
+        )),
+        TimelineSubject::Episode { episode, .. } => {
+            Some((episode.id.clone(), episode.file.clone(), 0.0))
+        }
+        TimelineSubject::Empty { .. } | TimelineSubject::Recording(_) => None,
+    };
     use_effect(use_reactive(
-        (&projected_recorded_episode,),
-        move |(episode,)| {
-            let Some(episode) = episode else { return };
-            if historical_state
-                .peek()
-                .as_ref()
-                .is_some_and(|source| source.episode == episode)
-            {
+        (&projected_recorded_identity,),
+        move |(identity,)| {
+            let Some((episode, _source_file, seconds)) = identity else {
                 return;
-            }
-            request_historical_preview(studio, episode, 0.0, historical_state, historical_revision);
+            };
+            // The stable episode ID survives finalization, but its source file
+            // changes from `.part` to `.jsonl`. Treat that durable identity as
+            // a new source even when the selected episode itself did not
+            // change, including server-driven recording stops.
+            let next_revision = historical_revision.peek().wrapping_add(1);
+            historical_revision.set(next_revision);
+            historical_state.set(None);
+            playhead.set(seconds);
+            request_historical_preview(
+                studio,
+                episode,
+                seconds,
+                historical_state,
+                historical_revision,
+            );
         },
     ));
     let subject = projection.timeline.clone();
@@ -335,6 +364,8 @@ pub fn App() -> Element {
         .and_then(|replay| {
             (subject.episode_id() == Some(replay.episode.as_str())).then_some(if replay.paused {
                 TimelinePlayback::RobotSyncPaused
+            } else if replay.phase == ReplayPhase::Seeking {
+                TimelinePlayback::RobotSyncSeeking
             } else {
                 TimelinePlayback::RobotSyncPlaying
             })
@@ -440,6 +471,7 @@ pub fn App() -> Element {
                         episode,
                         historical_source.as_ref(),
                         camera,
+                        playhead(),
                     )
                 } else {
                     CameraEditorSource::Live {
@@ -499,6 +531,7 @@ pub fn App() -> Element {
                     historical_source.as_ref(),
                     &stream_id,
                     &label,
+                    playhead(),
                 );
                 dock_panels.push((
                     Panel::new(
@@ -599,8 +632,25 @@ pub fn App() -> Element {
                                 &episode,
                                 keep,
                                 EventHandler::new(move |summary: rerobot_core::api::EpisodeSummary| {
+                                    // Finalization atomically renames `.part`
+                                    // to `.jsonl`. Cancel any read that began
+                                    // against the temporary name and load the
+                                    // completed source from its durable path.
+                                    let next_revision = historical_revision.peek().wrapping_add(1);
+                                    historical_revision.set(next_revision);
+                                    historical_state.set(None);
+                                    automatic_preview_target.set(None);
+                                    interactive_preview_target.set(None);
                                     if keep {
-                                        live_review_episode.set(Some(summary.id));
+                                        let episode = summary.id;
+                                        live_review_episode.set(Some(episode.clone()));
+                                        request_historical_preview(
+                                            studio,
+                                            episode,
+                                            0.0,
+                                            historical_state,
+                                            historical_revision,
+                                        );
                                     } else {
                                         live_review_episode.set(None);
                                     }
@@ -633,7 +683,7 @@ pub fn App() -> Element {
                             preview_target.set(None);
                             follow_live.set(false);
                             if let Some(summary) = action_subject.episode() {
-                                crate::commands::start_replay(studio, summary);
+                                crate::commands::start_replay(studio, summary, playhead());
                             }
                         }
                         TimelineRobotSyncAction::Pause => {
@@ -824,7 +874,20 @@ pub fn App() -> Element {
                                 &recording.episode,
                                 true,
                                 EventHandler::new(move |summary: rerobot_core::api::EpisodeSummary| {
-                                    live_review_episode.set(Some(summary.id));
+                                    let next_revision = historical_revision.peek().wrapping_add(1);
+                                    historical_revision.set(next_revision);
+                                    historical_state.set(None);
+                                    automatic_preview_target.set(None);
+                                    interactive_preview_target.set(None);
+                                    let episode = summary.id;
+                                    live_review_episode.set(Some(episode.clone()));
+                                    request_historical_preview(
+                                        studio,
+                                        episode,
+                                        0.0,
+                                        historical_state,
+                                        historical_revision,
+                                    );
                                 }),
                             ),
                             None if workbench() == Activity::Live => {
@@ -844,7 +907,14 @@ pub fn App() -> Element {
                                 studio,
                                 &recording.episode,
                                 false,
-                                EventHandler::new(move |_| live_review_episode.set(None)),
+                                EventHandler::new(move |_| {
+                                    let next_revision = historical_revision.peek().wrapping_add(1);
+                                    historical_revision.set(next_revision);
+                                    historical_state.set(None);
+                                    automatic_preview_target.set(None);
+                                    interactive_preview_target.set(None);
+                                    live_review_episode.set(None);
+                                }),
                             );
                         }
                     }
@@ -863,6 +933,19 @@ pub fn App() -> Element {
                     on_activity: move |next| {
                         preview_playing.set(false);
                         preview_target.set(None);
+                        // Live means current hardware unless an active paused
+                        // recording explicitly owns the review state. Clear a
+                        // completed-take review (including on a second click
+                        // of Live) so Data playback can never strand recorded
+                        // pixels over the live camera stream.
+                        if next == Activity::Live && studio.recording().is_none() {
+                            live_review_episode.set(None);
+                            automatic_preview_target.set(None);
+                            interactive_preview_target.set(None);
+                            let next_revision = historical_revision.peek().wrapping_add(1);
+                            historical_revision.set(next_revision);
+                            historical_state.set(None);
+                        }
                         workbench.set(next);
                     },
                     on_settings: move |_| settings_open.set(true),
@@ -1168,9 +1251,18 @@ struct HistoricalCamera {
     approximate: bool,
 }
 
+#[cfg(test)]
 fn historical_camera(
     preview: &HistoricalPreview,
     selected: Option<&(String, String, String)>,
+) -> Option<HistoricalCamera> {
+    historical_camera_at(preview, selected, preview.sample.seconds)
+}
+
+fn historical_camera_at(
+    preview: &HistoricalPreview,
+    selected: Option<&(String, String, String)>,
+    at: f64,
 ) -> Option<HistoricalCamera> {
     let expected = selected.map(|(robot, role, _)| format!("{robot}.camera.{role}"));
     let stream_id = if let Some(expected) = expected.as_deref() {
@@ -1192,7 +1284,7 @@ fn historical_camera(
         .map(|(_, role, _)| role.clone())
         .or_else(|| stream_id.rsplit('.').next().map(str::to_owned))
         .unwrap_or_else(|| "recorded".to_owned());
-    historical_camera_for_stream(preview, stream_id, &label)
+    historical_camera_for_stream_at(preview, stream_id, &label, at)
 }
 
 fn recorded_scene_source(
@@ -1255,9 +1347,10 @@ fn recorded_camera_source_for_live_assignment(
     episode: &str,
     source: Option<&RecordedSource<HistoricalPreview>>,
     camera: &(String, String, String),
+    at: f64,
 ) -> CameraEditorSource {
     CameraEditorSource::Recorded(map_recorded_camera(episode, source, |preview| {
-        historical_camera(preview, Some(camera))
+        historical_camera_at(preview, Some(camera), at)
     }))
 }
 
@@ -1266,9 +1359,10 @@ fn recorded_camera_source_for_stream(
     source: Option<&RecordedSource<HistoricalPreview>>,
     stream_id: &str,
     label: &str,
+    at: f64,
 ) -> CameraEditorSource {
     CameraEditorSource::Recorded(map_recorded_camera(episode, source, |preview| {
-        historical_camera_for_stream(preview, stream_id, label)
+        historical_camera_for_stream_at(preview, stream_id, label, at)
     }))
 }
 
@@ -1317,10 +1411,11 @@ fn recorded_camera_streams(preview: &HistoricalPreview) -> Vec<(String, String)>
     streams
 }
 
-fn historical_camera_for_stream(
+fn historical_camera_for_stream_at(
     preview: &HistoricalPreview,
     stream_id: &str,
     label: &str,
+    at: f64,
 ) -> Option<HistoricalCamera> {
     let assets = preview
         .timeline
@@ -1338,7 +1433,7 @@ fn historical_camera_for_stream(
             .unwrap_or_default()
             .total_cmp(&right.timeline_offset_seconds.unwrap_or_default())
     });
-    let at = preview.sample.seconds.max(0.0);
+    let at = at.max(0.0);
     let asset = if exact_assets.is_empty() {
         assets
             .iter()
@@ -1368,12 +1463,12 @@ fn historical_camera_for_stream(
     let episode_duration = preview.timeline.episode.duration_seconds.max(0.0);
     let (video_seconds, approximate) = if let Some(offset) = asset.timeline_offset_seconds {
         (
-            (preview.sample.seconds - offset).clamp(0.0, asset.duration_seconds.max(0.0)),
+            (at - offset).clamp(0.0, asset.duration_seconds.max(0.0)),
             false,
         )
     } else {
         let ratio = if episode_duration > 0.0 {
-            (preview.sample.seconds / episode_duration).clamp(0.0, 1.0)
+            (at / episode_duration).clamp(0.0, 1.0)
         } else {
             0.0
         };
@@ -1385,7 +1480,7 @@ fn historical_camera_for_stream(
         label,
         url,
         video_seconds,
-        episode_seconds: preview.sample.seconds,
+        episode_seconds: at,
         approximate,
     })
 }
@@ -1409,12 +1504,15 @@ fn historical_replay_slot(seconds: f64) -> u64 {
     (seconds * HISTORICAL_RENDER_HZ).floor() as u64
 }
 
-/// A one-frame replay is the controller's bounded implementation of a
-/// committed physical seek. It is a consequence of the Timeline playhead, not
-/// a transport that may replace or reposition that playhead while the arm is
-/// still travelling to the requested pose.
+/// Physical seeks are consequences of the Timeline playhead, not transport
+/// that may replace or reposition it while the arm is travelling to a pose.
 fn replay_owns_timeline_transport(replay: &rerobot_core::api::ReplayProgress) -> bool {
-    replay.frames > 1
+    replay.purpose == ReplayPurpose::Timeline
+}
+
+#[cfg(any(test, feature = "web"))]
+fn replay_drives_recorded_media(replay: &rerobot_core::api::ReplayProgress) -> bool {
+    replay_owns_timeline_transport(replay) && replay.phase == ReplayPhase::Playing && !replay.paused
 }
 
 fn timeline_target_episode(target: &TimelineTarget) -> &str {
@@ -1684,9 +1782,22 @@ fn request_historical_preview(
         if !revision.peek().eq(&ticket) {
             return;
         }
+        let timeline_source_file = timeline.episode.file.clone();
         let sample_path = crate::api::timeline_sample_url(&episode, seconds);
         match crate::api::get::<crate::api::TimelineSample>(&sample_path).await {
             Ok(sample) if revision.peek().eq(&ticket) => {
+                // A trace request from the same file generation may have
+                // completed while this sample was loading. Preserve those
+                // lanes instead of replacing them with the snapshot captured
+                // when this request began.
+                let signal_lanes = state
+                    .peek()
+                    .as_ref()
+                    .filter(|source| source.episode == episode)
+                    .and_then(RecordedSource::renderable)
+                    .filter(|preview| preview.timeline.episode.file == timeline_source_file)
+                    .and_then(|preview| preview.signal_lanes.clone())
+                    .or_else(|| existing_signal_lanes.clone());
                 state.set(Some(RecordedSource {
                     episode: episode.clone(),
                     seconds,
@@ -1694,18 +1805,18 @@ fn request_historical_preview(
                         episode: episode.clone(),
                         timeline,
                         sample,
-                        signal_lanes: existing_signal_lanes.clone(),
+                        signal_lanes,
                     }),
                 }));
                 if should_load_traces {
                     match load_recorded_timeline_traces(&episode, 240).await {
                         Ok(traces) => {
-                            if let Some(source) = state.write().as_mut()
-                                && source.episode == episode
-                                && let LoadState::Ready(preview) = &mut source.state
-                            {
-                                preview.signal_lanes = Some(traces.signal_lanes());
-                            }
+                            attach_historical_traces(
+                                &mut state.write(),
+                                &episode,
+                                &timeline_source_file,
+                                &traces,
+                            );
                         }
                         Err(error) if revision.peek().eq(&ticket) => studio.report(error),
                         Err(_) => {}
@@ -1727,6 +1838,35 @@ fn request_historical_preview(
             Err(_) => {}
         }
     });
+}
+
+fn attach_historical_traces(
+    source: &mut Option<RecordedSource<HistoricalPreview>>,
+    episode: &str,
+    source_file: &str,
+    traces: &RecordedTimelineTraces,
+) -> bool {
+    let Some(source) = source.as_mut().filter(|source| source.episode == episode) else {
+        return false;
+    };
+    let preview = match &mut source.state {
+        LoadState::Ready(preview) => preview,
+        LoadState::Loading {
+            previous: Some(preview),
+        }
+        | LoadState::Failed {
+            previous: Some(preview),
+            ..
+        } => preview,
+        LoadState::Loading { previous: None }
+        | LoadState::Failed { previous: None, .. }
+        | LoadState::Unavailable { .. } => return false,
+    };
+    if preview.timeline.episode.file != source_file {
+        return false;
+    }
+    preview.signal_lanes = Some(traces.signal_lanes());
+    true
 }
 
 fn format_elapsed_status(seconds: f64) -> String {
@@ -1838,6 +1978,16 @@ mod tests {
             camera.url,
             "/api/episodes/take-1/videos/follower.camera.wrist?segment=0"
         );
+    }
+
+    #[test]
+    fn recorded_video_sync_uses_the_controller_clock_not_a_late_sample_response() {
+        let preview = preview(1.0, vec![video(0, Some(0.0), 8.0)]);
+
+        let camera = historical_camera_at(&preview, None, 5.0).expect("recorded camera");
+
+        assert_eq!(camera.video_seconds, 5.0);
+        assert_eq!(camera.episode_seconds, 5.0);
     }
 
     #[test]
@@ -1978,12 +2128,76 @@ mod tests {
             frames: 1,
             elapsed_seconds: 0.0,
             duration_seconds: 1.0 / 60.0,
+            purpose: ReplayPurpose::PhysicalSeek,
+            phase: ReplayPhase::Seeking,
             paused: false,
         };
 
         assert!(!replay_owns_timeline_transport(&replay));
-        replay.frames = 2;
+        assert!(!replay_drives_recorded_media(&replay));
+        replay.purpose = ReplayPurpose::Timeline;
         assert!(replay_owns_timeline_transport(&replay));
+        assert!(!replay_drives_recorded_media(&replay));
+        replay.phase = ReplayPhase::Playing;
+        assert!(replay_drives_recorded_media(&replay));
+        replay.paused = true;
+        assert!(!replay_drives_recorded_media(&replay));
+    }
+
+    #[test]
+    fn stale_trace_results_cannot_cross_episode_file_generations() {
+        let mut source = Some(RecordedSource {
+            episode: "take-1".to_owned(),
+            seconds: 0.0,
+            state: LoadState::Ready(preview(0.0, Vec::new())),
+        });
+        let traces = RecordedTimelineTraces::default();
+
+        assert!(!attach_historical_traces(
+            &mut source,
+            "take-1",
+            "take-1.jsonl.part",
+            &traces,
+        ));
+        assert!(
+            source
+                .as_ref()
+                .and_then(RecordedSource::renderable)
+                .is_some_and(|preview| preview.signal_lanes.is_none())
+        );
+
+        assert!(attach_historical_traces(
+            &mut source,
+            "take-1",
+            "take-1.jsonl",
+            &traces,
+        ));
+        assert!(
+            source
+                .as_ref()
+                .and_then(RecordedSource::renderable)
+                .is_some_and(|preview| preview.signal_lanes.is_some())
+        );
+
+        let mut in_flight_sample = Some(RecordedSource {
+            episode: "take-1".to_owned(),
+            seconds: 2.0,
+            state: LoadState::Loading {
+                previous: Some(preview(1.0, Vec::new())),
+            },
+        });
+        assert!(attach_historical_traces(
+            &mut in_flight_sample,
+            "take-1",
+            "take-1.jsonl",
+            &traces,
+        ));
+        assert!(
+            in_flight_sample
+                .as_ref()
+                .and_then(RecordedSource::renderable)
+                .is_some_and(|preview| preview.signal_lanes.is_some())
+        );
     }
 
     #[test]
@@ -2034,7 +2248,7 @@ mod tests {
             "camera-1".to_owned(),
         );
 
-        let source = recorded_camera_source_for_live_assignment("take-1", None, &assigned);
+        let source = recorded_camera_source_for_live_assignment("take-1", None, &assigned, 0.0);
 
         assert!(matches!(
             source,

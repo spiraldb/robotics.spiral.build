@@ -28,8 +28,8 @@ use crate::episodes::{ArmConditionSummary, EpisodeCheckpoint, EpisodeWriter, Sam
 use rerobot_core::api::{
     CAUTION_FOLLOW_ERROR_DEGREES, CalibrationJointProgress, CalibrationProgress, ConnectionStatus,
     EpisodeArm, EpisodeSummary, JointRange, JointTelemetry, ModeSelection, ModeStatus, MotorFault,
-    MotorLimits, PortSettings, RecordingGap, RecordingProgress, ReplayProgress, RobotTelemetry,
-    TelemetryFrame,
+    MotorLimits, PortSettings, RecordingGap, RecordingProgress, ReplayPhase, ReplayProgress,
+    ReplayPurpose, RobotTelemetry, TelemetryFrame,
 };
 use rerobot_core::arm;
 use rerobot_core::calibration::{
@@ -58,13 +58,13 @@ pub const DEFAULT_TELEOP_MAX_STEP_COUNTS: i64 = 40;
 /// Consecutive failed transfers before a bus is considered lost.
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
-/// How close every joint must get to a take's first frame before playback runs.
+/// How close every joint must get to a replay's requested frame before playback runs.
 ///
 /// In normalized units, so this is a fraction of each joint's measured travel
 /// rather than a count that means something different on every joint.
 const REPLAY_SEEK_TOLERANCE: f64 = 0.02;
 
-/// How long an arm may spend moving to a take's start pose before giving up.
+/// How long an arm may spend moving to a replay's requested pose before giving up.
 ///
 /// A joint blocked by the bench, or by the operator's own hand, would otherwise
 /// leave a replay waiting to start forever with an energized arm pushing
@@ -126,6 +126,14 @@ pub struct HardwareState {
     /// happens: the recording counters vanish with the recording, and an
     /// operator looking up a second later would otherwise see nothing at all.
     pub recording_issue: Option<String>,
+}
+
+struct ReplayPlan {
+    frames: Vec<BTreeMap<String, f64>>,
+    sample_hz: f64,
+    start_frame: usize,
+    resolved_start_seconds: f64,
+    purpose: ReplayPurpose,
 }
 
 enum Command {
@@ -192,8 +200,7 @@ enum Command {
     StartReplay {
         robot: String,
         episode: String,
-        frames: Vec<BTreeMap<String, f64>>,
-        sample_hz: f64,
+        plan: ReplayPlan,
         reply: Reply<()>,
     },
     Shutdown {
@@ -335,14 +342,6 @@ impl Recording {
     }
 }
 
-/// Whether a replay is still driving the arm to the take's first pose.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ReplayPhase {
-    /// Ramping to frame zero, at the gentle manual rate.
-    Seeking,
-    Playing,
-}
-
 /// An episode being played back onto one arm.
 struct Replay {
     episode: String,
@@ -351,9 +350,14 @@ struct Replay {
     /// Seconds between recorded frames, so playback runs at the rate it was
     /// captured at rather than at whatever the control loop happens to manage.
     frame_period: f64,
+    purpose: ReplayPurpose,
     phase: ReplayPhase,
     /// Fractional index into `frames`, advanced by real elapsed time.
     position: f64,
+    /// Frame position and episode time are not interchangeable after frames
+    /// without commandable poses have been filtered out.
+    start_position: f64,
+    resolved_start_seconds: f64,
     /// A paused replay keeps its loaded trajectory and current position. The
     /// arm holds where it is until the same replay resumes.
     paused: bool,
@@ -364,10 +368,7 @@ struct Replay {
 impl Replay {
     /// The pose this replay wants the arm at right now.
     fn pose(&self) -> Option<&BTreeMap<String, f64>> {
-        match self.phase {
-            ReplayPhase::Seeking => self.frames.first(),
-            ReplayPhase::Playing => self.frames.get(self.cursor()),
-        }
+        self.frames.get(self.cursor())
     }
 
     fn cursor(&self) -> usize {
@@ -380,6 +381,11 @@ impl Replay {
 
     fn duration_seconds(&self) -> f64 {
         self.frames.len() as f64 * self.frame_period
+    }
+
+    fn elapsed_seconds(&self) -> f64 {
+        self.resolved_start_seconds
+            + (self.position - self.start_position).max(0.0) * self.frame_period
     }
 }
 
@@ -554,11 +560,66 @@ impl HardwareHandle {
         frames: Vec<BTreeMap<String, f64>>,
         sample_hz: f64,
     ) -> Result<(), String> {
+        self.start_replay_at_frame(robot, episode, frames, sample_hz, 0, 0.0)
+            .await
+    }
+
+    /// Play a recorded trajectory beginning at one resolved trajectory frame.
+    pub async fn start_replay_at_frame(
+        &self,
+        robot: &str,
+        episode: &str,
+        frames: Vec<BTreeMap<String, f64>>,
+        sample_hz: f64,
+        start_frame: usize,
+        resolved_start_seconds: f64,
+    ) -> Result<(), String> {
+        self.start_replay_for(
+            robot,
+            episode,
+            ReplayPlan {
+                frames,
+                sample_hz,
+                start_frame,
+                resolved_start_seconds,
+                purpose: ReplayPurpose::Timeline,
+            },
+        )
+        .await
+    }
+
+    /// Move to one committed historical pose without creating Timeline transport.
+    pub async fn start_physical_seek(
+        &self,
+        robot: &str,
+        episode: &str,
+        pose: BTreeMap<String, f64>,
+        sample_hz: f64,
+    ) -> Result<(), String> {
+        self.start_replay_for(
+            robot,
+            episode,
+            ReplayPlan {
+                frames: vec![pose],
+                sample_hz,
+                start_frame: 0,
+                resolved_start_seconds: 0.0,
+                purpose: ReplayPurpose::PhysicalSeek,
+            },
+        )
+        .await
+    }
+
+    async fn start_replay_for(
+        &self,
+        robot: &str,
+        episode: &str,
+        plan: ReplayPlan,
+    ) -> Result<(), String> {
         self.request(|reply| Command::StartReplay {
             robot: robot.to_owned(),
             episode: episode.to_owned(),
-            frames,
-            sample_hz,
+            plan,
             reply,
         })
         .await
@@ -1194,11 +1255,10 @@ impl Controller {
             Command::StartReplay {
                 robot,
                 episode,
-                frames,
-                sample_hz,
+                plan,
                 reply,
             } => {
-                let _ = reply.send(self.start_replay(&robot, &episode, frames, sample_hz));
+                let _ = reply.send(self.start_replay_for(&robot, &episode, plan));
             }
             Command::Shutdown { reply } => {
                 // A take in progress is worth more than a tidy exit: close it
@@ -1421,6 +1481,7 @@ impl Controller {
         }
     }
 
+    #[cfg(test)]
     fn start_replay(
         &mut self,
         robot: &str,
@@ -1428,12 +1489,48 @@ impl Controller {
         frames: Vec<BTreeMap<String, f64>>,
         sample_hz: f64,
     ) -> Result<(), String> {
+        self.start_replay_for(
+            robot,
+            episode,
+            ReplayPlan {
+                frames,
+                sample_hz,
+                start_frame: 0,
+                resolved_start_seconds: 0.0,
+                purpose: ReplayPurpose::Timeline,
+            },
+        )
+    }
+
+    fn start_replay_for(
+        &mut self,
+        robot: &str,
+        episode: &str,
+        plan: ReplayPlan,
+    ) -> Result<(), String> {
+        let ReplayPlan {
+            frames,
+            sample_hz,
+            start_frame,
+            resolved_start_seconds,
+            purpose,
+        } = plan;
         if frames.is_empty() {
             return Err(format!("take {episode:?} has no frames to replay"));
         }
         if !sample_hz.is_finite() || sample_hz <= 0.0 {
             return Err(format!(
                 "take {episode:?} records an unusable sample rate of {sample_hz}"
+            ));
+        }
+        if start_frame >= frames.len() {
+            return Err(format!(
+                "take {episode:?} has no replay frame at index {start_frame}"
+            ));
+        }
+        if !resolved_start_seconds.is_finite() || resolved_start_seconds < 0.0 {
+            return Err(format!(
+                "take {episode:?} resolves to an unusable replay time of {resolved_start_seconds}"
             ));
         }
         let calibration = self.require_calibrated(robot)?.clone();
@@ -1457,13 +1554,17 @@ impl Controller {
             episode: episode.to_owned(),
         })?;
 
+        let start_position = start_frame as f64;
         self.replay = Some(Replay {
             episode: episode.to_owned(),
             robot: robot.to_owned(),
             frames,
             frame_period: 1.0 / sample_hz,
+            purpose,
             phase: ReplayPhase::Seeking,
-            position: 0.0,
+            position: start_position,
+            start_position,
+            resolved_start_seconds,
             paused: false,
             seeking_since: Instant::now(),
         });
@@ -1471,6 +1572,16 @@ impl Controller {
     }
 
     fn set_replay_paused(&mut self, paused: bool) -> Result<(), String> {
+        // A physical seek is an atomic motion consequence, not Timeline
+        // transport. A late pause from the replay that preceded a scrub must
+        // not freeze the replacement seek before the arm can move.
+        if self
+            .replay
+            .as_ref()
+            .is_some_and(|replay| replay.purpose == ReplayPurpose::PhysicalSeek)
+        {
+            return Ok(());
+        }
         let robot = self
             .replay
             .as_ref()
@@ -1940,8 +2051,8 @@ impl Controller {
 
     /// Walk the replay forward one control cycle.
     ///
-    /// Two phases. The arm is first ramped to the take's first frame at the
-    /// gentle manual rate, because a recording almost never starts where the
+    /// Two phases. The arm is first ramped to the requested frame at the
+    /// gentle manual rate, because a recording rarely matches where the
     /// arm is standing — the previous take left it at *its* last pose. Only once
     /// every joint is there does playback begin, and playback advances by real
     /// elapsed time so a take captured at sixty hertz plays at sixty hertz
@@ -1971,7 +2082,7 @@ impl Controller {
         };
 
         if replay.phase == ReplayPhase::Seeking {
-            let Some(first) = replay.frames.first() else {
+            let Some(first) = replay.pose() else {
                 self.replay = None;
                 self.mode = ModeStatus {
                     selection: ModeSelection::Idle,
@@ -1994,7 +2105,6 @@ impl Controller {
 
             if arrived {
                 replay.phase = ReplayPhase::Playing;
-                replay.position = 0.0;
             } else if replay.seeking_since.elapsed() >= REPLAY_SEEK_TIMEOUT {
                 let waited = REPLAY_SEEK_TIMEOUT.as_secs();
                 self.replay = None;
@@ -2002,7 +2112,7 @@ impl Controller {
                     selection: ModeSelection::Idle,
                     active: false,
                     error: Some(format!(
-                        "stopped Replay: {robot_id} did not reach the start of {episode} within {waited} seconds. Check whether a joint is obstructed."
+                        "stopped Replay: {robot_id} did not reach the requested pose in {episode} within {waited} seconds. Check whether a joint is obstructed."
                     )),
                 };
                 return;
@@ -2120,18 +2230,15 @@ impl Controller {
                 replay: self.replay.as_ref().map(|replay| ReplayProgress {
                     episode: replay.episode.clone(),
                     robot: replay.robot.clone(),
-                    // While seeking, no recorded frame has been reached yet, so
-                    // the position is honestly zero rather than a guess.
-                    frame: match replay.phase {
-                        ReplayPhase::Seeking => 0,
-                        ReplayPhase::Playing => replay.cursor().min(replay.frames.len()) as u64,
-                    },
+                    // Seeking preserves the requested episode position while
+                    // the arm ramps there, so visualizations never jump back
+                    // to frame zero after a committed scrub.
+                    frame: replay.cursor().min(replay.frames.len()) as u64,
                     frames: replay.frames.len() as u64,
-                    elapsed_seconds: match replay.phase {
-                        ReplayPhase::Seeking => 0.0,
-                        ReplayPhase::Playing => replay.position * replay.frame_period,
-                    },
+                    elapsed_seconds: replay.elapsed_seconds(),
                     duration_seconds: replay.duration_seconds(),
+                    purpose: replay.purpose,
+                    phase: replay.phase,
                     paused: replay.paused,
                 }),
             },
@@ -2606,6 +2713,99 @@ mod tests {
                 > paused_at,
             "resume continues forward instead of seeking to frame zero"
         );
+    }
+
+    #[test]
+    fn a_replay_can_begin_at_the_committed_timeline_position() {
+        let mut controller = controller();
+        controller
+            .connect(spec("arm", Some(calibration(2048, 500))))
+            .expect("connect");
+        controller.poll_robots();
+        let frames = (0..120)
+            .map(|step| BTreeMap::from([("gripper".to_owned(), step as f64 / 240.0)]))
+            .collect::<Vec<_>>();
+
+        controller
+            .start_replay_for(
+                "arm",
+                "episode_000001",
+                ReplayPlan {
+                    frames,
+                    sample_hz: 60.0,
+                    start_frame: 60,
+                    resolved_start_seconds: 1.25,
+                    purpose: ReplayPurpose::Timeline,
+                },
+            )
+            .expect("start replay at playhead");
+
+        let replay = controller.replay.as_ref().expect("replay is active");
+        assert_eq!(replay.position, 60.0);
+        assert_eq!(replay.cursor(), 60);
+        assert_eq!(replay.elapsed_seconds(), 1.25);
+        assert_eq!(
+            replay.pose().and_then(|pose| pose.get("gripper")),
+            Some(&0.25)
+        );
+    }
+
+    #[test]
+    fn a_late_transport_pause_cannot_freeze_a_physical_seek() {
+        let mut controller = controller();
+        controller
+            .connect(spec("arm", Some(calibration(2048, 500))))
+            .expect("connect");
+        controller.poll_robots();
+        controller
+            .start_replay_for(
+                "arm",
+                "episode_000001",
+                ReplayPlan {
+                    frames: vec![BTreeMap::from([("gripper".to_owned(), 0.25)])],
+                    sample_hz: 60.0,
+                    start_frame: 0,
+                    resolved_start_seconds: 0.0,
+                    purpose: ReplayPurpose::PhysicalSeek,
+                },
+            )
+            .expect("start physical seek");
+
+        controller
+            .set_replay_paused(true)
+            .expect("late pause is harmless");
+
+        assert!(
+            !controller
+                .replay
+                .as_ref()
+                .expect("seek remains active")
+                .paused,
+            "one-frame physical motion must finish even if the prior replay's pause arrives late"
+        );
+    }
+
+    #[test]
+    fn a_one_frame_timeline_replay_still_supports_transport_pause() {
+        let mut controller = controller();
+        controller
+            .connect(spec("arm", Some(calibration(2048, 500))))
+            .expect("connect");
+        controller.poll_robots();
+        controller
+            .start_replay(
+                "arm",
+                "episode_000001",
+                vec![BTreeMap::from([("gripper".to_owned(), 0.25)])],
+                60.0,
+            )
+            .expect("start timeline replay");
+
+        controller.set_replay_paused(true).expect("pause replay");
+
+        let replay = controller.replay.as_ref().expect("replay remains loaded");
+        assert_eq!(replay.purpose, ReplayPurpose::Timeline);
+        assert!(replay.paused);
     }
 
     #[test]

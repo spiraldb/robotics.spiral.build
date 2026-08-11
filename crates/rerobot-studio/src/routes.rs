@@ -1432,8 +1432,11 @@ async fn episode_timeline(
 ) -> Result<Json<EpisodeTimelineResponse>, Failure> {
     let episodes = state.episodes.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let episode = episodes.get(&id).map_err(Failure::from)?;
         let samples = episodes.timeline_metadata(&id).map_err(Failure::from)?;
+        // Timeline metadata refreshes a stale `.part` cache entry if the
+        // recording finalized during this request. Read the summary after it
+        // so the response carries the same durable filename and footer state.
+        let episode = episodes.get(&id).map_err(Failure::from)?;
         let videos = load_assets(episodes.directory(), &id)
             .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?
             .iter()
@@ -1609,7 +1612,7 @@ async fn seek_episode(
     }
     state
         .hardware
-        .start_replay(&request.robot, &id, vec![pose], summary.sample_hz)
+        .start_physical_seek(&request.robot, &id, pose, summary.sample_hz)
         .await?;
     Ok(Json(response("seeking", &sample)))
 }
@@ -1836,6 +1839,11 @@ async fn start_replay(
     State(state): State<AppState>,
     Json(request): Json<StartReplayRequest>,
 ) -> Result<StatusCode, Failure> {
+    if !request.start_seconds.is_finite() || request.start_seconds < 0.0 {
+        return Err(Failure::bad_request(
+            "replay start time must be a finite, non-negative number of seconds",
+        ));
+    }
     let summary = state
         .episodes
         .get(&request.episode)
@@ -1847,13 +1855,22 @@ async fn start_replay(
 
     let episodes = state.episodes.clone();
     let episode = request.episode.clone();
-    let frames = tokio::task::spawn_blocking(move || episodes.trajectory(&episode, &source))
-        .await
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+    let trajectory = tokio::task::spawn_blocking(move || {
+        episodes.trajectory_at(&episode, &source, request.start_seconds)
+    })
+    .await
+    .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
 
     state
         .hardware
-        .start_replay(&request.robot, &request.episode, frames, summary.sample_hz)
+        .start_replay_at_frame(
+            &request.robot,
+            &request.episode,
+            trajectory.frames,
+            summary.sample_hz,
+            trajectory.start_frame,
+            trajectory.resolved_start_seconds,
+        )
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }

@@ -24,6 +24,7 @@ pub(crate) enum TimelinePlayback {
     #[default]
     Stopped,
     PreviewPlaying,
+    RobotSyncSeeking,
     RobotSyncPlaying,
     RobotSyncPaused,
 }
@@ -281,7 +282,7 @@ fn transport_intent(playback: TimelinePlayback, sync_robot: bool) -> TimelineTra
         TimelinePlayback::PreviewPlaying => {
             TimelineTransportIntent::Preview(TimelinePreviewAction::Pause)
         }
-        TimelinePlayback::RobotSyncPlaying => {
+        TimelinePlayback::RobotSyncSeeking | TimelinePlayback::RobotSyncPlaying => {
             TimelineTransportIntent::RobotSync(TimelineRobotSyncAction::Pause)
         }
         TimelinePlayback::RobotSyncPaused => {
@@ -336,8 +337,11 @@ pub(crate) fn StudioTimeline(
     let frames = state.subject.frames();
     let playback = state.playback;
     let preview_playing = playback == TimelinePlayback::PreviewPlaying;
-    let robot_sync_playing = state.playback == TimelinePlayback::RobotSyncPlaying;
-    let transport_playing = preview_playing || robot_sync_playing;
+    let robot_sync_active = matches!(
+        state.playback,
+        TimelinePlayback::RobotSyncSeeking | TimelinePlayback::RobotSyncPlaying
+    );
+    let transport_playing = preview_playing || robot_sync_active;
     let follow_live = state.follow_live;
     let range_max = duration.max(0.001);
     let playhead_percent = percent(shown_playhead, duration);
@@ -364,7 +368,9 @@ pub(crate) fn StudioTimeline(
         .clone()
         .unwrap_or_else(|| "Start Teleop and record a new episode".to_owned());
     let transport_allowed = match state.playback {
-        TimelinePlayback::RobotSyncPlaying | TimelinePlayback::RobotSyncPaused => true,
+        TimelinePlayback::RobotSyncSeeking
+        | TimelinePlayback::RobotSyncPlaying
+        | TimelinePlayback::RobotSyncPaused => true,
         TimelinePlayback::Stopped if sync_robot => capabilities.synced_playback.allowed,
         TimelinePlayback::Stopped | TimelinePlayback::PreviewPlaying => {
             capabilities.preview.allowed
@@ -372,6 +378,7 @@ pub(crate) fn StudioTimeline(
     };
     let transport_title = match state.playback {
         TimelinePlayback::PreviewPlaying => "Pause preview playback".to_owned(),
+        TimelinePlayback::RobotSyncSeeking => "Pause synchronized robot positioning".to_owned(),
         TimelinePlayback::RobotSyncPlaying => "Pause synchronized robot playback".to_owned(),
         TimelinePlayback::RobotSyncPaused => "Resume synchronized robot playback".to_owned(),
         TimelinePlayback::Stopped if sync_robot => capabilities
@@ -388,7 +395,9 @@ pub(crate) fn StudioTimeline(
             .unwrap_or_else(|| "Play the recorded episode in the visualizations".to_owned()),
     };
     let transport_label = match state.playback {
-        TimelinePlayback::PreviewPlaying | TimelinePlayback::RobotSyncPlaying => "Pause",
+        TimelinePlayback::PreviewPlaying
+        | TimelinePlayback::RobotSyncSeeking
+        | TimelinePlayback::RobotSyncPlaying => "Pause",
         TimelinePlayback::RobotSyncPaused => "Resume",
         TimelinePlayback::Stopped => "Play",
     };
@@ -575,7 +584,7 @@ pub(crate) fn StudioTimeline(
                                 if let Ok(seconds) = event.value().parse::<f64>() {
                                     let beginning_scrub = !scrubbing();
                                     scrubbing.set(true);
-                                    if beginning_scrub && robot_sync_playing
+                                    if beginning_scrub && robot_sync_active
                                         && let Some(episode) = scrub_sync_episode.clone()
                                     {
                                         on_action.call(TimelineAction::RobotSyncTransport {
@@ -863,6 +872,10 @@ mod tests {
         );
         assert_eq!(
             transport_intent(TimelinePlayback::RobotSyncPlaying, true),
+            TimelineTransportIntent::RobotSync(TimelineRobotSyncAction::Pause)
+        );
+        assert_eq!(
+            transport_intent(TimelinePlayback::RobotSyncSeeking, true),
             TimelineTransportIntent::RobotSync(TimelineRobotSyncAction::Pause)
         );
         assert_eq!(
