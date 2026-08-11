@@ -6,6 +6,7 @@
 
 use dioxus::prelude::*;
 use rerobot_core::api::{TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase};
+use rerobot_core::spiral::{self, Table};
 use rerobot_panels::{LayoutNode, Panel, PanelLayout, PanelWorkspace, SplitAxis};
 
 use crate::frontend::app::state::studio;
@@ -506,7 +507,7 @@ fn TrainingDataPath(dataset: String, run: Option<TrainingRun>) -> Element {
         .map(|run| run.source.checkpoint_table.as_str())
         .filter(|table| !table.is_empty())
         .map(str::to_owned)
-        .unwrap_or_else(|| format!("{dataset}.training_checkpoints"));
+        .unwrap_or_else(|| spiral::relation(&dataset, Table::TrainingCheckpoints));
     let json_fallback = run
         .as_ref()
         .is_some_and(|run| run.logs.iter().any(|line| line.contains("JSON vectors")));
@@ -623,9 +624,7 @@ enum ResourceSeries {
 }
 
 pub(crate) fn default_training_sql(dataset: &str) -> String {
-    format!(
-        "SELECT episode_id, stream_id, sample_index,\n       state_position_json AS state,\n       action_position_json AS action\nFROM {dataset}.joint_samples\nWHERE action_position_json IS NOT NULL\nORDER BY episode_id, stream_id, sample_index"
-    )
+    spiral::default_training_sql(dataset)
 }
 
 fn phase_class(phase: TrainingRunPhase) -> &'static str {
@@ -797,8 +796,14 @@ mod tests {
     #[test]
     fn default_query_uses_only_spiral_joint_samples() {
         let sql = default_training_sql("robotics");
-        assert!(sql.contains("FROM robotics.joint_samples"));
-        assert!(sql.contains("action_position_json IS NOT NULL"));
+        assert!(sql.contains(&format!(
+            "FROM {}",
+            spiral::relation("robotics", Table::JointSamples)
+        )));
+        assert!(sql.contains(&format!(
+            "{} IS NOT NULL",
+            spiral::column::ACTION_POSITION_JSON
+        )));
     }
 
     #[test]

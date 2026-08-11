@@ -8,6 +8,7 @@ use std::sync::{Mutex, MutexGuard};
 use rerobot_core::api::{
     DataSettings, HuggingFaceSettings, SpiralSettings, UpdateDataSettingsRequest, VideoSettings,
 };
+use rerobot_core::spiral;
 use serde::{Deserialize, Serialize};
 
 const SETTINGS_FILE: &str = ".rerobot-data-settings.json";
@@ -194,12 +195,7 @@ fn validate_update(update: &UpdateDataSettingsRequest) -> Result<(), String> {
 
 fn validate_dataset_identifier(value: &str) -> Result<(), String> {
     let value = value.trim();
-    let mut bytes = value.bytes();
-    if !bytes
-        .next()
-        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
-        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
+    if !spiral::is_identifier(value) {
         return Err(
             "Spiral dataset must start with a letter or '_' and contain only letters, numbers, or '_'"
                 .to_owned(),

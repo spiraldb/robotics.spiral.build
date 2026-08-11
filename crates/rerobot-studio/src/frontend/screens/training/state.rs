@@ -10,10 +10,12 @@ use rerobot_core::api::{StartTrainingRequest, TrainingRun};
 
 use crate::frontend::api::http as api;
 use crate::frontend::app::state::Studio;
+use crate::frontend::screens::sql_draft::rebase_generated_sql;
 
 #[derive(Clone, Copy)]
 pub(crate) struct TrainingController {
     request: Signal<StartTrainingRequest>,
+    generated_sql: Signal<String>,
     selected_run: Signal<Option<String>>,
     starting: Signal<bool>,
     stopping: Signal<Option<String>>,
@@ -21,19 +23,25 @@ pub(crate) struct TrainingController {
 
 pub(crate) fn use_training_controller(
     dataset: &str,
-    default_sql: impl FnOnce(&str) -> String,
+    default_sql: fn(&str) -> String,
 ) -> TrainingController {
     let initial_sql = default_sql(dataset);
+    let request_sql = initial_sql.clone();
     let controller = TrainingController {
         request: use_signal(move || StartTrainingRequest {
             run_name: "act-run-001".to_owned(),
-            sql: initial_sql,
+            sql: request_sql,
             ..StartTrainingRequest::default()
         }),
+        generated_sql: use_signal(move || initial_sql),
         selected_run: use_signal(|| None),
         starting: use_signal(|| false),
         stopping: use_signal(|| None),
     };
+    let dataset_dependency = dataset.to_owned();
+    use_effect(use_reactive((&dataset_dependency,), move |(dataset,)| {
+        controller.sync_dataset(&dataset, default_sql)
+    }));
     use_context_provider(|| controller)
 }
 
@@ -42,6 +50,19 @@ pub(crate) fn training_controller() -> TrainingController {
 }
 
 impl TrainingController {
+    fn sync_dataset(mut self, dataset: &str, default_sql: fn(&str) -> String) {
+        let previous = self.generated_sql.peek().clone();
+        let next = default_sql(dataset);
+        if previous == next {
+            return;
+        }
+        {
+            let mut request = self.request.write();
+            rebase_generated_sql(&mut request.sql, &previous, &next);
+        }
+        self.generated_sql.set(next);
+    }
+
     pub fn request(&self) -> StartTrainingRequest {
         self.request.read().clone()
     }

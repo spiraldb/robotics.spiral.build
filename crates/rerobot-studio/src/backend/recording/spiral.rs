@@ -13,25 +13,11 @@ use arrow_array::{
     UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
+use rerobot_core::spiral::{SCHEMA_VERSION, column as db};
 
 use crate::backend::recording::episodes::{EpisodeCompletion, EpisodeError, EpisodeStart, Sample};
 
-/// First schema version published by ReRobot.
-pub const SCHEMA_VERSION: u32 = 3;
-
-/// A completed episode. Presence in this table is the publication marker.
-pub const EPISODES_TABLE: &str = "episodes";
-
-/// Joint and camera stream descriptions captured with an episode.
-pub const EPISODE_STREAMS_TABLE: &str = "episode_streams";
-
-/// Natural-rate joint observations, keyed within one episode stream.
-pub const JOINT_SAMPLES_TABLE: &str = "joint_samples";
-
-/// Encoded camera media and its persisted Spiral video index.
-pub const VIDEO_ASSETS_TABLE: &str = "video_assets";
-
-/// One row destined for [`JOINT_SAMPLES_TABLE`].
+/// One row destined for [`rerobot_core::spiral::Table::JointSamples`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct JointSampleRow {
     pub episode_id: String,
@@ -125,19 +111,20 @@ impl SpiralEpisodeEncoder {
     }
 }
 
-/// Schema for the completion row inserted last into [`EPISODES_TABLE`].
+/// Schema for the completion row inserted last into
+/// [`rerobot_core::spiral::Table::Episodes`].
 pub fn episodes_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
-        Field::new("episode_id", DataType::Utf8, false),
-        Field::new("schema_version", DataType::UInt32, false),
-        Field::new("started_ms", DataType::Int64, false),
-        Field::new("sample_hz", DataType::Float64, false),
-        Field::new("source", DataType::Utf8, false),
-        Field::new("note", DataType::Utf8, true),
-        Field::new("frames", DataType::UInt64, false),
-        Field::new("duration_ns", DataType::UInt64, false),
-        Field::new("max_follow_error_degrees", DataType::Float64, true),
-        Field::new("discarded", DataType::Boolean, false),
+        Field::new(db::EPISODE_ID, DataType::Utf8, false),
+        Field::new(db::SCHEMA_VERSION, DataType::UInt32, false),
+        Field::new(db::STARTED_MS, DataType::Int64, false),
+        Field::new(db::SAMPLE_HZ, DataType::Float64, false),
+        Field::new(db::SOURCE, DataType::Utf8, false),
+        Field::new(db::NOTE, DataType::Utf8, true),
+        Field::new(db::FRAMES, DataType::UInt64, false),
+        Field::new(db::DURATION_NS, DataType::UInt64, false),
+        Field::new(db::MAX_FOLLOW_ERROR_DEGREES, DataType::Float64, true),
+        Field::new(db::DISCARDED, DataType::Boolean, false),
     ]))
 }
 
@@ -166,17 +153,17 @@ pub fn episode_completion_batch(
         .map_err(|error| invalid(format!("building Spiral episode batch: {error}")))
 }
 
-/// Schema for [`EPISODE_STREAMS_TABLE`].
+/// Schema for [`rerobot_core::spiral::Table::EpisodeStreams`].
 pub fn episode_streams_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
-        Field::new("episode_id", DataType::Utf8, false),
-        Field::new("stream_id", DataType::Utf8, false),
-        Field::new("modality", DataType::Utf8, false),
-        Field::new("joint_names_json", DataType::Utf8, true),
-        Field::new("camera_id", DataType::Utf8, true),
-        Field::new("width", DataType::UInt32, true),
-        Field::new("height", DataType::UInt32, true),
-        Field::new("fps", DataType::UInt32, true),
+        Field::new(db::EPISODE_ID, DataType::Utf8, false),
+        Field::new(db::STREAM_ID, DataType::Utf8, false),
+        Field::new(db::MODALITY, DataType::Utf8, false),
+        Field::new(db::JOINT_NAMES_JSON, DataType::Utf8, true),
+        Field::new(db::CAMERA_ID, DataType::Utf8, true),
+        Field::new(db::WIDTH, DataType::UInt32, true),
+        Field::new(db::HEIGHT, DataType::UInt32, true),
+        Field::new(db::FPS, DataType::UInt32, true),
     ]))
 }
 
@@ -235,25 +222,26 @@ pub fn video_streams_batch(rows: &[VideoStreamRow]) -> Result<RecordBatch, Episo
         .map_err(|error| invalid(format!("building Spiral video stream batch: {error}")))
 }
 
-/// Schema for [`JOINT_SAMPLES_TABLE`].
+/// Native in-process schema corresponding to
+/// [`rerobot_core::spiral::Table::JointSamples`].
 pub fn joint_samples_schema() -> SchemaRef {
     let nullable_f64_list =
         || DataType::List(Arc::new(Field::new("item", DataType::Float64, true)));
     Arc::new(Schema::new(vec![
-        Field::new("episode_id", DataType::Utf8, false),
-        Field::new("stream_id", DataType::Utf8, false),
-        Field::new("sample_index", DataType::UInt64, false),
-        Field::new("episode_time_ns", DataType::UInt64, false),
-        Field::new("state_position", nullable_f64_list(), false),
-        Field::new("action_position", nullable_f64_list(), true),
+        Field::new(db::EPISODE_ID, DataType::Utf8, false),
+        Field::new(db::STREAM_ID, DataType::Utf8, false),
+        Field::new(db::SAMPLE_INDEX, DataType::UInt64, false),
+        Field::new(db::EPISODE_TIME_NS, DataType::UInt64, false),
+        Field::new(db::STATE_POSITION, nullable_f64_list(), false),
+        Field::new(db::ACTION_POSITION, nullable_f64_list(), true),
         Field::new(
-            "raw_position",
+            db::RAW_POSITION,
             DataType::List(Arc::new(Field::new("item", DataType::Int64, false))),
             false,
         ),
-        Field::new("velocity", nullable_f64_list(), true),
-        Field::new("effort", nullable_f64_list(), true),
-        Field::new("follow_error_degrees", DataType::Float64, true),
+        Field::new(db::VELOCITY, nullable_f64_list(), true),
+        Field::new(db::EFFORT, nullable_f64_list(), true),
+        Field::new(db::FOLLOW_ERROR_DEGREES, DataType::Float64, true),
     ]))
 }
 
@@ -262,16 +250,16 @@ pub fn joint_samples_schema() -> SchemaRef {
 /// reader cannot reliably scan Arrow List attachments after mixed appends.
 pub fn spiral_joint_samples_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
-        Field::new("episode_id", DataType::Utf8, false),
-        Field::new("stream_id", DataType::Utf8, false),
-        Field::new("sample_index", DataType::UInt64, false),
-        Field::new("episode_time_ns", DataType::UInt64, false),
-        Field::new("state_position_json", DataType::Utf8, false),
-        Field::new("action_position_json", DataType::Utf8, true),
-        Field::new("raw_position_json", DataType::Utf8, false),
-        Field::new("velocity_json", DataType::Utf8, true),
-        Field::new("effort_json", DataType::Utf8, true),
-        Field::new("follow_error_degrees", DataType::Float64, true),
+        Field::new(db::EPISODE_ID, DataType::Utf8, false),
+        Field::new(db::STREAM_ID, DataType::Utf8, false),
+        Field::new(db::SAMPLE_INDEX, DataType::UInt64, false),
+        Field::new(db::EPISODE_TIME_NS, DataType::UInt64, false),
+        Field::new(db::STATE_POSITION_JSON, DataType::Utf8, false),
+        Field::new(db::ACTION_POSITION_JSON, DataType::Utf8, true),
+        Field::new(db::RAW_POSITION_JSON, DataType::Utf8, false),
+        Field::new(db::VELOCITY_JSON, DataType::Utf8, true),
+        Field::new(db::EFFORT_JSON, DataType::Utf8, true),
+        Field::new(db::FOLLOW_ERROR_DEGREES, DataType::Float64, true),
     ]))
 }
 
@@ -523,10 +511,28 @@ fn invalid(message: impl Into<String>) -> EpisodeError {
 
 #[cfg(test)]
 mod tests {
+    use rerobot_core::spiral::Table;
+
     use arrow_array::{Array as _, Float64Array, ListArray, StringArray, UInt64Array};
     use rerobot_core::api::EpisodeArm;
 
     use super::*;
+
+    #[test]
+    fn persisted_arrow_schemas_match_the_shared_contract() {
+        for (table, schema) in [
+            (Table::Episodes, episodes_schema()),
+            (Table::EpisodeStreams, episode_streams_schema()),
+            (Table::JointSamples, spiral_joint_samples_schema()),
+        ] {
+            let actual = schema
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, table.columns(), "{table}");
+        }
+    }
 
     fn start() -> EpisodeStart {
         EpisodeStart {

@@ -3,4 +3,5 @@
 pub(crate) mod data;
 pub(crate) mod live;
 pub(crate) mod settings;
+pub(crate) mod sql_draft;
 pub(crate) mod training;

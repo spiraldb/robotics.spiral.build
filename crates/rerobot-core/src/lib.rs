@@ -8,6 +8,7 @@
 pub mod api;
 pub mod arm;
 pub mod calibration;
+pub mod spiral;
 pub mod urdf;
 
 /// Re-exported so every crate that poses a robot agrees on what a matrix is.

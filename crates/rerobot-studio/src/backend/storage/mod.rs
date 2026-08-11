@@ -2,3 +2,4 @@
 
 pub mod manager;
 pub mod settings;
+pub(crate) mod sql;

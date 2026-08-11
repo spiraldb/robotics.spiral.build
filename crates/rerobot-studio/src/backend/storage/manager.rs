@@ -27,18 +27,19 @@ use parquet::file::properties::WriterProperties;
 use rerobot_core::api::{
     ConnectionTestResponse, PublicationStatus, QueryColumn, SpiralQueryResponse, TrainingSource,
 };
+use rerobot_core::spiral::{self, Table, column as db};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::backend::recording::episodes::{CompletedEpisode, EpisodeStore};
 use crate::backend::recording::spiral::{
-    EPISODE_STREAMS_TABLE, EPISODES_TABLE, JOINT_SAMPLES_TABLE, SpiralEpisodeEncoder,
-    VIDEO_ASSETS_TABLE, VideoStreamRow, episode_completion_batch, episode_streams_batch,
+    SpiralEpisodeEncoder, VideoStreamRow, episode_completion_batch, episode_streams_batch,
     joint_samples_batch, joint_samples_schema, spiral_joint_samples_batch, video_streams_batch,
 };
 use crate::backend::robotics::video::{VideoAsset, load_assets, save_assets};
 use crate::backend::storage::settings::{
     DataSettingsStore, StoredDataSettings, StoredSpiralSettings,
 };
+use crate::backend::storage::sql::{self, ReadOnlyMode};
 
 const MAX_QUERY_ROWS: usize = 1_000;
 const MAX_REPLAY_ROWS: usize = 250_000;
@@ -284,7 +285,7 @@ impl StorageManager {
         // publication instead of returning a false positive.
         if uses_managed_catalog(&settings) {
             let catalog_project = project.clone();
-            let table_filter = format!("{}.{}", settings.dataset, EPISODES_TABLE);
+            let table_filter = sql::relation(&settings.dataset, Table::Episodes);
             if let Err(error) = self
                 .run_adbc(settings, move |connection| {
                     let reader = connection
@@ -346,7 +347,7 @@ impl StorageManager {
     }
 
     pub async fn query(&self, sql: &str, max_rows: usize) -> Result<SpiralQueryResponse, String> {
-        ensure_read_only_sql(sql)?;
+        sql::ensure_read_only(sql, ReadOnlyMode::Preview)?;
         let settings = self.settings.get().spiral;
         if !settings.configured() {
             return Err(
@@ -382,7 +383,7 @@ impl StorageManager {
             .as_deref()
             .ok_or_else(|| "Configure the Spiral ADBC driver before training.".to_owned())?;
         validate_adbc_settings(&settings, driver)?;
-        let checkpoint_table = format!("{}.training_checkpoints", settings.dataset);
+        let checkpoint_table = sql::relation(&settings.dataset, Table::TrainingCheckpoints);
         Ok((
             settings.clone(),
             TrainingSource {
@@ -391,6 +392,38 @@ impl StorageManager {
                 checkpoint_table,
             },
         ))
+    }
+
+    /// Resolve the query and its Arrow contract before launching Python.
+    /// Unknown relations and renamed fields therefore fail the start request,
+    /// rather than becoming an asynchronous worker fatal error.
+    pub async fn validate_training_query(
+        &self,
+        settings: StoredSpiralSettings,
+        query: &str,
+        state_column: &str,
+        action_column: &str,
+    ) -> Result<(), String> {
+        sql::ensure_read_only(query, ReadOnlyMode::Training)?;
+        let query = query.to_owned();
+        let state_column = state_column.to_owned();
+        let action_column = action_column.to_owned();
+        let dataset = settings.dataset.clone();
+        self.run_adbc(settings, move |connection| {
+            let mut statement = connection
+                .new_statement()
+                .map_err(|error| format!("opening the Spiral training preflight: {error}"))?;
+            statement
+                .set_sql_query(&query)
+                .map_err(|error| format!("binding the Spiral training preflight: {error}"))?;
+            let reader = statement.execute().map_err(|error| {
+                format!(
+                    "training query does not resolve in configured dataset {dataset:?}: {error}"
+                )
+            })?;
+            validate_training_schema(reader.schema().as_ref(), &state_column, &action_column)
+        })
+        .await
     }
 
     /// Stream repeated query epochs through a dedicated hosted ADBC connection.
@@ -517,21 +550,7 @@ impl StorageManager {
         stream: &str,
     ) -> Result<(f64, Vec<BTreeMap<String, f64>>), String> {
         let settings = self.settings.get().spiral;
-        validate_safe_value("episode", episode)?;
-        validate_safe_value("stream", stream)?;
-        let table = |name: &str| format!("{}.{}", settings.dataset, name);
-        let sql = format!(
-            "SELECT e.sample_hz, s.joint_names_json, \
-             COALESCE(j.action_position_json, j.state_position_json) AS replay_position_json \
-             FROM {} e JOIN {} s ON e.episode_id = s.episode_id \
-             JOIN {} j ON j.episode_id = s.episode_id AND j.stream_id = s.stream_id \
-             WHERE e.episode_id = '{}' AND s.stream_id = '{}' ORDER BY j.sample_index",
-            table(EPISODES_TABLE),
-            table(EPISODE_STREAMS_TABLE),
-            table(JOINT_SAMPLES_TABLE),
-            episode,
-            stream,
-        );
+        let sql = sql::trajectory(&settings.dataset, episode, stream);
         let result = self
             .run_adbc(settings, move |connection| {
                 run_query(connection, &sql, MAX_REPLAY_ROWS)
@@ -545,19 +564,19 @@ impl StorageManager {
         let mut sample_hz = None;
         let mut trajectory = Vec::with_capacity(result.rows.len());
         for row in result.rows {
-            sample_hz = sample_hz.or_else(|| row.get("sample_hz").and_then(JsonValue::as_f64));
+            sample_hz = sample_hz.or_else(|| row.get(db::SAMPLE_HZ).and_then(JsonValue::as_f64));
             let names = row
-                .get("joint_names_json")
+                .get(db::JOINT_NAMES_JSON)
                 .and_then(JsonValue::as_str)
-                .ok_or_else(|| "Spiral trajectory is missing joint_names_json".to_owned())?;
+                .ok_or_else(|| format!("Spiral trajectory is missing {}", db::JOINT_NAMES_JSON))?;
             let names: Vec<String> = serde_json::from_str(names)
-                .map_err(|error| format!("decoding Spiral joint_names_json: {error}"))?;
+                .map_err(|error| format!("decoding Spiral {}: {error}", db::JOINT_NAMES_JSON))?;
             let values = row
-                .get("replay_position_json")
+                .get(db::REPLAY_POSITION)
                 .and_then(JsonValue::as_str)
-                .ok_or_else(|| "Spiral trajectory is missing replay_position_json".to_owned())?;
+                .ok_or_else(|| format!("Spiral trajectory is missing {}", db::REPLAY_POSITION))?;
             let values: Vec<Option<f64>> = serde_json::from_str(values)
-                .map_err(|error| format!("decoding Spiral replay_position_json: {error}"))?;
+                .map_err(|error| format!("decoding Spiral {}: {error}", db::REPLAY_POSITION))?;
             let pose = names
                 .iter()
                 .zip(&values)
@@ -583,16 +602,7 @@ impl StorageManager {
         segment: Option<u32>,
     ) -> Result<Vec<u8>, String> {
         let settings = self.settings.get().spiral;
-        validate_safe_value("episode", episode)?;
-        validate_safe_value("stream", stream)?;
-        let segment_filter = segment
-            .map(|segment| format!(" AND segment_index = {segment}"))
-            .unwrap_or_default();
-        let sql = format!(
-            "SELECT payload FROM {}.{} WHERE episode_id = '{}' AND stream_id = '{}'{} \
-             ORDER BY segment_index LIMIT 1",
-            settings.dataset, VIDEO_ASSETS_TABLE, episode, stream, segment_filter
-        );
+        let sql = sql::video_asset(&settings.dataset, episode, stream, segment);
         self.run_adbc(settings, move |connection| {
             run_binary_query(connection, &sql)
         })
@@ -846,7 +856,6 @@ fn publish_spiral_blocking(
     episode: &CompletedEpisode,
     videos: &[VideoAsset],
 ) -> Result<(), String> {
-    validate_safe_value("episode", &episode.start.id)?;
     if uses_managed_catalog(settings) {
         ensure_dataset_namespace(connection, &settings.dataset)?;
     }
@@ -857,19 +866,19 @@ fn publish_spiral_blocking(
         // memory connection instead of silently duplicating rows.
         if table_has_episode(
             connection,
-            &table_name(&settings.dataset, EPISODES_TABLE),
+            &sql::relation(&settings.dataset, Table::Episodes),
             &episode.start.id,
         )? {
             return Ok(());
         }
         for table in [
-            JOINT_SAMPLES_TABLE,
-            EPISODE_STREAMS_TABLE,
-            VIDEO_ASSETS_TABLE,
+            Table::JointSamples,
+            Table::EpisodeStreams,
+            Table::VideoAssets,
         ] {
             if table_has_episode(
                 connection,
-                &table_name(&settings.dataset, table),
+                &sql::relation(&settings.dataset, table),
                 &episode.start.id,
             )? {
                 return Err(
@@ -885,7 +894,7 @@ fn publish_spiral_blocking(
     clear_episode_rows(connection, settings, &episode.start.id)?;
     ingest_batch(
         connection,
-        &table_name(&settings.dataset, EPISODE_STREAMS_TABLE),
+        &sql::relation(&settings.dataset, Table::EpisodeStreams),
         episode_streams_batch(&episode.start).map_err(|error| error.to_string())?,
     )?;
     if !videos.is_empty() {
@@ -909,7 +918,7 @@ fn publish_spiral_blocking(
             .collect::<Vec<_>>();
         ingest_batch(
             connection,
-            &table_name(&settings.dataset, EPISODE_STREAMS_TABLE),
+            &sql::relation(&settings.dataset, Table::EpisodeStreams),
             video_streams_batch(&streams).map_err(|error| error.to_string())?,
         )?;
     }
@@ -922,7 +931,7 @@ fn publish_spiral_blocking(
             let batch = spiral_joint_samples_batch(&rows).map_err(|error| error.to_string())?;
             ingest_batch(
                 connection,
-                &table_name(&settings.dataset, JOINT_SAMPLES_TABLE),
+                &sql::relation(&settings.dataset, Table::JointSamples),
                 batch,
             )?;
             rows.clear();
@@ -932,7 +941,7 @@ fn publish_spiral_blocking(
         let batch = spiral_joint_samples_batch(&rows).map_err(|error| error.to_string())?;
         ingest_batch(
             connection,
-            &table_name(&settings.dataset, JOINT_SAMPLES_TABLE),
+            &sql::relation(&settings.dataset, Table::JointSamples),
             batch,
         )?;
     }
@@ -940,27 +949,22 @@ fn publish_spiral_blocking(
         let batch = video_assets_batch(&episode.start.id, videos)?;
         ingest_batch(
             connection,
-            &table_name(&settings.dataset, VIDEO_ASSETS_TABLE),
+            &sql::relation(&settings.dataset, Table::VideoAssets),
             batch,
         )?;
         // The view turns durable binary MP4 payloads into Spiral Blob values;
         // the managed dataset then persists the MP4/video index used by
         // `spql.video.*` frame selection and decode.
-        let sources = video_sources_name(settings, &episode.start.id);
-        let assets = format!("{}.{}", settings.dataset, VIDEO_ASSETS_TABLE);
-        let dataset = managed_video_dataset_name(settings, &episode.start.id);
-        let source_filter = if uses_managed_catalog(settings) {
-            format!(" WHERE assets.episode_id = '{}'", episode.start.id)
-        } else {
-            String::new()
-        };
+        let managed = uses_managed_catalog(settings);
+        let sources = sql::video_sources_relation(&settings.dataset, &episode.start.id, managed);
+        let assets = sql::relation(&settings.dataset, Table::VideoAssets);
+        let dataset = sql::video_dataset_relation(&settings.dataset, &episode.start.id);
         execute_update_sql(
             connection,
-            &format!(
-                "CREATE OR REPLACE VIEW {sources} AS SELECT assets.episode_id, assets.stream_id, \
-             assets.segment_index, assets.timeline_offset_ns, \
-             spql.blob.inline(assets.payload, assets.byte_size, 'video/mp4') AS source \
-             FROM {assets} AS assets{source_filter}"
+            &sql::create_video_sources(
+                &sources,
+                &assets,
+                managed.then_some(episode.start.id.as_str()),
             ),
         )
         .map_err(|error| format!("creating Spiral video source view: {error}"))?;
@@ -973,22 +977,13 @@ fn publish_spiral_blocking(
             // managed MP4 Dataset. This also avoids flattening the native
             // VideoIndex extension through ADBC metadata or relying on output
             // replacement, which REFRESH does not yet support.
-            let created = execute_update_sql(
-                connection,
-                &format!(
-                    "CREATE DATASET {dataset} USING spql.mp4.dataset FROM {sources} \
-                     WITH (blob = 'source', index_tier = 'dependency')"
-                ),
-            );
+            let created =
+                execute_update_sql(connection, &sql::create_video_dataset(&dataset, &sources));
             let needs_refresh = match created {
                 Ok(()) => true,
                 Err(error) if error.contains("already exists") => {
-                    let output = format!("{dataset}.assets");
-                    match run_query(
-                        connection,
-                        &format!("SELECT COUNT(*) AS rows FROM {output}"),
-                        1,
-                    ) {
+                    let output = sql::video_dataset_output(&settings.dataset, &episode.start.id);
+                    match run_query(connection, &sql::count_rows(&output), 1) {
                         Ok(_) => false,
                         Err(error) if error.contains("unknown table") => true,
                         Err(error) => {
@@ -1001,7 +996,7 @@ fn publish_spiral_blocking(
                 Err(error) => return Err(format!("creating Spiral MP4 dataset: {error}")),
             };
             if needs_refresh {
-                execute_update_sql(connection, &format!("REFRESH DATASET {dataset}"))
+                execute_update_sql(connection, &sql::refresh_dataset(&dataset))
                     .map_err(|error| format!("refreshing Spiral MP4 dataset: {error}"))?;
             }
         }
@@ -1010,7 +1005,7 @@ fn publish_spiral_blocking(
     // partially arrived.
     ingest_batch(
         connection,
-        &table_name(&settings.dataset, EPISODES_TABLE),
+        &sql::relation(&settings.dataset, Table::Episodes),
         episode_completion_batch(&episode.start, &episode.completion, encoder.frames())
             .map_err(|error| error.to_string())?,
     )?;
@@ -1025,9 +1020,14 @@ fn ensure_dataset_namespace(
     connection: &mut ManagedConnection,
     dataset: &str,
 ) -> Result<(), String> {
-    const MARKER: &str = "_rerobot_dataset_key_v1";
     match connection.get_table_schema(None, None, dataset) {
-        Ok(schema) if schema.field_with_name(MARKER).is_ok() => return Ok(()),
+        Ok(schema)
+            if schema
+                .field_with_name(spiral::DATASET_NAMESPACE_MARKER)
+                .is_ok() =>
+        {
+            return Ok(());
+        }
         Ok(_) => {
             return Err(format!(
                 "Spiral dataset namespace {dataset} exists but is not a rerobot v1 namespace; choose a new dataset name or remove that resource"
@@ -1040,11 +1040,8 @@ fn ensure_dataset_namespace(
             ));
         }
     }
-    execute_update_sql(
-        connection,
-        &format!("CREATE TABLE {dataset} AS SELECT '{dataset}' AS {MARKER}"),
-    )
-    .map_err(|error| format!("creating Spiral dataset namespace {dataset}: {error}"))
+    execute_update_sql(connection, &sql::create_dataset_namespace(dataset))
+        .map_err(|error| format!("creating Spiral dataset namespace {dataset}: {error}"))
 }
 
 fn clear_episode_rows(
@@ -1055,20 +1052,12 @@ fn clear_episode_rows(
     if settings.uri == "spiral:memory:" {
         return Ok(());
     }
-    for table in [
-        EPISODES_TABLE,
-        JOINT_SAMPLES_TABLE,
-        EPISODE_STREAMS_TABLE,
-        VIDEO_ASSETS_TABLE,
-    ] {
-        let target = table_name(&settings.dataset, table);
+    for table in Table::EPISODE_RELATIONS {
+        let target = sql::relation(&settings.dataset, table);
         if !table_exists(connection, &target)? {
             continue;
         }
-        let cleared = execute_update_sql(
-            connection,
-            &format!("DELETE FROM {target} WHERE episode_id = '{episode_id}'"),
-        );
+        let cleared = execute_update_sql(connection, &sql::delete_episode(&target, episode_id));
         if let Err(error) = cleared
             && !error.contains("finished without any affected rows")
         {
@@ -1086,11 +1075,7 @@ fn table_has_episode(
     if !table_exists(connection, target)? {
         return Ok(false);
     }
-    let result = run_query(
-        connection,
-        &format!("SELECT episode_id FROM {target} WHERE episode_id = '{episode_id}' LIMIT 1"),
-        1,
-    )?;
+    let result = run_query(connection, &sql::episode_exists(target, episode_id), 1)?;
     Ok(!result.rows.is_empty())
 }
 
@@ -1123,9 +1108,9 @@ fn validate_training_schema(
     action_column: &str,
 ) -> Result<(), String> {
     let missing = [
-        "episode_id",
-        "stream_id",
-        "sample_index",
+        db::EPISODE_ID,
+        db::STREAM_ID,
+        db::SAMPLE_INDEX,
         state_column,
         action_column,
     ]
@@ -1256,16 +1241,7 @@ fn training_json_vectors<'a>(
 }
 
 fn training_checkpoint_batch(checkpoint: TrainingCheckpointWrite) -> Result<RecordBatch, String> {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("run_id", DataType::Utf8, false),
-        Field::new("run_name", DataType::Utf8, false),
-        Field::new("policy", DataType::Utf8, false),
-        Field::new("step", DataType::UInt64, false),
-        Field::new("created_ms", DataType::Int64, false),
-        Field::new("validation_loss", DataType::Float64, true),
-        Field::new("config_json", DataType::Utf8, false),
-        Field::new("checkpoint", DataType::LargeBinary, false),
-    ]));
+    let schema = training_checkpoint_schema();
     let columns: Vec<ArrayRef> = vec![
         Arc::new(StringArray::from(vec![checkpoint.run_id])),
         Arc::new(StringArray::from(vec![checkpoint.run_name])),
@@ -1280,6 +1256,19 @@ fn training_checkpoint_batch(checkpoint: TrainingCheckpointWrite) -> Result<Reco
     ];
     RecordBatch::try_new(schema, columns)
         .map_err(|error| format!("building the training checkpoint batch: {error}"))
+}
+
+fn training_checkpoint_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new(db::RUN_ID, DataType::Utf8, false),
+        Field::new(db::RUN_NAME, DataType::Utf8, false),
+        Field::new(db::POLICY, DataType::Utf8, false),
+        Field::new(db::STEP, DataType::UInt64, false),
+        Field::new(db::CREATED_MS, DataType::Int64, false),
+        Field::new(db::VALIDATION_LOSS, DataType::Float64, true),
+        Field::new(db::CONFIG_JSON, DataType::Utf8, false),
+        Field::new(db::CHECKPOINT, DataType::LargeBinary, false),
+    ]))
 }
 
 fn table_exists(connection: &ManagedConnection, target: &str) -> Result<bool, String> {
@@ -1299,43 +1288,6 @@ fn execute_update_sql(connection: &mut ManagedConnection, sql: &str) -> Result<(
         .and_then(|()| statement.execute_update())
         .map_err(|error| error.to_string())?;
     Ok(())
-}
-
-fn table_name(dataset: &str, table: &str) -> String {
-    format!("{dataset}.{table}")
-}
-
-fn video_sources_name(settings: &StoredSpiralSettings, episode_id: &str) -> String {
-    if uses_managed_catalog(settings) {
-        format!(
-            "{}_{}_video_sources",
-            settings.dataset,
-            sql_identifier_component(episode_id)
-        )
-    } else {
-        format!("{}.video_sources", settings.dataset)
-    }
-}
-
-fn managed_video_dataset_name(settings: &StoredSpiralSettings, episode_id: &str) -> String {
-    format!(
-        "{}.video_{}",
-        settings.dataset,
-        sql_identifier_component(episode_id)
-    )
-}
-
-fn sql_identifier_component(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || character == '_' {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 fn video_assets_batch(episode_id: &str, videos: &[VideoAsset]) -> Result<RecordBatch, String> {
@@ -1370,19 +1322,7 @@ fn video_assets_batch(episode_id: &str, videos: &[VideoAsset]) -> Result<RecordB
                 .transpose()
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("episode_id", DataType::Utf8, false),
-        Field::new("stream_id", DataType::Utf8, false),
-        Field::new("segment_index", DataType::UInt32, false),
-        Field::new("timeline_offset_ns", DataType::UInt64, true),
-        Field::new("camera_id", DataType::Utf8, false),
-        Field::new("payload", DataType::Binary, false),
-        Field::new("byte_size", DataType::UInt64, false),
-        Field::new("width", DataType::UInt32, false),
-        Field::new("height", DataType::UInt32, false),
-        Field::new("fps", DataType::UInt32, false),
-        Field::new("frames", DataType::UInt64, false),
-    ]));
+    let schema = video_assets_schema();
     let columns: Vec<ArrayRef> = vec![
         Arc::new(StringArray::from_iter_values(
             videos.iter().map(|_| episode_id),
@@ -1418,6 +1358,22 @@ fn video_assets_batch(episode_id: &str, videos: &[VideoAsset]) -> Result<RecordB
     ];
     RecordBatch::try_new(schema, columns)
         .map_err(|error| format!("building Spiral video batch: {error}"))
+}
+
+fn video_assets_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new(db::EPISODE_ID, DataType::Utf8, false),
+        Field::new(db::STREAM_ID, DataType::Utf8, false),
+        Field::new(db::SEGMENT_INDEX, DataType::UInt32, false),
+        Field::new(db::TIMELINE_OFFSET_NS, DataType::UInt64, true),
+        Field::new(db::CAMERA_ID, DataType::Utf8, false),
+        Field::new(db::PAYLOAD, DataType::Binary, false),
+        Field::new(db::BYTE_SIZE, DataType::UInt64, false),
+        Field::new(db::WIDTH, DataType::UInt32, false),
+        Field::new(db::HEIGHT, DataType::UInt32, false),
+        Field::new(db::FPS, DataType::UInt32, false),
+        Field::new(db::FRAMES, DataType::UInt64, false),
+    ]))
 }
 
 fn run_query(
@@ -1495,8 +1451,8 @@ fn run_binary_query(connection: &mut ManagedConnection, sql: &str) -> Result<Vec
             continue;
         }
         let payload = batch
-            .column_by_name("payload")
-            .ok_or_else(|| "Spiral video query returned no payload column".to_owned())?;
+            .column_by_name(db::PAYLOAD)
+            .ok_or_else(|| format!("Spiral video query returned no {} column", db::PAYLOAD))?;
         if payload.is_null(0) {
             return Err("Spiral video payload is null".to_owned());
         }
@@ -1515,132 +1471,6 @@ fn run_binary_query(connection: &mut ManagedConnection, sql: &str) -> Result<Vec
         ));
     }
     Err("No video matched that episode and stream".to_owned())
-}
-
-fn ensure_read_only_sql(sql: &str) -> Result<(), String> {
-    let sql = sql.trim();
-    if sql.is_empty() {
-        return Err("Spiral query cannot be empty".to_owned());
-    }
-    let (tokens, semicolons) = sql_tokens(sql)?;
-    if semicolons > 1 {
-        return Err("Spiral preview accepts one read-only statement at a time".to_owned());
-    }
-    let first = tokens.first().map(String::as_str).unwrap_or_default();
-    if !matches!(first, "SELECT" | "WITH" | "EXPLAIN") {
-        return Err("Spiral preview accepts SELECT, WITH, or EXPLAIN queries only".to_owned());
-    }
-    const MUTATING_KEYWORDS: &[&str] = &[
-        "ALTER", "CALL", "COPY", "CREATE", "DELETE", "DROP", "EXECUTE", "GRANT", "INSERT", "MERGE",
-        "REFRESH", "REPLACE", "REVOKE", "TRUNCATE", "UPDATE",
-    ];
-    if tokens
-        .iter()
-        .any(|token| MUTATING_KEYWORDS.contains(&token.as_str()))
-    {
-        return Err("Spiral preview does not allow data or schema changes".to_owned());
-    }
-    Ok(())
-}
-
-/// Extract unquoted SQL words while rejecting extra statements. This is not a
-/// SQL parser; it is a conservative guard in front of the driver's real parser
-/// so a `WITH ... DELETE` cannot pass merely because its first word is `WITH`.
-fn sql_tokens(sql: &str) -> Result<(Vec<String>, usize), String> {
-    #[derive(Clone, Copy, Eq, PartialEq)]
-    enum State {
-        Normal,
-        SingleQuote,
-        DoubleQuote,
-        LineComment,
-        BlockComment,
-    }
-
-    let bytes = sql.as_bytes();
-    let mut state = State::Normal;
-    let mut tokens = Vec::new();
-    let mut token = String::new();
-    let mut semicolons = 0;
-    let mut statement_token_count = None;
-    let mut index = 0;
-    let flush = |token: &mut String, tokens: &mut Vec<String>| {
-        if !token.is_empty() {
-            tokens.push(std::mem::take(token).to_ascii_uppercase());
-        }
-    };
-    while index < bytes.len() {
-        let byte = bytes[index];
-        let next = bytes.get(index + 1).copied();
-        match state {
-            State::Normal => match (byte, next) {
-                (b'-', Some(b'-')) => {
-                    flush(&mut token, &mut tokens);
-                    state = State::LineComment;
-                    index += 1;
-                }
-                (b'/', Some(b'*')) => {
-                    flush(&mut token, &mut tokens);
-                    state = State::BlockComment;
-                    index += 1;
-                }
-                (b'\'', _) => {
-                    flush(&mut token, &mut tokens);
-                    state = State::SingleQuote;
-                }
-                (b'"', _) => {
-                    flush(&mut token, &mut tokens);
-                    state = State::DoubleQuote;
-                }
-                (b';', _) => {
-                    flush(&mut token, &mut tokens);
-                    semicolons += 1;
-                    statement_token_count.get_or_insert(tokens.len());
-                }
-                _ if byte.is_ascii_alphanumeric() || byte == b'_' => {
-                    token.push(char::from(byte));
-                }
-                _ => flush(&mut token, &mut tokens),
-            },
-            State::SingleQuote => {
-                if byte == b'\'' {
-                    if next == Some(b'\'') {
-                        index += 1;
-                    } else {
-                        state = State::Normal;
-                    }
-                }
-            }
-            State::DoubleQuote => {
-                if byte == b'"' {
-                    if next == Some(b'"') {
-                        index += 1;
-                    } else {
-                        state = State::Normal;
-                    }
-                }
-            }
-            State::LineComment => {
-                if matches!(byte, b'\n' | b'\r') {
-                    state = State::Normal;
-                }
-            }
-            State::BlockComment => {
-                if byte == b'*' && next == Some(b'/') {
-                    state = State::Normal;
-                    index += 1;
-                }
-            }
-        }
-        index += 1;
-    }
-    flush(&mut token, &mut tokens);
-    if !matches!(state, State::Normal | State::LineComment) {
-        return Err("Spiral query contains an unterminated quote or comment".to_owned());
-    }
-    if statement_token_count.is_some_and(|count| tokens.len() != count) {
-        return Err("Spiral preview accepts one read-only statement at a time".to_owned());
-    }
-    Ok((tokens, semicolons))
 }
 
 fn batches_to_json(batches: &[RecordBatch]) -> Result<Vec<JsonMap<String, JsonValue>>, String> {
@@ -1681,12 +1511,7 @@ fn validate_safe_value(label: &str, value: &str) -> Result<(), String> {
 }
 
 fn validate_dataset_identifier(value: &str) -> Result<(), String> {
-    let mut bytes = value.bytes();
-    if !bytes
-        .next()
-        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
-        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
+    if !spiral::is_identifier(value) {
         return Err(
             "Spiral dataset must start with a letter or '_' and contain only letters, numbers, or '_'"
                 .to_owned(),
@@ -1732,49 +1557,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn backend_owned_arrow_schemas_match_the_shared_contract() {
+        for (table, schema) in [
+            (Table::VideoAssets, video_assets_schema()),
+            (Table::TrainingCheckpoints, training_checkpoint_schema()),
+        ] {
+            let actual = schema
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, table.columns(), "{table}");
+        }
+    }
+
+    #[test]
     fn query_preview_rejects_mutation_and_multiple_statements() {
-        assert!(ensure_read_only_sql("SELECT * FROM rerobot.episodes;").is_ok());
-        assert!(ensure_read_only_sql("WITH recent AS (SELECT 1) SELECT * FROM recent").is_ok());
-        assert!(ensure_read_only_sql("SELECT ';' AS punctuation; -- okay").is_ok());
-        assert!(ensure_read_only_sql("DELETE FROM rerobot.episodes").is_err());
-        assert!(ensure_read_only_sql("SHOW TABLES").is_err());
-        assert!(
-            ensure_read_only_sql("WITH removed AS (DELETE FROM rerobot.episodes) SELECT 1")
-                .is_err()
-        );
-        assert!(ensure_read_only_sql("SELECT 1; DROP TABLE episodes").is_err());
+        let read_only = |query| sql::ensure_read_only(query, ReadOnlyMode::Preview);
+        assert!(read_only("SELECT * FROM rerobot.episodes;").is_ok());
+        assert!(read_only("WITH recent AS (SELECT 1) SELECT * FROM recent").is_ok());
+        assert!(read_only("SELECT ';' AS punctuation; -- okay").is_ok());
+        assert!(read_only("DELETE FROM rerobot.episodes").is_err());
+        assert!(read_only("SHOW TABLES").is_err());
+        assert!(read_only("WITH removed AS (DELETE FROM rerobot.episodes) SELECT 1").is_err());
+        assert!(read_only("SELECT 1; DROP TABLE episodes").is_err());
     }
 
     #[test]
     fn training_loader_normalizes_spiral_json_vectors_to_typed_float32() {
         let batch = RecordBatch::try_from_iter(vec![
             (
-                "episode_id",
+                db::EPISODE_ID,
                 Arc::new(StringArray::from(vec!["episode-a", "episode-a"])) as ArrayRef,
             ),
             (
-                "stream_id",
+                db::STREAM_ID,
                 Arc::new(StringArray::from(vec!["arm", "arm"])) as ArrayRef,
             ),
             (
-                "sample_index",
+                db::SAMPLE_INDEX,
                 Arc::new(UInt64Array::from(vec![0, 1])) as ArrayRef,
             ),
             (
-                "state",
+                db::STATE,
                 Arc::new(StringArray::from(vec!["[0.1,0.2]", "[0.3,0.4]"])) as ArrayRef,
             ),
             (
-                "action",
+                db::ACTION,
                 Arc::new(StringArray::from(vec!["[0.5,0.6]", "[0.7,0.8]"])) as ArrayRef,
             ),
         ])
         .unwrap();
 
-        let (batch, normalized) = normalize_training_batch(batch, "state", "action").unwrap();
+        let (batch, normalized) = normalize_training_batch(batch, db::STATE, db::ACTION).unwrap();
         assert!(normalized);
         let state = batch
-            .column_by_name("state")
+            .column_by_name(db::STATE)
             .unwrap()
             .as_any()
             .downcast_ref::<FixedSizeListArray>()
@@ -1789,6 +1627,18 @@ mod tests {
     fn training_loader_rejects_null_json_components_before_python() {
         let error = training_json_vectors("state", [Some("[0.1,null]")].into_iter()).unwrap_err();
         assert!(error.contains("null component"));
+    }
+
+    #[test]
+    fn training_schema_drift_is_rejected_before_python() {
+        let schema = Schema::new(vec![
+            Field::new(db::EPISODE_ID, DataType::Utf8, false),
+            Field::new(db::STREAM_ID, DataType::Utf8, false),
+            Field::new(db::SAMPLE_INDEX, DataType::UInt64, false),
+            Field::new(db::STATE, DataType::Utf8, false),
+        ]);
+        let error = validate_training_schema(&schema, db::STATE, db::ACTION).unwrap_err();
+        assert!(error.contains(db::ACTION));
     }
 
     /// Loads the real Spiral ADBC shared library but keeps all database state
@@ -1836,29 +1686,28 @@ mod tests {
 
         let episodes = run_query(
             &mut adbc.connection,
-            "SELECT COUNT(*) AS rows FROM rerobot.episodes",
+            &sql::count_rows(&sql::relation("rerobot", Table::Episodes)),
             10,
         )
         .unwrap();
         assert_eq!(episodes.rows[0]["rows"], serde_json::json!(1));
         let video_rows = run_query(
             &mut adbc.connection,
-            "SELECT COUNT(*) AS rows FROM rerobot.video_assets",
+            &sql::count_rows(&sql::relation("rerobot", Table::VideoAssets)),
             10,
         )
         .unwrap();
         assert_eq!(video_rows.rows[0]["rows"], serde_json::json!(1));
         let mp4_tracks = run_query(
             &mut adbc.connection,
-            "SELECT v.episode_id, v.stream_id, tracks.* FROM rerobot.video_sources v \
-             CROSS JOIN LATERAL spql.mp4.tracks(v.source) AS tracks LIMIT 20",
+            &sql::video_tracks("rerobot.video_sources", &episode.start.id),
             10,
         )
         .unwrap();
         assert_eq!(mp4_tracks.rows.len(), 1);
         let payload = run_binary_query(
             &mut adbc.connection,
-            "SELECT payload FROM rerobot.video_assets LIMIT 1",
+            &sql::video_asset("rerobot", &episode.start.id, "follower.camera.wrist", None),
         )
         .unwrap();
         assert!(!payload.is_empty());
@@ -1898,12 +1747,11 @@ mod tests {
 
         publish_spiral_blocking(&mut adbc.connection, &settings, &episode, &videos).unwrap();
 
-        let query_count = |connection: &mut ManagedConnection, table: &str| {
+        let query_count = |connection: &mut ManagedConnection, table: Table| {
+            let relation = sql::relation(&dataset, table);
             run_query(
                 connection,
-                &format!(
-                    "SELECT COUNT(*) AS rows FROM {dataset}.{table} WHERE episode_id = '{episode_id}'"
-                ),
+                &sql::count_episode_rows(&relation, &episode_id),
                 1,
             )
             .unwrap()
@@ -1911,24 +1759,24 @@ mod tests {
                 .as_u64()
                 .unwrap()
         };
-        assert_eq!(query_count(&mut adbc.connection, EPISODES_TABLE), 1);
+        assert_eq!(query_count(&mut adbc.connection, Table::Episodes), 1);
         assert_eq!(
-            query_count(&mut adbc.connection, JOINT_SAMPLES_TABLE),
+            query_count(&mut adbc.connection, Table::JointSamples),
             (episode.samples.len() * episode.start.arms.len()) as u64
         );
         assert_eq!(
-            query_count(&mut adbc.connection, VIDEO_ASSETS_TABLE),
+            query_count(&mut adbc.connection, Table::VideoAssets),
             videos.len() as u64
         );
 
+        let sources = sql::video_sources_relation(
+            &settings.dataset,
+            &episode_id,
+            uses_managed_catalog(&settings),
+        );
         let tracks = run_query(
             &mut adbc.connection,
-            &format!(
-                "SELECT v.episode_id, v.stream_id, tracks.* FROM {} v \
-                 CROSS JOIN LATERAL spql.mp4.tracks(v.source) AS tracks \
-                 WHERE v.episode_id = '{episode_id}'",
-                video_sources_name(&settings, &episode_id)
-            ),
+            &sql::video_tracks(&sources, &episode_id),
             100,
         )
         .unwrap();
@@ -1937,10 +1785,7 @@ mod tests {
         if uses_managed_catalog(&settings) {
             let indexed = run_query(
                 &mut adbc.connection,
-                &format!(
-                    "SELECT COUNT(*) AS rows FROM {}.assets",
-                    managed_video_dataset_name(&settings, &episode_id)
-                ),
+                &sql::count_rows(&sql::video_dataset_output(&settings.dataset, &episode_id)),
                 1,
             )
             .unwrap();
@@ -1950,11 +1795,11 @@ mod tests {
         let selected = &videos[0];
         let payload = run_binary_query(
             &mut adbc.connection,
-            &format!(
-                "SELECT payload FROM {dataset}.{VIDEO_ASSETS_TABLE} \
-                 WHERE episode_id = '{episode_id}' AND stream_id = '{}' \
-                 AND segment_index = {} LIMIT 1",
-                selected.stream_id, selected.segment_index
+            &sql::video_asset(
+                &dataset,
+                &episode_id,
+                &selected.stream_id,
+                Some(selected.segment_index),
             ),
         )
         .unwrap();
@@ -2004,16 +1849,13 @@ mod tests {
 
             let queried = manager
                 .query(
-                    &format!(
-                        "SELECT episode_id, frames FROM {dataset}.{EPISODES_TABLE} \
-                         WHERE episode_id = '{episode_id}'"
-                    ),
+                    &sql::episode_exists(&sql::relation(&dataset, Table::Episodes), &episode_id),
                     10,
                 )
                 .await
                 .unwrap();
             assert_eq!(queried.rows.len(), 1);
-            assert_eq!(queried.rows[0]["episode_id"], episode_id);
+            assert_eq!(queried.rows[0][db::EPISODE_ID], episode_id);
 
             let stream = &episode.start.arms[0].id;
             let (_, trajectory) = manager.trajectory(&episode_id, stream).await.unwrap();

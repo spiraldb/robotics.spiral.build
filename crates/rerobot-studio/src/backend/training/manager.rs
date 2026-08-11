@@ -29,6 +29,7 @@ use crate::backend::storage::manager::{
     StorageManager, TrainingCheckpointWrite, TrainingDataBatch, TrainingDataMessage,
 };
 use crate::backend::storage::settings::StoredSpiralSettings;
+use crate::backend::storage::sql::{self, ReadOnlyMode};
 
 const HISTORY_FILE: &str = "runs.json";
 const DATA_QUEUE_DEPTH: usize = 3;
@@ -195,6 +196,15 @@ impl TrainingManager {
             return Err(readiness.summary);
         }
         let (settings, source) = self.inner.storage.training_source()?;
+        self.inner
+            .storage
+            .validate_training_query(
+                settings.clone(),
+                &request.sql,
+                &request.state_column,
+                &request.action_column,
+            )
+            .await?;
         let sequence = RUN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let id = format!("train-{}-{sequence}", now_ms());
         let run = TrainingRun {
@@ -935,35 +945,7 @@ fn validate_request(request: &StartTrainingRequest) -> Result<(), String> {
             "Run name must use 1–80 letters, numbers, '.', '_' or '-' characters.".to_owned(),
         );
     }
-    let sql = request.sql.trim();
-    if sql.is_empty() || sql.len() > 64 * 1024 {
-        return Err("Training SQL must contain one query under 64 KiB.".to_owned());
-    }
-    let first = sql
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if !matches!(first.as_str(), "select" | "with") {
-        return Err("Training SQL must be a read-only SELECT or WITH query.".to_owned());
-    }
-    let without_trailing_terminator = sql.trim_end_matches(';').trim_end();
-    if without_trailing_terminator.contains(';') {
-        return Err("Training SQL must contain exactly one read-only query.".to_owned());
-    }
-    let forbidden = [
-        "insert", "update", "delete", "create", "alter", "drop", "truncate", "merge", "grant",
-        "revoke", "copy", "call", "attach", "detach",
-    ];
-    if let Some(keyword) = without_trailing_terminator
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-        .map(str::to_ascii_lowercase)
-        .find(|word| forbidden.contains(&word.as_str()))
-    {
-        return Err(format!(
-            "Training SQL is read-only; {keyword:?} is not allowed."
-        ));
-    }
+    sql::ensure_read_only(&request.sql, ReadOnlyMode::Training)?;
     for (label, column) in [
         ("State column", request.state_column.trim()),
         ("Action column", request.action_column.trim()),

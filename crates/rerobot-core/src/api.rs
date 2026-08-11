@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::calibration::{Direction, MotorCalibration};
+use crate::spiral::column as spiral_column;
 
 /// Server-owned data destinations. Secret values are intentionally absent:
 /// the browser can replace or clear them but can never read them back.
@@ -223,11 +224,11 @@ impl Default for StartTrainingRequest {
 }
 
 fn default_training_state_column() -> String {
-    "state".to_owned()
+    spiral_column::STATE.to_owned()
 }
 
 fn default_training_action_column() -> String {
-    "action".to_owned()
+    spiral_column::ACTION.to_owned()
 }
 
 fn default_training_device() -> String {

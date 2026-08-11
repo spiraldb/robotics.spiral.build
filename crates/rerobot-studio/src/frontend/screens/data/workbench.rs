@@ -10,6 +10,7 @@
 use dioxus::prelude::*;
 use gloo_net::http::Method;
 use rerobot_core::api::{EpisodeSummary, ImportResponse, SpiralQueryResponse};
+use rerobot_core::spiral::QueryPreset;
 
 use crate::frontend::api::http as api;
 use crate::frontend::app::state::studio;
@@ -64,47 +65,6 @@ pub(crate) enum QueryState {
     Ready(SpiralQueryResponse),
     Failed(String),
 }
-
-#[derive(Clone, Copy)]
-struct QueryPreset {
-    label: &'static str,
-    table: &'static str,
-    projection: &'static str,
-    suffix: &'static str,
-}
-
-const QUERY_PRESETS: [QueryPreset; 5] = [
-    QueryPreset {
-        label: "Episodes",
-        table: "episodes",
-        projection: "*",
-        suffix: " ORDER BY started_ms DESC LIMIT 100",
-    },
-    QueryPreset {
-        label: "Streams",
-        table: "episode_streams",
-        projection: "*",
-        suffix: " ORDER BY episode_id DESC, stream_id LIMIT 100",
-    },
-    QueryPreset {
-        label: "Joint samples",
-        table: "joint_samples",
-        projection: "*",
-        suffix: " ORDER BY episode_id DESC, stream_id, sample_index LIMIT 100",
-    },
-    QueryPreset {
-        label: "Video assets",
-        table: "video_assets",
-        projection: "episode_id, stream_id, camera_id, byte_size, width, height, fps, frames",
-        suffix: " ORDER BY episode_id DESC, stream_id LIMIT 100",
-    },
-    QueryPreset {
-        label: "Video index",
-        table: "video.assets",
-        projection: "episode_id, stream_id, media, video_index",
-        suffix: " LIMIT 100",
-    },
-];
 
 /// Dataset navigation and Query controls for the left side of the Studio.
 #[component]
@@ -299,9 +259,9 @@ pub(crate) fn DataWorkbench(
                         }
                         div { class: "flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-line px-2 py-1",
                             span { class: "text-[10px] text-ink-faint", "Examples" }
-                            for preset in QUERY_PRESETS {
+                            for preset in QueryPreset::ALL {
                                 button {
-                                    key: "{preset.label}",
+                                    key: "{preset.label()}",
                                     r#type: "button",
                                     class: "link min-h-6",
                                     onclick: {
@@ -311,7 +271,7 @@ pub(crate) fn DataWorkbench(
                                             controller.set_sql(statement, on_intent);
                                         }
                                     },
-                                    "{preset.label}"
+                                    "{preset.label()}"
                                 }
                             }
                         }
@@ -516,14 +476,11 @@ pub(crate) fn QueryResultView(model: QueryViewModel) -> Element {
 }
 
 fn preset_sql(dataset: &str, preset: QueryPreset) -> String {
-    format!(
-        "SELECT {} FROM {}.{}{}",
-        preset.projection, dataset, preset.table, preset.suffix
-    )
+    preset.sql(dataset)
 }
 
 pub(crate) fn default_query_sql(dataset: &str) -> String {
-    preset_sql(dataset, QUERY_PRESETS[0])
+    preset_sql(dataset, QueryPreset::Episodes)
 }
 
 fn preferred_episode(episodes: &[EpisodeSummary]) -> Option<&EpisodeSummary> {
@@ -586,7 +543,7 @@ mod tests {
     #[test]
     fn presets_are_scoped_to_the_current_dataset() {
         assert_eq!(
-            preset_sql("training", QUERY_PRESETS[2]),
+            preset_sql("training", QueryPreset::JointSamples),
             "SELECT * FROM training.joint_samples ORDER BY episode_id DESC, stream_id, sample_index LIMIT 100"
         );
     }
