@@ -9,10 +9,11 @@
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use rerobot_core::api::{EpisodeSummary, ImportResponse, SpiralQueryRequest, SpiralQueryResponse};
+use rerobot_core::api::{EpisodeSummary, ImportResponse, SpiralQueryResponse};
 
 use crate::api;
-use crate::state::studio;
+use crate::app::state::studio;
+use crate::features::data::controller::data_controller;
 
 pub(crate) const DEFAULT_QUERY_ROWS: usize = 100;
 const QUERY_ROW_OPTIONS: [usize; 5] = [25, 100, 250, 500, 1_000];
@@ -110,13 +111,10 @@ const QUERY_PRESETS: [QueryPreset; 5] = [
 pub(crate) fn DataWorkbench(
     dataset: String,
     query_available: bool,
-    mut tab: Signal<DataWorkbenchTab>,
-    mut sql: Signal<String>,
-    mut max_rows: Signal<usize>,
-    mut query: Signal<QueryViewModel>,
     on_intent: EventHandler<DataIntent>,
 ) -> Element {
     let mut studio = studio();
+    let controller = data_controller();
     let mut importing = use_signal(|| false);
     let mut confirming_delete = use_signal(|| None::<String>);
 
@@ -132,11 +130,11 @@ pub(crate) fn DataWorkbench(
             return;
         }
         match studio.focused_episode() {
-            Some(episode) if tab() == DataWorkbenchTab::Episodes => {
-                on_intent.call(DataIntent::Episode(episode));
+            Some(episode) if controller.tab() == DataWorkbenchTab::Episodes => {
+                controller.present_episode(studio, episode, on_intent);
             }
-            None if tab() == DataWorkbenchTab::Episodes => {
-                on_intent.call(DataIntent::EmptyEpisodes);
+            None if controller.tab() == DataWorkbenchTab::Episodes => {
+                controller.present_empty(on_intent);
             }
             _ => {}
         }
@@ -150,43 +148,7 @@ pub(crate) fn DataWorkbench(
     let selected = studio.selected_episode.read().clone();
     let replaying = studio.replay();
 
-    let mut run_query = move || {
-        if !query_available {
-            studio.report("Configure a Spiral catalog, project, and dataset in Settings before running Query.");
-            return;
-        }
-        let statement = sql.read().trim().to_owned();
-        if statement.is_empty() || matches!(query.read().state, QueryState::Running) {
-            return;
-        }
-        let rows = max_rows();
-        let running = QueryViewModel {
-            sql: statement.clone(),
-            max_rows: rows,
-            state: QueryState::Running,
-        };
-        query.set(running.clone());
-        on_intent.call(DataIntent::Query(running));
-
-        let request = SpiralQueryRequest {
-            sql: statement.clone(),
-            max_rows: rows,
-        };
-        spawn(async move {
-            let state =
-                match api::send_json(Method::POST, "/api/spiral/query", Some(&request)).await {
-                    Ok(response) => QueryState::Ready(response),
-                    Err(error) => QueryState::Failed(error),
-                };
-            let completed = QueryViewModel {
-                sql: statement,
-                max_rows: rows,
-                state,
-            };
-            query.set(completed.clone());
-            on_intent.call(DataIntent::Query(completed));
-        });
-    };
+    let run_query = move || controller.run_query(studio, query_available, on_intent);
 
     rsx! {
         section {
@@ -271,31 +233,22 @@ pub(crate) fn DataWorkbench(
                     button {
                         key: "{choice.label()}",
                         r#type: "button",
-                        class: if tab() == choice {
+                        class: if controller.tab() == choice {
                             "min-h-7 rounded-[3px] bg-surface text-[11px] font-medium text-ink shadow-sm"
                         } else {
                             "min-h-7 rounded-[3px] text-[11px] text-ink-soft hover:bg-hover hover:text-ink"
                         },
-                        "aria-pressed": tab() == choice,
+                        "aria-pressed": controller.tab() == choice,
                         onclick: move |_| {
                             confirming_delete.set(None);
-                            tab.set(choice);
-                            match choice {
-                                DataWorkbenchTab::Episodes => match studio.focused_episode() {
-                                    Some(episode) => on_intent.call(DataIntent::Episode(episode)),
-                                    None => on_intent.call(DataIntent::EmptyEpisodes),
-                                },
-                                DataWorkbenchTab::Query => {
-                                    on_intent.call(DataIntent::Query(query()));
-                                }
-                            }
+                            controller.select_tab(studio, choice, on_intent);
                         },
                         "{choice.label()}"
                     }
                 }
             }
 
-            match tab() {
+            match controller.tab() {
                 DataWorkbenchTab::Episodes => rsx! {
                     div { class: "min-h-0 flex-1 overflow-y-auto",
                         if episodes.is_empty() {
@@ -320,7 +273,7 @@ pub(crate) fn DataWorkbench(
                                         confirming_delete: confirming_delete.read().as_deref() == Some(episode.id.as_str()),
                                         on_select: move |chosen: EpisodeSummary| {
                                             confirming_delete.set(None);
-                                            on_intent.call(DataIntent::Episode(chosen));
+                                            controller.present_episode(studio, chosen, on_intent);
                                         },
                                         on_delete: move |id: String| {
                                             if confirming_delete.read().as_deref() == Some(id.as_str()) {
@@ -355,10 +308,7 @@ pub(crate) fn DataWorkbench(
                                         let dataset = dataset.clone();
                                         move |_| {
                                             let statement = preset_sql(&dataset, preset);
-                                            sql.set(statement.clone());
-                                            let idle = QueryViewModel::idle(statement, max_rows());
-                                            query.set(idle.clone());
-                                            on_intent.call(DataIntent::Query(idle));
+                                            controller.set_sql(statement, on_intent);
                                         }
                                     },
                                     "{preset.label}"
@@ -370,13 +320,9 @@ pub(crate) fn DataWorkbench(
                             textarea {
                                 class: "query-input min-h-32 flex-1 resize-none",
                                 spellcheck: "false",
-                                value: "{sql}",
+                                value: controller.sql(),
                                 oninput: move |event| {
-                                    let statement = event.value();
-                                    sql.set(statement.clone());
-                                    let idle = QueryViewModel::idle(statement, max_rows());
-                                    query.set(idle.clone());
-                                    on_intent.call(DataIntent::Query(idle));
+                                    controller.set_sql(event.value(), on_intent);
                                 },
                                 onkeydown: move |event| {
                                     if event.key() == Key::Enter
@@ -393,16 +339,13 @@ pub(crate) fn DataWorkbench(
                                 span { class: "label", "Max rows" }
                                 select {
                                     class: "field",
-                                    value: "{max_rows}",
+                                    value: "{controller.max_rows()}",
                                     onchange: move |event| {
                                         let rows = event.value().parse().unwrap_or(DEFAULT_QUERY_ROWS);
-                                        max_rows.set(rows);
-                                        let idle = QueryViewModel::idle(sql(), rows);
-                                        query.set(idle.clone());
-                                        on_intent.call(DataIntent::Query(idle));
+                                        controller.set_max_rows(rows, on_intent);
                                     },
                                     for option in QUERY_ROW_OPTIONS {
-                                        option { value: "{option}", selected: max_rows() == option, "{option}" }
+                                        option { value: "{option}", selected: controller.max_rows() == option, "{option}" }
                                     }
                                 }
                             }
@@ -412,9 +355,9 @@ pub(crate) fn DataWorkbench(
                             button {
                                 r#type: "button",
                                 class: "btn btn-primary",
-                                disabled: !query_available || sql.read().trim().is_empty() || matches!(query.read().state, QueryState::Running),
+                                disabled: !query_available || controller.sql().trim().is_empty() || matches!(controller.query().state, QueryState::Running),
                                 onclick: move |_| run_query(),
-                                if matches!(query.read().state, QueryState::Running) { "Running…" } else { "Run query" }
+                                if matches!(controller.query().state, QueryState::Running) { "Running…" } else { "Run query" }
                             }
                         }
                     }
@@ -591,12 +534,17 @@ fn preferred_episode(episodes: &[EpisodeSummary]) -> Option<&EpisodeSummary> {
         .or_else(|| episodes.last())
 }
 
-fn delete_episode(studio: crate::state::Studio, id: String) {
+fn delete_episode(studio: crate::app::state::Studio, id: String) {
     let mut selected = studio.selected_episode;
     let path = format!("/api/episodes/{id}");
+    let deleted_id = id.clone();
     studio.run_utility(format!("Deleted {id}."), async move {
         api::send::<()>(Method::DELETE, &path, None).await?;
-        selected.set(None);
+        // A slower deletion must not clear a newer choice made while the
+        // request was in flight.
+        if selected.peek().as_deref() == Some(deleted_id.as_str()) {
+            selected.set(None);
+        }
         Ok(())
     });
 }

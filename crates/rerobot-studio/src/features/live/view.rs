@@ -1,32 +1,21 @@
 //! Live operation workbench: capture, control, and the selected arm's state.
 
 use dioxus::prelude::*;
-use gloo_net::http::Method;
-use rerobot_core::api::{ModeSelection, TorqueRequest, default_teleoperation_pair};
+use rerobot_core::api::{ModeSelection, default_teleoperation_pair};
 
-use crate::api;
+use crate::app::state::{Selection, studio};
 use crate::control::JointPanel;
-use crate::modes::set_mode;
-use crate::state::{Selection, studio};
-
-/// Semantic changes requested by the Live workbench. The shell applies these
-/// to the activity projection; this component does not reach into selection
-/// state behind the visualization's back.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum LiveIntent {
-    Select(Option<Selection>),
-    Point(Option<Selection>),
-}
+use crate::features::live::controller::LiveAction;
 
 /// The complete left-hand workbench for operating a connected pair.
 #[component]
-pub fn LiveWorkbench(on_intent: EventHandler<LiveIntent>) -> Element {
+pub fn LiveWorkbench(on_action: EventHandler<LiveAction>) -> Element {
     let studio = studio();
     let robots = studio.snapshot.read().robots.clone();
 
     rsx! {
         div { class: "studio-workbench-scroll live-workbench",
-            ControlSection {}
+            ControlSection { on_action }
 
             section { class: "workbench-section live-properties",
                 header { class: "workbench-section-heading",
@@ -34,11 +23,11 @@ pub fn LiveWorkbench(on_intent: EventHandler<LiveIntent>) -> Element {
                 }
                 RobotRoster {
                     robots,
-                    on_select: move |selection| on_intent.call(LiveIntent::Select(selection)),
+                    on_select: move |selection| on_action.call(LiveAction::Select(selection)),
                 }
                 JointPanel {
-                    on_select: move |selection| on_intent.call(LiveIntent::Select(selection)),
-                    on_point: move |selection| on_intent.call(LiveIntent::Point(selection)),
+                    on_select: move |selection| on_action.call(LiveAction::Select(selection)),
+                    on_point: move |selection| on_action.call(LiveAction::Point(selection)),
                 }
             }
         }
@@ -113,7 +102,7 @@ fn RobotRoster(
 }
 
 #[component]
-fn ControlSection() -> Element {
+fn ControlSection(on_action: EventHandler<LiveAction>) -> Element {
     let studio = studio();
     let focused = studio.focused();
     let telemetry = focused
@@ -137,7 +126,7 @@ fn ControlSection() -> Element {
                     disabled: focused.is_none() || telemetry.is_none(),
                     onclick: {
                         let id = focused.as_ref().map(|robot| robot.id.clone());
-                        move |_| if let Some(id) = id.as_deref() { hold_robot(studio, id); }
+                        move |_| if let Some(id) = id.clone() { on_action.call(LiveAction::Hold(id)); }
                     },
                     "Hold"
                 }
@@ -154,7 +143,7 @@ fn ControlSection() -> Element {
                     disabled: pair.is_none() || !studio.controls_available(),
                     onclick: move |_| {
                         if let Some((leader, follower)) = pair.clone() {
-                            set_mode(studio, ModeSelection::Teleoperate { leader, follower });
+                            on_action.call(LiveAction::Teleoperate { leader, follower });
                         }
                     },
                     "Teleop"
@@ -169,7 +158,7 @@ fn ControlSection() -> Element {
                             let id = focused.as_ref().map(|robot| robot.id.clone());
                             move |_| {
                                 confirm_release.set(false);
-                                if let Some(id) = id.as_deref() { release_robot(studio, id); }
+                                if let Some(id) = id.clone() { on_action.call(LiveAction::Release(id)); }
                             }
                         },
                         "Release"
@@ -179,41 +168,6 @@ fn ControlSection() -> Element {
             }
         }
     }
-}
-
-/// Hold is the operator-facing form of Manual: select the focused arm as the
-/// command target, then energize it. Keeping the requests in one ordered task
-/// prevents the removed arm-local Manual control from remaining a hidden
-/// prerequisite for writable sliders.
-fn hold_robot(studio: crate::state::Studio, id: &str) {
-    let id = id.to_owned();
-    studio.run("", async move {
-        let mode = ModeSelection::Manual { robot: id.clone() };
-        api::send(Method::POST, "/api/mode", Some(&mode)).await?;
-        api::send(
-            Method::POST,
-            &format!("/api/robots/{id}/torque"),
-            Some(&TorqueRequest { enabled: true }),
-        )
-        .await
-    });
-}
-
-/// Release always attempts the physical release even if leaving the current
-/// mode fails. Torque-off is the safety consequence; an Idle transition is the
-/// semantic cleanup and may report its own failure afterward.
-fn release_robot(studio: crate::state::Studio, id: &str) {
-    let id = id.to_owned();
-    studio.run_safety("Motors released.", async move {
-        let idle = api::send(Method::POST, "/api/mode", Some(&ModeSelection::Idle)).await;
-        api::send(
-            Method::POST,
-            &format!("/api/robots/{id}/torque"),
-            Some(&TorqueRequest { enabled: false }),
-        )
-        .await?;
-        idle
-    });
 }
 
 fn role_label(kind: &str) -> &'static str {

@@ -1,20 +1,14 @@
 //! The complete rerobot Studio application, compiled by DX for the browser and server.
 
-mod activity;
 mod api;
 mod app;
 mod commands;
 mod control;
-mod data_workbench;
+mod features;
 mod icons;
-mod live_workbench;
 mod modes;
 mod recording_signals;
-mod settings_panel;
 mod setup;
-mod state;
-mod studio_timeline;
-mod training;
 mod viewport;
 
 pub use app::App;

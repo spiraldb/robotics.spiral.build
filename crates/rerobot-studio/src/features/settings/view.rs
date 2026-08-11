@@ -5,8 +5,8 @@ use gloo_net::http::Method;
 use rerobot_core::api::{ConnectionTestResponse, DataSettings, UpdateDataSettingsRequest};
 
 use crate::api;
+use crate::app::state::studio;
 use crate::setup::RobotPanel;
-use crate::state::studio;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsSection {
@@ -17,10 +17,16 @@ enum SettingsSection {
 }
 
 #[component]
-pub(crate) fn SettingsPanel(on_close: EventHandler<()>, on_saved: EventHandler<()>) -> Element {
-    let mut current = use_signal(DataSettings::default);
-    let mut loaded = use_signal(|| false);
-    let mut load_error = use_signal(|| None::<String>);
+pub(crate) fn SettingsPanel(
+    initial: Option<DataSettings>,
+    load_error: Option<String>,
+    on_close: EventHandler<()>,
+    on_saved: EventHandler<()>,
+    on_busy_change: EventHandler<bool>,
+) -> Element {
+    let initial_value = initial.clone().unwrap_or_default();
+    let settings_loaded = initial.is_some();
+    let mut current = use_signal(move || initial_value);
     let mut section = use_signal(|| SettingsSection::Robots);
     let mut hugging_face_token = use_signal(String::new);
     let mut clear_hugging_face = use_signal(|| false);
@@ -29,19 +35,20 @@ pub(crate) fn SettingsPanel(on_close: EventHandler<()>, on_saved: EventHandler<(
     let mut test_result = use_signal(|| None::<ConnectionTestResponse>);
     let studio = studio();
 
-    use_future(move || async move {
-        match api::get::<DataSettings>("/api/settings/data").await {
-            Ok(settings) => current.set(settings),
-            Err(error) => load_error.set(Some(error)),
+    use_effect(use_reactive((&initial,), move |(initial,)| {
+        if let Some(settings) = initial
+            && !saving.peek().to_owned()
+        {
+            current.set(settings);
         }
-        loaded.set(true);
-    });
+    }));
 
     let mut save = move |test_path: Option<&'static str>| {
-        if saving() || !loaded() {
+        if saving() || !settings_loaded {
             return;
         }
         saving.set(true);
+        on_busy_change.call(true);
         let request = UpdateDataSettingsRequest {
             spiral: current().spiral,
             hugging_face: current().hugging_face,
@@ -83,11 +90,12 @@ pub(crate) fn SettingsPanel(on_close: EventHandler<()>, on_saved: EventHandler<(
                 Err(error) => studio.report(error),
             }
             saving.set(false);
+            on_busy_change.call(false);
         });
     };
 
     rsx! {
-        div { class: "settings-backdrop", onclick: move |_| on_close.call(()) }
+        div { class: "settings-backdrop", onclick: move |_| if !saving() { on_close.call(()) } }
         section {
             class: "data-settings-dialog",
             role: "dialog",
@@ -106,7 +114,8 @@ pub(crate) fn SettingsPanel(on_close: EventHandler<()>, on_saved: EventHandler<(
                     class: "icon-button",
                     "aria-label": "Close settings",
                     autofocus: true,
-                    onclick: move |_| on_close.call(()),
+                    disabled: saving(),
+                    onclick: move |_| if !saving() { on_close.call(()) },
                     CloseIcon {}
                 }
             }
@@ -121,10 +130,10 @@ pub(crate) fn SettingsPanel(on_close: EventHandler<()>, on_saved: EventHandler<(
                     if section() == SettingsSection::Robots {
                         ProviderHeading { title: "Robot setup", description: "Configure ports, camera assignments, and calibration for each arm." }
                         div { class: "robot-settings-panel", RobotPanel { heading: false } }
-                    } else if !loaded() {
-                        div { class: "settings-loading", "Loading data settings…" }
-                    } else if let Some(error) = load_error() {
+                    } else if let Some(error) = load_error.as_ref() {
                         div { class: "settings-loading data-error", "{error}" }
+                    } else if !settings_loaded {
+                        div { class: "settings-loading", "Loading data settings…" }
                     } else {
                         match section() {
                             SettingsSection::Robots => rsx! {},

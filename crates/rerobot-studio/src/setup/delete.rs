@@ -3,7 +3,7 @@ use gloo_net::http::Method;
 use rerobot_core::api::RobotSummary;
 
 use crate::api;
-use crate::state::studio;
+use crate::app::state::studio;
 
 /// Deleting an arm destroys its calibration, so it takes a specific second click.
 #[component]

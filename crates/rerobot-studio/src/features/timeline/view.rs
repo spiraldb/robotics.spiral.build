@@ -10,7 +10,7 @@ use dioxus::prelude::*;
 use rerobot_core::arm::SO101_JOINTS;
 use serde::Deserialize;
 
-use crate::activity::{Activity, TimelineSubject, TimelineTarget};
+use crate::app::activity::{Activity, TimelineSubject, TimelineTarget};
 use crate::recording_signals::{SignalStore, signal_color};
 
 const TRACE_WIDTH: f64 = 1_000.0;
@@ -407,7 +407,10 @@ pub(crate) fn StudioTimeline(
         TimelineSubject::Episode { .. } => "Episode",
     };
     let identity_label = match full_episode_id.as_deref() {
-        Some(id) => format!("{subject_label} {}", crate::data_workbench::short_id(id)),
+        Some(id) => format!(
+            "{subject_label} {}",
+            crate::features::data::view::short_id(id)
+        ),
         None => "No episode".to_owned(),
     };
     let empty_reason = match &state.subject {

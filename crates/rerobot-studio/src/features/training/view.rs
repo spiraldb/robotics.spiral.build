@@ -5,14 +5,11 @@
 //! Studio event stream; no training lifecycle is inferred in the browser.
 
 use dioxus::prelude::*;
-use gloo_net::http::Method;
-use rerobot_core::api::{
-    StartTrainingRequest, TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase,
-};
+use rerobot_core::api::{TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase};
 use rerobot_panels::{LayoutNode, Panel, PanelLayout, PanelWorkspace, SplitAxis};
 
-use crate::api;
-use crate::state::studio;
+use crate::app::state::studio;
+use crate::features::training::controller::training_controller;
 
 const CHART_WIDTH: f64 = 1_000.0;
 const CHART_TOP: f64 = 18.0;
@@ -21,16 +18,11 @@ const CHART_BOTTOM: f64 = 242.0;
 #[component]
 pub(crate) fn TrainingWorkspace(dataset: String) -> Element {
     let studio = studio();
-    let initial_dataset = dataset.clone();
-    let request = use_signal(move || StartTrainingRequest {
-        run_name: "act-run-001".to_owned(),
-        sql: default_training_sql(&initial_dataset),
-        ..StartTrainingRequest::default()
-    });
-    let mut selected_run = use_signal(|| None::<String>);
+    let controller = training_controller();
     let snapshot = studio.training.read().clone();
     let active_run = snapshot.active_run().cloned();
-    let viewed_run = selected_run()
+    let viewed_run = controller
+        .selected_run()
         .as_ref()
         .and_then(|id| snapshot.runs.iter().find(|run| &run.id == id))
         .or(active_run.as_ref())
@@ -47,10 +39,7 @@ pub(crate) fn TrainingWorkspace(dataset: String) -> Element {
                 readiness: snapshot.readiness.clone(),
                 active_run: active_run.clone(),
                 viewed_run: viewed_run.clone(),
-                request,
                 history: snapshot.runs.clone(),
-                selected_run: selected_run(),
-                on_select_run: move |id| selected_run.set(Some(id)),
             }
         },
     )
@@ -118,13 +107,15 @@ fn TrainingRunBuilder(
     readiness: TrainingReadiness,
     active_run: Option<TrainingRun>,
     viewed_run: Option<TrainingRun>,
-    mut request: Signal<StartTrainingRequest>,
     history: Vec<TrainingRun>,
-    selected_run: Option<String>,
-    on_select_run: EventHandler<String>,
 ) -> Element {
     let studio = studio();
-    let can_start = readiness.ready && active_run.is_none();
+    let controller = training_controller();
+    let request = controller.request();
+    let selected_run = controller.selected_run();
+    let starting = controller.starting();
+    let stopping = controller.stopping();
+    let can_start = readiness.ready && active_run.is_none() && !starting;
     let active_id = active_run.as_ref().map(|run| run.id.clone());
     let progress = active_run.as_ref().map(|run| {
         if run.config.steps == 0 {
@@ -172,14 +163,12 @@ fn TrainingRunBuilder(
                     button {
                         r#type: "button",
                         class: "training-stop-button",
-                        disabled: run.phase == TrainingRunPhase::Stopping,
+                        disabled: run.phase == TrainingRunPhase::Stopping || stopping.is_some(),
                         onclick: move |_| {
                             let id = active_id.clone().unwrap_or_default();
-                            studio.run_utility("Stop requested.", async move {
-                                api::post(&format!("/api/training/runs/{id}/stop")).await
-                            });
+                            controller.stop(studio, id);
                         },
-                        if run.phase == TrainingRunPhase::Stopping { "Stopping…" } else { "Stop after current step" }
+                        if run.phase == TrainingRunPhase::Stopping || stopping.is_some() { "Stopping…" } else { "Stop after current step" }
                     }
                 }
             }
@@ -207,18 +196,24 @@ fn TrainingRunBuilder(
                 label { class: "training-field training-field-wide",
                     span { "Run name" }
                     input {
-                        value: request.read().run_name.clone(),
+                        value: request.run_name.clone(),
                         disabled: active_run.is_some(),
-                        oninput: move |event| request.write().run_name = event.value(),
+                        oninput: move |event| {
+                            let value = event.value();
+                            controller.edit_request(move |request| request.run_name = value);
+                        },
                     }
                 }
                 div { class: "training-form-grid",
                     label { class: "training-field",
                         span { "Device" }
                         select {
-                            value: request.read().device.clone(),
+                            value: request.device.clone(),
                             disabled: active_run.is_some(),
-                            onchange: move |event| request.write().device = event.value(),
+                            onchange: move |event| {
+                                let value = event.value();
+                                controller.edit_request(move |request| request.device = value);
+                            },
                             option { value: "auto", "Auto" }
                             option { value: "cuda", "CUDA" }
                             option { value: "mps", "Apple MPS" }
@@ -229,45 +224,55 @@ fn TrainingRunBuilder(
                         span { "Steps" }
                         input {
                             r#type: "number", min: "1", step: "100",
-                            value: "{request.read().steps}",
+                            value: "{request.steps}",
                             disabled: active_run.is_some(),
-                            oninput: move |event| if let Ok(value) = event.value().parse() { request.write().steps = value },
+                            oninput: move |event| if let Ok(value) = event.value().parse() {
+                                controller.edit_request(move |request| request.steps = value);
+                            },
                         }
                     }
                     label { class: "training-field",
                         span { "Batch" }
                         input {
                             r#type: "number", min: "1",
-                            value: "{request.read().batch_size}",
+                            value: "{request.batch_size}",
                             disabled: active_run.is_some(),
-                            oninput: move |event| if let Ok(value) = event.value().parse() { request.write().batch_size = value },
+                            oninput: move |event| if let Ok(value) = event.value().parse() {
+                                controller.edit_request(move |request| request.batch_size = value);
+                            },
                         }
                     }
                     label { class: "training-field",
                         span { "Action chunk" }
                         input {
                             r#type: "number", min: "1", max: "256",
-                            value: "{request.read().chunk_size}",
+                            value: "{request.chunk_size}",
                             disabled: active_run.is_some(),
-                            oninput: move |event| if let Ok(value) = event.value().parse() { request.write().chunk_size = value },
+                            oninput: move |event| if let Ok(value) = event.value().parse() {
+                                controller.edit_request(move |request| request.chunk_size = value);
+                            },
                         }
                     }
                     label { class: "training-field",
                         span { "Learning rate" }
                         input {
                             r#type: "number", min: "0", step: "0.00001",
-                            value: "{request.read().learning_rate}",
+                            value: "{request.learning_rate}",
                             disabled: active_run.is_some(),
-                            oninput: move |event| if let Ok(value) = event.value().parse() { request.write().learning_rate = value },
+                            oninput: move |event| if let Ok(value) = event.value().parse() {
+                                controller.edit_request(move |request| request.learning_rate = value);
+                            },
                         }
                     }
                     label { class: "training-field",
                         span { "Checkpoint every" }
                         input {
                             r#type: "number", min: "1", step: "100",
-                            value: "{request.read().checkpoint_every}",
+                            value: "{request.checkpoint_every}",
                             disabled: active_run.is_some(),
-                            oninput: move |event| if let Ok(value) = event.value().parse() { request.write().checkpoint_every = value },
+                            oninput: move |event| if let Ok(value) = event.value().parse() {
+                                controller.edit_request(move |request| request.checkpoint_every = value);
+                            },
                         }
                     }
                 }
@@ -283,25 +288,34 @@ fn TrainingRunBuilder(
                 }
                 textarea {
                     spellcheck: "false",
-                    value: request.read().sql.clone(),
+                    value: request.sql.clone(),
                     disabled: active_run.is_some(),
-                    oninput: move |event| request.write().sql = event.value(),
+                    oninput: move |event| {
+                        let value = event.value();
+                        controller.edit_request(move |request| request.sql = value);
+                    },
                 }
                 div { class: "training-column-row",
                     label { class: "training-field",
                         span { "State column" }
                         input {
-                            value: request.read().state_column.clone(),
+                            value: request.state_column.clone(),
                             disabled: active_run.is_some(),
-                            oninput: move |event| request.write().state_column = event.value(),
+                            oninput: move |event| {
+                                let value = event.value();
+                                controller.edit_request(move |request| request.state_column = value);
+                            },
                         }
                     }
                     label { class: "training-field",
                         span { "Action column" }
                         input {
-                            value: request.read().action_column.clone(),
+                            value: request.action_column.clone(),
                             disabled: active_run.is_some(),
-                            oninput: move |event| request.write().action_column = event.value(),
+                            oninput: move |event| {
+                                let value = event.value();
+                                controller.edit_request(move |request| request.action_column = value);
+                            },
                         }
                     }
                 }
@@ -313,18 +327,9 @@ fn TrainingRunBuilder(
                 disabled: !can_start,
                 title: if active_run.is_some() { "Stop the active run first".to_owned() } else if !readiness.ready { readiness.summary.clone() } else { "Start local PyTorch training".to_owned() },
                 onclick: move |_| {
-                    let next = request();
-                    studio.run_utility("Training started.", async move {
-                        api::send_json::<_, TrainingRun>(
-                            Method::POST,
-                            "/api/training/runs",
-                            Some(&next),
-                        )
-                        .await
-                        .map(|_| ())
-                    });
+                    controller.start(studio);
                 },
-                "Start training"
+                if starting { "Starting…" } else { "Start training" }
             }
 
             section { class: "training-history",
@@ -341,7 +346,7 @@ fn TrainingRunBuilder(
                         class: if selected_run.as_deref() == Some(run.id.as_str()) { "training-history-row training-history-row-selected" } else { "training-history-row" },
                         onclick: {
                             let id = run.id.clone();
-                            move |_| on_select_run.call(id.clone())
+                            move |_| controller.select_run(id.clone())
                         },
                         span { class: "training-history-name", "{run.config.run_name}" }
                         span { class: phase_class(run.phase), "{run.phase.label()}" }
@@ -617,7 +622,7 @@ enum ResourceSeries {
     Transfer,
 }
 
-fn default_training_sql(dataset: &str) -> String {
+pub(crate) fn default_training_sql(dataset: &str) -> String {
     format!(
         "SELECT episode_id, stream_id, sample_index,\n       state_position_json AS state,\n       action_position_json AS action\nFROM {dataset}.joint_samples\nWHERE action_position_json IS NOT NULL\nORDER BY episode_id, stream_id, sample_index"
     )

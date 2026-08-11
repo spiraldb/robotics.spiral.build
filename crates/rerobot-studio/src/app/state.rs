@@ -1,4 +1,4 @@
-//! Studio state shared by every screen.
+//! Application state shared by every Studio feature.
 
 use std::future::Future;
 use std::rc::Rc;
@@ -195,13 +195,6 @@ pub struct Studio {
     /// the joint inspector somewhere else, because judging a take and watching
     /// the arm that produced it are the same gesture.
     pub selected_episode: Signal<Option<String>>,
-    /// An episode the operator asked to open in Data, from wherever they were.
-    ///
-    /// Intent, not state: the shell consumes it, switches activity, sets
-    /// [`Self::selected_episode`], and clears it. Keeping it here rather than
-    /// letting a notice reach into the activity signal preserves the rule that
-    /// surfaces emit intent and one controller derives the consequence.
-    pub view_episode_request: Signal<Option<String>>,
     /// Joint angles for the take being recorded, or the last one recorded.
     ///
     /// Filled from the event stream rather than from the panel that draws it:
@@ -214,21 +207,34 @@ pub struct Studio {
 impl Studio {
     /// Create the shared state and start following the server.
     pub fn use_studio() -> Self {
+        // Hooks own the lifetime of every signal. The context publishes only
+        // their handles; it does not construct unscoped reactive state inside
+        // a provider closure.
+        let snapshot = use_signal(StudioSnapshot::default);
+        let telemetry = use_signal(TelemetryFrame::default);
+        let training = use_signal(TrainingSnapshot::default);
+        let live = use_signal(|| false);
+        let last_event_ms = use_signal(|| 0.0);
+        let clock_ms = use_signal(|| 0.0);
+        let notice = use_signal(|| None);
+        let selected = use_signal(|| None);
+        let pointed = use_signal(|| None);
+        let selected_episode = use_signal(|| None);
+        let recording_signals = use_signal(SignalStore::default);
         let studio = use_context_provider(|| Self {
-            snapshot: Signal::new(StudioSnapshot::default()),
-            telemetry: Signal::new(TelemetryFrame::default()),
-            training: Signal::new(TrainingSnapshot::default()),
-            live: Signal::new(false),
-            last_event_ms: Signal::new(0.0),
+            snapshot,
+            telemetry,
+            training,
+            live,
+            last_event_ms,
             // Keep the server's first render identical to the browser's first
             // render; the browser clock starts with the client tasks below.
-            clock_ms: Signal::new(0.0),
-            notice: Signal::new(None),
-            selected: Signal::new(None),
-            pointed: Signal::new(None),
-            selected_episode: Signal::new(None),
-            view_episode_request: Signal::new(None),
-            recording_signals: Signal::new(SignalStore::default()),
+            clock_ms,
+            notice,
+            selected,
+            pointed,
+            selected_episode,
+            recording_signals,
         });
         let mut default_selection = studio.selected;
         use_effect(move || {
@@ -486,7 +492,11 @@ impl Studio {
     {
         let mut notice = self.notice;
         let success = success.into();
-        spawn(async move {
+        // Commands are consequences owned by the Studio session, not by the
+        // button or activity that happened to launch them. Activity switches
+        // unmount views, so keep accepted commands alive until the backend
+        // answers and report their outcome through session-owned notices.
+        dioxus::dioxus_core::spawn_forever(async move {
             match future.await {
                 Ok(()) if success.is_empty() => {}
                 Ok(()) => notice.set(Some(Notice::new(success, false))),

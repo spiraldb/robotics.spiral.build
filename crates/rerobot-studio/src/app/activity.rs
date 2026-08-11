@@ -7,7 +7,7 @@
 
 use rerobot_core::api::{EpisodeSummary, RecordingProgress};
 
-use crate::data_workbench::{DataIntent, QueryViewModel};
+use crate::features::data::view::{DataIntent, QueryViewModel};
 
 /// The Studio's three primary activities.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

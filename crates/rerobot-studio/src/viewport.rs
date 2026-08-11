@@ -34,9 +34,9 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 use web_sys::HtmlCanvasElement;
 
-use crate::activity::RecordedSource;
 use crate::api::{TimelineArmSample, TimelineSample};
-use crate::state::{Selection, studio};
+use crate::app::activity::RecordedSource;
+use crate::app::state::{Selection, studio};
 
 pub use rerobot_viewport::tool_position;
 
@@ -121,7 +121,7 @@ pub fn Viewport(
     on_select: EventHandler<Option<Selection>>,
 ) -> Element {
     let studio = studio();
-    let urdf = crate::state::description();
+    let urdf = crate::app::state::description();
     let bench = use_hook(|| Rc::new(RefCell::new(Option::<Bench>::None)));
     let mut camera = use_signal(Camera::default);
     let mut drag = use_signal(|| Option::<Drag>::None);
@@ -456,7 +456,7 @@ fn HoverNote(hover: Hover, historical: bool) -> Element {
 
 /// What to call an entity, and the reading worth showing beside its name.
 fn describe(
-    studio: &crate::state::Studio,
+    studio: &crate::app::state::Studio,
     entity: &RobotEntity,
     historical: bool,
 ) -> (String, Option<String>) {
@@ -528,7 +528,7 @@ fn matches_selection(selection: Option<&Selection>, entity: &RobotEntity) -> boo
 /// often than the geometry does.
 fn compose(
     urdf: &rerobot_core::urdf::Urdf,
-    studio: &crate::state::Studio,
+    studio: &crate::app::state::Studio,
     grid: bool,
     source: &SceneSource,
     hovered: Option<&RobotEntity>,
@@ -567,7 +567,7 @@ fn compose(
 }
 
 /// Every motor's condition, judged once per frame against its own limits.
-fn motor_conditions(studio: &crate::state::Studio) -> BTreeMap<(String, String), Condition> {
+fn motor_conditions(studio: &crate::app::state::Studio) -> BTreeMap<(String, String), Condition> {
     let snapshot = studio.snapshot.read();
     let telemetry = studio.telemetry.read();
     let mut conditions = BTreeMap::new();
@@ -600,8 +600,8 @@ fn motor_conditions(studio: &crate::state::Studio) -> BTreeMap<(String, String),
 type Mark = (String, f64, f64, bool);
 
 fn condition_marks(
-    urdf: &crate::state::Description,
-    studio: &crate::state::Studio,
+    urdf: &crate::app::state::Description,
+    studio: &crate::app::state::Studio,
     bench: &Rc<RefCell<Option<Bench>>>,
     camera: Camera,
     grid: bool,
@@ -644,8 +644,8 @@ fn condition_marks(
 
 /// What the pointer is over, and where the note about it belongs.
 fn hovered(
-    urdf: &crate::state::Description,
-    studio: &crate::state::Studio,
+    urdf: &crate::app::state::Description,
+    studio: &crate::app::state::Studio,
     bench: &Rc<RefCell<Option<Bench>>>,
     camera: Camera,
     grid: bool,
@@ -665,7 +665,7 @@ fn hovered(
 }
 
 /// Every arm on the bench, posed from what it is currently reporting.
-fn placements(studio: &crate::state::Studio, source: &SceneSource) -> Vec<ArmPlacement> {
+fn placements(studio: &crate::app::state::Studio, source: &SceneSource) -> Vec<ArmPlacement> {
     let arms = studio.snapshot.read().robots.clone();
     let count = arms.len();
     arms.iter()
@@ -825,7 +825,7 @@ fn ViewCube(mut camera: Signal<Camera>) -> Element {
     }
 }
 
-fn frame_selection(camera: &mut Signal<Camera>, studio: &crate::state::Studio) {
+fn frame_selection(camera: &mut Signal<Camera>, studio: &crate::app::state::Studio) {
     let robot = studio
         .selected
         .read()

@@ -137,12 +137,14 @@ impl DockZone {
     }
 }
 
-/// One tab group. Empty tiles are intentional drop targets created by Split.
+/// One tab group. Only an explicit operator-created Split remains when empty.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Tile {
     pub id: TileId,
     pub panels: Vec<PanelId>,
     pub active: Option<PanelId>,
+    #[serde(default)]
+    preserve_when_empty: bool,
 }
 
 impl Tile {
@@ -157,11 +159,14 @@ impl Tile {
             id: id.into(),
             panels,
             active,
+            preserve_when_empty: false,
         }
     }
 
     pub fn empty(id: impl Into<TileId>) -> Self {
-        Self::new(id, std::iter::empty::<PanelId>())
+        let mut tile = Self::new(id, std::iter::empty::<PanelId>());
+        tile.preserve_when_empty = true;
+        tile
     }
 }
 
@@ -284,13 +289,24 @@ impl PanelLayout {
 
     /// Remove unavailable panel ids, repair active tabs, and attach any newly
     /// registered panels to their preferred home tile (or the first tile).
+    ///
+    /// Unclaimed empty tiles are collapsed, unless the tile is a named home for
+    /// the next registry. Explicit empty tiles created by the operator carry a
+    /// durable marker and remain valid drop targets across persistence.
     pub fn reconcile(&mut self, placements: &[PanelPlacement]) {
         let available = placements
             .iter()
             .map(|placement| placement.panel.clone())
             .collect::<HashSet<_>>();
+        let protected_homes = placements
+            .iter()
+            .map(|placement| placement.home.clone())
+            .collect::<HashSet<_>>();
+        let fallback_tile = first_tile_id(&self.root).clone();
         let mut seen = HashSet::new();
         reconcile_node(&mut self.root, &available, &mut seen);
+        self.root = prune_unclaimed_empty_tiles(self.root.clone(), &protected_homes)
+            .unwrap_or_else(|| LayoutNode::empty_tile(fallback_tile));
 
         for placement in placements {
             if seen.contains(&placement.panel) {
@@ -536,6 +552,38 @@ fn reconcile_node(
             reconcile_node(first, available, seen);
             reconcile_node(second, available, seen);
         }
+    }
+}
+
+fn prune_unclaimed_empty_tiles(
+    node: LayoutNode,
+    protected_homes: &HashSet<TileId>,
+) -> Option<LayoutNode> {
+    match node {
+        LayoutNode::Tile(tile) => (!tile.panels.is_empty()
+            || tile.preserve_when_empty
+            || protected_homes.contains(&tile.id))
+        .then_some(LayoutNode::Tile(tile)),
+        LayoutNode::Split {
+            id,
+            axis,
+            ratio,
+            first,
+            second,
+        } => match (
+            prune_unclaimed_empty_tiles(*first, protected_homes),
+            prune_unclaimed_empty_tiles(*second, protected_homes),
+        ) {
+            (Some(first), Some(second)) => Some(LayoutNode::Split {
+                id,
+                axis,
+                ratio,
+                first: Box::new(first),
+                second: Box::new(second),
+            }),
+            (Some(node), None) | (None, Some(node)) => Some(node),
+            (None, None) => None,
+        },
     }
 }
 
@@ -836,6 +884,87 @@ mod tests {
                 ..
             }
         ));
+        assert!(layout.valid());
+    }
+
+    #[test]
+    fn registry_changes_prune_only_the_camera_rows_they_empty() {
+        let mut layout = PanelLayout::new(LayoutNode::split(
+            "root",
+            SplitAxis::Horizontal,
+            0.7,
+            LayoutNode::tile("primary", ["scene"]),
+            LayoutNode::split(
+                "camera-rows-1",
+                SplitAxis::Vertical,
+                0.5,
+                LayoutNode::tile("cameras", ["camera-live-gripper"]),
+                LayoutNode::split(
+                    "camera-rows-2",
+                    SplitAxis::Vertical,
+                    0.5,
+                    LayoutNode::tile("cameras-2", ["camera-live-top"]),
+                    LayoutNode::tile("cameras-3", ["camera-live-room"]),
+                ),
+            ),
+        ));
+
+        layout.reconcile(&[
+            PanelPlacement::new("scene", "primary"),
+            PanelPlacement::new("episode-camera:gripper", "cameras").with_zone(DockZone::Bottom),
+            PanelPlacement::new("episode-camera:top", "cameras").with_zone(DockZone::Bottom),
+        ]);
+
+        assert_eq!(layout.tile_count(), 3);
+        assert_eq!(
+            layout.tile_for_panel(&PanelId::from("episode-camera:gripper")),
+            Some(TileId::from("cameras"))
+        );
+        assert_ne!(
+            layout.tile_for_panel(&PanelId::from("episode-camera:gripper")),
+            layout.tile_for_panel(&PanelId::from("episode-camera:top"))
+        );
+        assert!(
+            tile_ids(&layout.root)
+                .iter()
+                .all(|id| layout.tile(id).is_some_and(|tile| !tile.panels.is_empty()))
+        );
+        assert!(layout.valid());
+    }
+
+    #[test]
+    fn registry_changes_preserve_operator_created_empty_drop_targets() {
+        let mut layout = PanelLayout::single("scene-group", "scene");
+        let empty = layout
+            .split_tile(&TileId::from("scene-group"), DockZone::Right)
+            .expect("empty drop target");
+        let encoded = layout.encode().expect("serializable layout");
+        let mut layout = PanelLayout::decode(&encoded).expect("persisted layout");
+
+        layout.reconcile(&[PanelPlacement::new("scene", "scene-group")]);
+
+        assert!(
+            layout
+                .tile(&empty)
+                .is_some_and(|tile| tile.panels.is_empty())
+        );
+        assert!(layout.valid());
+    }
+
+    #[test]
+    fn persisted_unmarked_empty_groups_are_repaired_as_registry_artifacts() {
+        let mut layout = PanelLayout::new(LayoutNode::split(
+            "root",
+            SplitAxis::Horizontal,
+            0.5,
+            LayoutNode::tile("scene-group", ["scene"]),
+            LayoutNode::tile("stale-camera-row", std::iter::empty::<PanelId>()),
+        ));
+
+        layout.reconcile(&[PanelPlacement::new("scene", "scene-group")]);
+
+        assert_eq!(layout.tile_count(), 1);
+        assert!(layout.tile(&TileId::from("stale-camera-row")).is_none());
         assert!(layout.valid());
     }
 

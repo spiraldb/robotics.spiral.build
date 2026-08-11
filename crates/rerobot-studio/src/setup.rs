@@ -15,8 +15,8 @@ use rerobot_core::api::{
 };
 
 use crate::api;
+use crate::app::state::{Selection, Studio, studio};
 use crate::icons::{Chevron, Trash};
-use crate::state::{Selection, Studio, studio};
 use crate::viewport::accent_css;
 
 mod calibration;
@@ -281,7 +281,7 @@ fn ImportRobotConfiguration() -> Element {
                         match result {
                             Ok(robot) => {
                                 chosen.set(Some(Selection::Robot(robot.id.clone())));
-                                notice.set(Some(crate::state::Notice::new(
+                                notice.set(Some(crate::app::state::Notice::new(
                                     format!("Imported {}.", robot.id),
                                     false,
                                 )));

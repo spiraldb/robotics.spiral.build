@@ -128,11 +128,11 @@ pub fn PanelWorkspace(
     // Without this, the new registry could be painted from a reconciled copy
     // of the previous mode while mutations and persistence still targeted the
     // previous tree.
-    let next_scope = storage_key.clone();
+    let scope_dependency = storage_key.clone();
     let next_fallback = initial_layout.clone();
     let next_placements = placements.clone();
     let next_mobile_panel = panels.first().map(|panel| panel.id.clone());
-    use_effect(move || {
+    use_effect(use_reactive((&scope_dependency,), move |(next_scope,)| {
         if layout_scope.peek().as_ref() == next_scope.as_ref() {
             return;
         }
@@ -147,7 +147,7 @@ pub fn PanelWorkspace(
         dragging.set(None);
         drop_preview.set(None);
         resizing.set(None);
-    });
+    }));
 
     let display_layout = layout().reconciled(&placements);
     let context = RenderContext {

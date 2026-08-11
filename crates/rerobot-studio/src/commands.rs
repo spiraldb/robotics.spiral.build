@@ -12,7 +12,7 @@ use rerobot_core::api::{
 };
 
 use crate::api;
-use crate::state::Studio;
+use crate::app::state::Studio;
 
 pub(crate) fn recording_blocker(studio: Studio) -> Option<String> {
     if matches!(studio.mode(), ModeSelection::Replay { .. }) {
@@ -93,10 +93,10 @@ pub(crate) fn stop_recording(
         .await?;
         if keep {
             let mut notice = studio.notice;
-            notice.set(Some(crate::state::Notice::about_episode(
+            notice.set(Some(crate::app::state::Notice::about_episode(
                 format!(
                     "Episode {} saved — {}, {} frames.",
-                    crate::data_workbench::short_id(&summary.id),
+                    crate::features::data::view::short_id(&summary.id),
                     format_take_duration(summary.duration_seconds),
                     summary.frames
                 ),

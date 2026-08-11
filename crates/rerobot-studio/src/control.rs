@@ -12,7 +12,7 @@ use rerobot_core::api::{
 use rerobot_core::arm::{self, JointAngles};
 
 use crate::api;
-use crate::state::{Selection, studio};
+use crate::app::state::{Selection, studio};
 use crate::viewport::tool_position;
 
 #[derive(Default)]
@@ -86,7 +86,7 @@ pub fn JointPanel(
 /// Where the arm is holding its gripper, solved from the robot description.
 #[component]
 fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
-    let description = crate::state::description();
+    let description = crate::app::state::description();
     let Ok(urdf) = description.as_ref() else {
         return rsx! {};
     };

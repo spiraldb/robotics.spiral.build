@@ -4,7 +4,7 @@ use gloo_net::http::Method;
 use rerobot_core::api::ModeSelection;
 
 use crate::api;
-use crate::state::Studio;
+use crate::app::state::Studio;
 
 pub fn set_mode(studio: Studio, selection: ModeSelection) {
     let request = selection.clone();
