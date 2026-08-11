@@ -292,6 +292,15 @@
     background: var(--tone-accent);
   }
 
+  /* Torque engaged is a physical fact, not a selection. Role blue made Hold and
+     Teleop read exactly as calm as Release, so the only thing on screen saying
+     the arm was live was a 10px count in the far corner of the status bar.
+     DESIGN.md spends Brick Red on energized torque; this is where it lands. */
+  .control-segment-energized {
+    @apply text-accent-ink;
+    background: var(--tone-danger);
+  }
+
   .inline-safety-confirm {
     @apply mx-3 mb-2 flex flex-wrap items-center gap-1 rounded bg-danger-soft px-2 py-1 text-[10px] text-danger;
   }

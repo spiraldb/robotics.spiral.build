@@ -133,7 +133,7 @@ fn ControlSection() -> Element {
             div { class: "control-segmented", role: "group", "aria-label": "Motor control mode",
                 button {
                     r#type: "button",
-                    class: if holding && !teleop { "control-segment control-segment-active" } else { "control-segment" },
+                    class: if holding && !teleop { "control-segment control-segment-active control-segment-energized" } else { "control-segment" },
                     disabled: focused.is_none() || telemetry.is_none(),
                     onclick: {
                         let id = focused.as_ref().map(|robot| robot.id.clone());
@@ -150,7 +150,7 @@ fn ControlSection() -> Element {
                 }
                 button {
                     r#type: "button",
-                    class: if teleop { "control-segment control-segment-active" } else { "control-segment" },
+                    class: if teleop { "control-segment control-segment-active control-segment-energized" } else { "control-segment" },
                     disabled: pair.is_none() || !studio.controls_available(),
                     onclick: move |_| {
                         if let Some((leader, follower)) = pair.clone() {

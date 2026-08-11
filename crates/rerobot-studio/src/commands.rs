@@ -75,8 +75,12 @@ pub(crate) fn stop_recording(
         return;
     }
     let request = StopRecordingRequest { keep };
+    // "Episode saved." named nothing, so the one moment the operator has
+    // earned something was also the moment the interface forgot what it was.
+    // The real facts only exist once the server answers, so the safety message
+    // covers the mode change and the summary replaces it with the take.
     let message = if keep {
-        "Episode saved. Teleoperation stopped."
+        "Saving the episode. Teleoperation stopped."
     } else {
         "Recording discarded. Teleoperation stopped."
     };
@@ -87,9 +91,31 @@ pub(crate) fn stop_recording(
             Some(&request),
         )
         .await?;
+        if keep {
+            let mut notice = studio.notice;
+            notice.set(Some(crate::state::Notice::about_episode(
+                format!(
+                    "Episode {} saved — {}, {} frames.",
+                    crate::data_workbench::short_id(&summary.id),
+                    format_take_duration(summary.duration_seconds),
+                    summary.frames
+                ),
+                summary.id.clone(),
+            )));
+        }
         on_completed.call(summary);
         Ok(())
     });
+}
+
+/// Minutes and tenths, matching the Timeline clock the operator just watched.
+fn format_take_duration(seconds: f64) -> String {
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return "0:00.0".to_owned();
+    }
+    let minutes = (seconds / 60.0).floor() as u64;
+    let remainder = seconds - minutes as f64 * 60.0;
+    format!("{minutes}:{remainder:04.1}")
 }
 
 pub(crate) fn replay_target(

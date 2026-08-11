@@ -44,6 +44,13 @@ pub struct Notice {
     pub failed: bool,
     /// Wall-clock milliseconds after which this notice comes off the page.
     pub until_ms: f64,
+    /// The episode this notice is about, when there is somewhere to go.
+    ///
+    /// "Episode saved." named nothing and led nowhere, so the operator's only
+    /// route from a finished take to that take was to switch activity and
+    /// recognize their own recording in a list. A notice that reports an
+    /// episode should be able to hand it over.
+    pub view_episode: Option<String>,
 }
 
 impl Notice {
@@ -54,6 +61,15 @@ impl Notice {
             text,
             failed,
             until_ms,
+            view_episode: None,
+        }
+    }
+
+    /// A success notice that can hand its episode to the Data activity.
+    pub fn about_episode(text: impl Into<String>, episode: impl Into<String>) -> Self {
+        Self {
+            view_episode: Some(episode.into()),
+            ..Self::new(text, false)
         }
     }
 
@@ -177,6 +193,13 @@ pub struct Studio {
     /// the joint inspector somewhere else, because judging a take and watching
     /// the arm that produced it are the same gesture.
     pub selected_episode: Signal<Option<String>>,
+    /// An episode the operator asked to open in Data, from wherever they were.
+    ///
+    /// Intent, not state: the shell consumes it, switches activity, sets
+    /// [`Self::selected_episode`], and clears it. Keeping it here rather than
+    /// letting a notice reach into the activity signal preserves the rule that
+    /// surfaces emit intent and one controller derives the consequence.
+    pub view_episode_request: Signal<Option<String>>,
     /// Joint angles for the take being recorded, or the last one recorded.
     ///
     /// Filled from the event stream rather than from the panel that draws it:
@@ -201,6 +224,7 @@ impl Studio {
             selected: Signal::new(None),
             pointed: Signal::new(None),
             selected_episode: Signal::new(None),
+            view_episode_request: Signal::new(None),
             recording_signals: Signal::new(SignalStore::default()),
         });
         let mut default_selection = studio.selected;

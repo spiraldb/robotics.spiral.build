@@ -269,6 +269,48 @@ pub(crate) enum TimelineAction {
         target: TimelineTarget,
         enabled: bool,
     },
+    /// Re-request the recorded traces for a named episode after a failure.
+    ReloadRecorded {
+        episode: String,
+    },
+}
+
+/// Where the Timeline's signal lanes are getting their samples, and — when the
+/// answer is "nowhere yet" — why.
+///
+/// Without this the lanes could only ask `series.is_empty()`, so a request still
+/// in flight and a request that died rendered identically to an episode the
+/// backend confirmed was empty: six lanes reading "No samples" with an
+/// `aria-label` of "had no samples", asserted in the past tense, for a recording
+/// that had 1082 frames. DESIGN.md's Explicit-Source Rule names these states;
+/// this is the type that carries them as far as the thing that draws.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) enum SignalSource {
+    /// Live telemetry from the recording signal store.
+    #[default]
+    Live,
+    /// A recorded episode whose traces have arrived.
+    RecordedReady,
+    /// A recorded episode whose traces are still in flight.
+    RecordedLoading,
+    /// A recorded episode whose traces will not arrive, and why.
+    RecordedUnavailable { episode: String, reason: String },
+}
+
+impl SignalSource {
+    /// True while the lanes have nothing to draw and no verdict yet.
+    fn loading(&self) -> bool {
+        matches!(self, Self::RecordedLoading)
+    }
+
+    fn unavailable(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::RecordedUnavailable { episode, reason } => {
+                Some((episode.as_str(), reason.as_str()))
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -305,6 +347,7 @@ fn transport_intent(playback: TimelinePlayback, sync_robot: bool) -> TimelineTra
 pub(crate) fn StudioTimeline(
     state: StudioTimelineState,
     signal_lanes: [TimelineSignalLane; 6],
+    signal_source: SignalSource,
     capabilities: TimelineCapabilities,
     on_action: EventHandler<TimelineAction>,
 ) -> Element {
@@ -317,12 +360,23 @@ pub(crate) fn StudioTimeline(
     };
     let mut scrubbing = use_signal(|| false);
     let mut draft_playhead = use_signal(|| external_playhead);
+    let mut confirm_discard = use_signal(|| false);
 
     use_effect(move || {
         if !scrubbing() {
             draft_playhead.set(external_playhead);
         }
     });
+
+    // A pending confirmation belongs to the take that raised it. If that take
+    // ends by any other route — Stop, a server-side fault, an activity switch —
+    // the armed Discard must not survive to greet the next one.
+    let capture_identity = recording.as_ref().map(|progress| progress.episode.clone());
+    use_effect(use_reactive((&capture_identity,), move |(identity,)| {
+        if identity.is_none() {
+            confirm_discard.set(false);
+        }
+    }));
 
     let shown_playhead = if scrubbing() {
         draft_playhead().clamp(0.0, duration)
@@ -334,6 +388,7 @@ pub(crate) fn StudioTimeline(
         .episode_id()
         .unwrap_or("No episode")
         .to_owned();
+    let full_episode_id = state.subject.episode_id().map(str::to_owned);
     let frames = state.subject.frames();
     let playback = state.playback;
     let preview_playing = playback == TimelinePlayback::PreviewPlaying;
@@ -350,6 +405,10 @@ pub(crate) fn StudioTimeline(
         TimelineSubject::Empty { activity, .. } => activity.label(),
         TimelineSubject::Recording(_) => "Recording",
         TimelineSubject::Episode { .. } => "Episode",
+    };
+    let identity_label = match full_episode_id.as_deref() {
+        Some(id) => format!("{subject_label} {}", crate::data_workbench::short_id(id)),
+        None => "No episode".to_owned(),
     };
     let empty_reason = match &state.subject {
         TimelineSubject::Empty { reason, .. } => Some(reason.clone()),
@@ -428,18 +487,15 @@ pub(crate) fn StudioTimeline(
 
             header { class: "flex min-h-9 flex-wrap items-center gap-2 border-b border-line px-2 py-1",
                 if let Some(episode) = capture_episode.clone() {
+                    // Stop is the one reached for with a hand still on the arm
+                    // once a take is running, so it takes the 28px take-button
+                    // and the live red. Pause stays an ordinary 24px control and
+                    // Discard sits behind a confirm at the far end of the row —
+                    // the three used to be the same size, 8px apart, with the
+                    // only unconfirmed one being the only unrecoverable one.
                     button {
                         r#type: "button",
-                        class: "btn btn-outline",
-                        onclick: move |_| on_action.call(TimelineAction::Capture {
-                            episode: Some(episode.clone()),
-                            action: if capture_paused { TimelineCaptureAction::Resume } else { TimelineCaptureAction::Pause },
-                        }),
-                        if capture_paused { "Resume recording" } else { "Pause recording" }
-                    }
-                    button {
-                        r#type: "button",
-                        class: "btn btn-outline",
+                        class: "take-button take-button-live",
                         onclick: {
                             let episode = capture_episode.clone();
                             move |_| on_action.call(TimelineAction::Capture {
@@ -451,22 +507,54 @@ pub(crate) fn StudioTimeline(
                     }
                     button {
                         r#type: "button",
-                        class: "btn btn-danger",
-                        onclick: {
-                            let episode = capture_episode.clone();
-                            move |_| on_action.call(TimelineAction::Capture {
-                                episode: episode.clone(),
-                                action: TimelineCaptureAction::Discard,
-                            })
-                        },
-                        "Discard"
+                        class: "btn btn-outline",
+                        onclick: move |_| on_action.call(TimelineAction::Capture {
+                            episode: Some(episode.clone()),
+                            action: if capture_paused { TimelineCaptureAction::Resume } else { TimelineCaptureAction::Pause },
+                        }),
+                        if capture_paused { "Resume recording" } else { "Pause recording" }
+                    }
+                    div { class: "ml-1 flex items-center gap-1 border-l border-line pl-2",
+                        if confirm_discard() {
+                            span { class: "text-[11px] text-danger", "Discard this take?" }
+                            button {
+                                r#type: "button",
+                                class: "btn btn-danger",
+                                onclick: {
+                                    let episode = capture_episode.clone();
+                                    move |_| {
+                                        confirm_discard.set(false);
+                                        on_action.call(TimelineAction::Capture {
+                                            episode: episode.clone(),
+                                            action: TimelineCaptureAction::Discard,
+                                        });
+                                    }
+                                },
+                                "Discard"
+                            }
+                            button {
+                                r#type: "button",
+                                class: "btn btn-outline",
+                                onclick: move |_| confirm_discard.set(false),
+                                "Keep"
+                            }
+                        } else {
+                            button {
+                                r#type: "button",
+                                class: "btn btn-danger",
+                                "aria-label": "Discard this take without saving",
+                                onclick: move |_| confirm_discard.set(true),
+                                "Discard"
+                            }
+                        }
                     }
                 } else {
                     button {
                         r#type: "button",
-                        class: "btn btn-primary",
+                        class: "take-button",
                         disabled: !capabilities.record.allowed,
                         title: "{record_title}",
+                        "aria-label": if capabilities.record.allowed { "Record".to_owned() } else { format!("Record — {record_title}") },
                         onclick: move |_| on_action.call(TimelineAction::Capture {
                             episode: None,
                             action: TimelineCaptureAction::Start,
@@ -519,9 +607,17 @@ pub(crate) fn StudioTimeline(
                     span { "Sync robot" }
                 }
 
+                // The list says "#21", the Scene tab says "Episode · #21", and
+                // this used to say "episode_000021" — three spellings of one
+                // take on one screen. The short form leads because it is what
+                // the operator reads everywhere else; the durable key stays
+                // beside it in micro, on the page, because it is the string
+                // Query and any wire request actually need.
                 div { class: "flex min-w-0 items-baseline gap-1",
-                    strong { class: "truncate text-[12px]", "{episode_id}" }
-                    span { class: "text-[10px] text-ink-faint", "{subject_label}" }
+                    strong { class: "truncate text-[12px]", "{identity_label}" }
+                    if let Some(full) = full_episode_id.clone() {
+                        span { class: "truncate font-mono text-[10px] tabular-nums text-ink-faint", "{full}" }
+                    }
                 }
                 div { class: "ml-auto flex items-baseline gap-1 font-mono tabular-nums",
                     span { class: "text-[12px] font-medium", "{format_clock(shown_playhead)}" }
@@ -548,6 +644,28 @@ pub(crate) fn StudioTimeline(
             if let Some(problem) = status {
                 p { class: "m-0 border-b border-line bg-danger-soft px-2 py-1 text-[11px] text-danger", role: "alert",
                     "{problem}"
+                }
+            }
+            // The reason belongs on the page once, not repeated into six lanes —
+            // the lanes say "Unavailable" and this says why and offers the way
+            // out. Without it a stalled trace request was indistinguishable from
+            // an empty episode, and there was nothing to press.
+            if let Some((failed_episode, reason)) = signal_source.unavailable() {
+                div {
+                    class: "m-0 flex flex-wrap items-center gap-2 border-b border-line bg-caution-soft px-2 py-1 text-[11px] text-caution",
+                    role: "alert",
+                    span { class: "min-w-0 flex-1", "Signals for {failed_episode} are unavailable. {reason}" }
+                    button {
+                        r#type: "button",
+                        class: "btn btn-outline",
+                        onclick: {
+                            let episode = failed_episode.to_owned();
+                            move |_| on_action.call(TimelineAction::ReloadRecorded {
+                                episode: episode.clone(),
+                            })
+                        },
+                        "Retry"
+                    }
                 }
             }
 
@@ -636,6 +754,7 @@ pub(crate) fn StudioTimeline(
                             SignalLaneTrack {
                                 lane: lane.clone(),
                                 duration,
+                                source: signal_source.clone(),
                             }
                         }
                     }
@@ -657,18 +776,33 @@ pub(crate) fn StudioTimeline(
 }
 
 #[component]
-fn SignalLaneTrack(lane: TimelineSignalLane, duration: f64) -> Element {
+fn SignalLaneTrack(lane: TimelineSignalLane, duration: f64, source: SignalSource) -> Element {
     let bounds = signal_bounds(&lane.series);
+    let empty = lane.series.is_empty();
+    let loading = empty && source.loading();
+    let unavailable = empty && source.unavailable().is_some();
     rsx! {
         div {
             class: "relative min-h-9 overflow-hidden border-b border-line bg-canvas",
             role: "img",
-            "aria-label": if lane.series.is_empty() {
+            "aria-busy": if loading { "true" } else { "false" },
+            "aria-label": if loading {
+                format!("{} samples are loading", lane.label)
+            } else if unavailable {
+                format!("{} samples are unavailable", lane.label)
+            } else if empty {
                 format!("{} had no samples", lane.label)
             } else {
                 format!("{} over time for {} arm(s)", lane.label, lane.series.len())
             },
-            if lane.series.is_empty() {
+            if loading {
+                // A resting placeholder, not a shimmer: the reduced-motion block
+                // strips animation anyway, and a lane that pulses while the arm
+                // is live reads as telemetry rather than as absence.
+                span { class: "absolute inset-y-2 left-2 right-2 rounded-sm bg-sunken" }
+            } else if unavailable {
+                span { class: "absolute inset-0 flex items-center px-2 text-[10px] text-caution", "Unavailable" }
+            } else if empty {
                 span { class: "absolute inset-0 flex items-center px-2 text-[10px] text-ink-faint", "No samples" }
             } else {
                 svg {

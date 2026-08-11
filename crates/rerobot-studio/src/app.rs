@@ -19,7 +19,7 @@ use crate::live_workbench::{LiveIntent, LiveWorkbench};
 use crate::settings_panel::SettingsPanel;
 use crate::state::Studio;
 use crate::studio_timeline::{
-    RecordedTimelineTraces, StudioTimeline, StudioTimelineState, TimelineAction,
+    RecordedTimelineTraces, SignalSource, StudioTimeline, StudioTimelineState, TimelineAction,
     TimelineCapabilities, TimelineCaptureAction, TimelineGate, TimelinePlayback,
     TimelinePreviewAction, TimelineRobotSyncAction, TimelineSignalLane,
     load_recorded_timeline_traces, signal_lanes_from_store,
@@ -39,6 +39,19 @@ pub fn App() -> Element {
     let mut studio = crate::state::studio();
     let mut workbench = use_signal(Activity::default);
     let mut settings_open = use_signal(|| false);
+
+    // One place turns "show me that episode" into an activity change and a Data
+    // selection, so no surface has to reach across the layout to do it. The
+    // request is cleared here rather than by whoever raised it: an intent that
+    // outlives its consequence would re-fire on the next render.
+    use_effect(move || {
+        let Some(episode) = studio.view_episode_request.read().clone() else {
+            return;
+        };
+        studio.selected_episode.set(Some(episode));
+        workbench.set(Activity::Data);
+        studio.view_episode_request.set(None);
+    });
     let mut settings_revision = use_signal(|| 0_u64);
     let settings = use_resource(move || {
         let _revision = settings_revision();
@@ -82,6 +95,24 @@ pub fn App() -> Element {
     let mut automatic_preview_target = use_signal(|| None::<(String, u64)>);
     let mut interactive_preview_target = use_signal(|| None::<(String, u64)>);
     let mut split_resize_revision = use_signal(|| 0_u64);
+
+    // Arriving in Data straight from a take used to mean finding your own
+    // recording in a list by eye, because Live review and Data selection are
+    // deliberately separate state. Filling an *empty* Data selection with the
+    // take just reviewed in Live closes that gap without overriding a choice
+    // the operator already made — a deliberate selection is never replaced.
+    use_effect(move || {
+        if workbench() != Activity::Data {
+            return;
+        }
+        if studio.selected_episode.read().is_some() {
+            return;
+        }
+        let Some(recent) = live_review_episode() else {
+            return;
+        };
+        studio.selected_episode.set(Some(recent));
+    });
 
     // One reactive clock drives every recorded video element. Child component
     // effects only observed signals they owned, so a prop-only historical
@@ -354,8 +385,41 @@ pub fn App() -> Element {
         None if history_active => RecordedTimelineTraces::default().signal_lanes(),
         None => live_signal_lanes,
     };
+    // The lanes above cannot tell absence from delay, so the reason travels
+    // beside them. Empty lanes only mean "this episode had no samples" once the
+    // trace request has actually come back.
+    let signal_source = match review_episode.as_ref() {
+        None => SignalSource::Live,
+        Some(episode) => {
+            let failure = historical
+                .as_ref()
+                .and_then(|preview| preview.signal_lanes_error.clone())
+                .or_else(|| {
+                    historical_source
+                        .as_ref()
+                        .and_then(|source| source.state.reason().map(str::to_owned))
+                });
+            match failure {
+                Some(reason) => SignalSource::RecordedUnavailable {
+                    episode: episode.clone(),
+                    reason,
+                },
+                None if historical
+                    .as_ref()
+                    .is_some_and(|preview| preview.signal_lanes.is_some()) =>
+                {
+                    SignalSource::RecordedReady
+                }
+                None => SignalSource::RecordedLoading,
+            }
+        }
+    };
     let timeline_target = subject.target();
-    let requested_robot_sync = robot_sync_target.read().as_ref() == timeline_target.as_ref();
+    // Two `None`s compare equal, so with no episode on the clock this read as
+    // "armed" and the physical-motion toggle rendered checked at rest. Nothing
+    // is armed until there is a target to arm it against.
+    let requested_robot_sync =
+        timeline_target.is_some() && robot_sync_target.read().as_ref() == timeline_target.as_ref();
     let capabilities = timeline_capabilities(studio, projection.activity, &subject);
     let seek_context = timeline_seek_context(studio, &subject);
     let playback = studio
@@ -608,6 +672,7 @@ pub fn App() -> Element {
                 sync_robot: robot_sync,
             },
             signal_lanes: signal_lanes.clone(),
+            signal_source: signal_source.clone(),
             capabilities: capabilities.clone(),
             on_action: move |action| match action {
                 TimelineAction::Capture { episode, action } => match action {
@@ -751,6 +816,20 @@ pub fn App() -> Element {
                             crate::commands::stop_replay(studio, &replay.episode);
                         }
                     }
+                }
+                // Retry names the episode it is retrying, so a stale banner
+                // cannot re-request whatever happens to be selected now.
+                TimelineAction::ReloadRecorded { episode }
+                    if action_review_episode.as_deref() == Some(episode.as_str()) =>
+                {
+                    historical_state.set(None);
+                    request_historical_preview(
+                        studio,
+                        episode,
+                        playhead(),
+                        historical_state,
+                        historical_revision,
+                    );
                 }
                 _ => studio.report("The Timeline subject changed before the action was applied."),
             },
@@ -897,7 +976,20 @@ pub fn App() -> Element {
                         }
                     }
                     // Only meaningful mid-take: this is the "that one was bad"
-                    // key, pressed while the arm is still moving.
+                    // key, pressed while the arm is still moving. It destroys a
+                    // take that cost a human forty seconds of teleoperation, so
+                    // it takes Shift — a bare `x` under a startled hand should
+                    // not be the thing that throws the take away. Pressing it
+                    // alone names the real shortcut instead of doing nothing,
+                    // since it appears nowhere else in the interface.
+                    Key::Character(pressed)
+                        if pressed.eq_ignore_ascii_case("x")
+                            && recording.is_some()
+                            && !event.modifiers().shift() =>
+                    {
+                        event.prevent_default();
+                        studio.report_success("Press Shift+X to discard this take.");
+                    }
                     Key::Character(pressed)
                         if pressed.eq_ignore_ascii_case("x") && recording.is_some() =>
                     {
@@ -1239,7 +1331,13 @@ struct HistoricalPreview {
     episode: String,
     timeline: crate::api::EpisodeTimelineResponse,
     sample: crate::api::TimelineSample,
+    /// `None` while the separate trace request is still in flight. Absent lanes
+    /// are not evidence that the episode is empty — see `signal_lanes_error`.
     signal_lanes: Option<[TimelineSignalLane; 6]>,
+    /// Why the trace request will not produce lanes. Set together with
+    /// `signal_lanes: None` so the Timeline can say "unavailable" instead of
+    /// letting six empty lanes claim the recording had no samples.
+    signal_lanes_error: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1760,7 +1858,13 @@ fn request_historical_preview(
             Some(timeline) => timeline,
             None => {
                 let timeline_path = crate::api::episode_timeline_url(&episode);
-                match crate::api::get::<crate::api::EpisodeTimelineResponse>(&timeline_path).await {
+                match with_deadline(
+                    "The episode timeline",
+                    RECORDED_REQUEST_TIMEOUT_MS,
+                    crate::api::get::<crate::api::EpisodeTimelineResponse>(&timeline_path),
+                )
+                .await
+                {
                     Ok(timeline) => timeline,
                     Err(error) => {
                         if revision.peek().eq(&ticket) {
@@ -1784,7 +1888,13 @@ fn request_historical_preview(
         }
         let timeline_source_file = timeline.episode.file.clone();
         let sample_path = crate::api::timeline_sample_url(&episode, seconds);
-        match crate::api::get::<crate::api::TimelineSample>(&sample_path).await {
+        match with_deadline(
+            "The episode sample",
+            RECORDED_REQUEST_TIMEOUT_MS,
+            crate::api::get::<crate::api::TimelineSample>(&sample_path),
+        )
+        .await
+        {
             Ok(sample) if revision.peek().eq(&ticket) => {
                 // A trace request from the same file generation may have
                 // completed while this sample was loading. Preserve those
@@ -1806,10 +1916,17 @@ fn request_historical_preview(
                         timeline,
                         sample,
                         signal_lanes,
+                        signal_lanes_error: None,
                     }),
                 }));
                 if should_load_traces {
-                    match load_recorded_timeline_traces(&episode, 240).await {
+                    let traces = with_deadline(
+                        "The signal traces",
+                        RECORDED_REQUEST_TIMEOUT_MS,
+                        load_recorded_timeline_traces(&episode, 240),
+                    )
+                    .await;
+                    match traces {
                         Ok(traces) => {
                             attach_historical_traces(
                                 &mut state.write(),
@@ -1818,7 +1935,19 @@ fn request_historical_preview(
                                 &traces,
                             );
                         }
-                        Err(error) if revision.peek().eq(&ticket) => studio.report(error),
+                        // A failed trace request used to raise a notice and
+                        // leave the lanes empty, so an expiring toast was the
+                        // only difference between "this request died" and "this
+                        // episode is empty". Record it where the lanes can read
+                        // it and offer the retry there.
+                        Err(error) if revision.peek().eq(&ticket) => {
+                            attach_historical_trace_failure(
+                                &mut state.write(),
+                                &episode,
+                                &timeline_source_file,
+                                &error,
+                            );
+                        }
                         Err(_) => {}
                     }
                 }
@@ -1838,6 +1967,81 @@ fn request_historical_preview(
             Err(_) => {}
         }
     });
+}
+
+/// How long a recorded-source request may go unanswered before the Timeline
+/// stops calling it "loading".
+///
+/// The observed failure was not an error response: `/timeline` answered 200 and
+/// the sample request simply never resolved, so the panel sat on `Loading` with
+/// no error, no retry, and six lanes asserting the episode had no samples. A
+/// request with no deadline cannot fail, and a state that cannot fail cannot be
+/// recovered from.
+const RECORDED_REQUEST_TIMEOUT_MS: u32 = 15_000;
+
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
+async fn recorded_deadline(millis: u32) {
+    gloo_timers::future::TimeoutFuture::new(millis).await;
+}
+
+/// The server build never drives this clock, so nothing there should ever time
+/// out; a future that never completes leaves `select` waiting on the work.
+#[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+async fn recorded_deadline(_millis: u32) {
+    std::future::pending::<()>().await
+}
+
+/// Bound one recorded-source request so a request that never answers becomes a
+/// stated failure the operator can act on.
+async fn with_deadline<T>(
+    label: &str,
+    millis: u32,
+    work: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    use futures_util::future::{Either, select};
+    let work = std::pin::pin!(work);
+    let timer = std::pin::pin!(recorded_deadline(millis));
+    match select(work, timer).await {
+        Either::Left((result, _)) => result,
+        Either::Right(((), _)) => Err(format!(
+            "{label} did not answer within {}s.",
+            millis / 1_000
+        )),
+    }
+}
+
+/// Record why the lanes will stay empty, on the same preview the Timeline reads.
+fn attach_historical_trace_failure(
+    source: &mut Option<RecordedSource<HistoricalPreview>>,
+    episode: &str,
+    source_file: &str,
+    reason: &str,
+) -> bool {
+    let Some(source) = source.as_mut().filter(|source| source.episode == episode) else {
+        return false;
+    };
+    let preview = match &mut source.state {
+        LoadState::Ready(preview) => preview,
+        LoadState::Loading {
+            previous: Some(preview),
+        }
+        | LoadState::Failed {
+            previous: Some(preview),
+            ..
+        } => preview,
+        LoadState::Loading { previous: None }
+        | LoadState::Failed { previous: None, .. }
+        | LoadState::Unavailable { .. } => return false,
+    };
+    if preview.timeline.episode.file != source_file {
+        return false;
+    }
+    // A later success must win over an earlier timeout.
+    if preview.signal_lanes.is_some() {
+        return false;
+    }
+    preview.signal_lanes_error = Some(reason.to_owned());
+    true
 }
 
 fn attach_historical_traces(
@@ -1866,6 +2070,7 @@ fn attach_historical_traces(
         return false;
     }
     preview.signal_lanes = Some(traces.signal_lanes());
+    preview.signal_lanes_error = None;
     true
 }
 
@@ -1885,6 +2090,8 @@ fn NoticeStrip() -> Element {
         return rsx! {};
     };
 
+    let mut view_episode_request = studio.view_episode_request;
+
     rsx! {
         div { class: "notice-positioner",
             div {
@@ -1892,6 +2099,17 @@ fn NoticeStrip() -> Element {
                 "aria-live": if current.failed { "assertive" } else { "polite" },
                 span { class: "status-dot", style: if current.failed { "background: var(--tone-danger)" } else { "background: var(--tone-good)" } }
                 span { class: "flex-1 text-[12px]", "{current.text}" }
+                if let Some(episode) = current.view_episode.clone() {
+                    button {
+                        r#type: "button",
+                        class: "btn btn-outline",
+                        onclick: move |_| {
+                            view_episode_request.set(Some(episode.clone()));
+                            notice.set(None);
+                        },
+                        "View in Data"
+                    }
+                }
                 button { r#type: "button", class: "link", onclick: move |_| notice.set(None), "Dismiss" }
             }
         }
@@ -1932,6 +2150,7 @@ mod tests {
                 ..TimelineSample::default()
             },
             signal_lanes: None,
+            signal_lanes_error: None,
         }
     }
 
@@ -2197,6 +2416,79 @@ mod tests {
                 .as_ref()
                 .and_then(RecordedSource::renderable)
                 .is_some_and(|preview| preview.signal_lanes.is_some())
+        );
+    }
+
+    #[test]
+    fn a_dead_trace_request_is_recorded_as_unavailable_not_as_an_empty_episode() {
+        let mut source = Some(RecordedSource {
+            episode: "take-1".to_owned(),
+            seconds: 0.0,
+            state: LoadState::Ready(preview(0.0, Vec::new())),
+        });
+
+        // A failure from a different file generation belongs to a take that is
+        // no longer on the clock.
+        assert!(!attach_historical_trace_failure(
+            &mut source,
+            "take-1",
+            "take-1.jsonl.part",
+            "The signal traces did not answer within 15s.",
+        ));
+
+        assert!(attach_historical_trace_failure(
+            &mut source,
+            "take-1",
+            "take-1.jsonl",
+            "The signal traces did not answer within 15s.",
+        ));
+        let failed = source
+            .as_ref()
+            .and_then(RecordedSource::renderable)
+            .expect("preview");
+        assert!(failed.signal_lanes.is_none());
+        assert_eq!(
+            failed.signal_lanes_error.as_deref(),
+            Some("The signal traces did not answer within 15s.")
+        );
+    }
+
+    #[test]
+    fn traces_arriving_after_a_timeout_clear_the_failure() {
+        let mut source = Some(RecordedSource {
+            episode: "take-1".to_owned(),
+            seconds: 0.0,
+            state: LoadState::Ready(preview(0.0, Vec::new())),
+        });
+        attach_historical_trace_failure(&mut source, "take-1", "take-1.jsonl", "timed out");
+
+        assert!(attach_historical_traces(
+            &mut source,
+            "take-1",
+            "take-1.jsonl",
+            &RecordedTimelineTraces::default(),
+        ));
+        let recovered = source
+            .as_ref()
+            .and_then(RecordedSource::renderable)
+            .expect("preview");
+        assert!(recovered.signal_lanes.is_some());
+        assert_eq!(recovered.signal_lanes_error, None);
+
+        // A late timeout from the same generation must not un-say a success the
+        // operator can already see.
+        assert!(!attach_historical_trace_failure(
+            &mut source,
+            "take-1",
+            "take-1.jsonl",
+            "timed out",
+        ));
+        assert_eq!(
+            source
+                .as_ref()
+                .and_then(RecordedSource::renderable)
+                .and_then(|preview| preview.signal_lanes_error.as_deref()),
+            None
         );
     }
 
