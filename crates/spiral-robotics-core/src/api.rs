@@ -266,9 +266,13 @@ pub struct TrainingMetricPoint {
     pub train_loss: f64,
     pub validation_loss: Option<f64>,
     pub learning_rate: f64,
+    /// Whole-device GPU activity over the platform sampler's recent window.
     pub gpu_utilization_pct: Option<f64>,
+    /// Bytes held by this PyTorch worker's CUDA/MPS allocator or driver.
     pub gpu_memory_bytes: Option<u64>,
+    /// Worker process CPU where 100% equals one fully occupied logical core.
     pub cpu_utilization_pct: f64,
+    /// Latest Arrow batch bytes divided by its Spiral ADBC query/fetch time.
     pub transfer_bytes_per_second: f64,
     pub examples_per_second: f64,
     pub queue_depth: usize,

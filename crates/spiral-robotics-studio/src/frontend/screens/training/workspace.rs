@@ -520,7 +520,7 @@ fn TrainingDataPath(dataset: String, run: Option<TrainingRun>) -> Element {
             ol { class: "training-path-stages",
                 li {
                     span { class: "training-path-index", "1" }
-                    div { strong { "Spiral" } small { "{source_dataset}" } }
+                    div { strong { "Spiral query" } small { "Arrow fetch · {source_dataset}" } }
                     em { "{transfer}" }
                 }
                 li {
@@ -560,7 +560,13 @@ fn TrainingResources(run: Option<TrainingRun>) -> Element {
         .map(format_bytes)
         .unwrap_or_else(|| "—".to_owned());
     let cpu = last
-        .map(|point| format!("{:.0}%", point.cpu_utilization_pct))
+        .map(|point| {
+            format!(
+                "{:.0}% · {:.1} cores",
+                point.cpu_utilization_pct,
+                point.cpu_utilization_pct / 100.0
+            )
+        })
         .unwrap_or_else(|| "—".to_owned());
     let transfer = last
         .map(|point| format_rate(point.transfer_bytes_per_second))
@@ -569,10 +575,14 @@ fn TrainingResources(run: Option<TrainingRun>) -> Element {
     rsx! {
         section { class: "training-resources",
             div { class: "training-resource-grid",
-                ResourceLane { label: "GPU utilization", value: gpu, points: resource_points(metrics, total_steps, ResourceSeries::Gpu), class: "resource-gpu" }
-                ResourceLane { label: "GPU memory", value: memory, points: resource_points(metrics, total_steps, ResourceSeries::Memory), class: "resource-memory" }
-                ResourceLane { label: "CPU utilization", value: cpu, points: resource_points(metrics, total_steps, ResourceSeries::Cpu), class: "resource-cpu" }
-                ResourceLane { label: "Spiral transfer", value: transfer, points: resource_points(metrics, total_steps, ResourceSeries::Transfer), class: "resource-transfer" }
+                ResourceLane { label: "GPU device utilization", value: gpu, points: resource_points(metrics, total_steps, ResourceSeries::Gpu), class: "resource-gpu", description: "Whole-device GPU activity; other processes may contribute." }
+                ResourceLane { label: "PyTorch GPU allocation", value: memory, points: resource_points(metrics, total_steps, ResourceSeries::Memory), class: "resource-memory", description: "GPU memory held by this training worker. A flat line is normal when the allocator reuses a fixed model and batch shape." }
+                ResourceLane { label: "Worker CPU", value: cpu, points: resource_points(metrics, total_steps, ResourceSeries::Cpu), class: "resource-cpu", description: "htop-style process CPU: 100% equals one fully occupied logical core, so multi-threaded training can exceed 100%." }
+                ResourceLane { label: "Spiral fetch rate", value: transfer, points: resource_points(metrics, total_steps, ResourceSeries::Transfer), class: "resource-transfer", description: "Arrow bytes in the latest batch divided by its Spiral ADBC query and fetch time." }
+            }
+            div { class: "training-resource-definitions",
+                small { "CPU uses htop's process scale: 100% is one logical core. GPU utilization is whole-device; GPU allocation belongs to this PyTorch worker and can stay flat while memory is reused." }
+                small { "Spiral fetch rate = Arrow batch bytes ÷ ADBC query/fetch time. It excludes Rust conversion, queue wait, and PyTorch compute; it is not raw network speed." }
             }
         }
     }
@@ -584,9 +594,10 @@ fn ResourceLane(
     value: String,
     points: String,
     class: &'static str,
+    description: &'static str,
 ) -> Element {
     rsx! {
-        div { class: "training-resource-lane {class}",
+        div { class: "training-resource-lane {class}", title: "{description}",
             div { span { "{label}" } strong { "{value}" } }
             svg { view_box: "0 0 1000 80", preserve_aspect_ratio: "none", "aria-hidden": "true",
                 line { x1: "0", x2: "1000", y1: "68", y2: "68", class: "training-resource-baseline" }
@@ -698,7 +709,11 @@ fn resource_points(
         .filter(|value| value.is_finite() && *value >= 0.0)
         .collect::<Vec<_>>();
     let maximum = match series {
-        ResourceSeries::Gpu | ResourceSeries::Cpu => 100.0,
+        ResourceSeries::Gpu => 100.0,
+        ResourceSeries::Cpu => {
+            let peak = readings.iter().copied().fold(0.0, f64::max).max(100.0);
+            (peak / 100.0).ceil() * 100.0
+        }
         ResourceSeries::Memory | ResourceSeries::Transfer => {
             readings.iter().copied().fold(0.0, f64::max).max(1.0)
         }

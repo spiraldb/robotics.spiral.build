@@ -12,6 +12,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import subprocess
 import struct
 import sys
 import time
@@ -336,24 +338,72 @@ def choose_device(requested: str) -> torch.device:
     return device
 
 
+def parse_mps_device_utilization(output: str) -> float | None:
+    """Read the whole-device percentage exposed by Apple's AGX driver."""
+    match = re.search(r'"Device Utilization %"\s*=\s*(\d+(?:\.\d+)?)', output)
+    if match is None:
+        return None
+    return min(100.0, max(0.0, float(match.group(1))))
+
+
+def mps_device_utilization() -> float | None:
+    if sys.platform != "darwin":
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "/usr/sbin/ioreg",
+                "-r",
+                "-d",
+                "1",
+                "-w",
+                "0",
+                "-c",
+                "AGXAccelerator",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return parse_mps_device_utilization(result.stdout)
+
+
+def mps_memory_bytes() -> int | None:
+    # Driver allocation includes tensors, command buffers, and the allocator's
+    # reusable cache. It is the closest public MPS equivalent to process GPU
+    # memory, and is intentionally not whole-system unified memory use.
+    for method_name in ("driver_allocated_memory", "current_allocated_memory"):
+        method = getattr(torch.mps, method_name, None)
+        if method is not None:
+            try:
+                return int(method())
+            except RuntimeError:
+                pass
+    return None
+
+
 def resource_metrics(
     device: torch.device, wall_delta: float, cpu_delta: float
 ) -> tuple[float | None, int | None, float]:
     gpu_utilization = None
     gpu_memory = None
     if device.type == "cuda":
-        gpu_memory = int(torch.cuda.memory_allocated(device))
+        gpu_memory = int(torch.cuda.memory_reserved(device))
         try:
             gpu_utilization = float(torch.cuda.utilization(device))
-        except (AttributeError, RuntimeError):
+        except (AttributeError, ImportError, RuntimeError):
             pass
     elif device.type == "mps":
-        try:
-            gpu_memory = int(torch.mps.current_allocated_memory())
-        except (AttributeError, RuntimeError):
-            pass
-    cores = max(os.cpu_count() or 1, 1)
-    cpu = min(100.0, max(0.0, cpu_delta / max(wall_delta, 1e-9) * 100.0 / cores))
+        gpu_utilization = mps_device_utilization()
+        gpu_memory = mps_memory_bytes()
+    # Match htop's process convention: 100% is one fully occupied logical core,
+    # so a multi-threaded PyTorch worker can legitimately exceed 100%.
+    cpu = max(0.0, cpu_delta / max(wall_delta, 1e-9) * 100.0)
     return gpu_utilization, gpu_memory, cpu
 
 
@@ -645,6 +695,10 @@ def self_test() -> None:
     targets = torch.cat([window.target for window in second + final], dim=0)
     assert targets[:, :, 0].tolist() == [[0.0, 1.0, 2.0], [1.0, 2.0, 3.0], [2.0, 3.0, 4.0]]
     assert validation_episode("same-episode") == validation_episode("same-episode")
+    assert parse_mps_device_utilization(
+        '"PerformanceStatistics" = {"Device Utilization %"=35}'
+    ) == 35.0
+    assert resource_metrics(torch.device("cpu"), 0.5, 2.5) == (None, None, 500.0)
 
     model = StateAct(state_dim=2, action_dim=2, chunk_size=3)
     output = model(torch.zeros((2, 2), dtype=torch.float32))
