@@ -191,6 +191,14 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
                 &path,
                 include_bytes!("../../../python/spiral_robotics_train.py"),
             )?;
+            std::fs::write(
+                training_root.join("spiral_robotics_policy.py"),
+                include_bytes!("../../../python/spiral_robotics_policy.py"),
+            )?;
+            std::fs::write(
+                training_root.join("spiral_robotics_data.py"),
+                include_bytes!("../../../python/spiral_robotics_data.py"),
+            )?;
             path
         }
     };

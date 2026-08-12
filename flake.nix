@@ -90,10 +90,15 @@
           linuxBuildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [
             pkgs.v4l-utils
           ];
-          # The Studio owns orchestration in Rust. This interpreter is only the
-          # isolated tensor/Arrow compute worker: PyTorch trains the model and
-          # PyArrow decodes Rust-framed IPC batches. Spiral ADBC and checkpoint
-          # publication remain entirely in the Rust backend.
+          # The Studio owns orchestration in Rust. The isolated worker uses the
+          # Spiral Python relation API for random-access sample preparation and
+          # native media-to-tensor conversion, then PyTorch for vision ACT.
+          # Checkpoint publication remains in Rust.
+          #
+          # SpiralDB's native Python relation wheel is currently distributed
+          # separately from nixpkgs. Development against a SpiralDB checkout
+          # should override SPIRAL_ROBOTICS_TRAINING_PYTHON with that checkout's
+          # Python environment until the native wheel has a stable package URL.
           trainingPython = pkgs.python312.withPackages (ps: [
             ((ps."torch-bin" or ps.torch).overridePythonAttrs (_: {
               # The 2.12 wheel metadata caps setuptools below the version in

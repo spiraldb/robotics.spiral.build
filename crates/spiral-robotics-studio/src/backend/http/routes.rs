@@ -1175,7 +1175,14 @@ async fn begin_recording(
             ))
         })
         .collect::<Vec<_>>();
-    let arms = build_arms(&arms).map_err(Failure::from)?;
+    let mut arms = build_arms(&arms).map_err(Failure::from)?;
+    for arm in &mut arms {
+        arm.robot_type = state
+            .workspace
+            .get(&arm.id)
+            .ok()
+            .and_then(|robot| robot.robot_type());
+    }
 
     let note = request
         .note

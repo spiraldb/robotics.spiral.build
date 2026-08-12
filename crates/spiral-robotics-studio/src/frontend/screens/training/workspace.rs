@@ -133,15 +133,25 @@ fn TrainingRunBuilder(
         div { class: "training-workbench studio-workbench-scroll",
             if !readiness.ready {
                 div { class: "training-inline-state training-inline-state-caution",
-                    strong { "Training is not ready" }
-                    span { "{readiness.summary}" }
+                    div { class: "training-inline-copy",
+                        strong { "Training is not ready" }
+                        span { "{readiness.summary}" }
+                    }
                 }
             }
 
-            if let Some(error) = start_error {
+            if let Some(error) = start_error.clone() {
                 div { class: "training-inline-state training-inline-state-danger", role: "alert",
-                    strong { "Training could not start" }
-                    span { "{error}" }
+                    div { class: "training-inline-copy",
+                        strong { "Training could not start" }
+                        span { "{error}" }
+                    }
+                    button {
+                        r#type: "button",
+                        class: "training-inline-dismiss",
+                        onclick: move |_| controller.clear_start_error(),
+                        "Dismiss"
+                    }
                 }
             }
 
@@ -183,18 +193,22 @@ fn TrainingRunBuilder(
                 }
             }
 
-            if let Some(run) = viewed_run.as_ref().filter(|run| !run.phase.active()) {
-                section {
-                    class: if run.phase == TrainingRunPhase::Failed { "training-run-result training-run-result-failed" } else { "training-run-result" },
-                    role: if run.phase == TrainingRunPhase::Failed { "alert" } else { "status" },
-                    h3 { "{run.phase.label()} · {run.config.run_name}" }
-                    p { {run.message.clone().unwrap_or_else(|| "The run ended without a status message.".to_owned())} }
-                    if !run.logs.is_empty() {
-                        details { open: run.phase == TrainingRunPhase::Failed,
-                            summary { "Logs ({run.logs.len()})" }
-                            pre {
-                                for line in run.logs.iter().rev().take(12).rev() {
-                                    code { "{line}\n" }
+            if start_error.is_none() {
+                if let Some(run) = viewed_run.as_ref().filter(|run| !run.phase.active()) {
+                    section {
+                        class: if run.phase == TrainingRunPhase::Failed { "training-run-result training-run-result-failed" } else { "training-run-result" },
+                        div { class: "training-run-result-heading",
+                            h3 { "{run.config.run_name}" }
+                            span { class: phase_class(run.phase), "{run.phase.label()}" }
+                        }
+                        p { {run.message.clone().unwrap_or_else(|| "The run ended without a status message.".to_owned())} }
+                        if !run.logs.is_empty() {
+                            details {
+                                summary { "Logs · {run.logs.len()}" }
+                                pre {
+                                    for line in run.logs.iter().rev().take(12).rev() {
+                                        code { "{line}\n" }
+                                    }
                                 }
                             }
                         }
@@ -328,6 +342,47 @@ fn TrainingRunBuilder(
                             }
                         }
                     }
+                    div { class: "training-column-row",
+                        label { class: "training-field training-field-wide",
+                            span { "Camera streams" }
+                            input {
+                                value: request.act.camera_streams.join(", "),
+                                placeholder: "follower.camera.gripper, follower.camera.top",
+                                disabled: active_run.is_some(),
+                                oninput: move |event| {
+                                    let streams = event.value()
+                                        .split(',')
+                                        .map(str::trim)
+                                        .filter(|stream| !stream.is_empty())
+                                        .map(str::to_owned)
+                                        .collect();
+                                    controller.edit_request(move |request| request.act.camera_streams = streams);
+                                },
+                            }
+                        }
+                        label { class: "training-field",
+                            span { "Image width" }
+                            input {
+                                r#type: "number", min: "32", max: "1024", step: "16",
+                                value: "{request.act.image_width}",
+                                disabled: active_run.is_some(),
+                                oninput: move |event| if let Ok(value) = event.value().parse() {
+                                    controller.edit_request(move |request| request.act.image_width = value);
+                                },
+                            }
+                        }
+                        label { class: "training-field",
+                            span { "Image height" }
+                            input {
+                                r#type: "number", min: "32", max: "1024", step: "16",
+                                value: "{request.act.image_height}",
+                                disabled: active_run.is_some(),
+                                oninput: move |event| if let Ok(value) = event.value().parse() {
+                                    controller.edit_request(move |request| request.act.image_height = value);
+                                },
+                            }
+                        }
+                    }
                 }
             }
 
@@ -337,7 +392,7 @@ fn TrainingRunBuilder(
                 disabled: !can_start,
                 title: if active_run.is_some() { "Stop the active run first".to_owned() } else if !readiness.ready { readiness.summary.clone() } else { "Start training".to_owned() },
                 onclick: move |_| {
-                    controller.start(studio);
+                    controller.start();
                 },
                 if starting { "Starting…" } else { "Start training" }
             }
@@ -520,12 +575,12 @@ fn TrainingDataPath(dataset: String, run: Option<TrainingRun>) -> Element {
             ol { class: "training-path-stages",
                 li {
                     span { class: "training-path-index", "1" }
-                    div { strong { "Spiral query" } small { "Arrow fetch · {source_dataset}" } }
+                    div { strong { "Spiral relation" } small { "random anchors · {source_dataset}" } }
                     em { "{transfer}" }
                 }
                 li {
                     span { class: "training-path-index", "2" }
-                    div { strong { "Arrow queue" } small { "float32" } }
+                    div { strong { "Camera + actions" } small { "to_torch() · prefetch" } }
                     em { "depth {queue_depth}" }
                 }
                 li {
@@ -578,11 +633,11 @@ fn TrainingResources(run: Option<TrainingRun>) -> Element {
                 ResourceLane { label: "GPU device utilization", value: gpu, points: resource_points(metrics, total_steps, ResourceSeries::Gpu), class: "resource-gpu", description: "Whole-device GPU activity; other processes may contribute." }
                 ResourceLane { label: "PyTorch GPU allocation", value: memory, points: resource_points(metrics, total_steps, ResourceSeries::Memory), class: "resource-memory", description: "GPU memory held by this training worker. A flat line is normal when the allocator reuses a fixed model and batch shape." }
                 ResourceLane { label: "Worker CPU", value: cpu, points: resource_points(metrics, total_steps, ResourceSeries::Cpu), class: "resource-cpu", description: "htop-style process CPU: 100% equals one fully occupied logical core, so multi-threaded training can exceed 100%." }
-                ResourceLane { label: "Spiral fetch rate", value: transfer, points: resource_points(metrics, total_steps, ResourceSeries::Transfer), class: "resource-transfer", description: "Arrow bytes in the latest batch divided by its Spiral ADBC query and fetch time." }
+                ResourceLane { label: "Spiral tensor rate", value: transfer, points: resource_points(metrics, total_steps, ResourceSeries::Transfer), class: "resource-transfer", description: "Decoded image-tensor bytes returned by Spiral divided by total sample-preparation time." }
             }
             div { class: "training-resource-definitions",
                 small { "CPU uses htop's process scale: 100% is one logical core. GPU utilization is whole-device; GPU allocation belongs to this PyTorch worker and can stay flat while memory is reused." }
-                small { "Spiral fetch rate = Arrow batch bytes ÷ ADBC query/fetch time. It excludes Rust conversion, queue wait, and PyTorch compute; it is not raw network speed." }
+                small { "Spiral tensor rate = decoded image tensors returned through to_torch() ÷ batch preparation time. It excludes PyTorch model compute and is not raw network speed." }
             }
         }
     }
@@ -780,13 +835,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_query_uses_only_spiral_joint_samples() {
+    fn default_query_selects_complete_kept_follower_samples() {
         let sql = default_training_sql("robotics");
         assert!(sql.contains(&format!(
             "FROM {}",
             spiral::relation("robotics", Table::JointSamples)
         )));
-        assert!(sql.contains(&format!("{} IS NOT NULL", spiral::column::ACTION_POSITION)));
+        assert!(sql.contains(&spiral::relation("robotics", Table::Episodes)));
+        assert!(sql.contains(&spiral::relation("robotics", Table::EpisodeStreams)));
+        assert!(sql.contains(&format!("j.{}", spiral::column::STATE_VALID)));
+        assert!(sql.contains(&format!("j.{}", spiral::column::ACTION_VALID)));
+        assert!(sql.contains("LIKE '%follower%'"));
     }
 
     #[test]

@@ -24,6 +24,8 @@ pub struct JointSampleRow {
     pub stream_id: String,
     pub sample_index: u64,
     pub episode_time_ns: u64,
+    pub state_valid: bool,
+    pub action_valid: bool,
     pub state_position: Vec<Option<f64>>,
     pub action_position: Option<Vec<Option<f64>>>,
     pub raw_position: Vec<i64>,
@@ -88,6 +90,16 @@ impl SpiralEpisodeEncoder {
                 stream_id: arm.id.clone(),
                 sample_index,
                 episode_time_ns,
+                state_valid: sample.normalized[arm_index]
+                    .iter()
+                    .all(|value| value.is_some_and(f64::is_finite)),
+                action_valid: sample
+                    .action
+                    .get(arm_index)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|values| {
+                        values.iter().all(|value| value.is_some_and(f64::is_finite))
+                    }),
                 state_position: sample.normalized[arm_index].clone(),
                 action_position: sample.action.get(arm_index).cloned().flatten(),
                 raw_position: sample.raw[arm_index].clone(),
@@ -159,6 +171,7 @@ pub fn episode_streams_schema() -> SchemaRef {
         Field::new(db::EPISODE_ID, DataType::Utf8, false),
         Field::new(db::STREAM_ID, DataType::Utf8, false),
         Field::new(db::MODALITY, DataType::Utf8, false),
+        Field::new(db::ROBOT_TYPE, DataType::Utf8, true),
         Field::new(
             db::JOINT_NAMES,
             DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
@@ -194,6 +207,9 @@ pub fn episode_streams_batch(start: &EpisodeStart) -> Result<RecordBatch, Episod
         Arc::new(StringArray::from_iter_values(
             start.arms.iter().map(|_| "joint"),
         )),
+        Arc::new(StringArray::from_iter(
+            start.arms.iter().map(|arm| arm.robot_type.as_deref()),
+        )),
         Arc::new(joint_names.finish()),
         Arc::new(StringArray::from(vec![None::<&str>; start.arms.len()])),
         Arc::new(UInt32Array::from(vec![None; start.arms.len()])),
@@ -222,6 +238,7 @@ pub fn video_streams_batch(rows: &[VideoStreamRow]) -> Result<RecordBatch, Episo
             rows.iter().map(|row| row.stream_id.as_str()),
         )),
         Arc::new(StringArray::from_iter_values(rows.iter().map(|_| "video"))),
+        Arc::new(StringArray::from(vec![None::<&str>; rows.len()])),
         Arc::new(joint_names.finish()),
         Arc::new(StringArray::from_iter_values(
             rows.iter().map(|row| row.camera_id.as_str()),
@@ -249,6 +266,8 @@ pub fn joint_samples_schema() -> SchemaRef {
         Field::new(db::STREAM_ID, DataType::Utf8, false),
         Field::new(db::SAMPLE_INDEX, DataType::UInt64, false),
         Field::new(db::EPISODE_TIME_NS, DataType::UInt64, false),
+        Field::new(db::STATE_VALID, DataType::Boolean, false),
+        Field::new(db::ACTION_VALID, DataType::Boolean, false),
         Field::new(db::STATE_POSITION, nullable_f64_list(), false),
         Field::new(db::ACTION_POSITION, nullable_f64_list(), true),
         Field::new(
@@ -297,6 +316,12 @@ pub fn joint_samples_batch(rows: &[JointSampleRow]) -> Result<RecordBatch, Episo
         )),
         Arc::new(UInt64Array::from_iter_values(
             rows.iter().map(|row| row.episode_time_ns),
+        )),
+        Arc::new(BooleanArray::from(
+            rows.iter().map(|row| row.state_valid).collect::<Vec<_>>(),
+        )),
+        Arc::new(BooleanArray::from(
+            rows.iter().map(|row| row.action_valid).collect::<Vec<_>>(),
         )),
         Arc::new(state_position.finish()),
         Arc::new(action_position.finish()),
@@ -469,10 +494,12 @@ mod tests {
             arms: vec![
                 EpisodeArm {
                     id: "leader".to_owned(),
+                    robot_type: Some("so101_leader".to_owned()),
                     joints: vec!["shoulder".to_owned(), "elbow".to_owned()],
                 },
                 EpisodeArm {
                     id: "follower".to_owned(),
+                    robot_type: Some("so101_follower".to_owned()),
                     joints: vec!["shoulder".to_owned(), "elbow".to_owned()],
                 },
             ],

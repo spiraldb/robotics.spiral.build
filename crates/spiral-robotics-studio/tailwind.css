@@ -484,15 +484,24 @@
   }
 
   .training-inline-state {
-    @apply mx-3 mt-3 flex flex-col gap-0.5 rounded px-2.5 py-2 text-[11px];
+    @apply mx-3 mt-3 flex min-w-0 items-start gap-2 rounded px-2.5 py-2 text-[11px];
   }
 
-  .training-inline-state strong {
+  .training-inline-copy {
+    @apply flex min-w-0 flex-1 flex-col gap-0.5;
+  }
+
+  .training-inline-copy strong {
     @apply font-semibold;
   }
 
-  .training-inline-state span {
-    @apply text-[10px];
+  .training-inline-copy span {
+    @apply max-h-32 overflow-y-auto text-[10px] leading-4;
+    overflow-wrap: anywhere;
+  }
+
+  .training-inline-dismiss {
+    @apply -mr-1 min-h-6 shrink-0 cursor-pointer rounded px-1 text-[10px] font-medium outline-none hover:bg-surface/60 focus-visible:ring-2 focus-visible:ring-current;
   }
 
   .training-inline-state-caution {
@@ -556,7 +565,11 @@
   }
 
   .training-run-result h3 {
-    @apply text-[11px] font-semibold;
+    @apply min-w-0 flex-1 truncate text-[11px] font-semibold;
+  }
+
+  .training-run-result-heading {
+    @apply flex min-w-0 items-center gap-2;
   }
 
   .training-run-result p {
@@ -586,13 +599,7 @@
   }
 
   .training-run-result-failed {
-    background: var(--tone-danger-soft);
-    color: var(--tone-danger);
-  }
-
-  .training-run-result-failed p,
-  .training-run-result-failed summary {
-    color: inherit;
+    border-inline-start: 1px solid var(--tone-danger);
   }
 
   .training-form-section,

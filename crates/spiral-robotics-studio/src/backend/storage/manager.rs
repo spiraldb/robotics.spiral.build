@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -13,9 +12,8 @@ use adbc_core::options::{
 use adbc_core::{Connection as _, Database as _, Driver as _, Optionable as _, Statement as _};
 use adbc_driver_manager::{ManagedConnection, ManagedDatabase, ManagedDriver};
 use arrow_array::{
-    Array as _, ArrayRef, BinaryArray, BinaryViewArray, FixedSizeListArray, Float32Array,
-    Float64Array, Int64Array, LargeBinaryArray, LargeListArray, LargeListViewArray, ListArray,
-    ListViewArray, RecordBatch, StringArray, UInt32Array, UInt64Array,
+    Array as _, ArrayRef, BinaryArray, BinaryViewArray, Float64Array, Int64Array, LargeBinaryArray,
+    RecordBatch, StringArray, UInt32Array, UInt64Array,
 };
 use arrow_json::writer::{JsonArray, WriterBuilder};
 use arrow_schema::{DataType, Field, Schema};
@@ -46,21 +44,6 @@ const MAX_QUERY_ROWS: usize = 1_000;
 const MAX_REPLAY_ROWS: usize = 250_000;
 const JOINT_BATCH_ROWS: usize = 512;
 const SPIRAL_RECEIPT: &str = "spiral.json";
-
-/// One database batch ready for the bounded Rust → Python Arrow pipe.
-pub struct TrainingDataBatch {
-    pub batch: RecordBatch,
-    pub epoch: u64,
-    pub fetch_seconds: f64,
-    pub loader_seconds: f64,
-    pub source_bytes: u64,
-    pub queue_depth: usize,
-}
-
-pub enum TrainingDataMessage {
-    Batch(TrainingDataBatch),
-    EpochEnd { epoch: u64 },
-}
 
 pub struct TrainingCheckpointWrite {
     pub run_id: String,
@@ -564,108 +547,9 @@ impl StorageManager {
         .await
     }
 
-    /// Stream repeated query epochs through a dedicated hosted ADBC connection.
-    ///
-    /// A small bounded channel is the only prefetch queue. Database fetching is
-    /// timed before any queue wait, so transfer and loader-stall telemetry do
-    /// not accidentally include model computation.
-    pub async fn stream_training_data(
-        &self,
-        settings: StoredSpiralSettings,
-        sql: String,
-        state_column: String,
-        action_column: String,
-        stop: Arc<AtomicBool>,
-        sender: tokio::sync::mpsc::Sender<TrainingDataMessage>,
-    ) -> Result<(), String> {
-        let driver_path = self
-            .driver_path
-            .clone()
-            .ok_or_else(|| "Spiral ADBC driver is not configured on this backend".to_owned())?;
-        validate_adbc_settings(&settings, &driver_path)?;
-        tokio::task::spawn_blocking(move || {
-            let key = AdbcConnectionKey::new(&settings, driver_path);
-            let mut adbc = open_adbc(key)?;
-            let connection = &mut adbc.connection;
-            let mut epoch = 0_u64;
-            while !stop.load(Ordering::Acquire) {
-                epoch = epoch.saturating_add(1);
-                let mut statement = connection
-                    .new_statement()
-                    .map_err(|error| format!("opening the Spiral training query: {error}"))?;
-                statement
-                    .set_sql_query(&sql)
-                    .map_err(|error| format!("binding the Spiral training query: {error}"))?;
-                let execute_started = Instant::now();
-                let mut reader = statement
-                    .execute()
-                    .map_err(|error| format!("executing the Spiral training query: {error}"))?;
-                let execute_seconds = execute_started.elapsed().as_secs_f64();
-                validate_training_schema(reader.schema().as_ref(), &state_column, &action_column)?;
-
-                let mut rows = 0_usize;
-                let mut first = true;
-                loop {
-                    if stop.load(Ordering::Acquire) {
-                        return Ok(());
-                    }
-                    let fetch_started = Instant::now();
-                    let next = reader.next();
-                    let mut fetch_seconds = fetch_started.elapsed().as_secs_f64();
-                    if first {
-                        fetch_seconds += execute_seconds;
-                        first = false;
-                    }
-                    let Some(batch) = next else {
-                        break;
-                    };
-                    let batch = batch
-                        .map_err(|error| format!("reading the Spiral training query: {error}"))?;
-                    if batch.num_rows() == 0 {
-                        continue;
-                    }
-                    rows = rows.saturating_add(batch.num_rows());
-                    let source_bytes = batch
-                        .columns()
-                        .iter()
-                        .map(|column| column.get_buffer_memory_size() as u64)
-                        .sum();
-                    let prepare_started = Instant::now();
-                    let batch = prepare_training_batch(batch, &state_column, &action_column)?;
-                    let loader_seconds = fetch_seconds + prepare_started.elapsed().as_secs_f64();
-                    let queue_depth = sender.max_capacity().saturating_sub(sender.capacity());
-                    if sender
-                        .blocking_send(TrainingDataMessage::Batch(TrainingDataBatch {
-                            batch,
-                            epoch,
-                            fetch_seconds,
-                            loader_seconds,
-                            source_bytes,
-                            queue_depth,
-                        }))
-                        .is_err()
-                    {
-                        return Ok(());
-                    }
-                }
-                if rows == 0 {
-                    return Err("the Spiral training query returned no rows".to_owned());
-                }
-                if sender
-                    .blocking_send(TrainingDataMessage::EpochEnd { epoch })
-                    .is_err()
-                {
-                    return Ok(());
-                }
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|error| format!("Spiral training loader failed: {error}"))?
-    }
-
     /// Publish a worker-produced artifact through the backend's trusted ADBC
-    /// path. Python never receives a database URI, driver path, or credential.
+    /// path. Python receives only the project/dataset names and uses the
+    /// user's normal Spiral identity; checkpoint writes stay backend-owned.
     pub async fn publish_training_checkpoint(
         &self,
         settings: StoredSpiralSettings,
@@ -1105,7 +989,8 @@ fn publish_spiral_blocking(
         )?;
     }
     if !videos.is_empty() {
-        let batch = video_assets_batch(&episode.start.id, videos)?;
+        let media_relation = sql::video_dataset_output(&settings.dataset, &episode.start.id);
+        let batch = video_assets_batch(&episode.start.id, videos, &media_relation)?;
         ingest_batch(
             connection,
             &sql::relation(&settings.dataset, Table::VideoAssets),
@@ -1270,186 +1155,92 @@ fn validate_training_schema(
         db::EPISODE_ID,
         db::STREAM_ID,
         db::SAMPLE_INDEX,
+        db::EPISODE_TIME_NS,
+        db::SAMPLE_HZ,
+        db::EPISODE_FRAMES,
+        db::ROBOT_TYPE,
+        db::JOINT_NAMES,
         state_column,
         action_column,
     ]
     .into_iter()
     .filter(|name| schema.field_with_name(name).is_err())
     .collect::<Vec<_>>();
-    if missing.is_empty() {
-        Ok(())
-    } else {
+    if !missing.is_empty() {
         Err(format!(
             "the Spiral training query is missing required columns: {}",
             missing.join(", ")
-        ))
+        ))?;
     }
-}
 
-/// Validate native Arrow list columns and present equal-width float32 vectors
-/// to the Python worker. This stays in the bounded Rust loader and overlaps
-/// with PyTorch compute.
-fn prepare_training_batch(
-    batch: RecordBatch,
-    state_column: &str,
-    action_column: &str,
-) -> Result<RecordBatch, String> {
-    let mut fields = batch
-        .schema()
-        .fields()
-        .iter()
-        .map(|field| field.as_ref().clone())
-        .collect::<Vec<_>>();
-    let mut columns = batch.columns().to_vec();
-    for name in [state_column, action_column] {
-        let index = batch
-            .schema()
-            .index_of(name)
-            .map_err(|error| format!("finding training column {name:?}: {error}"))?;
-        let array = training_list_vectors(name, &columns[index])?;
-        fields[index] = Field::new(name, array.data_type().clone(), false);
-        columns[index] = array;
-    }
-    let schema = Arc::new(Schema::new_with_metadata(
-        fields,
-        batch.schema().metadata().clone(),
-    ));
-    RecordBatch::try_new(schema, columns)
-        .map_err(|error| format!("building the prepared training batch: {error}"))
-}
-
-fn training_list_vectors(name: &str, array: &ArrayRef) -> Result<ArrayRef, String> {
-    let rows = match array.data_type() {
-        DataType::List(_) => {
-            let lists = array
-                .as_any()
-                .downcast_ref::<ListArray>()
-                .expect("List column must be a ListArray");
-            (0..lists.len())
-                .map(|row| (!lists.is_null(row)).then(|| lists.value(row)))
-                .collect::<Vec<_>>()
-        }
-        DataType::LargeList(_) => {
-            let lists = array
-                .as_any()
-                .downcast_ref::<LargeListArray>()
-                .expect("LargeList column must be a LargeListArray");
-            (0..lists.len())
-                .map(|row| (!lists.is_null(row)).then(|| lists.value(row)))
-                .collect::<Vec<_>>()
-        }
-        DataType::ListView(_) => {
-            let lists = array
-                .as_any()
-                .downcast_ref::<ListViewArray>()
-                .expect("ListView column must be a ListViewArray");
-            (0..lists.len())
-                .map(|row| (!lists.is_null(row)).then(|| lists.value(row)))
-                .collect::<Vec<_>>()
-        }
-        DataType::LargeListView(_) => {
-            let lists = array
-                .as_any()
-                .downcast_ref::<LargeListViewArray>()
-                .expect("LargeListView column must be a LargeListViewArray");
-            (0..lists.len())
-                .map(|row| (!lists.is_null(row)).then(|| lists.value(row)))
-                .collect::<Vec<_>>()
-        }
-        DataType::FixedSizeList(_, _) => {
-            let lists = array
-                .as_any()
-                .downcast_ref::<FixedSizeListArray>()
-                .expect("FixedSizeList column must be a FixedSizeListArray");
-            (0..lists.len())
-                .map(|row| (!lists.is_null(row)).then(|| lists.value(row)))
-                .collect::<Vec<_>>()
-        }
-        data_type => {
-            return Err(format!(
-                "training column {name:?} must be a native Arrow list, got {data_type}"
-            ));
+    let expect = |name: &str, accepted: &dyn Fn(&DataType) -> bool, label: &str| {
+        let field = schema
+            .field_with_name(name)
+            .expect("required training field was checked above");
+        if accepted(field.data_type()) {
+            Ok(())
+        } else {
+            Err(format!(
+                "training column {name:?} must be {label}, got {}",
+                field.data_type()
+            ))
         }
     };
-
-    let mut width = None;
-    let mut values = Vec::new();
-    for (row, components) in rows.into_iter().enumerate() {
-        let components = components.ok_or_else(|| {
-            format!("training column {name:?} contains a null vector at batch row {row}")
-        })?;
-        if components.is_empty() {
-            return Err(format!(
-                "training column {name:?} contains an empty vector at batch row {row}"
-            ));
-        }
-        match width {
-            Some(width) if width != components.len() => {
-                return Err(format!(
-                    "training column {name:?} changes width from {width} to {} at batch row {row}",
-                    components.len()
-                ));
-            }
-            None => width = Some(components.len()),
-            _ => {}
-        }
-        match components.data_type() {
-            DataType::Float32 => {
-                let components = components
-                    .as_any()
-                    .downcast_ref::<Float32Array>()
-                    .expect("Float32 values must be a Float32Array");
-                append_training_components(name, row, components.iter(), &mut values)?;
-            }
-            DataType::Float64 => {
-                let components = components
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .expect("Float64 values must be a Float64Array");
-                append_training_components(
-                    name,
-                    row,
-                    components
-                        .iter()
-                        .map(|value| value.map(|value| value as f32)),
-                    &mut values,
-                )?;
-            }
-            data_type => {
-                return Err(format!(
-                    "training column {name:?} must contain float32 or float64 values, got {data_type}"
-                ));
-            }
-        }
-    }
-    let width = width.ok_or_else(|| format!("training column {name:?} contains no vectors"))?;
-    let width = i32::try_from(width)
-        .map_err(|_| format!("training column {name:?} is too wide for Arrow"))?;
-    let item = Arc::new(Field::new("item", DataType::Float32, false));
-    FixedSizeListArray::try_new(item, width, Arc::new(Float32Array::from(values)), None)
-        .map(|array| Arc::new(array) as ArrayRef)
-        .map_err(|error| format!("building typed training column {name:?}: {error}"))
-}
-
-fn append_training_components(
-    name: &str,
-    row: usize,
-    components: impl Iterator<Item = Option<f32>>,
-    values: &mut Vec<f32>,
-) -> Result<(), String> {
-    for (component, value) in components.enumerate() {
-        let value = value.ok_or_else(|| {
-            format!(
-                "training column {name:?} contains a null component at batch row {row}, component {component}"
+    // Spiral preserves its zero-copy string representation through ADBC as
+    // Arrow Utf8View. It has the same logical UTF-8 contract as the offset-
+    // based Utf8 and LargeUtf8 arrays, so schema validation must accept all
+    // three physical representations.
+    let utf8 = |kind: &DataType| {
+        matches!(
+            kind,
+            DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8
+        )
+    };
+    let integer = |kind: &DataType| {
+        matches!(
+            kind,
+            DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::UInt8
+                | DataType::UInt16
+                | DataType::UInt32
+                | DataType::UInt64
+        )
+    };
+    let floating = |kind: &DataType| {
+        matches!(
+            kind,
+            DataType::Float16 | DataType::Float32 | DataType::Float64
+        )
+    };
+    let numeric_vector = |kind: &DataType| match kind {
+        DataType::List(item) | DataType::LargeList(item) | DataType::FixedSizeList(item, _) => {
+            matches!(
+                item.data_type(),
+                DataType::Float16 | DataType::Float32 | DataType::Float64
             )
-        })?;
-        if !value.is_finite() {
-            return Err(format!(
-                "training column {name:?} contains a non-finite component at batch row {row}, component {component}"
-            ));
         }
-        values.push(value);
-    }
+        _ => false,
+    };
+    let string_list = |kind: &DataType| match kind {
+        DataType::List(item) | DataType::LargeList(item) | DataType::FixedSizeList(item, _) => {
+            utf8(item.data_type())
+        }
+        _ => false,
+    };
+
+    expect(db::EPISODE_ID, &utf8, "UTF-8 text")?;
+    expect(db::STREAM_ID, &utf8, "UTF-8 text")?;
+    expect(db::SAMPLE_INDEX, &integer, "an integer")?;
+    expect(db::EPISODE_TIME_NS, &integer, "an integer")?;
+    expect(db::SAMPLE_HZ, &floating, "a floating-point rate")?;
+    expect(db::EPISODE_FRAMES, &integer, "an integer")?;
+    expect(db::ROBOT_TYPE, &utf8, "UTF-8 text")?;
+    expect(db::JOINT_NAMES, &string_list, "a list of UTF-8 joint names")?;
+    expect(state_column, &numeric_vector, "a floating-point vector")?;
+    expect(action_column, &numeric_vector, "a floating-point vector")?;
     Ok(())
 }
 
@@ -1503,7 +1294,11 @@ fn execute_update_sql(connection: &mut ManagedConnection, sql: &str) -> Result<(
     Ok(())
 }
 
-fn video_assets_batch(episode_id: &str, videos: &[VideoAsset]) -> Result<RecordBatch, String> {
+fn video_assets_batch(
+    episode_id: &str,
+    videos: &[VideoAsset],
+    media_relation: &str,
+) -> Result<RecordBatch, String> {
     let payloads = videos
         .iter()
         .map(|video| {
@@ -1568,6 +1363,9 @@ fn video_assets_batch(episode_id: &str, videos: &[VideoAsset]) -> Result<RecordB
         Arc::new(UInt64Array::from_iter_values(
             videos.iter().map(|video| video.frames),
         )),
+        Arc::new(StringArray::from_iter_values(
+            videos.iter().map(|_| media_relation),
+        )),
     ];
     RecordBatch::try_new(schema, columns)
         .map_err(|error| format!("building Spiral video batch: {error}"))
@@ -1586,6 +1384,7 @@ fn video_assets_schema() -> Arc<Schema> {
         Field::new(db::HEIGHT, DataType::UInt32, false),
         Field::new(db::FPS, DataType::UInt32, false),
         Field::new(db::FRAMES, DataType::UInt64, false),
+        Field::new(db::MEDIA_RELATION, DataType::Utf8, false),
     ]))
 }
 
@@ -1796,7 +1595,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use arrow_array::builder::{Float64Builder, ListBuilder};
     use bytes::Bytes;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use spiral_robotics_core::api::EpisodeArm;
@@ -1833,76 +1631,37 @@ mod tests {
     }
 
     #[test]
-    fn training_loader_prepares_native_lists_as_typed_float32() {
-        let mut state = ListBuilder::new(Float64Builder::new());
-        let mut action = ListBuilder::new(Float64Builder::new());
-        for values in [[0.1, 0.2], [0.3, 0.4]] {
-            state.values().append_slice(&values);
-            state.append(true);
-        }
-        for values in [[0.5, 0.6], [0.7, 0.8]] {
-            action.values().append_slice(&values);
-            action.append(true);
-        }
-        let batch = RecordBatch::try_from_iter(vec![
-            (
-                db::EPISODE_ID,
-                Arc::new(StringArray::from(vec!["episode-a", "episode-a"])) as ArrayRef,
-            ),
-            (
-                db::STREAM_ID,
-                Arc::new(StringArray::from(vec!["arm", "arm"])) as ArrayRef,
-            ),
-            (
-                db::SAMPLE_INDEX,
-                Arc::new(UInt64Array::from(vec![0, 1])) as ArrayRef,
-            ),
-            (db::STATE, Arc::new(state.finish()) as ArrayRef),
-            (db::ACTION, Arc::new(action.finish()) as ArrayRef),
-        ])
-        .unwrap();
-
-        let batch = prepare_training_batch(batch, db::STATE, db::ACTION).unwrap();
-        let state = batch
-            .column_by_name(db::STATE)
-            .unwrap()
-            .as_any()
-            .downcast_ref::<FixedSizeListArray>()
-            .unwrap();
-        assert_eq!(state.value_length(), 2);
-        let first = state.value(0);
-        let first = first.as_any().downcast_ref::<Float32Array>().unwrap();
-        assert_eq!(first.values(), &[0.1, 0.2]);
-    }
-
-    #[test]
-    fn training_loader_rejects_null_list_components_before_python() {
-        let mut values = ListBuilder::new(Float64Builder::new());
-        values.values().append_value(0.1);
-        values.values().append_null();
-        values.append(true);
-        let error =
-            training_list_vectors("state", &(Arc::new(values.finish()) as ArrayRef)).unwrap_err();
-        assert!(error.contains("null component"));
-    }
-
-    #[test]
-    fn training_loader_rejects_string_vectors() {
-        let vectors = Arc::new(StringArray::from(vec!["[0.1,0.2]"])) as ArrayRef;
-        let error = training_list_vectors("state", &vectors).unwrap_err();
-        assert!(error.contains("must be a native Arrow list"));
-    }
-
-    #[test]
     fn training_schema_drift_is_rejected_before_python() {
         let schema = Schema::new(vec![
             Field::new(db::EPISODE_ID, DataType::Utf8, false),
             Field::new(db::STREAM_ID, DataType::Utf8, false),
             Field::new(db::SAMPLE_INDEX, DataType::UInt64, false),
+            Field::new(db::EPISODE_TIME_NS, DataType::UInt64, false),
             Field::new(db::STATE, DataType::Utf8, false),
         ]);
         let error = validate_training_schema(&schema, db::STATE, db::ACTION).unwrap_err();
         assert!(error.contains(db::ACTION));
+    }
+
+    #[test]
+    fn training_schema_accepts_spiral_utf8_views() {
+        let string_list = DataType::List(Arc::new(Field::new("item", DataType::Utf8View, false)));
+        let vector =
+            || DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float64, false)), 6);
+        let schema = Schema::new(vec![
+            Field::new(db::EPISODE_ID, DataType::Utf8View, false),
+            Field::new(db::STREAM_ID, DataType::Utf8View, false),
+            Field::new(db::SAMPLE_INDEX, DataType::UInt64, false),
+            Field::new(db::EPISODE_TIME_NS, DataType::UInt64, false),
+            Field::new(db::SAMPLE_HZ, DataType::Float64, false),
+            Field::new(db::EPISODE_FRAMES, DataType::UInt64, false),
+            Field::new(db::ROBOT_TYPE, DataType::Utf8View, false),
+            Field::new(db::JOINT_NAMES, string_list, false),
+            Field::new(db::STATE, vector(), false),
+            Field::new(db::ACTION, vector(), false),
+        ]);
+
+        validate_training_schema(&schema, db::STATE, db::ACTION).unwrap();
     }
 
     #[test]
@@ -2030,6 +1789,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(video_rows.rows[0]["rows"], serde_json::json!(1));
+        let training_rows = run_query(
+            &mut adbc.connection,
+            &spiral::default_training_sql("spiral_robotics"),
+            10,
+        )
+        .unwrap();
+        assert_eq!(training_rows.rows.len(), 2);
         let mp4_tracks = run_query(
             &mut adbc.connection,
             &sql::video_tracks("spiral_robotics.video_sources", &episode.start.id),
@@ -2233,6 +1999,7 @@ mod tests {
             note: None,
             arms: vec![EpisodeArm {
                 id: "follower".to_owned(),
+                robot_type: Some("so101_follower".to_owned()),
                 joints: vec!["joint".to_owned()],
             }],
             condition: Vec::new(),

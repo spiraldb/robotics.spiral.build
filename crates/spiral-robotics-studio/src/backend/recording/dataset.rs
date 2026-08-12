@@ -409,6 +409,7 @@ pub fn import_lerobot_archive(
             fps,
             vec![EpisodeArm {
                 id: "follower".to_owned(),
+                robot_type: Some("so101_follower".to_owned()),
                 joints: joints.clone(),
             }],
             // An imported dataset carries no motor condition: it was recorded
@@ -1046,6 +1047,7 @@ mod tests {
                 30.0,
                 vec![EpisodeArm {
                     id: "follower".to_owned(),
+                    robot_type: Some("so101_follower".to_owned()),
                     joints: SO101_JOINTS
                         .iter()
                         .map(|joint| (*joint).to_owned())

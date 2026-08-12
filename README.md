@@ -16,10 +16,24 @@ nix develop .
 ```
 
 Start the studio by:
-```
+```console
 cd crates/spiral-robotics-studio
 dx serve --release
 ```
+
+Vision ACT uses SpiralDB's native Python relation package (`to_torch()`). Until
+that wheel is part of nixpkgs, point Studio at the Python environment from the
+matching SpiralDB checkout:
+
+```console
+SPIRAL_ROBOTICS_TRAINING_PYTHON=/path/to/spiraldb/lang/python/spiral-engine/.venv/bin/python \
+dx serve --release
+```
+
+That environment must contain PyTorch, PyArrow, NumPy, and a matching SpiralDB
+build with the video/image relation operators. Studio verifies a real
+`to_torch()` conversion before enabling training. Spiral—not Python—selects,
+decodes, resizes, and normalizes every requested camera frame.
 
 To connect Studio to a local SpiralDB stack:
 ```console

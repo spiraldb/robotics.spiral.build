@@ -1372,12 +1372,12 @@ impl Controller {
             .ok_or_else(|| "no take is being recorded".to_owned())?
             .resume_mode
             .clone();
+        self.set_mode(resume_mode)?;
         let elapsed_seconds = self
             .recording
             .as_ref()
             .map(|recording| recording.active_elapsed(Instant::now()).as_secs_f64())
             .unwrap_or_default();
-        self.set_mode(resume_mode)?;
         if let Some(recording) = self.recording.as_mut()
             && recording.paused_at.is_some()
         {

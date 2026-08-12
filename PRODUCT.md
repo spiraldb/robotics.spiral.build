@@ -31,7 +31,7 @@ terminal without managing a Python environment themselves.
 
 The durable scope is the **full robot-learning loop**: connect → calibrate →
 teleoperate → record → inspect/query → publish/export → train → run a policy.
-Everything through local state-based ACT training exists today; policy
+Everything through local vision-conditioned ACT training exists today; policy
 inference and robot rollout do not.
 
 Success is an ML engineer collecting a usable dataset, understanding any
@@ -47,9 +47,11 @@ on real hardware without writing glue code or operating a Python stack.
 - **Rust owns the system boundary.** The motor bus, camera capture,
   calibration, kinematics, server, run supervision, data contracts, and web
   interface are Rust. Policy training uses one isolated PyTorch worker whose
-  Python dependencies are pinned by the Nix flake. Rust retains Spiral ADBC,
-  the bounded Arrow data queue, lifecycle, persistence, and checkpoint ingest;
-  Python is only the model/optimizer compute process, not a second
+  tensor/media dependencies are pinned by the Nix flake and whose native
+  Spiral binding follows the selected SpiralDB engine installation. Python owns the read-only
+  Spiral relation and `to_torch()` sample-preparation path because that API is
+  not exposed through ADBC. Rust retains lifecycle, persistence, query
+  authorization, and checkpoint ingest; Python is not a second
   operator-facing system.
 - **One arm is one robot instance is one JSON file.** Serial port, cameras,
   motors, and calibration live in one versioned file. There is no hidden
@@ -127,9 +129,10 @@ applies them; the browser never becomes the motor-control runtime.
   - **Data** owns the local episode buffer, per-episode Local / Synced state,
     explicit SpiralDB push, replay/delete actions, import and export, and
     guarded read-only Spiral SQL.
-  - **Training** owns hosted-Spiral SQL sampling through Rust ADBC, local
-    PyTorch run configuration, learning and resource telemetry, graceful
-    cancellation, and Rust-published Spiral checkpoints.
+  - **Training** owns random anchor and camera/action sampling through the
+    Spiral Python relation API, local vision ACT configuration, learning and
+    resource telemetry, graceful cancellation, and Rust-published Spiral
+    checkpoints.
   - **Settings** owns robot setup (ports, camera assignment, calibration,
     add/import/delete) and backend data destinations. Setup is not mixed into
     the live operating flow.
@@ -165,11 +168,14 @@ applies them; the browser never becomes the motor-control runtime.
   playback. Pause/resume keeps the current replay frame rather than restarting
   the episode.
 - An explicit per-episode SpiralDB push writes completed episode metadata,
-  streams, joint samples, actions, and MP4 payloads as Arrow relations through
-  a trusted ADBC driver. Hosted configurations maintain a reusable managed
-  video dataset; memory mode exposes equivalent MP4 functions without durable
-  managed dataset resources. The Studio exposes row-limited, read-only query
-  preview and video retrieval through the backend.
+  stream semantics, fixed-rate joint samples, actions, and MP4 assets as Arrow
+  relations through a trusted ADBC driver. Hosted configurations maintain
+  managed per-episode MP4 datasets. Training derives the MP4 frame directly
+  from sample index and the declared stream rates, then submits only finite
+  frame manifests; Spiral performs frame selection, decode, resize,
+  normalization, and `to_torch()` conversion.
+  The Studio exposes row-limited, read-only query preview and video retrieval
+  through the backend.
 - Optional Hugging Face publishing mirrors completed episodes as Parquet,
   metadata, and MP4 files using a backend-held write token.
 - A `--simulate` mode with emulated motors allows calibration, teleoperation,
@@ -182,9 +188,10 @@ action trajectory exists; producing new actions from a model does not.
 
 - **Hardware:** SO-ARM101 only for now, with leader and follower roles. Live
   calibration supports Feetech protocol-0 motors such as the STS3215.
-- **No user-managed Python.** The only Python boundary is the Nix-pinned
-  PyTorch training worker launched and supervised by the Rust backend. It is
-  not given Spiral credentials or an ADBC driver.
+- **One supervised Python worker.** The only Python boundary is the
+  PyTorch/Spiral training worker launched and supervised by the Rust backend.
+  It uses the user's normal Spiral identity for read-only sample queries and is
+  not given the backend ADBC driver or a separate secret.
 - **Nix flake** provides the development environment and web toolchain (`dx`,
   Tailwind CLI, `wasm-bindgen`, and `wasm-opt`).
 - **Safety is enforced by the server.** Enabling torque first copies measured

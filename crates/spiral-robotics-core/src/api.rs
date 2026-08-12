@@ -127,11 +127,6 @@ pub struct SpiralQueryResponse {
 }
 
 /// The policy family executed by the isolated PyTorch worker.
-///
-/// The first vertical slice is deliberately honest about its data contract:
-/// it trains a low-dimensional action-chunking transformer from state/action
-/// columns returned by Spiral. Image-token policies join this enum only after
-/// Spiral exposes a typed camera tensor contract.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrainingPolicy {
@@ -142,7 +137,59 @@ pub enum TrainingPolicy {
 impl TrainingPolicy {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Act => "ACT · state",
+            Self::Act => "ACT · vision",
+        }
+    }
+}
+
+/// Model-specific ACT settings kept together so checkpoints remain
+/// self-describing as the training UI grows.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ActTrainingConfig {
+    /// Camera stream IDs that must be present for every sampled anchor.
+    #[serde(default = "default_training_camera_streams")]
+    pub camera_streams: Vec<String>,
+    #[serde(default = "default_training_image_size")]
+    pub image_width: usize,
+    #[serde(default = "default_training_image_size")]
+    pub image_height: usize,
+    /// Spiral video decoder implementation: auto, ffmpeg, videotoolbox, or nvdec.
+    #[serde(default = "default_training_video_decoder")]
+    pub video_decoder: String,
+    /// Use the ImageNet initialization expected by vision ACT.
+    #[serde(default = "default_act_pretrained_backbone")]
+    pub pretrained_backbone: bool,
+    #[serde(default = "default_act_hidden_dim")]
+    pub hidden_dim: usize,
+    #[serde(default = "default_act_latent_dim")]
+    pub latent_dim: usize,
+    #[serde(default = "default_act_encoder_layers")]
+    pub encoder_layers: usize,
+    #[serde(default = "default_act_decoder_layers")]
+    pub decoder_layers: usize,
+    #[serde(default = "default_act_attention_heads")]
+    pub attention_heads: usize,
+    #[serde(default = "default_act_feedforward_dim")]
+    pub feedforward_dim: usize,
+    #[serde(default = "default_act_kl_weight")]
+    pub kl_weight: f64,
+}
+
+impl Default for ActTrainingConfig {
+    fn default() -> Self {
+        Self {
+            camera_streams: default_training_camera_streams(),
+            image_width: default_training_image_size(),
+            image_height: default_training_image_size(),
+            video_decoder: default_training_video_decoder(),
+            pretrained_backbone: default_act_pretrained_backbone(),
+            hidden_dim: default_act_hidden_dim(),
+            latent_dim: default_act_latent_dim(),
+            encoder_layers: default_act_encoder_layers(),
+            decoder_layers: default_act_decoder_layers(),
+            attention_heads: default_act_attention_heads(),
+            feedforward_dim: default_act_feedforward_dim(),
+            kl_weight: default_act_kl_weight(),
         }
     }
 }
@@ -202,6 +249,8 @@ pub struct StartTrainingRequest {
     pub chunk_size: usize,
     #[serde(default = "default_training_seed")]
     pub seed: u64,
+    #[serde(default)]
+    pub act: ActTrainingConfig,
 }
 
 impl Default for StartTrainingRequest {
@@ -219,6 +268,7 @@ impl Default for StartTrainingRequest {
             checkpoint_every: default_training_checkpoint_every(),
             chunk_size: default_training_chunk_size(),
             seed: default_training_seed(),
+            act: ActTrainingConfig::default(),
         }
     }
 }
@@ -240,11 +290,11 @@ const fn default_training_steps() -> u64 {
 }
 
 const fn default_training_batch_size() -> usize {
-    256
+    32
 }
 
 const fn default_training_learning_rate() -> f64 {
-    3.0e-4
+    1.0e-5
 }
 
 const fn default_training_checkpoint_every() -> u64 {
@@ -252,11 +302,55 @@ const fn default_training_checkpoint_every() -> u64 {
 }
 
 const fn default_training_chunk_size() -> usize {
-    16
+    100
 }
 
 const fn default_training_seed() -> u64 {
     42
+}
+
+fn default_training_camera_streams() -> Vec<String> {
+    vec!["follower.camera.gripper".to_owned()]
+}
+
+const fn default_training_image_size() -> usize {
+    224
+}
+
+fn default_training_video_decoder() -> String {
+    "auto".to_owned()
+}
+
+const fn default_act_pretrained_backbone() -> bool {
+    true
+}
+
+const fn default_act_hidden_dim() -> usize {
+    256
+}
+
+const fn default_act_latent_dim() -> usize {
+    32
+}
+
+const fn default_act_encoder_layers() -> usize {
+    4
+}
+
+const fn default_act_decoder_layers() -> usize {
+    7
+}
+
+const fn default_act_attention_heads() -> usize {
+    8
+}
+
+const fn default_act_feedforward_dim() -> usize {
+    2_048
+}
+
+const fn default_act_kl_weight() -> f64 {
+    10.0
 }
 
 /// One sample on the shared training-step axis used by every Studio plot.
@@ -272,7 +366,7 @@ pub struct TrainingMetricPoint {
     pub gpu_memory_bytes: Option<u64>,
     /// Worker process CPU where 100% equals one fully occupied logical core.
     pub cpu_utilization_pct: f64,
-    /// Latest Arrow batch bytes divided by its Spiral ADBC query/fetch time.
+    /// Latest requested video payload bytes divided by total sample preparation time.
     pub transfer_bytes_per_second: f64,
     pub examples_per_second: f64,
     pub queue_depth: usize,
@@ -427,6 +521,7 @@ impl TrainingSnapshot {
             }
             TrainingUpdate::Checkpoint { run_id, checkpoint } => {
                 if let Some(run) = self.runs.iter_mut().find(|run| run.id == run_id) {
+                    run.current_step = run.current_step.max(checkpoint.step);
                     run.checkpoints.push(checkpoint);
                     let excess = run
                         .checkpoints
@@ -1007,6 +1102,10 @@ impl EpisodeSummary {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EpisodeArm {
     pub id: String,
+    /// Stable hardware family/role captured with the episode, such as
+    /// `so101_follower`. Training uses this instead of guessing from the ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub robot_type: Option<String>,
     /// Joint names, in the order their values appear in every frame.
     pub joints: Vec<String>,
 }
@@ -1387,6 +1486,7 @@ mod tests {
             file: "episode_000001.jsonl".to_owned(),
             arms: vec![EpisodeArm {
                 id: "follower".to_owned(),
+                robot_type: Some("so101_follower".to_owned()),
                 joints: vec!["shoulder_pan".to_owned()],
             }],
             frames: 120,

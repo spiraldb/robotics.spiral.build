@@ -7,7 +7,7 @@
 use std::fmt;
 
 /// Schema version written into every completed episode row.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Marker used to distinguish Spiral Robotics' managed dataset namespace resource.
 pub const DATASET_NAMESPACE_MARKER: &str = "_spiral_robotics_dataset_key_v1";
@@ -60,6 +60,7 @@ impl Table {
                 column::EPISODE_ID,
                 column::STREAM_ID,
                 column::MODALITY,
+                column::ROBOT_TYPE,
                 column::JOINT_NAMES,
                 column::CAMERA_ID,
                 column::WIDTH,
@@ -71,6 +72,8 @@ impl Table {
                 column::STREAM_ID,
                 column::SAMPLE_INDEX,
                 column::EPISODE_TIME_NS,
+                column::STATE_VALID,
+                column::ACTION_VALID,
                 column::STATE_POSITION,
                 column::ACTION_POSITION,
                 column::RAW_POSITION,
@@ -90,6 +93,7 @@ impl Table {
                 column::HEIGHT,
                 column::FPS,
                 column::FRAMES,
+                column::MEDIA_RELATION,
             ],
             Self::TrainingCheckpoints => &[
                 column::RUN_ID,
@@ -114,6 +118,7 @@ impl fmt::Display for Table {
 /// Persisted and query-result column names.
 pub mod column {
     pub const ACTION: &str = "action";
+    pub const ACTION_VALID: &str = "action_valid";
     pub const ACTION_POSITION: &str = "action_position";
     pub const BYTE_SIZE: &str = "byte_size";
     pub const CAMERA_ID: &str = "camera_id";
@@ -124,6 +129,7 @@ pub mod column {
     pub const DURATION_NS: &str = "duration_ns";
     pub const EFFORT: &str = "effort";
     pub const EPISODE_ID: &str = "episode_id";
+    pub const EPISODE_FRAMES: &str = "episode_frames";
     pub const EPISODE_TIME_NS: &str = "episode_time_ns";
     pub const FOLLOW_ERROR_DEGREES: &str = "follow_error_degrees";
     pub const FPS: &str = "fps";
@@ -131,11 +137,13 @@ pub mod column {
     pub const HEIGHT: &str = "height";
     pub const JOINT_NAMES: &str = "joint_names";
     pub const MAX_FOLLOW_ERROR_DEGREES: &str = "max_follow_error_degrees";
+    pub const MEDIA_RELATION: &str = "media_relation";
     pub const MODALITY: &str = "modality";
     pub const NOTE: &str = "note";
     pub const PAYLOAD: &str = "payload";
     pub const POLICY: &str = "policy";
     pub const RAW_POSITION: &str = "raw_position";
+    pub const ROBOT_TYPE: &str = "robot_type";
     pub const REPLAY_POSITION: &str = "replay_position";
     pub const RUN_ID: &str = "run_id";
     pub const RUN_NAME: &str = "run_name";
@@ -146,6 +154,7 @@ pub mod column {
     pub const SOURCE: &str = "source";
     pub const STARTED_MS: &str = "started_ms";
     pub const STATE: &str = "state";
+    pub const STATE_VALID: &str = "state_valid";
     pub const STATE_POSITION: &str = "state_position";
     pub const STEP: &str = "step";
     pub const STREAM_ID: &str = "stream_id";
@@ -232,16 +241,32 @@ pub fn relation(dataset: &str, table: Table) -> String {
 
 /// Default typed sample projection used by ACT training.
 pub fn default_training_sql(dataset: &str) -> String {
-    let relation = relation(dataset, Table::JointSamples);
+    let samples = relation(dataset, Table::JointSamples);
+    let episodes = relation(dataset, Table::Episodes);
+    let streams = relation(dataset, Table::EpisodeStreams);
     format!(
-        "SELECT {episode_id}, {stream_id}, {sample_index},\n       {state_position} AS {state},\n       {action_position} AS {action}\nFROM {relation}\nWHERE {action_position} IS NOT NULL\nORDER BY {episode_id}, {stream_id}, {sample_index}",
+        "SELECT j.{episode_id}, j.{stream_id}, j.{sample_index}, j.{episode_time_ns},\n       e.{sample_hz}, e.{frames} AS episode_frames, s.{robot_type}, s.{joint_names},\n       j.{state_position} AS {state},\n       j.{action_position} AS {action}\nFROM {samples} AS j\nJOIN {episodes} AS e ON e.{episode_id} = j.{episode_id}\nJOIN {streams} AS s ON s.{episode_id} = j.{episode_id} AND s.{stream_id} = j.{stream_id}\nWHERE e.{schema_version} = {current_schema}\n  AND NOT e.{discarded}\n  AND s.{modality} = 'joint'\n  AND (\n      LOWER(s.{robot_type}) LIKE '%follower%'\n      OR (s.{robot_type} IS NULL AND s.{stream_id} = 'follower')\n  )\n  AND j.{state_valid}\n  AND j.{action_valid}",
         episode_id = column::EPISODE_ID,
         stream_id = column::STREAM_ID,
         sample_index = column::SAMPLE_INDEX,
+        episode_time_ns = column::EPISODE_TIME_NS,
+        sample_hz = column::SAMPLE_HZ,
+        frames = column::FRAMES,
+        robot_type = column::ROBOT_TYPE,
+        joint_names = column::JOINT_NAMES,
         state_position = column::STATE_POSITION,
         state = column::STATE,
         action_position = column::ACTION_POSITION,
         action = column::ACTION,
+        samples = samples,
+        episodes = episodes,
+        streams = streams,
+        schema_version = column::SCHEMA_VERSION,
+        current_schema = SCHEMA_VERSION,
+        discarded = column::DISCARDED,
+        modality = column::MODALITY,
+        state_valid = column::STATE_VALID,
+        action_valid = column::ACTION_VALID,
     )
 }
 
@@ -256,7 +281,7 @@ pub fn is_identifier(value: &str) -> bool {
 
 /// Convert an external immutable ID into one component of a generated name.
 pub fn identifier_component(value: &str) -> String {
-    value
+    let rendered = value
         .chars()
         .map(|character| {
             if character.is_ascii_alphanumeric() || character == '_' {
@@ -265,7 +290,20 @@ pub fn identifier_component(value: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect::<String>();
+    if rendered == value && !rendered.is_empty() {
+        return rendered;
+    }
+    // Replacing punctuation alone would alias IDs such as `episode-1` and
+    // `episode_1`. A deterministic suffix keeps generated resource names both
+    // SQL-safe and one-to-one without leaking this convention to readers.
+    let hash = value
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
+    format!("{rendered}_{hash:016x}")
 }
 
 #[cfg(test)]
@@ -285,6 +323,7 @@ mod tests {
             column::ACTION_POSITION,
             column::ACTION
         )));
+        assert!(sql.contains("robot_type IS NULL AND s.stream_id = 'follower'"));
     }
 
     #[test]
@@ -308,5 +347,10 @@ mod tests {
         assert!(is_identifier("spiral_robotics_v3"));
         assert!(!is_identifier("spiral-robotics-v3"));
         assert!(!is_identifier("3spiral_robotics"));
+        assert_eq!(identifier_component("episode_37"), "episode_37");
+        assert_ne!(
+            identifier_component("episode-37"),
+            identifier_component("episode_37")
+        );
     }
 }

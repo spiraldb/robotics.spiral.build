@@ -93,9 +93,14 @@ impl TrainingController {
 
     pub fn select_run(mut self, id: String) {
         self.selected_run.set(Some(id));
+        self.start_error.set(None);
     }
 
-    pub fn start(mut self, studio: Studio) {
+    pub fn clear_start_error(mut self) {
+        self.start_error.set(None);
+    }
+
+    pub fn start(mut self) {
         if self.starting.peek().to_owned() {
             return;
         }
@@ -104,7 +109,7 @@ impl TrainingController {
         let request = (self.request)();
         let mut starting = self.starting;
         let mut start_error = self.start_error;
-        studio.run_utility("Training started.", async move {
+        spawn(async move {
             let result = api::send_json::<_, TrainingRun>(
                 Method::POST,
                 "/api/training/runs",
@@ -114,7 +119,6 @@ impl TrainingController {
             .map(|_| ());
             starting.set(false);
             start_error.set(result.as_ref().err().cloned());
-            result
         });
     }
 

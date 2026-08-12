@@ -321,7 +321,8 @@ async fn record_camera(
     mut control: watch::Receiver<CaptureState>,
     segment: CameraSegment,
 ) -> Result<VideoAsset, String> {
-    let rate = spec.fps.clamp(1, 120).to_string();
+    let encoder_fps = spec.fps.clamp(1, 120);
+    let rate = encoder_fps.to_string();
     let mut child = tokio::process::Command::new(&segment.ffmpeg)
         .args([
             "-hide_banner",
@@ -432,7 +433,7 @@ async fn record_camera(
         path: segment.output,
         width: spec.width,
         height: spec.height,
-        fps: spec.fps,
+        fps: encoder_fps,
         frames: written,
         segment_index: segment.index,
         timeline_offset_seconds: Some(segment.timeline_offset_seconds),

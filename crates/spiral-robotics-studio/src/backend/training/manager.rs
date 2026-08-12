@@ -1,55 +1,40 @@
-//! Rust-owned supervision and data plane for local PyTorch training.
+//! Rust-owned supervision for the Spiral-backed PyTorch worker.
 //!
-//! Rust owns every consequential boundary: Spiral ADBC, query validation,
-//! bounded prefetch, process lifecycle, checkpoint publication, persistence,
-//! and browser events. Python receives framed Arrow IPC batches on stdin and
-//! returns typed NDJSON metrics plus local checkpoint artifacts on stdout.
+//! Python owns small read-only Spiral metadata reads through Arrow and the
+//! per-step `to_torch()` sample path. Rust retains process lifecycle, query
+//! authorization, persistence, checkpoint publication, and browser events.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::future::pending;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use arrow_ipc::writer::StreamWriter;
 use serde::{Deserialize, Serialize};
 use spiral_robotics_core::api::{
     ConnectionTestResponse, MAX_TRAINING_HISTORY_RUNS, StartTrainingRequest, TrainingCheckpoint,
     TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase, TrainingSnapshot,
     TrainingSource, TrainingUpdate,
 };
-use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
-use tokio::process::{ChildStdin, Command};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use spiral_robotics_core::spiral;
+use tokio::io::{AsyncBufReadExt as _, BufReader};
+use tokio::process::Command;
+use tokio::sync::{broadcast, oneshot};
 
-use crate::backend::storage::manager::{
-    StorageManager, TrainingCheckpointWrite, TrainingDataBatch, TrainingDataMessage,
-};
+use crate::backend::storage::manager::{StorageManager, TrainingCheckpointWrite};
 use crate::backend::storage::settings::StoredSpiralSettings;
 use crate::backend::storage::sql::{self, ReadOnlyMode};
 
 const HISTORY_FILE: &str = "runs.json";
-const DATA_QUEUE_DEPTH: usize = 3;
 const STOP_GRACE: Duration = Duration::from_secs(10);
-const MAX_CHECKPOINT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const FRAME_BATCH: u8 = 1;
-const FRAME_ERROR: u8 = 2;
-const FRAME_EPOCH_END: u8 = 3;
-const FRAME_END: u8 = 4;
-const FRAME_HEADER_BYTES: usize = 45;
+// The current checkpoint relation stores one artifact per Binary cell. Stay
+// below Spiral's default 256 MiB table-operation limit with headroom for the
+// other columns in the ingest batch.
+const MAX_CHECKPOINT_BYTES: u64 = 240 * 1024 * 1024;
 static RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Default)]
-struct FrameMetadata {
-    epoch: u64,
-    fetch_ns: u64,
-    source_bytes: u64,
-    loader_ns: u64,
-    queue_depth: usize,
-}
 
 #[derive(Clone)]
 pub struct TrainingManager {
@@ -71,7 +56,8 @@ struct TrainingManagerInner {
 struct WorkerConfig {
     run_id: String,
     request: StartTrainingRequest,
-    source: TrainingSource,
+    spiral_project: String,
+    spiral_dataset: String,
     stop_file: String,
 }
 
@@ -300,7 +286,8 @@ impl TrainingManager {
         let config = WorkerConfig {
             run_id: run_id.clone(),
             request: request.clone(),
-            source: source.clone(),
+            spiral_project: settings.project_id.clone(),
+            spiral_dataset: settings.dataset.clone(),
             stop_file: stop_path.display().to_string(),
         };
         let config_bytes = match serde_json::to_vec_pretty(&config) {
@@ -329,7 +316,7 @@ impl TrainingManager {
             .current_dir(&run_directory)
             .env("PYTHONUNBUFFERED", "1")
             .env("PYTHONNOUSERSITE", "1")
-            .stdin(Stdio::piped())
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -347,17 +334,8 @@ impl TrainingManager {
             }
         };
 
-        let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
-        let stop = Arc::new(AtomicBool::new(false));
-        let data_task = tokio::spawn(stream_data_to_worker(
-            self.inner.storage.clone(),
-            settings.clone(),
-            request.clone(),
-            stop.clone(),
-            stdin,
-        ));
         let stderr_manager = self.clone();
         let stderr_run = run_id.clone();
         let stderr_task = tokio::spawn(async move {
@@ -377,7 +355,6 @@ impl TrainingManager {
             tokio::select! {
                 _ = &mut cancel, if !stop_requested => {
                     stop_requested = true;
-                    stop.store(true, Ordering::Release);
                     let _ = tokio::fs::write(&stop_path, b"stop\n").await;
                     stop_deadline = Some(tokio::time::Instant::now() + STOP_GRACE);
                 }
@@ -409,7 +386,6 @@ impl TrainingManager {
                                 let failed = matches!(&next, WorkerTerminal::Failed(_));
                                 if failed && !stop_requested {
                                     stop_requested = true;
-                                    stop.store(true, Ordering::Release);
                                     let _ = tokio::fs::write(&stop_path, b"stop\n").await;
                                     stop_deadline = Some(tokio::time::Instant::now() + STOP_GRACE);
                                 }
@@ -430,9 +406,7 @@ impl TrainingManager {
             }
         }
 
-        stop.store(true, Ordering::Release);
         let status = child.wait().await;
-        let _ = tokio::time::timeout(Duration::from_secs(2), data_task).await;
         let _ = stderr_task.await;
         lock(&self.inner.controls).remove(&run_id);
         let _ = tokio::fs::remove_file(&stop_path).await;
@@ -602,7 +576,7 @@ impl TrainingManager {
         }
         if byte_size > MAX_CHECKPOINT_BYTES {
             return Err(format!(
-                "checkpoint {file_name} exceeds the 2 GiB publication limit"
+                "checkpoint {file_name} exceeds the 240 MiB single-artifact publication limit"
             ));
         }
         let payload = tokio::fs::read(&path)
@@ -807,129 +781,6 @@ async fn readiness(
     }
 }
 
-async fn stream_data_to_worker(
-    storage: Arc<StorageManager>,
-    settings: StoredSpiralSettings,
-    request: StartTrainingRequest,
-    stop: Arc<AtomicBool>,
-    mut stdin: ChildStdin,
-) {
-    let (sender, mut receiver) = mpsc::channel(DATA_QUEUE_DEPTH);
-    let loader = tokio::spawn({
-        let stop = stop.clone();
-        async move {
-            storage
-                .stream_training_data(
-                    settings,
-                    request.sql,
-                    request.state_column,
-                    request.action_column,
-                    stop,
-                    sender,
-                )
-                .await
-        }
-    });
-
-    while let Some(message) = receiver.recv().await {
-        let result = match message {
-            TrainingDataMessage::Batch(batch) => write_batch_frame(&mut stdin, batch).await,
-            TrainingDataMessage::EpochEnd { epoch } => {
-                write_frame(
-                    &mut stdin,
-                    FRAME_EPOCH_END,
-                    &[],
-                    FrameMetadata {
-                        epoch,
-                        ..FrameMetadata::default()
-                    },
-                )
-                .await
-            }
-        };
-        if result.is_err() {
-            stop.store(true, Ordering::Release);
-            return;
-        }
-    }
-    match loader.await {
-        Ok(Ok(())) => {
-            let _ = write_frame(&mut stdin, FRAME_END, &[], FrameMetadata::default()).await;
-        }
-        Ok(Err(error)) => {
-            let bytes = error.as_bytes();
-            let _ = write_frame(&mut stdin, FRAME_ERROR, bytes, FrameMetadata::default()).await;
-        }
-        Err(error) => {
-            let message = format!("Spiral loader task failed: {error}");
-            let _ = write_frame(
-                &mut stdin,
-                FRAME_ERROR,
-                message.as_bytes(),
-                FrameMetadata::default(),
-            )
-            .await;
-        }
-    }
-    let _ = stdin.shutdown().await;
-}
-
-async fn write_batch_frame(stdin: &mut ChildStdin, batch: TrainingDataBatch) -> Result<(), String> {
-    let mut payload = Vec::new();
-    {
-        let mut writer = StreamWriter::try_new(&mut payload, batch.batch.schema().as_ref())
-            .map_err(|error| format!("opening the Arrow worker stream: {error}"))?;
-        writer
-            .write(&batch.batch)
-            .and_then(|()| writer.finish())
-            .map_err(|error| format!("encoding an Arrow worker batch: {error}"))?;
-    }
-    let fetch_ns = (batch.fetch_seconds.max(0.0) * 1_000_000_000.0)
-        .round()
-        .clamp(0.0, u64::MAX as f64) as u64;
-    let loader_ns = (batch.loader_seconds.max(0.0) * 1_000_000_000.0)
-        .round()
-        .clamp(0.0, u64::MAX as f64) as u64;
-    write_frame(
-        stdin,
-        FRAME_BATCH,
-        &payload,
-        FrameMetadata {
-            epoch: batch.epoch,
-            fetch_ns,
-            source_bytes: batch.source_bytes,
-            loader_ns,
-            queue_depth: batch.queue_depth,
-        },
-    )
-    .await
-}
-
-async fn write_frame(
-    stdin: &mut ChildStdin,
-    kind: u8,
-    payload: &[u8],
-    metadata: FrameMetadata,
-) -> Result<(), String> {
-    let mut header = [0_u8; FRAME_HEADER_BYTES];
-    header[0] = kind;
-    header[1..9].copy_from_slice(&(payload.len() as u64).to_le_bytes());
-    header[9..17].copy_from_slice(&metadata.epoch.to_le_bytes());
-    header[17..25].copy_from_slice(&metadata.fetch_ns.to_le_bytes());
-    header[25..33].copy_from_slice(&metadata.source_bytes.to_le_bytes());
-    header[33..41].copy_from_slice(&metadata.loader_ns.to_le_bytes());
-    header[41..45]
-        .copy_from_slice(&(metadata.queue_depth.min(u32::MAX as usize) as u32).to_le_bytes());
-    stdin
-        .write_all(&header)
-        .await
-        .map_err(|error| format!("writing the worker frame header: {error}"))?;
-    stdin
-        .write_all(payload)
-        .await
-        .map_err(|error| format!("writing the worker frame payload: {error}"))
-}
-
 fn validate_request(request: &StartTrainingRequest) -> Result<(), String> {
     let name = request.run_name.trim();
     if name.is_empty()
@@ -947,28 +798,86 @@ fn validate_request(request: &StartTrainingRequest) -> Result<(), String> {
         ("State column", request.state_column.trim()),
         ("Action column", request.action_column.trim()),
     ] {
-        if column.is_empty()
-            || !column
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        {
+        if !spiral::is_identifier(column) {
             return Err(format!("{label} must be a SQL identifier."));
         }
     }
     if !(1..=10_000_000).contains(&request.steps) {
         return Err("Training steps must be between 1 and 10,000,000.".to_owned());
     }
-    if !(1..=8_192).contains(&request.batch_size) {
-        return Err("Batch size must be between 1 and 8,192.".to_owned());
+    if !(1..=512).contains(&request.batch_size) {
+        return Err("Batch size must be between 1 and 512.".to_owned());
     }
     if !(1..=256).contains(&request.chunk_size) {
         return Err("Action chunk size must be between 1 and 256.".to_owned());
+    }
+    if request
+        .batch_size
+        .checked_mul(request.chunk_size)
+        .is_none_or(|rows| rows > 8_192)
+    {
+        return Err(
+            "Batch size × action chunk size may not exceed 8,192 manifest rows.".to_owned(),
+        );
     }
     if request.checkpoint_every == 0 || request.checkpoint_every > request.steps {
         return Err("Checkpoint cadence must be between 1 and the run step count.".to_owned());
     }
     if !request.learning_rate.is_finite() || request.learning_rate <= 0.0 {
         return Err("Learning rate must be a finite positive number.".to_owned());
+    }
+    if request.act.camera_streams.is_empty() || request.act.camera_streams.len() > 8 {
+        return Err("ACT requires between one and eight camera streams.".to_owned());
+    }
+    let mut camera_streams = BTreeSet::new();
+    for stream in &request.act.camera_streams {
+        if stream.is_empty()
+            || !stream
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        {
+            return Err(format!("Invalid ACT camera stream {stream:?}."));
+        }
+        if !camera_streams.insert(stream) {
+            return Err(format!("ACT camera stream {stream:?} is repeated."));
+        }
+    }
+    if !(32..=1_024).contains(&request.act.image_width)
+        || !(32..=1_024).contains(&request.act.image_height)
+    {
+        return Err("ACT image width and height must be between 32 and 1,024.".to_owned());
+    }
+    if !matches!(
+        request.act.video_decoder.as_str(),
+        "auto" | "ffmpeg" | "videotoolbox" | "nvdec"
+    ) {
+        return Err("ACT video decoder must be auto, ffmpeg, videotoolbox, or nvdec.".to_owned());
+    }
+    if !(1..=16).contains(&request.act.attention_heads) {
+        return Err("ACT attention heads must be between 1 and 16.".to_owned());
+    }
+    if !(64..=1_024).contains(&request.act.hidden_dim)
+        || !request.act.hidden_dim.is_multiple_of(4)
+        || !request
+            .act
+            .hidden_dim
+            .is_multiple_of(request.act.attention_heads)
+    {
+        return Err(
+            "ACT hidden size must be 64–1,024 and divisible by four and the attention-head count."
+                .to_owned(),
+        );
+    }
+    if !(1..=12).contains(&request.act.encoder_layers)
+        || !(1..=12).contains(&request.act.decoder_layers)
+        || !(1..=512).contains(&request.act.latent_dim)
+        || request.act.feedforward_dim < request.act.hidden_dim
+        || request.act.feedforward_dim > 16_384
+    {
+        return Err("ACT transformer configuration is outside the supported range.".to_owned());
+    }
+    if !request.act.kl_weight.is_finite() || request.act.kl_weight < 0.0 {
+        return Err("ACT KL weight must be finite and non-negative.".to_owned());
     }
     Ok(())
 }
@@ -996,6 +905,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_vision_act_request_matches_recorded_camera_stream_ids() {
+        let request = StartTrainingRequest {
+            sql: "SELECT 1".to_owned(),
+            ..StartTrainingRequest::default()
+        };
+
+        validate_request(&request).unwrap();
+        assert_eq!(request.act.camera_streams, ["follower.camera.gripper"]);
+    }
+
+    #[test]
     fn training_request_rejects_mutating_sql() {
         let request = StartTrainingRequest {
             sql: "DELETE FROM spiral_robotics.joint_samples".to_owned(),
@@ -1019,6 +939,21 @@ mod tests {
             validate_request(&request)
                 .unwrap_err()
                 .contains("exactly one")
+        );
+    }
+
+    #[test]
+    fn training_columns_must_start_like_sql_identifiers() {
+        let request = StartTrainingRequest {
+            state_column: "1state".to_owned(),
+            sql: "SELECT 1".to_owned(),
+            ..StartTrainingRequest::default()
+        };
+
+        assert!(
+            validate_request(&request)
+                .unwrap_err()
+                .contains("identifier")
         );
     }
 

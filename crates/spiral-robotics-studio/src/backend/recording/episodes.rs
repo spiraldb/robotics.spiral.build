@@ -1875,6 +1875,7 @@ pub fn build_arms(arms: &[(String, Vec<String>)]) -> Result<Vec<EpisodeArm>, Epi
         }
         built.push(EpisodeArm {
             id: id.clone(),
+            robot_type: None,
             joints: joints.clone(),
         });
     }
@@ -1891,6 +1892,7 @@ mod tests {
     fn arms() -> Vec<EpisodeArm> {
         vec![EpisodeArm {
             id: "follower".to_owned(),
+            robot_type: None,
             joints: vec!["shoulder_pan".to_owned(), "gripper".to_owned()],
         }]
     }
