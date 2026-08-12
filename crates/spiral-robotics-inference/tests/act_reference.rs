@@ -1,5 +1,3 @@
-#![cfg(feature = "cpu")]
-
 use sha2::{Digest, Sha256};
 use spiral_robotics_inference::act::{REFERENCE_WEIGHTS_SHA256, load_cpu, reference_model_files};
 use spiral_robotics_inference::{ImageView, InferenceInput, Policy};
@@ -59,7 +57,7 @@ fn pinned_checkpoint_matches_reference_output() {
     assert_eq!(
         milliaction_sha256(chunk.as_slice()),
         EXPECTED_MILLIACTION_SHA256,
-        "all 1,400 values must match the independent PyTorch reference to 1e-3"
+        "all 1,400 values must match the independent upstream reference to 1e-3"
     );
     for (actual, expected) in chunk.action(0).unwrap().iter().zip(EXPECTED_FIRST_ACTION) {
         assert!(

@@ -1,5 +1,7 @@
 //! Live screen workbench: capture, control, and selected-arm state.
 
+use std::collections::BTreeSet;
+
 use dioxus::prelude::*;
 use spiral_robotics_core::api::{ModeSelection, default_teleoperation_pair};
 
@@ -16,6 +18,7 @@ pub fn LiveWorkbench(on_action: EventHandler<LiveAction>) -> Element {
     rsx! {
         div { class: "studio-workbench-scroll live-workbench",
             ControlSection { on_action }
+            CaptureSection {}
 
             section { class: "workbench-section live-properties",
                 header { class: "workbench-section-heading",
@@ -28,6 +31,53 @@ pub fn LiveWorkbench(on_action: EventHandler<LiveAction>) -> Element {
                 JointPanel {
                     on_select: move |selection| on_action.call(LiveAction::Select(selection)),
                     on_point: move |selection| on_action.call(LiveAction::Point(selection)),
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn CaptureSection() -> Element {
+    let studio = studio();
+    let mut selected_dataset = studio.selected_dataset;
+    let recording = studio.recording();
+    let dataset_ids = studio
+        .episodes()
+        .into_iter()
+        .map(|episode| episode.dataset_id)
+        .chain(std::iter::once(selected_dataset.read().clone()))
+        .collect::<BTreeSet<_>>();
+
+    rsx! {
+        section { class: "workbench-section capture-destination",
+            header { class: "workbench-section-heading",
+                h3 { "Capture destination" }
+                if let Some(recording) = recording.as_ref() {
+                    span { "Recording {recording.episode}" }
+                }
+            }
+            label { class: "capture-dataset-field",
+                span { "Dataset" }
+                input {
+                    class: "field",
+                    list: "live-dataset-options",
+                    value: selected_dataset.read().clone(),
+                    disabled: recording.is_some(),
+                    maxlength: "96",
+                    pattern: "[A-Za-z0-9_.-]+",
+                    placeholder: "pick-place-v1",
+                    oninput: move |event| selected_dataset.set(event.value()),
+                }
+            }
+            datalist { id: "live-dataset-options",
+                for id in dataset_ids { option { value: "{id}" } }
+            }
+            p {
+                if recording.is_some() {
+                    "Dataset assignment is locked until this episode finishes."
+                } else {
+                    "Record creates an episode in this dataset; import and Training use the same selection."
                 }
             }
         }

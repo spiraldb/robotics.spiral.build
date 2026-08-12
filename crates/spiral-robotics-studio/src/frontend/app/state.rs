@@ -12,6 +12,9 @@ use spiral_robotics_core::urdf::{SO101_URDF, Urdf, UrdfError};
 
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
 use crate::frontend::api::http::{self as api, StudioEvent};
+use crate::frontend::app::notifications::{
+    MessageAction, MessageSeverity, MessageSource, NotificationCenterState,
+};
 use crate::frontend::panels::timeline::signals::SignalStore;
 
 /// The robot description the studio poses, draws, and measures from.
@@ -30,67 +33,6 @@ pub(crate) fn use_description() -> Description {
 /// Read the shared robot description from context.
 pub(crate) fn description() -> Description {
     use_context::<Description>()
-}
-
-/// A short message shown to the operator after an action.
-///
-/// A notice carries its own expiry rather than leaving one to whoever renders
-/// it: every one of these used to sit on the bench until it was dismissed by
-/// hand, and "Episode saved." was still on screen forty takes later. Putting
-/// the deadline in the value means a notice cannot be created without one.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Notice {
-    pub text: String,
-    pub failed: bool,
-    /// Wall-clock milliseconds after which this notice comes off the page.
-    pub until_ms: f64,
-    /// The episode this notice is about, when there is somewhere to go.
-    ///
-    /// "Episode saved." named nothing and led nowhere, so the operator's only
-    /// route from a finished take to that take was to switch activity and
-    /// recognize their own recording in a list. A notice that reports an
-    /// episode should be able to hand it over.
-    pub view_episode: Option<String>,
-}
-
-impl Notice {
-    pub(crate) fn new(text: impl Into<String>, failed: bool) -> Self {
-        let text = text.into();
-        let until_ms = now_ms() + f64::from(linger_ms(&text, failed));
-        Self {
-            text,
-            failed,
-            until_ms,
-            view_episode: None,
-        }
-    }
-
-    /// A success notice that can hand its episode to the Data activity.
-    pub(crate) fn about_episode(text: impl Into<String>, episode: impl Into<String>) -> Self {
-        Self {
-            view_episode: Some(episode.into()),
-            ..Self::new(text, false)
-        }
-    }
-
-    /// True once `now` has passed this notice's deadline.
-    ///
-    /// Only the browser's clock loop asks; the server build never raises a
-    /// notice, so it never has one to age out.
-    #[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
-    fn expired(&self, now: f64) -> bool {
-        now >= self.until_ms
-    }
-}
-
-/// How long a notice stays up, scaled to how much there is to read.
-///
-/// A confirmation the operator glances at should not outlive the glance, and a
-/// failure they have to act on should not vanish mid-sentence — so the floor
-/// differs and the length is paid for either way.
-fn linger_ms(text: &str, failed: bool) -> u32 {
-    let reading = 3_500 + (text.chars().count() as u32) * 55;
-    reading.clamp(if failed { 8_000 } else { 4_000 }, 14_000)
 }
 
 fn now_ms() -> f64 {
@@ -181,7 +123,9 @@ pub(crate) struct Studio {
     /// Wall-clock time of the last valid event and a periodically updated clock.
     pub last_event_ms: Signal<f64>,
     pub clock_ms: Signal<f64>,
-    pub notice: Signal<Option<Notice>>,
+    /// Session-level command outcomes and recoverable failures. Panels keep
+    /// durable domain state; this queue owns cross-route operator messages.
+    pub notifications: Signal<NotificationCenterState>,
     /// The entity every view is currently showing and editing.
     pub selected: Signal<Option<Selection>>,
     /// What the pointer is over, wherever it is.
@@ -197,6 +141,9 @@ pub(crate) struct Studio {
     /// the joint inspector somewhere else, because judging a take and watching
     /// the arm that produced it are the same gesture.
     pub selected_episode: Signal<Option<String>>,
+    /// Dataset row used by capture, import, Data filtering, and new Training
+    /// runs. This is distinct from the configured Spiral namespace.
+    pub selected_dataset: Signal<String>,
     /// Joint angles for the take being recorded, or the last one recorded.
     ///
     /// Filled from the event stream rather than from the panel that draws it:
@@ -219,10 +166,11 @@ impl Studio {
         let live = use_signal(|| false);
         let last_event_ms = use_signal(|| 0.0);
         let clock_ms = use_signal(|| 0.0);
-        let notice = use_signal(|| None);
+        let notifications = use_signal(NotificationCenterState::default);
         let selected = use_signal(|| None);
         let pointed = use_signal(|| None);
         let selected_episode = use_signal(|| None);
+        let selected_dataset = use_signal(|| "default".to_owned());
         let recording_signals = use_signal(SignalStore::default);
         let studio = use_context_provider(|| Self {
             snapshot,
@@ -234,10 +182,11 @@ impl Studio {
             // Keep the server's first render identical to the browser's first
             // render; the browser clock starts with the client tasks below.
             clock_ms,
-            notice,
+            notifications,
             selected,
             pointed,
             selected_episode,
+            selected_dataset,
             recording_signals,
         });
         let mut default_selection = studio.selected;
@@ -298,24 +247,15 @@ impl Studio {
             }
         });
 
-        // The clock the studio measures staleness against, and the one place a
-        // notice is taken back off the page. Expiring it here rather than from
-        // the component that draws it means every notice ages the same way, no
-        // matter which panel raised it.
+        // The clock the studio measures staleness and message prominence
+        // against. Notification history does not expire; only its compact
+        // status-bar preview does.
         #[cfg(all(feature = "web", target_arch = "wasm32"))]
         use_future(move || async move {
-            let mut notice = studio.notice;
             loop {
                 gloo_timers::future::TimeoutFuture::new(250).await;
                 let now = js_sys::Date::now();
                 studio.clock_ms.set(now);
-                if notice
-                    .peek()
-                    .as_ref()
-                    .is_some_and(|current| current.expired(now))
-                {
-                    notice.set(None);
-                }
             }
         });
 
@@ -496,31 +436,71 @@ impl Studio {
     where
         F: Future<Output = Result<(), String>> + 'static,
     {
-        let mut notice = self.notice;
+        let studio = *self;
         let success = success.into();
         // Commands are consequences owned by the Studio session, not by the
         // button or activity that happened to launch them. Activity switches
         // unmount views, so keep accepted commands alive until the backend
-        // answers and report their outcome through session-owned notices.
+        // answers and report their outcome through session-owned messages.
         dioxus::dioxus_core::spawn_forever(async move {
             match future.await {
                 Ok(()) if success.is_empty() => {}
-                Ok(()) => notice.set(Some(Notice::new(success, false))),
-                Err(error) => notice.set(Some(Notice::new(error, true))),
+                Ok(()) => studio.report_success(success),
+                Err(error) => studio.report(error),
             }
         });
     }
 
     /// Report a problem the UI detected on its own.
     pub(crate) fn report(&self, message: impl Into<String>) {
-        let mut notice = self.notice;
-        notice.set(Some(Notice::new(message, true)));
+        self.report_from(MessageSource::Studio, message);
     }
 
     /// Confirm a completed browser-side utility action.
     pub(crate) fn report_success(&self, message: impl Into<String>) {
-        let mut notice = self.notice;
-        notice.set(Some(Notice::new(message, false)));
+        self.report_success_from(MessageSource::Studio, message);
+    }
+
+    pub(crate) fn report_from(&self, source: MessageSource, message: impl Into<String>) {
+        self.push_message(message, MessageSeverity::Error, source, None);
+    }
+
+    pub(crate) fn report_success_from(&self, source: MessageSource, message: impl Into<String>) {
+        self.push_message(message, MessageSeverity::Success, source, None);
+    }
+
+    pub(crate) fn report_info_from(&self, source: MessageSource, message: impl Into<String>) {
+        self.push_message(message, MessageSeverity::Info, source, None);
+    }
+
+    pub(crate) fn report_warning_from(&self, source: MessageSource, message: impl Into<String>) {
+        self.push_message(message, MessageSeverity::Warning, source, None);
+    }
+
+    pub(crate) fn report_episode_success(
+        &self,
+        message: impl Into<String>,
+        episode: impl Into<String>,
+    ) {
+        self.push_message(
+            message,
+            MessageSeverity::Success,
+            MessageSource::Live,
+            Some(MessageAction::OpenEpisode(episode.into())),
+        );
+    }
+
+    pub(crate) fn push_message(
+        &self,
+        message: impl Into<String>,
+        severity: MessageSeverity,
+        source: MessageSource,
+        action: Option<MessageAction>,
+    ) {
+        let mut notifications = self.notifications;
+        notifications
+            .write()
+            .push(message, severity, source, action, now_ms());
     }
 }
 
@@ -534,7 +514,7 @@ mod tests {
     use spiral_robotics_core::api::{ConnectionStatus, MotorLimits, MotorSummary, RobotSummary};
     use spiral_robotics_core::calibration::Direction;
 
-    use super::{Notice, Selection, default_joint_selection, linger_ms};
+    use super::{Selection, default_joint_selection};
 
     fn robot(id: &str, motors: &[&str]) -> RobotSummary {
         RobotSummary {
@@ -559,33 +539,6 @@ mod tests {
             problem: None,
             connection: ConnectionStatus::default(),
         }
-    }
-
-    #[test]
-    fn a_notice_stays_up_long_enough_to_read_and_no_longer() {
-        let glance = linger_ms("Episode saved.", false);
-        let sentence = linger_ms(
-            "Recording cancelled. The episode remains on disk but will not be exported.",
-            false,
-        );
-
-        assert!((4_000..=5_000).contains(&glance), "{glance}");
-        assert!(sentence > glance, "longer messages get longer to read");
-        // A failure asks for a decision, so it gets a floor of its own even
-        // when it is short.
-        assert!(linger_ms("Failed.", true) >= 8_000);
-        // And nothing sits on the bench forever, which is what having no
-        // deadline at all amounted to.
-        assert_eq!(linger_ms(&"x".repeat(400), false), 14_000);
-    }
-
-    #[test]
-    fn a_notice_comes_off_the_page_on_its_own() {
-        let notice = Notice::new("Episode saved.", false);
-
-        assert!(!notice.expired(0.0), "it is up the moment it is raised");
-        assert!(!notice.expired(notice.until_ms - 1.0));
-        assert!(notice.expired(notice.until_ms));
     }
 
     #[test]

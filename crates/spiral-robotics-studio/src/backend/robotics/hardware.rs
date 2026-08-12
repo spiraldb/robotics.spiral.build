@@ -2303,6 +2303,7 @@ impl Controller {
                     let now = Instant::now();
                     RecordingProgress {
                         episode: recording.writer.id().to_owned(),
+                        dataset_id: recording.writer.dataset_id().to_owned(),
                         frames: recording.frames,
                         elapsed_seconds: recording.active_elapsed(now).as_secs_f64(),
                         wall_elapsed_seconds: now.duration_since(recording.started).as_secs_f64(),

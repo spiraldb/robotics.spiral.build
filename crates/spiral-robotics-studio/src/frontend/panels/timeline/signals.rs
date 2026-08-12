@@ -232,6 +232,7 @@ mod tests {
                 .collect(),
             recording: episode.map(|episode| RecordingProgress {
                 episode: episode.to_owned(),
+                dataset_id: "default".to_owned(),
                 frames: 1,
                 elapsed_seconds: elapsed,
                 wall_elapsed_seconds: elapsed,

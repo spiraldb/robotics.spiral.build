@@ -77,11 +77,25 @@ struct ImportedFrame {
 }
 
 /// Export every complete, non-cancelled episode as a LeRobot v3 ZIP.
+#[cfg(test)]
 pub(crate) fn export_lerobot_archive(store: &EpisodeStore) -> Result<DatasetArchive, EpisodeError> {
+    export_lerobot_archive_for_dataset(store, None)
+}
+
+/// Export complete episodes assigned to one dataset. `None` preserves the
+/// legacy all-episodes boundary for CLI/tests that have not selected a set.
+pub(crate) fn export_lerobot_archive_for_dataset(
+    store: &EpisodeStore,
+    dataset_id: Option<&str>,
+) -> Result<DatasetArchive, EpisodeError> {
     let listed = store.list();
     let candidates = listed
         .iter()
-        .filter(|episode| episode.usable() && !episode.discarded)
+        .filter(|episode| {
+            episode.usable()
+                && !episode.discarded
+                && dataset_id.is_none_or(|dataset_id| episode.dataset_id == dataset_id)
+        })
         .collect::<Vec<_>>();
     if candidates.is_empty() {
         return Err(invalid("there are no recorded episodes to download"));
@@ -293,9 +307,18 @@ pub(crate) fn export_lerobot_archive(store: &EpisodeStore) -> Result<DatasetArch
 }
 
 /// Import a zipped LeRobot v2/v3 dataset into the local episode workspace.
+#[cfg(test)]
 pub(crate) fn import_lerobot_archive(
     store: &EpisodeStore,
     bytes: &[u8],
+) -> Result<ImportResponse, EpisodeError> {
+    import_lerobot_archive_into_dataset(store, bytes, "default")
+}
+
+pub(crate) fn import_lerobot_archive_into_dataset(
+    store: &EpisodeStore,
+    bytes: &[u8],
+    dataset_id: &str,
 ) -> Result<ImportResponse, EpisodeError> {
     let mut archive = ZipArchive::new(Cursor::new(bytes))
         .map_err(|error| invalid(format!("the selected file is not a readable ZIP: {error}")))?;
@@ -403,7 +426,8 @@ pub(crate) fn import_lerobot_archive(
         if frames.is_empty() {
             continue;
         }
-        let writer = store.begin(
+        let writer = store.begin_in_dataset(
+            dataset_id.to_owned(),
             "Imported — LeRobot dataset".to_owned(),
             Some("Imported from a LeRobot ZIP".to_owned()),
             fps,

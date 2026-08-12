@@ -38,6 +38,14 @@ pub(crate) fn episode_exists(relation: &str, episode_id: &str) -> String {
     )
 }
 
+pub(crate) fn dataset_exists(relation: &str, dataset_id: &str) -> String {
+    format!(
+        "SELECT {dataset_id_column} FROM {relation} WHERE {dataset_id_column} = {dataset_id} LIMIT 1",
+        dataset_id_column = column::DATASET_ID,
+        dataset_id = string_literal(dataset_id),
+    )
+}
+
 pub(crate) fn delete_episode(relation: &str, episode_id: &str) -> String {
     format!(
         "DELETE FROM {relation} WHERE {} = {}",

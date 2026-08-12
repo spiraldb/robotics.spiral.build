@@ -1,4 +1,4 @@
-//! Backend-owned data destination settings and secrets.
+//! Backend-owned data destination settings.
 
 use std::fs;
 use std::io::Write as _;
@@ -7,7 +7,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 use spiral_robotics_core::api::{
-    DataSettings, HuggingFaceSettings, SpiralSettings, UpdateDataSettingsRequest, VideoSettings,
+    DataSettings, SpiralSettings, UpdateDataSettingsRequest, VideoSettings,
 };
 use spiral_robotics_core::spiral;
 
@@ -17,8 +17,6 @@ const SETTINGS_FILE: &str = ".spiral-robotics-data-settings.json";
 pub(crate) struct StoredDataSettings {
     #[serde(default)]
     pub spiral: StoredSpiralSettings,
-    #[serde(default)]
-    pub hugging_face: StoredHuggingFaceSettings,
     #[serde(default)]
     pub video: VideoSettings,
 }
@@ -59,29 +57,6 @@ impl StoredSpiralSettings {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct StoredHuggingFaceSettings {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub repository: String,
-    #[serde(default = "default_revision")]
-    pub revision: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
-}
-
-impl Default for StoredHuggingFaceSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            repository: String::new(),
-            revision: default_revision(),
-            token: None,
-        }
-    }
-}
-
 impl StoredDataSettings {
     pub(crate) fn public(&self) -> DataSettings {
         DataSettings {
@@ -91,19 +66,13 @@ impl StoredDataSettings {
                 project_id: self.spiral.project_id.clone(),
                 dataset: self.spiral.dataset.clone(),
             },
-            hugging_face: HuggingFaceSettings {
-                enabled: self.hugging_face.enabled,
-                repository: self.hugging_face.repository.clone(),
-                revision: self.hugging_face.revision.clone(),
-                has_token: self.hugging_face.token.is_some(),
-            },
             video: self.video.clone(),
         }
     }
 }
 
 /// The settings file lives beside the recovery spool and is readable only by
-/// the backend account. No API returns a stored token.
+/// the backend account.
 pub(crate) struct DataSettingsStore {
     path: PathBuf,
     current: Mutex<StoredDataSettings>,
@@ -115,8 +84,18 @@ impl DataSettingsStore {
         let current = if path.exists() {
             let bytes = fs::read(&path)
                 .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-            serde_json::from_slice(&bytes)
-                .map_err(|error| format!("could not parse {}: {error}", path.display()))?
+            let mut document = serde_json::from_slice::<serde_json::Value>(&bytes)
+                .map_err(|error| format!("could not parse {}: {error}", path.display()))?;
+            let removed_legacy_hugging_face = document
+                .as_object_mut()
+                .and_then(|object| object.remove("hugging_face"))
+                .is_some();
+            let current = serde_json::from_value(document)
+                .map_err(|error| format!("could not parse {}: {error}", path.display()))?;
+            if removed_legacy_hugging_face {
+                write_private_json(&path, &current)?;
+            }
+            current
         } else {
             StoredDataSettings::default()
         };
@@ -142,21 +121,7 @@ impl DataSettingsStore {
         staged.spiral.project_id = update.spiral.project_id.trim().to_owned();
         staged.spiral.dataset = update.spiral.dataset.trim().to_owned();
         staged.spiral.enabled = staged.spiral.configured();
-        staged.hugging_face.enabled = update.hugging_face.enabled;
-        staged.hugging_face.repository = update.hugging_face.repository.trim().to_owned();
-        staged.hugging_face.revision = update.hugging_face.revision.trim().to_owned();
         staged.video = update.video;
-
-        if update.clear_hugging_face_token {
-            staged.hugging_face.token = None;
-        } else if let Some(token) = nonempty_secret(update.hugging_face_token) {
-            staged.hugging_face.token = Some(token);
-        }
-        if staged.hugging_face.enabled && staged.hugging_face.token.is_none() {
-            return Err(
-                "Hugging Face publishing is enabled but no write token is stored".to_owned(),
-            );
-        }
 
         // Publish to disk before replacing the in-memory value. A failed disk
         // write must not make the running backend claim settings it cannot
@@ -177,19 +142,6 @@ fn validate_update(update: &UpdateDataSettingsRequest) -> Result<(), String> {
         }
         validate_dataset_identifier(&update.spiral.dataset)?;
     }
-    if update.hugging_face.enabled {
-        let repo = update.hugging_face.repository.trim();
-        let mut parts = repo.split('/');
-        if parts.next().is_none_or(str::is_empty)
-            || parts.next().is_none_or(str::is_empty)
-            || parts.next().is_some()
-        {
-            return Err("Hugging Face repository must use owner/name".to_owned());
-        }
-        if update.hugging_face.revision.trim().is_empty() {
-            return Err("Hugging Face revision cannot be empty".to_owned());
-        }
-    }
     Ok(())
 }
 
@@ -197,7 +149,7 @@ fn validate_dataset_identifier(value: &str) -> Result<(), String> {
     let value = value.trim();
     if !spiral::is_identifier(value) {
         return Err(
-            "Spiral dataset must start with a letter or '_' and contain only letters, numbers, or '_'"
+            "Spiral namespace must start with a letter or '_' and contain only letters, numbers, or '_'"
                 .to_owned(),
         );
     }
@@ -224,13 +176,6 @@ fn validate_spiral_uri(value: &str) -> Result<(), String> {
         return Ok(());
     }
     Err("Spiral ADBC URI must be 'spiraldb://' or 'spiral:memory:'".to_owned())
-}
-
-fn nonempty_secret(value: Option<String>) -> Option<String> {
-    value.and_then(|value| {
-        let value = value.trim();
-        (!value.is_empty()).then(|| value.to_owned())
-    })
 }
 
 fn write_private_json(path: &Path, value: &StoredDataSettings) -> Result<(), String> {
@@ -264,10 +209,6 @@ fn default_dataset() -> String {
     "spiral_robotics".to_owned()
 }
 
-fn default_revision() -> String {
-    "main".to_owned()
-}
-
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
@@ -279,20 +220,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hugging_face_secrets_are_redacted_and_preserved_when_omitted() {
+    fn legacy_hugging_face_credentials_are_removed_from_disk() {
         let directory = tempfile::tempdir().unwrap();
-        let store = DataSettingsStore::open(directory.path()).unwrap();
-        let mut update = UpdateDataSettingsRequest {
-            hugging_face_token: Some("secret".to_owned()),
-            ..UpdateDataSettingsRequest::default()
-        };
-        store.update(update.clone()).unwrap();
-        assert!(store.public().hugging_face.has_token);
-        assert!(!fs::read_to_string(&store.path).unwrap().is_empty());
+        let path = directory.path().join(SETTINGS_FILE);
+        fs::write(
+            &path,
+            r#"{"hugging_face":{"enabled":true,"repository":"owner/data","revision":"main","token":"secret"}}"#,
+        )
+        .unwrap();
 
-        update.hugging_face_token = None;
-        store.update(update).unwrap();
-        assert_eq!(store.get().hugging_face.token.as_deref(), Some("secret"));
+        DataSettingsStore::open(directory.path()).unwrap();
+
+        let stored = fs::read_to_string(path).unwrap();
+        assert!(!stored.contains("hugging_face"));
+        assert!(!stored.contains("secret"));
     }
 
     #[test]
@@ -304,7 +245,7 @@ mod tests {
         update.spiral.dataset = "robot-data".to_owned();
 
         let error = validate_update(&update).unwrap_err();
-        assert!(error.contains("Spiral dataset must start"));
+        assert!(error.contains("Spiral namespace must start"));
 
         update.spiral.dataset = "robot_data_1".to_owned();
         validate_update(&update).unwrap();

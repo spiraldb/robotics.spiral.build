@@ -81,3 +81,14 @@ pub fn RolloutIcon() -> Element {
         }
     }
 }
+
+/// Session messages live behind one VS Code-style status-bar affordance.
+#[component]
+pub fn NotificationIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M3.5 11.5h9l-1.25-1.75V7a3.25 3.25 0 0 0-6.5 0v2.75L3.5 11.5Z" }
+            path { d: "M6.5 13a1.75 1.75 0 0 0 3 0" }
+        }
+    }
+}

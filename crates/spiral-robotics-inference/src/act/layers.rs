@@ -1,9 +1,11 @@
-use burn_core::module::Param;
+use burn_core as burn;
+use burn_core::module::{Module, Param};
 use burn_core::tensor::Tensor;
 use burn_core::tensor::activation::relu;
 use burn_core::tensor::backend::Backend;
+use burn_nn::LinearConfig;
 use burn_nn::attention::{MhaInput, MultiHeadAttention, MultiHeadAttentionConfig};
-use burn_nn::{LayerNorm, LayerNormConfig, Linear};
+use burn_nn::{Dropout, DropoutConfig, LayerNorm, LayerNormConfig, Linear};
 
 use crate::{Error, Result};
 
@@ -24,7 +26,8 @@ pub(super) fn load_linear<B: Backend>(
     let bias =
         weights.tensor_exact::<B, 1>(&format!("{prefix}.bias"), [output_dimensions], device)?;
     Ok(Linear {
-        // PyTorch stores [output, input], while Burn stores [input, output].
+        // Durable ACT checkpoints store [output, input], while Burn modules use
+        // [input, output].
         weight: Param::from_tensor(weight.transpose()),
         bias: Some(Param::from_tensor(bias)),
     })
@@ -57,6 +60,40 @@ fn load_attention<B: Backend>(
     heads: usize,
     device: &B::Device,
 ) -> Result<MultiHeadAttention<B>> {
+    if weights.contains(&format!("{prefix}.query.weight")) {
+        let mut attention = MultiHeadAttentionConfig::new(dimensions, heads)
+            .with_dropout(0.0)
+            .init(device);
+        attention.query = load_linear(
+            weights,
+            &format!("{prefix}.query"),
+            dimensions,
+            dimensions,
+            device,
+        )?;
+        attention.key = load_linear(
+            weights,
+            &format!("{prefix}.key"),
+            dimensions,
+            dimensions,
+            device,
+        )?;
+        attention.value = load_linear(
+            weights,
+            &format!("{prefix}.value"),
+            dimensions,
+            dimensions,
+            device,
+        )?;
+        attention.output = load_linear(
+            weights,
+            &format!("{prefix}.output"),
+            dimensions,
+            dimensions,
+            device,
+        )?;
+        return Ok(attention);
+    }
     let packed_dimensions = dimensions.checked_mul(3).ok_or_else(|| {
         Error::Checkpoint("attention projection dimensions overflow usize".to_owned())
     })?;
@@ -101,15 +138,36 @@ fn load_attention<B: Backend>(
     Ok(attention)
 }
 
+#[derive(Module, Debug)]
 pub(super) struct EncoderLayer<B: Backend> {
     attention: MultiHeadAttention<B>,
     linear1: Linear<B>,
     linear2: Linear<B>,
     norm1: LayerNorm<B>,
     norm2: LayerNorm<B>,
+    dropout: Dropout,
 }
 
 impl<B: Backend> EncoderLayer<B> {
+    pub fn init(
+        dimensions: usize,
+        heads: usize,
+        feedforward_dimensions: usize,
+        dropout: f64,
+        device: &B::Device,
+    ) -> Self {
+        Self {
+            attention: MultiHeadAttentionConfig::new(dimensions, heads)
+                .with_dropout(dropout)
+                .init(device),
+            linear1: LinearConfig::new(dimensions, feedforward_dimensions).init(device),
+            linear2: LinearConfig::new(feedforward_dimensions, dimensions).init(device),
+            norm1: LayerNormConfig::new(dimensions).init(device),
+            norm2: LayerNormConfig::new(dimensions).init(device),
+            dropout: DropoutConfig::new(dropout).init(),
+        }
+    }
+
     pub fn load(
         weights: &Weights,
         prefix: &str,
@@ -118,10 +176,14 @@ impl<B: Backend> EncoderLayer<B> {
         feedforward_dimensions: usize,
         device: &B::Device,
     ) -> Result<Self> {
+        let native = weights.contains(&format!("{prefix}.attention.query.weight"));
         Ok(Self {
             attention: load_attention(
                 weights,
-                &format!("{prefix}.self_attn"),
+                &format!(
+                    "{prefix}.{}",
+                    if native { "attention" } else { "self_attn" }
+                ),
                 dimensions,
                 heads,
                 device,
@@ -142,6 +204,7 @@ impl<B: Backend> EncoderLayer<B> {
             )?,
             norm1: load_layer_norm(weights, &format!("{prefix}.norm1"), dimensions, device)?,
             norm2: load_layer_norm(weights, &format!("{prefix}.norm2"), dimensions, device)?,
+            dropout: DropoutConfig::new(0.0).init(),
         })
     }
 
@@ -152,12 +215,14 @@ impl<B: Backend> EncoderLayer<B> {
             .attention
             .forward(MhaInput::new(query_key.clone(), query_key, x.clone()))
             .context;
-        let x = self.norm1.forward(x + attention);
-        let feedforward = self.linear2.forward(relu(self.linear1.forward(x.clone())));
-        self.norm2.forward(x + feedforward)
+        let x = self.norm1.forward(x + self.dropout.forward(attention));
+        let feedforward = self.dropout.forward(relu(self.linear1.forward(x.clone())));
+        let feedforward = self.linear2.forward(feedforward);
+        self.norm2.forward(x + self.dropout.forward(feedforward))
     }
 }
 
+#[derive(Module, Debug)]
 pub(super) struct DecoderLayer<B: Backend> {
     self_attention: MultiHeadAttention<B>,
     cross_attention: MultiHeadAttention<B>,
@@ -166,9 +231,33 @@ pub(super) struct DecoderLayer<B: Backend> {
     norm1: LayerNorm<B>,
     norm2: LayerNorm<B>,
     norm3: LayerNorm<B>,
+    dropout: Dropout,
 }
 
 impl<B: Backend> DecoderLayer<B> {
+    pub fn init(
+        dimensions: usize,
+        heads: usize,
+        feedforward_dimensions: usize,
+        dropout: f64,
+        device: &B::Device,
+    ) -> Self {
+        Self {
+            self_attention: MultiHeadAttentionConfig::new(dimensions, heads)
+                .with_dropout(dropout)
+                .init(device),
+            cross_attention: MultiHeadAttentionConfig::new(dimensions, heads)
+                .with_dropout(dropout)
+                .init(device),
+            linear1: LinearConfig::new(dimensions, feedforward_dimensions).init(device),
+            linear2: LinearConfig::new(feedforward_dimensions, dimensions).init(device),
+            norm1: LayerNormConfig::new(dimensions).init(device),
+            norm2: LayerNormConfig::new(dimensions).init(device),
+            norm3: LayerNormConfig::new(dimensions).init(device),
+            dropout: DropoutConfig::new(dropout).init(),
+        }
+    }
+
     pub fn load(
         weights: &Weights,
         prefix: &str,
@@ -177,17 +266,32 @@ impl<B: Backend> DecoderLayer<B> {
         feedforward_dimensions: usize,
         device: &B::Device,
     ) -> Result<Self> {
+        let native = weights.contains(&format!("{prefix}.self_attention.query.weight"));
         Ok(Self {
             self_attention: load_attention(
                 weights,
-                &format!("{prefix}.self_attn"),
+                &format!(
+                    "{prefix}.{}",
+                    if native {
+                        "self_attention"
+                    } else {
+                        "self_attn"
+                    }
+                ),
                 dimensions,
                 heads,
                 device,
             )?,
             cross_attention: load_attention(
                 weights,
-                &format!("{prefix}.multihead_attn"),
+                &format!(
+                    "{prefix}.{}",
+                    if native {
+                        "cross_attention"
+                    } else {
+                        "multihead_attn"
+                    }
+                ),
                 dimensions,
                 heads,
                 device,
@@ -209,6 +313,7 @@ impl<B: Backend> DecoderLayer<B> {
             norm1: load_layer_norm(weights, &format!("{prefix}.norm1"), dimensions, device)?,
             norm2: load_layer_norm(weights, &format!("{prefix}.norm2"), dimensions, device)?,
             norm3: load_layer_norm(weights, &format!("{prefix}.norm3"), dimensions, device)?,
+            dropout: DropoutConfig::new(0.0).init(),
         })
     }
 
@@ -224,7 +329,7 @@ impl<B: Backend> DecoderLayer<B> {
             .self_attention
             .forward(MhaInput::new(query_key.clone(), query_key, x.clone()))
             .context;
-        let x = self.norm1.forward(x + self_attention);
+        let x = self.norm1.forward(x + self.dropout.forward(self_attention));
 
         let cross_attention = self
             .cross_attention
@@ -234,9 +339,12 @@ impl<B: Backend> DecoderLayer<B> {
                 encoder.clone(),
             ))
             .context;
-        let x = self.norm2.forward(x + cross_attention);
+        let x = self
+            .norm2
+            .forward(x + self.dropout.forward(cross_attention));
 
-        let feedforward = self.linear2.forward(relu(self.linear1.forward(x.clone())));
-        self.norm3.forward(x + feedforward)
+        let feedforward = self.dropout.forward(relu(self.linear1.forward(x.clone())));
+        let feedforward = self.linear2.forward(feedforward);
+        self.norm3.forward(x + self.dropout.forward(feedforward))
     }
 }

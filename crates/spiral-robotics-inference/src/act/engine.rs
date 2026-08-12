@@ -14,7 +14,6 @@ use super::weights::Weights;
 
 const NORMALIZATION_EPSILON: f32 = 1.0e-8;
 
-#[cfg(feature = "cpu")]
 pub type CpuActPolicy = ActPolicy<burn_ndarray::NdArray<f32>>;
 
 #[cfg(feature = "metal")]
@@ -40,12 +39,10 @@ fn ensure_metal_available() -> Result<()> {
 }
 
 /// Load ACT with the portable CPU runtime.
-#[cfg(feature = "cpu")]
 pub fn load_cpu(files: &ModelFiles) -> Result<CpuActPolicy> {
     ActPolicy::load(files, Default::default())
 }
 
-#[cfg(feature = "cpu")]
 pub fn load_cpu_artifact(artifact: ModelArtifact) -> Result<CpuActPolicy> {
     ActPolicy::from_artifact(artifact, Default::default())
 }

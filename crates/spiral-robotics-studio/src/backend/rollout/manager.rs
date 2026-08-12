@@ -20,6 +20,7 @@ use crate::backend::robotics::cameras::{CameraManager, Frame};
 use crate::backend::robotics::hardware::HardwareHandle;
 use crate::backend::robots::workspace::RobotWorkspace;
 use crate::backend::storage::manager::{StorageManager, TrainingCheckpointArtifact};
+use crate::backend::training::{ACT_ARTIFACT_FORMAT, ACT_TENSOR_NAMESPACE};
 
 const INPUT_STALE_AFTER: Duration = Duration::from_millis(350);
 const INITIAL_CAMERA_TIMEOUT: Duration = Duration::from_secs(5);
@@ -523,9 +524,9 @@ fn validate_manifest(
     request: &StartRolloutRequest,
     config: &[u8],
 ) -> Result<(), String> {
-    if manifest.format != "spiral_robotics.act.safetensors.v2"
+    if manifest.format != ACT_ARTIFACT_FORMAT
         || manifest.artifact != "inference"
-        || manifest.tensor_namespace != "lerobot_act_state_dict"
+        || manifest.tensor_namespace != ACT_TENSOR_NAMESPACE
     {
         return Err("checkpoint is not a native Spiral ACT inference artifact".to_owned());
     }
@@ -706,8 +707,10 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CameraInput, INPUT_STALE_AFTER, camera_matches, require_fresh_cameras, validate_request,
+        ArtifactDataContract, ArtifactManifest, CameraInput, INPUT_STALE_AFTER, camera_matches,
+        require_fresh_cameras, validate_manifest, validate_request,
     };
+    use crate::backend::training::{ACT_ARTIFACT_FORMAT, ACT_TENSOR_NAMESPACE};
     use bytes::Bytes;
     use spiral_robotics_core::api::StartRolloutRequest;
     use std::sync::Arc;
@@ -732,6 +735,33 @@ mod tests {
         assert!(validate_request(&request).is_ok());
         request.control_rate_hz = 101;
         assert!(validate_request(&request).is_err());
+    }
+
+    #[test]
+    fn rollout_accepts_the_native_training_artifact_contract() {
+        let model_config = serde_json::json!({"type": "act"});
+        let request = StartRolloutRequest {
+            run_id: "run-1".to_owned(),
+            checkpoint_step: 10,
+            robot: "follower".to_owned(),
+            action_steps: 4,
+            control_rate_hz: 30,
+        };
+        let manifest = ArtifactManifest {
+            format: ACT_ARTIFACT_FORMAT.to_owned(),
+            artifact: "inference".to_owned(),
+            run_id: request.run_id.clone(),
+            step: request.checkpoint_step,
+            data_contract: ArtifactDataContract {
+                robot_type: "so101_follower".to_owned(),
+                joint_names: vec!["shoulder".to_owned()],
+                camera_streams: vec!["wrist".to_owned()],
+            },
+            model_config: model_config.clone(),
+            tensor_namespace: ACT_TENSOR_NAMESPACE.to_owned(),
+        };
+        let config = serde_json::to_vec(&model_config).unwrap();
+        assert!(validate_manifest(&manifest, &request, &config).is_ok());
     }
 
     #[test]

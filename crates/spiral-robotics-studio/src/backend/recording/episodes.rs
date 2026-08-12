@@ -26,7 +26,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use spiral_robotics_core::api::{
-    EpisodeArm, EpisodeSummary, ExportResponse, MotorLimits, RecordingGap,
+    EpisodeArm, EpisodeSummary, ExportResponse, MotorLimits, RecordingGap, default_dataset_id,
 };
 use spiral_robotics_core::arm::SO101_JOINTS;
 
@@ -119,6 +119,8 @@ struct Header {
     /// Format version, so a later reader can refuse what it cannot parse.
     spiral_robotics_episode: u32,
     id: String,
+    #[serde(default = "default_dataset_id")]
+    dataset_id: String,
     started_ms: i64,
     sample_hz: f64,
     /// The mode that produced the take, in the studio's own words.
@@ -244,6 +246,7 @@ pub(crate) struct Sample {
 #[derive(Clone, Debug)]
 pub(crate) struct EpisodeStart {
     pub id: String,
+    pub dataset_id: String,
     pub started_ms: i64,
     pub sample_hz: f64,
     pub source: String,
@@ -262,13 +265,12 @@ pub(crate) struct EpisodeCompletion {
     pub condition: Vec<ArmConditionSummary>,
 }
 
-/// A finished local recovery copy, ready for an external publisher.
+/// A finished local recovery copy, ready for ingestion into SpiralDB.
 #[derive(Clone, Debug)]
 pub(crate) struct CompletedEpisode {
     pub start: EpisodeStart,
     pub samples: Vec<Sample>,
     pub completion: EpisodeCompletion,
-    pub path: PathBuf,
 }
 
 /// What a take's file looked like when it was last read.
@@ -579,6 +581,7 @@ impl EpisodeStore {
         Ok(CompletedEpisode {
             start: EpisodeStart {
                 id: header.id,
+                dataset_id: header.dataset_id,
                 started_ms: header.started_ms,
                 sample_hz: header.sample_hz,
                 source: header.source,
@@ -594,7 +597,6 @@ impl EpisodeStore {
                 discarded: footer.discarded,
                 condition: footer.condition,
             },
-            path,
         })
     }
 
@@ -619,8 +621,29 @@ impl EpisodeStore {
     }
 
     /// Start writing a take, returning the writer the control loop feeds.
+    #[cfg(test)]
     pub(crate) fn begin(
         &self,
+        source: String,
+        note: Option<String>,
+        sample_hz: f64,
+        arms: Vec<EpisodeArm>,
+        condition: Vec<ArmCondition>,
+    ) -> Result<EpisodeWriter, EpisodeError> {
+        self.begin_in_dataset(
+            default_dataset_id(),
+            source,
+            note,
+            sample_hz,
+            arms,
+            condition,
+        )
+    }
+
+    /// Start writing a take already assigned to one relational dataset.
+    pub(crate) fn begin_in_dataset(
+        &self,
+        dataset_id: String,
         source: String,
         note: Option<String>,
         sample_hz: f64,
@@ -642,6 +665,7 @@ impl EpisodeStore {
         let started_ms = unix_millis();
         let start = EpisodeStart {
             id: id.clone(),
+            dataset_id,
             started_ms,
             sample_hz,
             source,
@@ -652,6 +676,7 @@ impl EpisodeStore {
         let header = Header {
             spiral_robotics_episode: FORMAT_VERSION,
             id: start.id.clone(),
+            dataset_id: start.dataset_id.clone(),
             started_ms: start.started_ms,
             sample_hz: start.sample_hz,
             source: start.source.clone(),
@@ -1389,6 +1414,10 @@ impl EpisodeWriter {
         &self.session.start().id
     }
 
+    pub(crate) fn dataset_id(&self) -> &str {
+        &self.session.start().dataset_id
+    }
+
     pub(crate) fn started_ms(&self) -> i64 {
         self.session.start().started_ms
     }
@@ -1719,6 +1748,7 @@ fn read_summary(path: &Path, kind: FileKind) -> Result<EpisodeSummary, EpisodeEr
 
     Ok(EpisodeSummary {
         id: header.id,
+        dataset_id: header.dataset_id,
         file: file_name,
         arms: header.arms,
         frames,
@@ -2009,6 +2039,31 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert!(listed[0].usable(), "an older take is still a usable take");
         assert_eq!(listed[0].frames, 1);
+        assert_eq!(listed[0].dataset_id, "default");
+    }
+
+    #[test]
+    fn a_take_keeps_its_dataset_assignment_across_reload() {
+        let (_directory, store) = store();
+        let writer = store
+            .begin_in_dataset(
+                "pick-place".to_owned(),
+                "Teleoperation".to_owned(),
+                Some("red block".to_owned()),
+                60.0,
+                arms(),
+                Vec::new(),
+            )
+            .expect("begin take");
+        writer
+            .finish(0.0, Vec::new(), None, false, Vec::new())
+            .expect("finish take");
+        store.reload().expect("reload");
+
+        let episode = store.list().pop().expect("episode");
+        assert_eq!(episode.dataset_id, "pick-place");
+        let header = store.completed(&episode.id).expect("load episode").start;
+        assert_eq!(header.dataset_id, "pick-place");
     }
 
     #[test]

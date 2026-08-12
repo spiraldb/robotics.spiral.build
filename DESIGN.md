@@ -857,13 +857,13 @@ by joint name, and crosshair/focus changes emphasis without changing layout.
 Training is a curve-first operating instrument, not a collection of dashboard
 cards. The dominant learning curve answers whether the policy is improving;
 configuration and run history occupy the workbench, while the data path and
-resource lanes explain whether the input pipeline and machine are feeding it.
+throughput lanes explain whether the input pipeline and optimizer are moving.
 
-- **Shared step axis:** Learning traces, resource lanes, checkpoints,
+- **Shared step axis:** Learning traces, throughput lanes, checkpoints,
   validation, and loader events use optimizer step as one common horizontal
   identity. A marker keeps the same step everywhere so an operator can relate a
   loss change to the system condition that accompanied it.
-- **Flat lanes:** Data-path stages and resource series are content within
+- **Flat lanes:** Data-path stages and throughput series are content within
   ordinary panels, separated by rhythm and hairlines. They do not introduce
   nested cards, decorative containers, or resting elevation.
 - **Charts:** Grids, polylines, baselines, and markers are code-native SVG with
@@ -874,14 +874,14 @@ resource lanes explain whether the input pipeline and machine are feeding it.
   first optimizer step. They never draw synthetic telemetry. Unavailable or
   locked actions remain visible and disabled beside the blocker or active-run
   context, while Stop remains reachable for the run in progress. Readiness is
-  the backend's combined PyTorch-and-hosted-Spiral probe, not an inference made
+  the backend's combined Burn-runtime-and-hosted-Spiral probe, not an inference made
   from settings in the browser. A failed run keeps its terminal reason and the
-  latest worker log lines visible in the workbench.
+  latest training log lines visible in the workbench.
 - **Owned data path:** The four stages shown are the actual boundaries: Rust
-  Spiral ADBC query, bounded Arrow IPC queue, Python tensor/model compute, and
-  Rust checkpoint ingest. Transfer rate and queue depth are measured values;
-  the bounded Rust loader validates native Arrow lists and presents fixed-width
-  float32 vectors to Python.
+  Spiral ADBC query, Arrow image/action buffers, Burn tensor/model compute, and
+  Rust checkpoint ingest. Tensor and optimizer throughput are measured values;
+  the Rust loader validates native Arrow tensor structs and packs fixed-shape
+  float32 buffers directly for Burn.
 - **Terse operating copy:** Panel tabs name the regions, so their contents do
   not repeat those names with explanatory headlines. Configuration uses field
   labels, run state uses measured facts, and the SQL plus column mapping stays
@@ -955,8 +955,7 @@ ambient browser selection—decides whether execution may begin.
   recording state.
 - **Push semantics:** Local rows expose Push, failed SpiralDB attempts expose
   Retry, and Synced rows need no redundant action. Push/Retry targets only the
-  configured SpiralDB destination; unrelated Hugging Face activity cannot
-  change the row's SpiralDB state. Removing a Synced row deletes only its local
+  configured SpiralDB destination. Removing a Synced row deletes only its local
   copy and leaves the persisted SpiralDB episode intact.
 - **Form decision:** This is an incumbent-surface extension, exempt from a
   concept roll because the operator explicitly retained the existing ordered
@@ -965,16 +964,14 @@ ambient browser selection—decides whether execution may begin.
   Data workbench. Results render as the active sibling tab beside the preserved
   Scene and may synchronize the selected episode/playhead.
 - **Destination state:** SpiralDB becomes active when its required configuration
-  is complete; do not add a redundant enable switch. Hugging Face remains an
-  explicit optional mirror.
+  is complete; do not add a redundant enable switch.
 
 ### Settings
 
 Settings is one Codex-style modal: category navigation at left, ordinary forms
 at right, header and footer fixed. Robots is the default section, followed by
-SpiralDB, Hugging Face, and Video. Secrets are entered but never echoed back;
-test results and configuration blockers are rendered beside the responsible
-section.
+SpiralDB and Video. Test results and configuration blockers are rendered beside
+the responsible section.
 
 ### Inputs / Fields
 

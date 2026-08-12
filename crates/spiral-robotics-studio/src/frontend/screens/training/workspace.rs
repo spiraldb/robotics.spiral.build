@@ -4,6 +4,8 @@
 //! stops runs through the backend, then renders only metrics received from the
 //! Studio event stream; no training lifecycle is inferred in the browser.
 
+use std::collections::BTreeSet;
+
 use dioxus::prelude::*;
 use spiral_robotics_core::api::{
     TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase,
@@ -11,6 +13,7 @@ use spiral_robotics_core::api::{
 use spiral_robotics_core::spiral::{self, Table};
 use spiral_robotics_panels::{LayoutNode, Panel, PanelLayout, PanelWorkspace, SplitAxis};
 
+use crate::frontend::app::notifications::MessageSource;
 use crate::frontend::app::state::studio;
 use crate::frontend::screens::training::state::training_controller;
 
@@ -21,6 +24,7 @@ const CHART_BOTTOM: f64 = 242.0;
 #[component]
 pub(crate) fn TrainingWorkspace(dataset: String) -> Element {
     let studio = studio();
+    let dataset_id = studio.selected_dataset.read().clone();
     let controller = training_controller();
     let snapshot = studio.training.read().clone();
     let active_run = snapshot.active_run().cloned();
@@ -29,8 +33,20 @@ pub(crate) fn TrainingWorkspace(dataset: String) -> Element {
         .as_ref()
         .and_then(|id| snapshot.runs.iter().find(|run| &run.id == id))
         .or(active_run.as_ref())
-        .or_else(|| snapshot.runs.first())
         .cloned();
+    let readiness_notice = (!snapshot.readiness.ready
+        && !snapshot.readiness.summary.starts_with("Checking "))
+    .then(|| training_readiness_guidance(&snapshot.readiness).0);
+    use_effect(use_reactive((&readiness_notice,), move |(notice,)| {
+        let Some(notice) = notice else { return };
+        if !studio
+            .notifications
+            .read()
+            .contains(MessageSource::Training, &notice)
+        {
+            studio.report_warning_from(MessageSource::Training, notice);
+        }
+    }));
 
     let workbench = Panel::new(
         "training-workbench",
@@ -38,7 +54,8 @@ pub(crate) fn TrainingWorkspace(dataset: String) -> Element {
         "training-workbench",
         rsx! {
             TrainingRunBuilder {
-                dataset: dataset.clone(),
+                namespace: dataset.clone(),
+                dataset_id: dataset_id.clone(),
                 readiness: snapshot.readiness.clone(),
                 active_run: active_run.clone(),
                 viewed_run: viewed_run.clone(),
@@ -58,17 +75,17 @@ pub(crate) fn TrainingWorkspace(dataset: String) -> Element {
         "training-data-path",
         "Data path",
         "training-data",
-        rsx! { TrainingDataPath { dataset: dataset.clone(), run: viewed_run.clone() } },
+        rsx! { TrainingDataPath { namespace: dataset.clone(), dataset_id: dataset_id.clone(), run: viewed_run.clone() } },
     )
     .with_class("training-data-editor");
-    let resources = Panel::new(
+    let throughput = Panel::new(
         "training-resources",
-        "Resources",
+        "Throughput",
         "training-resources",
-        rsx! { TrainingResources { run: viewed_run } },
+        rsx! { TrainingThroughput { run: viewed_run } },
     )
     .with_class("training-resource-editor");
-    let panels = vec![workbench, learning, data_path, resources];
+    let panels = vec![workbench, learning, data_path, throughput];
 
     let top = LayoutNode::split(
         "training-upper",
@@ -106,20 +123,46 @@ pub(crate) fn TrainingWorkspace(dataset: String) -> Element {
 
 #[component]
 fn TrainingRunBuilder(
-    dataset: String,
+    namespace: String,
+    dataset_id: String,
     readiness: TrainingReadiness,
     active_run: Option<TrainingRun>,
     viewed_run: Option<TrainingRun>,
     history: Vec<TrainingRun>,
 ) -> Element {
     let studio = studio();
+    let mut selected_dataset = studio.selected_dataset;
     let controller = training_controller();
     let request = controller.request();
+    let inspected_request = viewed_run
+        .as_ref()
+        .map(|run| run.config.clone())
+        .unwrap_or_else(|| request.clone());
+    let inspecting_run = viewed_run.as_ref().is_some_and(|run| !run.phase.active());
+    let dataset_ids = studio
+        .episodes()
+        .into_iter()
+        .map(|episode| episode.dataset_id)
+        .chain(std::iter::once(dataset_id.clone()))
+        .collect::<BTreeSet<_>>();
     let selected_run = controller.selected_run();
     let starting = controller.starting();
-    let start_error = controller.start_error();
     let stopping = controller.stopping();
-    let can_start = readiness.ready && active_run.is_none() && !starting;
+    let dataset_valid = spiral::is_dataset_id(dataset_id.trim());
+    let can_start = readiness.ready && active_run.is_none() && !starting && dataset_valid;
+    let generated_dataset_query =
+        inspected_request.sql == default_training_sql(&namespace, &inspected_request.dataset_id);
+    let (local_episode_count, local_frame_count) = studio
+        .episodes()
+        .into_iter()
+        .filter(|episode| {
+            episode.dataset_id == inspected_request.dataset_id
+                && episode.usable()
+                && !episode.discarded
+        })
+        .fold((0_u64, 0_u64), |(episodes, frames), episode| {
+            (episodes + 1, frames.saturating_add(episode.frames))
+        });
     let active_id = active_run.as_ref().map(|run| run.id.clone());
     let progress = active_run.as_ref().map(|run| {
         if run.config.steps == 0 {
@@ -128,6 +171,7 @@ fn TrainingRunBuilder(
             run.current_step as f64 / run.config.steps as f64 * 100.0
         }
     });
+    let (readiness_summary, readiness_recovery) = training_readiness_guidance(&readiness);
 
     rsx! {
         div { class: "training-workbench studio-workbench-scroll",
@@ -135,22 +179,12 @@ fn TrainingRunBuilder(
                 div { class: "training-inline-state training-inline-state-caution",
                     div { class: "training-inline-copy",
                         strong { "Training is not ready" }
-                        span { "{readiness.summary}" }
-                    }
-                }
-            }
-
-            if let Some(error) = start_error.clone() {
-                div { class: "training-inline-state training-inline-state-danger", role: "alert",
-                    div { class: "training-inline-copy",
-                        strong { "Training could not start" }
-                        span { "{error}" }
-                    }
-                    button {
-                        r#type: "button",
-                        class: "training-inline-dismiss",
-                        onclick: move |_| controller.clear_start_error(),
-                        "Dismiss"
+                        span { "{readiness_summary}" }
+                        p { "{readiness_recovery}" }
+                        details { class: "technical-details",
+                            summary { "Technical details" }
+                            code { "{readiness.summary}" }
+                        }
                     }
                 }
             }
@@ -161,6 +195,7 @@ fn TrainingRunBuilder(
                         div {
                             strong { "{run.config.run_name}" }
                             span { class: phase_class(run.phase), "{run.phase.label()}" }
+                            small { "Dataset · {run.config.dataset_id}" }
                         }
                         span { class: "training-step-readout", "{run.current_step} / {run.config.steps}" }
                     }
@@ -193,8 +228,7 @@ fn TrainingRunBuilder(
                 }
             }
 
-            if start_error.is_none() {
-                if let Some(run) = viewed_run.as_ref().filter(|run| !run.phase.active()) {
+            if let Some(run) = viewed_run.as_ref().filter(|run| !run.phase.active()) {
                     section {
                         class: if run.phase == TrainingRunPhase::Failed { "training-run-result training-run-result-failed" } else { "training-run-result" },
                         div { class: "training-run-result-heading",
@@ -202,6 +236,12 @@ fn TrainingRunBuilder(
                             span { class: phase_class(run.phase), "{run.phase.label()}" }
                         }
                         p { {run.message.clone().unwrap_or_else(|| "The run ended without a status message.".to_owned())} }
+                        button {
+                            r#type: "button",
+                            class: "link min-h-6",
+                            onclick: move |_| controller.clear_selected_run(),
+                            "Back to new run"
+                        }
                         if !run.logs.is_empty() {
                             details {
                                 summary { "Logs · {run.logs.len()}" }
@@ -213,10 +253,56 @@ fn TrainingRunBuilder(
                             }
                         }
                     }
+            }
+
+            section { class: "training-input-summary",
+                header {
+                    h3 { "Training data" }
+                    span { if inspecting_run { "Run snapshot" } else { "New run draft" } }
+                }
+                dl {
+                    div { class: "training-dataset-definition",
+                        dt { "Dataset" }
+                        dd {
+                            if inspecting_run || active_run.is_some() {
+                                "{inspected_request.dataset_id}"
+                            } else {
+                                input {
+                                    list: "training-dataset-options",
+                                    value: dataset_id.clone(),
+                                    maxlength: "96",
+                                    pattern: "[A-Za-z0-9_.-]+",
+                                    "aria-label": "Training dataset",
+                                    oninput: move |event| selected_dataset.set(event.value()),
+                                }
+                            }
+                        }
+                    }
+                    div { dt { "Namespace" } dd { "{namespace}" } }
+                    div { dt { "SQL scope" }
+                        dd { if generated_dataset_query { "Filtered by episodes.dataset_id" } else { "Custom SQL · review below" } }
+                    }
+                    div { dt { "Local preview" } dd { "{local_episode_count} kept · {local_frame_count} frames" } }
+                    div { dt { "Cameras" } dd { "{inspected_request.act.camera_streams.len()} required" } }
+                }
+                datalist { id: "training-dataset-options",
+                    for id in dataset_ids { option { value: "{id}" } }
+                }
+                details {
+                    summary { "Exact SQL and column mapping" }
+                    pre { code { "{inspected_request.sql}" } }
+                    p {
+                        "State · {inspected_request.state_column} · Action · {inspected_request.action_column}"
+                    }
                 }
             }
 
+            if !inspecting_run {
             section { class: "training-form-section",
+                header { class: "training-form-heading",
+                    h3 { "New run" }
+                    span { "Dataset · {dataset_id}" }
+                }
                 label { class: "training-field training-field-wide",
                     span { "Run name" }
                     input {
@@ -304,8 +390,8 @@ fn TrainingRunBuilder(
 
             details { class: "training-query-section",
                 summary {
-                    span { "Data query" }
-                    small { "{dataset}" }
+                    span { "New run data query" }
+                    small { "{request.dataset_id}" }
                 }
                 div { class: "training-query-body",
                     textarea {
@@ -390,11 +476,12 @@ fn TrainingRunBuilder(
                 r#type: "button",
                 class: "training-start-button",
                 disabled: !can_start,
-                title: if active_run.is_some() { "Stop the active run first".to_owned() } else if !readiness.ready { readiness.summary.clone() } else { "Start training".to_owned() },
+                title: if active_run.is_some() { "Stop the active run first".to_owned() } else if !dataset_valid { "Choose a valid dataset ID first".to_owned() } else if !readiness.ready { readiness_recovery.clone() } else { "Start training".to_owned() },
                 onclick: move |_| {
-                    controller.start();
+                    controller.start(studio);
                 },
-                if starting { "Starting…" } else { "Start training" }
+                if starting { "Starting…" } else { "Train {request.dataset_id}" }
+            }
             }
 
             section { class: "training-history",
@@ -413,6 +500,7 @@ fn TrainingRunBuilder(
                             move |_| controller.select_run(id.clone())
                         },
                         span { class: "training-history-name", "{run.config.run_name}" }
+                        span { class: "training-history-dataset", "{run.config.dataset_id}" }
                         span { class: phase_class(run.phase), "{run.phase.label()}" }
                         span { class: "training-history-step", "{run.current_step}" }
                     }
@@ -420,6 +508,17 @@ fn TrainingRunBuilder(
             }
         }
     }
+}
+
+fn training_readiness_guidance(readiness: &TrainingReadiness) -> (String, String) {
+    if !readiness.spiral_ready {
+        return (
+            "SpiralDB is not ready for training.".to_owned(),
+            "Open Settings, verify the Spiral catalog, project, namespace, and ADBC driver, then test the connection again."
+                .to_owned(),
+        );
+    }
+    (readiness.summary.clone(), "Training is ready.".to_owned())
 }
 
 #[component]
@@ -542,7 +641,7 @@ fn TrainingLearning(run: Option<TrainingRun>) -> Element {
 }
 
 #[component]
-fn TrainingDataPath(dataset: String, run: Option<TrainingRun>) -> Element {
+fn TrainingDataPath(namespace: String, dataset_id: String, run: Option<TrainingRun>) -> Element {
     let transfer = run
         .as_ref()
         .and_then(|run| run.metrics.last())
@@ -554,38 +653,43 @@ fn TrainingDataPath(dataset: String, run: Option<TrainingRun>) -> Element {
         .map(|point| format!("{:.0}/s", point.examples_per_second))
         .unwrap_or_else(|| "—".to_owned());
     let checkpoint_count = run.as_ref().map_or(0, |run| run.checkpoints.len());
-    let queue_depth = run
+    let frames_per_batch = run
         .as_ref()
-        .and_then(|run| run.metrics.last())
-        .map(|point| point.queue_depth.to_string())
+        .map(|run| run.config.batch_size * run.config.act.camera_streams.len())
+        .map(|frames| format!("{frames}/batch"))
         .unwrap_or_else(|| "—".to_owned());
-    let source_dataset = run
+    let source_namespace = run
         .as_ref()
         .map(|run| run.source.dataset.as_str())
         .filter(|dataset| !dataset.is_empty())
-        .unwrap_or(&dataset);
+        .unwrap_or(&namespace);
+    let source_dataset = run
+        .as_ref()
+        .map(|run| run.source.dataset_id.as_str())
+        .filter(|dataset| !dataset.is_empty())
+        .unwrap_or(&dataset_id);
     let checkpoint_table = run
         .as_ref()
         .map(|run| run.source.checkpoint_table.as_str())
         .filter(|table| !table.is_empty())
         .map(str::to_owned)
-        .unwrap_or_else(|| spiral::relation(&dataset, Table::TrainingCheckpoints));
+        .unwrap_or_else(|| spiral::relation(&namespace, Table::TrainingCheckpoints));
     rsx! {
         section { class: "training-data-path",
             ol { class: "training-path-stages",
                 li {
                     span { class: "training-path-index", "1" }
-                    div { strong { "Spiral relation" } small { "random anchors · {source_dataset}" } }
+                    div { strong { "Dataset · {source_dataset}" } small { "{source_namespace}.episodes → joint_samples" } }
                     em { "{transfer}" }
                 }
                 li {
                     span { class: "training-path-index", "2" }
-                    div { strong { "Camera + actions" } small { "to_torch() · prefetch" } }
-                    em { "depth {queue_depth}" }
+                    div { strong { "Arrow tensors" } small { "decode · resize · normalize" } }
+                    em { "{frames_per_batch}" }
                 }
                 li {
                     span { class: "training-path-index", "3" }
-                    div { strong { "PyTorch" } }
+                    div { strong { "Burn ACT" } small { "native optimizer" } }
                     em { "{examples}" }
                 }
                 li {
@@ -599,29 +703,15 @@ fn TrainingDataPath(dataset: String, run: Option<TrainingRun>) -> Element {
 }
 
 #[component]
-fn TrainingResources(run: Option<TrainingRun>) -> Element {
+fn TrainingThroughput(run: Option<TrainingRun>) -> Element {
     let total_steps = run.as_ref().map_or(1, |run| run.config.steps);
     let metrics = run
         .as_ref()
         .map(|run| run.metrics.as_slice())
         .unwrap_or(&[]);
     let last = metrics.last();
-    let gpu = last
-        .and_then(|point| point.gpu_utilization_pct)
-        .map(|value| format!("{value:.0}%"))
-        .unwrap_or_else(|| "—".to_owned());
-    let memory = last
-        .and_then(|point| point.gpu_memory_bytes)
-        .map(format_bytes)
-        .unwrap_or_else(|| "—".to_owned());
-    let cpu = last
-        .map(|point| {
-            format!(
-                "{:.0}% · {:.1} cores",
-                point.cpu_utilization_pct,
-                point.cpu_utilization_pct / 100.0
-            )
-        })
+    let throughput = last
+        .map(|point| format!("{:.1} examples/s", point.examples_per_second))
         .unwrap_or_else(|| "—".to_owned());
     let transfer = last
         .map(|point| format_rate(point.transfer_bytes_per_second))
@@ -630,14 +720,12 @@ fn TrainingResources(run: Option<TrainingRun>) -> Element {
     rsx! {
         section { class: "training-resources",
             div { class: "training-resource-grid",
-                ResourceLane { label: "GPU device utilization", value: gpu, points: resource_points(metrics, total_steps, ResourceSeries::Gpu), class: "resource-gpu", description: "Whole-device GPU activity; other processes may contribute." }
-                ResourceLane { label: "PyTorch GPU allocation", value: memory, points: resource_points(metrics, total_steps, ResourceSeries::Memory), class: "resource-memory", description: "GPU memory held by this training worker. A flat line is normal when the allocator reuses a fixed model and batch shape." }
-                ResourceLane { label: "Worker CPU", value: cpu, points: resource_points(metrics, total_steps, ResourceSeries::Cpu), class: "resource-cpu", description: "htop-style process CPU: 100% equals one fully occupied logical core, so multi-threaded training can exceed 100%." }
+                ResourceLane { label: "Optimizer throughput", value: throughput, points: resource_points(metrics, total_steps, ResourceSeries::Throughput), class: "resource-throughput", description: "Examples completed per second over the latest measured optimizer interval." }
                 ResourceLane { label: "Spiral tensor rate", value: transfer, points: resource_points(metrics, total_steps, ResourceSeries::Transfer), class: "resource-transfer", description: "Decoded image-tensor bytes returned by Spiral divided by total sample-preparation time." }
             }
             div { class: "training-resource-definitions",
-                small { "CPU uses htop's process scale: 100% is one logical core. GPU utilization is whole-device; GPU allocation belongs to this PyTorch worker and can stay flat while memory is reused." }
-                small { "Spiral tensor rate = decoded image tensors returned through to_torch() ÷ batch preparation time. It excludes PyTorch model compute and is not raw network speed." }
+                small { "Optimizer throughput counts completed examples over the latest metric interval." }
+                small { "Spiral tensor rate = decoded Arrow image-tensor bytes ÷ batch preparation time. It excludes Burn model compute and is not raw network speed." }
             }
         }
     }
@@ -666,14 +754,12 @@ fn ResourceLane(
 
 #[derive(Clone, Copy)]
 enum ResourceSeries {
-    Gpu,
-    Memory,
-    Cpu,
+    Throughput,
     Transfer,
 }
 
-pub(crate) fn default_training_sql(dataset: &str) -> String {
-    spiral::default_training_sql(dataset)
+pub(crate) fn default_training_sql(namespace: &str, dataset_id: &str) -> String {
+    spiral::default_training_sql_for_dataset(namespace, dataset_id)
 }
 
 fn phase_class(phase: TrainingRunPhase) -> &'static str {
@@ -755,36 +841,27 @@ fn resource_points(
 ) -> String {
     let readings = metrics
         .iter()
-        .filter_map(|point| match series {
-            ResourceSeries::Gpu => point.gpu_utilization_pct,
-            ResourceSeries::Memory => point.gpu_memory_bytes.map(|value| value as f64),
-            ResourceSeries::Cpu => Some(point.cpu_utilization_pct),
-            ResourceSeries::Transfer => Some(point.transfer_bytes_per_second),
+        .map(|point| match series {
+            ResourceSeries::Throughput => point.examples_per_second,
+            ResourceSeries::Transfer => point.transfer_bytes_per_second,
         })
         .filter(|value| value.is_finite() && *value >= 0.0)
         .collect::<Vec<_>>();
     let maximum = match series {
-        ResourceSeries::Gpu => 100.0,
-        ResourceSeries::Cpu => {
-            let peak = readings.iter().copied().fold(0.0, f64::max).max(100.0);
-            (peak / 100.0).ceil() * 100.0
-        }
-        ResourceSeries::Memory | ResourceSeries::Transfer => {
+        ResourceSeries::Throughput | ResourceSeries::Transfer => {
             readings.iter().copied().fold(0.0, f64::max).max(1.0)
         }
     };
     metrics
         .iter()
-        .filter_map(|point| {
+        .map(|point| {
             let value = match series {
-                ResourceSeries::Gpu => point.gpu_utilization_pct?,
-                ResourceSeries::Memory => point.gpu_memory_bytes? as f64,
-                ResourceSeries::Cpu => point.cpu_utilization_pct,
+                ResourceSeries::Throughput => point.examples_per_second,
                 ResourceSeries::Transfer => point.transfer_bytes_per_second,
             };
             let x = point.step as f64 / total_steps.max(1) as f64 * CHART_WIDTH;
             let y = 68.0 - (value / maximum).clamp(0.0, 1.0) * 56.0;
-            Some(format!("{x:.2},{y:.2}"))
+            format!("{x:.2},{y:.2}")
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -810,16 +887,6 @@ fn format_loss(value: f64) -> String {
     }
 }
 
-fn format_bytes(bytes: u64) -> String {
-    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-    const MIB: f64 = 1024.0 * 1024.0;
-    if bytes as f64 >= GIB {
-        format!("{:.2} GiB", bytes as f64 / GIB)
-    } else {
-        format!("{:.0} MiB", bytes as f64 / MIB)
-    }
-}
-
 fn format_rate(bytes_per_second: f64) -> String {
     const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
     const MIB: f64 = 1024.0 * 1024.0;
@@ -836,7 +903,7 @@ mod tests {
 
     #[test]
     fn default_query_selects_complete_kept_follower_samples() {
-        let sql = default_training_sql("robotics");
+        let sql = default_training_sql("robotics", "pick-place");
         assert!(sql.contains(&format!(
             "FROM {}",
             spiral::relation("robotics", Table::JointSamples)
@@ -849,13 +916,13 @@ mod tests {
     }
 
     #[test]
-    fn resources_use_the_optimizer_step_axis() {
+    fn throughput_uses_the_optimizer_step_axis() {
         let metrics = vec![TrainingMetricPoint {
             step: 50,
-            cpu_utilization_pct: 25.0,
+            examples_per_second: 25.0,
             ..TrainingMetricPoint::default()
         }];
-        assert!(resource_points(&metrics, 100, ResourceSeries::Cpu).starts_with("500.00,"));
+        assert!(resource_points(&metrics, 100, ResourceSeries::Throughput).starts_with("500.00,"));
         assert_eq!(step_percent(50, 100), 50.0);
     }
 }

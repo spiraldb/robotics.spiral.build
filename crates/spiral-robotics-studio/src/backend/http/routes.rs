@@ -31,13 +31,15 @@ use spiral_robotics_core::api::{
     RobotSummary, RolloutSnapshot, SerialPortSummary, SetRecordingPausedRequest,
     SetReplayPausedRequest, SpiralQueryRequest, SpiralQueryResponse, StartRecordingRequest,
     StartReplayRequest, StartRolloutRequest, StartSpiralReplayRequest, StartTrainingRequest,
-    StopRecordingRequest, StudioSnapshot, TorqueRequest, TrainingCheckpointFormat, TrainingRun,
-    TrainingSnapshot, UpdateDataSettingsRequest, UpdateRobotRequest, default_teleoperation_pair,
+    StopRecordingRequest, StudioSnapshot, TorqueRequest, TrainingRun, TrainingSnapshot,
+    UpdateDataSettingsRequest, UpdateRobotRequest, default_teleoperation_pair,
 };
 use spiral_robotics_core::calibration::build_calibration;
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
 
-use crate::backend::recording::dataset::{export_lerobot_archive, import_lerobot_archive};
+use crate::backend::recording::dataset::{
+    export_lerobot_archive_for_dataset, import_lerobot_archive_into_dataset,
+};
 use crate::backend::recording::episodes::{
     ArmCondition, EpisodeError, EpisodeStore, TimelineMetadata, TimelineSample, TimelineTraces,
     build_arms,
@@ -274,9 +276,7 @@ pub(crate) fn api_router(state: AppState) -> Router {
             get(get_data_settings).patch(update_data_settings),
         )
         .route("/settings/data/test/spiral", post(test_spiral))
-        .route("/settings/data/test/hugging-face", post(test_hugging_face))
         .route("/publications", get(list_publications))
-        .route("/publications/{episode}", post(publish_existing_episode))
         .route(
             "/spiral/publications/{episode}",
             post(sync_existing_episode_to_spiral),
@@ -502,10 +502,11 @@ async fn start_rollout(
             "stop or finish training before starting a rollout",
         ));
     }
-    if !run.checkpoints.iter().any(|checkpoint| {
-        checkpoint.step == request.checkpoint_step
-            && checkpoint.format == TrainingCheckpointFormat::SafeTensors
-    }) {
+    if !run
+        .checkpoints
+        .iter()
+        .any(|checkpoint| checkpoint.step == request.checkpoint_step && checkpoint.inference_ready)
+    {
         return Err(Failure::bad_request(
             "the selected checkpoint is no longer available",
         ));
@@ -1050,23 +1051,8 @@ async fn test_spiral(State(state): State<AppState>) -> Json<ConnectionTestRespon
     Json(state.storage.test_spiral().await)
 }
 
-async fn test_hugging_face(State(state): State<AppState>) -> Json<ConnectionTestResponse> {
-    Json(state.storage.test_hugging_face().await)
-}
-
 async fn list_publications(State(state): State<AppState>) -> Json<Vec<PublicationStatus>> {
     Json(state.storage.statuses())
-}
-
-async fn publish_existing_episode(
-    State(state): State<AppState>,
-    Path(episode): Path<String>,
-) -> Result<StatusCode, Failure> {
-    state
-        .storage
-        .publish_existing(episode)
-        .map_err(Failure::bad_request)?;
-    Ok(StatusCode::ACCEPTED)
 }
 
 async fn sync_existing_episode_to_spiral(
@@ -1151,6 +1137,7 @@ async fn start_recording(
             "a take is already recording; stop it first".to_owned(),
         ));
     }
+    request.dataset_id = validated_dataset_id(&request.dataset_id)?;
 
     let (leader, follower) = default_teleoperation_pair(&build_snapshot(&state).robots)
         .ok_or_else(|| {
@@ -1302,7 +1289,14 @@ async fn begin_recording(
 
     let writer = state
         .episodes
-        .begin(source.clone(), note, sample_hz, arms.clone(), condition)
+        .begin_in_dataset(
+            request.dataset_id.clone(),
+            source.clone(),
+            note,
+            sample_hz,
+            arms.clone(),
+            condition,
+        )
         .map_err(Failure::from)?;
     let id = writer.id().to_owned();
     let started_ms = writer.started_ms();
@@ -1363,6 +1357,7 @@ async fn begin_recording(
 
     Ok(Json(EpisodeSummary {
         id,
+        dataset_id: request.dataset_id,
         file: String::new(),
         arms,
         frames: 0,
@@ -2045,11 +2040,26 @@ async fn export_episodes(
 }
 
 /// Build a current LeRobot v3 dataset and let the browser download it as one file.
-async fn download_episodes(State(state): State<AppState>) -> Result<Response, Failure> {
+#[derive(Debug, Deserialize)]
+struct DatasetQuery {
+    dataset_id: Option<String>,
+}
+
+async fn download_episodes(
+    State(state): State<AppState>,
+    Query(query): Query<DatasetQuery>,
+) -> Result<Response, Failure> {
+    let dataset_id = query
+        .dataset_id
+        .as_deref()
+        .map(validated_dataset_id)
+        .transpose()?;
     let episodes = state.episodes.clone();
-    let archive = tokio::task::spawn_blocking(move || export_lerobot_archive(&episodes))
-        .await
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+    let archive = tokio::task::spawn_blocking(move || {
+        export_lerobot_archive_for_dataset(&episodes, dataset_id.as_deref())
+    })
+    .await
+    .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
     let mut response = Body::from(archive.bytes).into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -2090,6 +2100,7 @@ async fn download_episodes(State(state): State<AppState>) -> Result<Response, Fa
 /// Convert a browser-uploaded LeRobot ZIP into replayable local episodes.
 async fn import_episodes(
     State(state): State<AppState>,
+    Query(query): Query<DatasetQuery>,
     body: Bytes,
 ) -> Result<Json<ImportResponse>, Failure> {
     if body.is_empty() {
@@ -2097,11 +2108,24 @@ async fn import_episodes(
             "choose a LeRobot dataset ZIP to import",
         ));
     }
+    let dataset_id = validated_dataset_id(query.dataset_id.as_deref().unwrap_or("default"))?;
     let episodes = state.episodes.clone();
-    let response = tokio::task::spawn_blocking(move || import_lerobot_archive(&episodes, &body))
-        .await
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+    let response = tokio::task::spawn_blocking(move || {
+        import_lerobot_archive_into_dataset(&episodes, &body, &dataset_id)
+    })
+    .await
+    .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
     Ok(Json(response))
+}
+
+fn validated_dataset_id(value: &str) -> Result<String, Failure> {
+    let value = value.trim();
+    if !spiral_robotics_core::spiral::is_dataset_id(value) {
+        return Err(Failure::bad_request(
+            "dataset ID must use 1–96 letters, numbers, '.', '_' or '-' characters",
+        ));
+    }
+    Ok(value.to_owned())
 }
 
 /// Resolve an export destination, refusing anything that escapes the workspace.
@@ -2160,6 +2184,7 @@ mod tests {
     ) -> spiral_robotics_core::api::RecordingProgress {
         spiral_robotics_core::api::RecordingProgress {
             episode: episode.to_owned(),
+            dataset_id: "default".to_owned(),
             frames: 12,
             elapsed_seconds: 0.2,
             wall_elapsed_seconds: 0.2,

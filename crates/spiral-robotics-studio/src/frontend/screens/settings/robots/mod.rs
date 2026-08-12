@@ -262,7 +262,6 @@ fn ImportRobotConfiguration() -> Element {
                 onchange: move |event| {
                     let Some(file) = event.files().first().cloned() else { return };
                     importing.set(true);
-                    let mut notice = studio.notice;
                     studio.run_utility("", async move {
                         let result = async {
                             let bytes = file
@@ -281,10 +280,7 @@ fn ImportRobotConfiguration() -> Element {
                         match result {
                             Ok(robot) => {
                                 chosen.set(Some(Selection::Robot(robot.id.clone())));
-                                notice.set(Some(crate::frontend::app::state::Notice::new(
-                                    format!("Imported {}.", robot.id),
-                                    false,
-                                )));
+                                studio.report_success(format!("Imported {}.", robot.id));
                                 Ok(())
                             }
                             Err(error) => Err(error),

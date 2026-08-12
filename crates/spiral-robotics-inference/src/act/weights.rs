@@ -41,6 +41,10 @@ impl Weights {
         decode_f32(name, view.data())
     }
 
+    pub fn contains(&self, name: &str) -> bool {
+        SafeTensors::deserialize(&self.bytes).is_ok_and(|tensors| tensors.tensor(name).is_ok())
+    }
+
     fn f32_view_exact<'a>(
         &'a self,
         name: &str,

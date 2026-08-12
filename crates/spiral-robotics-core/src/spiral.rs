@@ -7,7 +7,7 @@
 use std::fmt;
 
 /// Schema version written into every completed episode row.
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// Marker used to distinguish Spiral Robotics' managed dataset namespace resource.
 pub const DATASET_NAMESPACE_MARKER: &str = "_spiral_robotics_dataset_key_v1";
@@ -15,6 +15,7 @@ pub const DATASET_NAMESPACE_MARKER: &str = "_spiral_robotics_dataset_key_v1";
 /// Stable persisted relations owned by Spiral Robotics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Table {
+    Datasets,
     Episodes,
     EpisodeStreams,
     JointSamples,
@@ -23,6 +24,16 @@ pub enum Table {
 }
 
 impl Table {
+    /// Relations shown in the Data schema browser.
+    pub const ALL: [Self; 6] = [
+        Self::Datasets,
+        Self::Episodes,
+        Self::EpisodeStreams,
+        Self::JointSamples,
+        Self::VideoAssets,
+        Self::TrainingCheckpoints,
+    ];
+
     /// Relations published for each episode, in safe deletion order.
     pub const EPISODE_RELATIONS: [Self; 4] = [
         Self::Episodes,
@@ -33,6 +44,7 @@ impl Table {
 
     pub const fn name(self) -> &'static str {
         match self {
+            Self::Datasets => "datasets",
             Self::Episodes => "episodes",
             Self::EpisodeStreams => "episode_streams",
             Self::JointSamples => "joint_samples",
@@ -44,8 +56,15 @@ impl Table {
     /// Ordered persisted columns for schema-drift checks.
     pub const fn columns(self) -> &'static [&'static str] {
         match self {
+            Self::Datasets => &[
+                column::DATASET_ID,
+                column::NAME,
+                column::CREATED_MS,
+                column::DESCRIPTION,
+            ],
             Self::Episodes => &[
                 column::EPISODE_ID,
+                column::DATASET_ID,
                 column::SCHEMA_VERSION,
                 column::STARTED_MS,
                 column::SAMPLE_HZ,
@@ -125,6 +144,8 @@ pub mod column {
     pub const CHECKPOINT: &str = "checkpoint";
     pub const CONFIG_JSON: &str = "config_json";
     pub const CREATED_MS: &str = "created_ms";
+    pub const DATASET_ID: &str = "dataset_id";
+    pub const DESCRIPTION: &str = "description";
     pub const DISCARDED: &str = "discarded";
     pub const DURATION_NS: &str = "duration_ns";
     pub const EFFORT: &str = "effort";
@@ -139,6 +160,7 @@ pub mod column {
     pub const MAX_FOLLOW_ERROR_DEGREES: &str = "max_follow_error_degrees";
     pub const MEDIA_RELATION: &str = "media_relation";
     pub const MODALITY: &str = "modality";
+    pub const NAME: &str = "name";
     pub const NOTE: &str = "note";
     pub const PAYLOAD: &str = "payload";
     pub const POLICY: &str = "policy";
@@ -167,41 +189,53 @@ pub mod column {
 /// Built-in read-only queries shown by the Data workbench.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QueryPreset {
+    Datasets,
     Episodes,
     EpisodeStreams,
     JointSamples,
     VideoAssets,
+    TrainingCheckpoints,
 }
 
 impl QueryPreset {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 6] = [
+        Self::Datasets,
         Self::Episodes,
         Self::EpisodeStreams,
         Self::JointSamples,
         Self::VideoAssets,
+        Self::TrainingCheckpoints,
     ];
 
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Datasets => "Datasets",
             Self::Episodes => "Episodes",
             Self::EpisodeStreams => "Streams",
             Self::JointSamples => "Joint samples",
             Self::VideoAssets => "Video assets",
+            Self::TrainingCheckpoints => "Checkpoints",
         }
     }
 
     pub const fn table(self) -> Table {
         match self {
+            Self::Datasets => Table::Datasets,
             Self::Episodes => Table::Episodes,
             Self::EpisodeStreams => Table::EpisodeStreams,
             Self::JointSamples => Table::JointSamples,
             Self::VideoAssets => Table::VideoAssets,
+            Self::TrainingCheckpoints => Table::TrainingCheckpoints,
         }
     }
 
     pub fn sql(self, dataset: &str) -> String {
         let relation = relation(dataset, self.table());
         match self {
+            Self::Datasets => format!(
+                "SELECT * FROM {relation} ORDER BY {} DESC LIMIT 100",
+                column::CREATED_MS
+            ),
             Self::Episodes => format!(
                 "SELECT * FROM {relation} ORDER BY {} DESC LIMIT 100",
                 column::STARTED_MS
@@ -230,6 +264,16 @@ impl QueryPreset {
                 column::EPISODE_ID,
                 column::STREAM_ID,
             ),
+            Self::TrainingCheckpoints => format!(
+                "SELECT {}, {}, {}, {}, {}, {} FROM {relation} ORDER BY {} DESC LIMIT 100",
+                column::RUN_ID,
+                column::RUN_NAME,
+                column::POLICY,
+                column::STEP,
+                column::CREATED_MS,
+                column::VALIDATION_LOSS,
+                column::CREATED_MS,
+            ),
         }
     }
 }
@@ -240,12 +284,19 @@ pub fn relation(dataset: &str, table: Table) -> String {
 }
 
 /// Default typed sample projection used by ACT training.
-pub fn default_training_sql(dataset: &str) -> String {
-    let samples = relation(dataset, Table::JointSamples);
-    let episodes = relation(dataset, Table::Episodes);
-    let streams = relation(dataset, Table::EpisodeStreams);
+pub fn default_training_sql(namespace: &str) -> String {
+    default_training_sql_for_dataset(namespace, "default")
+}
+
+/// Default typed sample projection for one relational dataset row.
+pub fn default_training_sql_for_dataset(namespace: &str, dataset_id: &str) -> String {
+    let datasets = relation(namespace, Table::Datasets);
+    let samples = relation(namespace, Table::JointSamples);
+    let episodes = relation(namespace, Table::Episodes);
+    let streams = relation(namespace, Table::EpisodeStreams);
+    let dataset_id = dataset_id.replace('\'', "''");
     format!(
-        "SELECT j.{episode_id}, j.{stream_id}, j.{sample_index}, j.{episode_time_ns},\n       e.{sample_hz}, e.{frames} AS episode_frames, s.{robot_type}, s.{joint_names},\n       j.{state_position} AS {state},\n       j.{action_position} AS {action}\nFROM {samples} AS j\nJOIN {episodes} AS e ON e.{episode_id} = j.{episode_id}\nJOIN {streams} AS s ON s.{episode_id} = j.{episode_id} AND s.{stream_id} = j.{stream_id}\nWHERE e.{schema_version} = {current_schema}\n  AND NOT e.{discarded}\n  AND s.{modality} = 'joint'\n  AND (\n      LOWER(s.{robot_type}) LIKE '%follower%'\n      OR (s.{robot_type} IS NULL AND s.{stream_id} = 'follower')\n  )\n  AND j.{state_valid}\n  AND j.{action_valid}",
+        "SELECT j.{episode_id}, j.{stream_id}, j.{sample_index}, j.{episode_time_ns},\n       e.{sample_hz}, e.{frames} AS episode_frames, s.{robot_type}, s.{joint_names},\n       j.{state_position} AS {state},\n       j.{action_position} AS {action}\nFROM {samples} AS j\nJOIN {episodes} AS e ON e.{episode_id} = j.{episode_id}\nJOIN {datasets} AS d ON d.{dataset_id} = e.{dataset_id}\nJOIN {streams} AS s ON s.{episode_id} = j.{episode_id} AND s.{stream_id} = j.{stream_id}\nWHERE e.{schema_version} = {current_schema}\n  AND d.{dataset_id} = '{dataset_value}'\n  AND NOT e.{discarded}\n  AND s.{modality} = 'joint'\n  AND (\n      LOWER(s.{robot_type}) LIKE '%follower%'\n      OR (s.{robot_type} IS NULL AND s.{stream_id} = 'follower')\n  )\n  AND j.{state_valid}\n  AND j.{action_valid}",
         episode_id = column::EPISODE_ID,
         stream_id = column::STREAM_ID,
         sample_index = column::SAMPLE_INDEX,
@@ -261,6 +312,9 @@ pub fn default_training_sql(dataset: &str) -> String {
         samples = samples,
         episodes = episodes,
         streams = streams,
+        datasets = datasets,
+        dataset_id = column::DATASET_ID,
+        dataset_value = dataset_id,
         schema_version = column::SCHEMA_VERSION,
         current_schema = SCHEMA_VERSION,
         discarded = column::DISCARDED,
@@ -277,6 +331,15 @@ pub fn is_identifier(value: &str) -> bool {
         .next()
         .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+/// Whether a value is safe as a logical dataset row identifier.
+pub fn is_dataset_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 96
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
 /// Convert an external immutable ID into one component of a generated name.
@@ -312,11 +375,16 @@ mod tests {
 
     #[test]
     fn training_query_comes_from_the_shared_relation_contract() {
-        let sql = default_training_sql("robotics");
+        let sql = default_training_sql_for_dataset("robotics", "pick-place");
         assert!(sql.contains(&format!(
             "FROM {}",
             relation("robotics", Table::JointSamples)
         )));
+        assert!(sql.contains(&format!(
+            "JOIN {} AS d",
+            relation("robotics", Table::Datasets)
+        )));
+        assert!(sql.contains("d.dataset_id = 'pick-place'"));
         assert!(sql.contains(&format!("{} AS {}", column::STATE_POSITION, column::STATE)));
         assert!(sql.contains(&format!(
             "{} AS {}",
@@ -328,13 +396,7 @@ mod tests {
 
     #[test]
     fn every_persisted_table_declares_unique_columns() {
-        for table in [
-            Table::Episodes,
-            Table::EpisodeStreams,
-            Table::JointSamples,
-            Table::VideoAssets,
-            Table::TrainingCheckpoints,
-        ] {
+        for table in Table::ALL {
             let mut columns = table.columns().to_vec();
             columns.sort_unstable();
             columns.dedup();
@@ -343,10 +405,28 @@ mod tests {
     }
 
     #[test]
+    fn episodes_reference_the_dataset_table() {
+        assert_eq!(Table::Datasets.columns().first(), Some(&column::DATASET_ID));
+        assert_eq!(Table::Episodes.columns().get(1), Some(&column::DATASET_ID));
+        for table in Table::ALL {
+            if table != Table::Datasets && table != Table::Episodes {
+                assert!(
+                    !table.columns().contains(&column::DATASET_ID),
+                    "{table} must reach datasets through episodes"
+                );
+            }
+        }
+        assert_eq!(QueryPreset::ALL.len(), Table::ALL.len());
+    }
+
+    #[test]
     fn identifiers_follow_the_sql_contract() {
         assert!(is_identifier("spiral_robotics_v3"));
         assert!(!is_identifier("spiral-robotics-v3"));
         assert!(!is_identifier("3spiral_robotics"));
+        assert!(is_dataset_id("2026.pick-place_v1"));
+        assert!(!is_dataset_id("pick place"));
+        assert!(!is_dataset_id(""));
         assert_eq!(identifier_component("episode_37"), "episode_37");
         assert_ne!(
             identifier_component("episode-37"),

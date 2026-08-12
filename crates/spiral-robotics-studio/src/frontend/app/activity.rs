@@ -7,8 +7,6 @@
 
 use spiral_robotics_core::api::{EpisodeSummary, RecordingProgress};
 
-use crate::frontend::screens::data::workbench::{DataIntent, QueryViewModel};
-
 /// The Studio's four primary activities.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum Activity {
@@ -157,7 +155,7 @@ impl TimelineSubject {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum PrimaryVisualization {
     LiveScene,
-    RecordedScene(EpisodeSummary),
+    RecordedScene(Box<EpisodeSummary>),
     EmptyEpisodes,
 }
 
@@ -165,7 +163,7 @@ pub(crate) enum PrimaryVisualization {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum CameraRegistrySource {
     LiveAssignments,
-    RecordedEpisode(EpisodeSummary),
+    RecordedEpisode(Box<EpisodeSummary>),
     None,
 }
 
@@ -174,9 +172,6 @@ pub(crate) enum CameraRegistrySource {
 pub(crate) struct ActivityProjection {
     pub(crate) activity: Activity,
     pub(crate) primary: PrimaryVisualization,
-    /// Query is an additive panel consequence. It never replaces or
-    /// unregisters the Scene/empty primary visualization.
-    pub(crate) query: Option<QueryViewModel>,
     pub(crate) cameras: CameraRegistrySource,
     pub(crate) timeline: TimelineSubject,
 }
@@ -186,7 +181,6 @@ impl ActivityProjection {
         activity: Activity,
         recording: Option<RecordingProgress>,
         live_review: Option<EpisodeSummary>,
-        data_intent: Option<&DataIntent>,
         data_episode_context: Option<EpisodeSummary>,
     ) -> Self {
         match activity {
@@ -201,52 +195,27 @@ impl ActivityProjection {
                     .unwrap_or_else(|| TimelineSubject::empty(activity));
                 let primary = match live_review {
                     Some(episode) if timeline.recorded_episode().is_some() => {
-                        PrimaryVisualization::RecordedScene(episode)
+                        PrimaryVisualization::RecordedScene(Box::new(episode))
                     }
                     _ => PrimaryVisualization::LiveScene,
                 };
                 Self {
                     activity,
                     primary,
-                    query: None,
                     cameras: CameraRegistrySource::LiveAssignments,
                     timeline,
                 }
             }
-            Activity::Data => match data_intent {
-                Some(DataIntent::Episode(episode)) => Self {
+            Activity::Data => match data_episode_context {
+                Some(episode) => Self {
                     activity,
-                    primary: PrimaryVisualization::RecordedScene(episode.clone()),
-                    query: None,
-                    cameras: CameraRegistrySource::RecordedEpisode(episode.clone()),
-                    timeline: TimelineSubject::Episode {
-                        activity,
-                        episode: episode.clone(),
-                    },
+                    primary: PrimaryVisualization::RecordedScene(Box::new(episode.clone())),
+                    cameras: CameraRegistrySource::RecordedEpisode(Box::new(episode.clone())),
+                    timeline: TimelineSubject::Episode { activity, episode },
                 },
-                Some(DataIntent::Query(model)) => {
-                    let timeline = data_episode_context
-                        .clone()
-                        .map(|episode| TimelineSubject::Episode { activity, episode })
-                        .unwrap_or_else(|| TimelineSubject::empty(activity));
-                    let cameras = data_episode_context
-                        .clone()
-                        .map(CameraRegistrySource::RecordedEpisode)
-                        .unwrap_or(CameraRegistrySource::None);
-                    Self {
-                        activity,
-                        primary: data_episode_context
-                            .map(PrimaryVisualization::RecordedScene)
-                            .unwrap_or(PrimaryVisualization::EmptyEpisodes),
-                        query: Some(model.clone()),
-                        cameras,
-                        timeline,
-                    }
-                }
-                Some(DataIntent::EmptyEpisodes) | None => Self {
+                None => Self {
                     activity,
                     primary: PrimaryVisualization::EmptyEpisodes,
-                    query: None,
                     cameras: CameraRegistrySource::None,
                     timeline: TimelineSubject::empty(activity),
                 },
@@ -254,14 +223,12 @@ impl ActivityProjection {
             Activity::Training => Self {
                 activity,
                 primary: PrimaryVisualization::EmptyEpisodes,
-                query: None,
                 cameras: CameraRegistrySource::None,
                 timeline: TimelineSubject::empty(activity),
             },
             Activity::Rollout => Self {
                 activity,
                 primary: PrimaryVisualization::LiveScene,
-                query: None,
                 cameras: CameraRegistrySource::LiveAssignments,
                 timeline: TimelineSubject::empty(activity),
             },
@@ -369,6 +336,7 @@ mod tests {
 
     fn episode(id: &str) -> EpisodeSummary {
         EpisodeSummary {
+            dataset_id: "default".to_owned(),
             id: id.to_owned(),
             file: format!("{id}.jsonl"),
             arms: Vec::new(),
@@ -387,53 +355,40 @@ mod tests {
     #[test]
     fn an_episode_selection_derives_scene_cameras_and_timeline_together() {
         let selected = episode("episode-42");
-        let visualization = DataIntent::Episode(selected.clone());
-        let projection = ActivityProjection::derive(
-            Activity::Data,
-            None,
-            None,
-            Some(&visualization),
-            Some(selected.clone()),
-        );
+        let projection =
+            ActivityProjection::derive(Activity::Data, None, None, Some(selected.clone()));
 
         assert_eq!(
             projection.primary,
-            PrimaryVisualization::RecordedScene(selected.clone())
+            PrimaryVisualization::RecordedScene(Box::new(selected.clone()))
         );
         assert_eq!(
             projection.cameras,
-            CameraRegistrySource::RecordedEpisode(selected.clone())
+            CameraRegistrySource::RecordedEpisode(Box::new(selected.clone()))
         );
         assert_eq!(projection.timeline.episode_id(), Some(selected.id.as_str()));
     }
 
     #[test]
-    fn query_context_is_explicit_in_every_projected_surface() {
+    fn query_state_does_not_replace_episode_context() {
         let selected = episode("episode-7");
-        let visualization = DataIntent::Query(QueryViewModel::idle("select 1".to_owned(), 100));
-        let projection = ActivityProjection::derive(
-            Activity::Data,
-            None,
-            None,
-            Some(&visualization),
-            Some(selected.clone()),
-        );
+        let projection =
+            ActivityProjection::derive(Activity::Data, None, None, Some(selected.clone()));
 
         assert_eq!(
             projection.primary,
-            PrimaryVisualization::RecordedScene(selected.clone())
+            PrimaryVisualization::RecordedScene(Box::new(selected.clone()))
         );
-        assert!(matches!(projection.query, Some(QueryViewModel { .. })));
         assert_eq!(
             projection.cameras,
-            CameraRegistrySource::RecordedEpisode(selected.clone())
+            CameraRegistrySource::RecordedEpisode(Box::new(selected.clone()))
         );
         assert_eq!(projection.timeline.episode_id(), Some(selected.id.as_str()));
     }
 
     #[test]
     fn an_empty_data_activity_has_one_explicit_empty_timeline_subject() {
-        let projection = ActivityProjection::derive(Activity::Data, None, None, None, None);
+        let projection = ActivityProjection::derive(Activity::Data, None, None, None);
         assert!(matches!(
             projection.timeline,
             TimelineSubject::Empty {
@@ -446,7 +401,7 @@ mod tests {
 
     #[test]
     fn rollout_projects_live_scene_and_follower_camera_context() {
-        let projection = ActivityProjection::derive(Activity::Rollout, None, None, None, None);
+        let projection = ActivityProjection::derive(Activity::Rollout, None, None, None);
         assert_eq!(projection.primary, PrimaryVisualization::LiveScene);
         assert_eq!(projection.cameras, CameraRegistrySource::LiveAssignments);
         assert!(matches!(

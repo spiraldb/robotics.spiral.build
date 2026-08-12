@@ -27,7 +27,7 @@ when the project is opened. See **Distribution** below.
 Spiral Robotics sets up, calibrates, and drives SO-ARM101 arms, records synchronized
 robot and camera data, publishes and queries episodes, trains policies, and
 safely replays actions on a follower. Operators use it from the browser or the
-terminal without managing a Python environment themselves.
+terminal without managing a separate ML runtime themselves.
 
 The durable scope is the **full robot-learning loop**: connect → calibrate →
 teleoperate → record → inspect/query → publish/export → train → run a policy.
@@ -37,7 +37,7 @@ and applies it through the follower's bounded control path.
 
 Success is an ML engineer collecting a usable dataset, understanding any
 episode against one synchronized clock, training from Spiral, and replaying it
-on real hardware without writing glue code or operating a Python stack.
+on real hardware without writing glue code or operating a second training stack.
 
 ## Positioning
 
@@ -47,13 +47,10 @@ on real hardware without writing glue code or operating a Python stack.
   backend; it never holds service credentials or drives hardware directly.
 - **Rust owns the system boundary.** The motor bus, camera capture,
   calibration, kinematics, server, run supervision, data contracts, and web
-  interface are Rust. Policy training uses one isolated PyTorch worker whose
-  tensor/media dependencies are pinned by the Nix flake and whose native
-  Spiral binding follows the selected SpiralDB engine installation. Python owns the read-only
-  Spiral relation and `to_torch()` sample-preparation path because that API is
-  not exposed through ADBC. Rust retains lifecycle, persistence, query
-  authorization, and checkpoint ingest; Python is not a second
-  operator-facing system.
+  interface are Rust. Policy training is also native: a dedicated ADBC
+  connection streams Arrow state, action, and Spiral-decoded image tensors into
+  Burn's full vision ACT/CVAE trainer. Rust owns lifecycle, cancellation,
+  validation, telemetry, and SafeTensors checkpoint publication.
 - **One arm is one robot instance is one JSON file.** Serial port, cameras,
   motors, and calibration live in one versioned file. There is no hidden
   calibration cache or second manifest to reconcile, and the Studio notices
@@ -65,8 +62,8 @@ on real hardware without writing glue code or operating a Python stack.
 - **SpiralDB is the primary connected data path.** Completed episodes can be
   published as relational Arrow tables plus managed MP4 data through ADBC,
   queried from the Studio, and brought back through the backend for safe local
-  replay. Hugging Face is an optional publishing mirror; local JSONL/MP4 is the
-  operator-cleared staging and recovery buffer, not a second connected dataset.
+  replay. Local JSONL/MP4 is the operator-cleared staging and recovery buffer,
+  not a second connected dataset.
 - **The robot description is the single source of truth.** Geometry, joint
   limits, and the rendered model come from URDF rather than duplicated drawing
   constants.
@@ -85,13 +82,12 @@ Spiral Robotics backend
       ├── local episode recovery
       ├── SpiralDB ingest and read-only queries
       ├── local policy-training supervision and telemetry
-      ├── Hugging Face publishing
       └── episode validation and follower replay
 ```
 
 - **The browser can run anywhere.** It renders the interface, WebGL scene,
   charts, tables, and native video. It connects only to the Spiral Robotics
-  backend and does not connect directly to robots, SpiralDB, or Hugging Face.
+  backend and does not connect directly to robots or SpiralDB.
 - **The backend is the one consequential system.** It normally runs near the
   arms and owns all hardware connections, the control loop, safety decisions,
   camera capture, video encoding, durable episode files, service credentials,
@@ -135,9 +131,8 @@ selects and monitors a rollout but never becomes the motor-control runtime.
     explicit SpiralDB push, replay/delete actions, import and export, and
     guarded read-only Spiral SQL.
   - **Training** owns random anchor and camera/action sampling through the
-    Spiral Python relation API, local vision ACT configuration, learning and
-    resource telemetry, graceful cancellation, and Rust-published Spiral
-    checkpoints.
+    Spiral ADBC/Arrow path, local Burn vision ACT configuration, learning and
+    throughput telemetry, graceful cancellation, and Spiral checkpoints.
   - **Rollout** owns checkpoint selection, fixed-follower readiness, simple
     action-chunk and control-rate settings, the live 3D scene, one follower
     camera, authoritative start/stop lifecycle, and measured native inference
@@ -182,11 +177,10 @@ selects and monitors a rollout but never becomes the motor-control runtime.
   managed per-episode MP4 datasets. Training derives the MP4 frame directly
   from sample index and the declared stream rates, then submits only finite
   frame manifests; Spiral performs frame selection, decode, resize,
-  normalization, and `to_torch()` conversion.
+  normalization, and Arrow tensor conversion. Rust packs those contiguous
+  buffers into Burn tensors without materializing encoded video frames.
   The Studio exposes row-limited, read-only query preview and video retrieval
   through the backend.
-- Optional Hugging Face publishing mirrors completed episodes as Parquet,
-  metadata, and MP4 files using a backend-held write token.
 - A `--simulate` mode with emulated motors allows calibration, teleoperation,
   recording, and replay without hardware.
 
@@ -201,10 +195,9 @@ sent.
 
 - **Hardware:** SO-ARM101 only for now, with leader and follower roles. Live
   calibration supports Feetech protocol-0 motors such as the STS3215.
-- **One supervised Python worker.** The only Python boundary is the
-  PyTorch/Spiral training worker launched and supervised by the Rust backend.
-  It uses the user's normal Spiral identity for read-only sample queries and is
-  not given the backend ADBC driver or a separate secret.
+- **One native training runtime.** Burn training runs in-process under the
+  backend supervisor. It uses a dedicated read-only ADBC connection for sample
+  queries and the backend's existing trusted connection for checkpoint ingest.
 - **Nix flake** provides the development environment and web toolchain (`dx`,
   Tailwind CLI, `wasm-bindgen`, and `wasm-opt`).
 - **Safety is enforced by the server.** Enabling torque first copies measured

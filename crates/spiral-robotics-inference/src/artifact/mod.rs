@@ -12,7 +12,7 @@ pub const WEIGHTS_FILE: &str = "model.safetensors";
 /// Content-addressed identity of the exact bytes admitted to the runtime.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelIdentity {
-    repository: Option<String>,
+    source: Option<String>,
     /// Immutable source commit, never a branch or tag.
     revision: Option<String>,
     config_sha256: Option<String>,
@@ -22,7 +22,7 @@ pub struct ModelIdentity {
 impl ModelIdentity {
     pub fn local() -> Self {
         Self {
-            repository: None,
+            source: None,
             revision: None,
             config_sha256: None,
             weights_sha256: None,
@@ -38,7 +38,7 @@ impl ModelIdentity {
         require_hex(&config_sha256, 64, "config SHA-256")?;
         require_hex(&weights_sha256, 64, "weights SHA-256")?;
         Ok(Self {
-            repository: None,
+            source: None,
             revision: None,
             config_sha256: Some(config_sha256.to_ascii_lowercase()),
             weights_sha256: Some(weights_sha256.to_ascii_lowercase()),
@@ -46,23 +46,23 @@ impl ModelIdentity {
     }
 
     pub fn pinned(
-        repository: impl Into<String>,
+        source: impl Into<String>,
         revision: impl Into<String>,
         config_sha256: impl Into<String>,
         weights_sha256: impl Into<String>,
     ) -> Result<Self> {
-        let repository = repository.into();
+        let source = source.into();
         let revision = revision.into();
-        require_repository(&repository)?;
+        require_source(&source)?;
         require_hex(&revision, 40, "model revision")?;
         let mut identity = Self::content_addressed(config_sha256, weights_sha256)?;
-        identity.repository = Some(repository);
+        identity.source = Some(source);
         identity.revision = Some(revision.to_ascii_lowercase());
         Ok(identity)
     }
 
-    pub fn repository(&self) -> Option<&str> {
-        self.repository.as_deref()
+    pub fn source(&self) -> Option<&str> {
+        self.source.as_deref()
     }
 
     pub fn revision(&self) -> Option<&str> {
@@ -134,7 +134,7 @@ impl ModelFiles {
         )
     }
 
-    #[cfg(feature = "hub")]
+    #[cfg(feature = "download")]
     fn verify_expected_files(&self) -> Result<()> {
         if let Some(expected) = self.identity.config_sha256.as_deref() {
             let actual = sha256_file(&self.config)?;
@@ -236,7 +236,7 @@ fn sha256_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-#[cfg(feature = "hub")]
+#[cfg(feature = "download")]
 fn sha256_file(path: &Path) -> Result<String> {
     use std::io::{BufReader, Read};
 
@@ -274,41 +274,57 @@ fn require_hex(value: &str, length: usize, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn require_repository(repository: &str) -> Result<()> {
-    let mut parts = repository.split('/');
-    if parts.next().is_none_or(str::is_empty)
-        || parts.next().is_none_or(str::is_empty)
-        || parts.next().is_some()
-    {
+fn require_source(source: &str) -> Result<()> {
+    if source.trim().is_empty() {
+        return Err(Error::Artifact("model source cannot be empty".to_owned()));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "download")]
+fn require_https_url(url: &str, label: &str) -> Result<()> {
+    if !url.starts_with("https://") || url.len() == "https://".len() {
         return Err(Error::Artifact(format!(
-            "Hugging Face model ID {repository:?} must be owner/name"
+            "{label} must be an absolute HTTPS URL"
         )));
     }
     Ok(())
 }
 
-#[cfg(feature = "hub")]
+#[cfg(feature = "download")]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HubModel {
-    repository: String,
-    revision: String,
-    config_sha256: Option<String>,
-    weights_sha256: Option<String>,
+pub struct RemoteModel {
+    config_url: String,
+    weights_url: String,
+    identity: ModelIdentity,
 }
 
-#[cfg(feature = "hub")]
-impl HubModel {
-    /// Construct a model pinned to an immutable 40-character Git commit.
-    pub fn pinned(repository: impl Into<String>, revision: impl Into<String>) -> Result<Self> {
-        let repository = repository.into();
+#[cfg(feature = "download")]
+impl RemoteModel {
+    /// Construct a raw-URL model pinned to an immutable 40-character source revision.
+    pub fn pinned(
+        source: impl Into<String>,
+        revision: impl Into<String>,
+        config_url: impl Into<String>,
+        weights_url: impl Into<String>,
+    ) -> Result<Self> {
+        let source = source.into();
         let revision = revision.into();
-        require_repository(&repository)?;
+        let config_url = config_url.into();
+        let weights_url = weights_url.into();
+        require_source(&source)?;
         require_hex(&revision, 40, "model revision")?;
+        require_https_url(&config_url, "model config URL")?;
+        require_https_url(&weights_url, "model weights URL")?;
         Ok(Self {
-            repository,
-            revision: revision.to_ascii_lowercase(),
-            config_sha256: None,
-            weights_sha256: None,
+            config_url,
+            weights_url,
+            identity: ModelIdentity {
+                source: Some(source),
+                revision: Some(revision.to_ascii_lowercase()),
+                config_sha256: None,
+                weights_sha256: None,
+            },
         })
     }
 
@@ -321,49 +337,122 @@ impl HubModel {
         let weights_sha256 = weights_sha256.into();
         require_hex(&config_sha256, 64, "config SHA-256")?;
         require_hex(&weights_sha256, 64, "weights SHA-256")?;
-        self.config_sha256 = Some(config_sha256.to_ascii_lowercase());
-        self.weights_sha256 = Some(weights_sha256.to_ascii_lowercase());
+        self.identity.config_sha256 = Some(config_sha256.to_ascii_lowercase());
+        self.identity.weights_sha256 = Some(weights_sha256.to_ascii_lowercase());
         Ok(self)
     }
 
-    pub fn repository(&self) -> &str {
-        &self.repository
+    pub fn config_url(&self) -> &str {
+        &self.config_url
     }
 
-    pub fn revision(&self) -> &str {
-        &self.revision
+    pub fn weights_url(&self) -> &str {
+        &self.weights_url
     }
 }
 
-#[cfg(feature = "hub")]
-pub fn download_from_hub(model: &HubModel) -> Result<ModelFiles> {
-    use hf_hub::{HFClientSync, split_id};
+#[cfg(feature = "download")]
+pub fn download_remote_model(model: &RemoteModel) -> Result<ModelFiles> {
+    let cache = std::env::var_os("SPIRAL_ROBOTICS_CACHE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::cache_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join("spiral-robotics")
+        })
+        .join("models");
+    download_remote_model_to(model, cache)
+}
 
-    let client = HFClientSync::new()?;
-    let (owner, name) = split_id(&model.repository);
-    let repository = client.model(owner, name);
-    let config = repository
-        .download_file()
-        .filename(CONFIG_FILE)
-        .revision(&model.revision)
-        .send()?;
-    let weights = repository
-        .download_file()
-        .filename(WEIGHTS_FILE)
-        .revision(&model.revision)
-        .send()?;
+#[cfg(feature = "download")]
+pub fn download_remote_model_to(
+    model: &RemoteModel,
+    cache_root: impl AsRef<Path>,
+) -> Result<ModelFiles> {
+    let cache_key = sha256_bytes(
+        format!(
+            "{}\n{}\n{}\n{}",
+            model.identity.source.as_deref().unwrap_or_default(),
+            model.identity.revision.as_deref().unwrap_or_default(),
+            model.config_url,
+            model.weights_url,
+        )
+        .as_bytes(),
+    );
+    let directory = cache_root.as_ref().join(cache_key);
+    std::fs::create_dir_all(&directory).at(&directory)?;
+    let config = directory.join(CONFIG_FILE);
+    let weights = directory.join(WEIGHTS_FILE);
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(concat!("spiral-robotics/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|source| Error::Download {
+            url: "HTTP client".to_owned(),
+            source,
+        })?;
+    download_file(
+        &client,
+        &model.config_url,
+        &config,
+        model.identity.config_sha256.as_deref(),
+    )?;
+    download_file(
+        &client,
+        &model.weights_url,
+        &weights,
+        model.identity.weights_sha256.as_deref(),
+    )?;
     let files = ModelFiles {
         config,
         weights,
-        identity: ModelIdentity {
-            repository: Some(model.repository.clone()),
-            revision: Some(model.revision.clone()),
-            config_sha256: model.config_sha256.clone(),
-            weights_sha256: model.weights_sha256.clone(),
-        },
+        identity: model.identity.clone(),
     };
     files.verify_expected_files()?;
     Ok(files)
+}
+
+#[cfg(feature = "download")]
+fn download_file(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    destination: &Path,
+    expected_sha256: Option<&str>,
+) -> Result<()> {
+    use std::io::Write as _;
+
+    if destination.is_file()
+        && expected_sha256
+            .map(|expected| {
+                sha256_file(destination).is_ok_and(|actual| actual.eq_ignore_ascii_case(expected))
+            })
+            .unwrap_or(true)
+    {
+        return Ok(());
+    }
+
+    let mut response = client
+        .get(url)
+        .send()
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .map_err(|source| Error::Download {
+            url: url.to_owned(),
+            source,
+        })?;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| Error::Artifact("download destination has no parent".to_owned()))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).at(parent)?;
+    std::io::copy(&mut response, temporary.as_file_mut()).at(destination)?;
+    temporary.flush().at(destination)?;
+    if let Some(expected) = expected_sha256 {
+        let actual = sha256_file(temporary.path())?;
+        verify_digest("download", Some(expected), &actual)?;
+    }
+    temporary.persist(destination).map_err(|error| Error::Io {
+        path: destination.to_owned(),
+        source: error.error,
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -391,10 +480,26 @@ mod tests {
         assert_eq!(artifact.identity().weights_sha256().unwrap().len(), 64);
     }
 
-    #[cfg(feature = "hub")]
+    #[cfg(feature = "download")]
     #[test]
-    fn mutable_hub_revisions_are_rejected() {
-        assert!(super::HubModel::pinned("owner/model", "main").is_err());
-        assert!(super::HubModel::pinned("owner/model", "a".repeat(40)).is_ok());
+    fn remote_models_require_pinned_revisions_and_https_urls() {
+        assert!(
+            super::RemoteModel::pinned(
+                "model source",
+                "main",
+                "https://example.com/config.json",
+                "https://example.com/model.safetensors",
+            )
+            .is_err()
+        );
+        assert!(
+            super::RemoteModel::pinned(
+                "model source",
+                "a".repeat(40),
+                "http://example.com/config.json",
+                "https://example.com/model.safetensors",
+            )
+            .is_err()
+        );
     }
 }

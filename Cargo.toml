@@ -59,13 +59,21 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 [patch.crates-io]
 block = { path = "patches/block" }
 
-[profile.web-release]
+[profile.wasm-dev]
+inherits = "dev"
+# Dioxus 0.7 asks wasm-bindgen and Binaryen to preserve debug information even
+# when Binaryen cannot parse the DWARF emitted by newer Rust toolchains. Do not
+# emit DWARF for browser artifacts; the native server keeps normal dev symbols.
+debug = 0
+
+[profile.wasm-release]
 inherits = "release"
 # DX uses this profile only for the downloaded WebAssembly half of the studio.
 opt-level = "s"
 lto = true
 codegen-units = 1
 panic = "abort"
+debug = 0
 strip = "debuginfo"
 
 [profile.server-release]

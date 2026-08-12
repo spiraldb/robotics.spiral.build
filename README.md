@@ -5,11 +5,10 @@ Spiral Robotics is a Rust-native robotics toolkit and browser studio inspired by
 [Rerun](https://github.com/rerun-io/rerun). It sets up, calibrates, and operates
 SO-ARM101 arms; records synchronized robot and camera data; publishes and queries
 episodes through SpiralDB; trains vision-conditioned ACT policies; and safely
-replays recorded actions. Policy inference and robot rollout are not implemented
-yet.
+executes trained policies through the follower's bounded rollout path.
 
 Completed recordings use a local recovery buffer before explicit publication to
-SpiralDB. Hugging Face is available as an optional publishing mirror.
+SpiralDB.
 
 ## Development
 
@@ -25,20 +24,6 @@ Start the studio with:
 cd crates/spiral-robotics-studio
 dx serve --release
 ```
-
-Vision ACT uses SpiralDB's native Python relation package (`to_torch()`). Until
-that wheel is part of nixpkgs, point Studio at the Python environment from the
-matching SpiralDB checkout:
-
-```console
-SPIRAL_ROBOTICS_TRAINING_PYTHON=/path/to/spiraldb/lang/python/spiral-engine/.venv/bin/python \
-dx serve --release
-```
-
-That environment must contain PyTorch, PyArrow, NumPy, SafeTensors, and a
-matching SpiralDB build with the video/image relation operators. Studio verifies a real
-`to_torch()` conversion before enabling training. Spiral—not Python—selects,
-decodes, resizes, and normalizes every requested camera frame.
 
 To connect Studio to a local SpiralDB stack:
 

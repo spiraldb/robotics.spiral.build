@@ -16,7 +16,6 @@ use crate::spiral::column as spiral_column;
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DataSettings {
     pub spiral: SpiralSettings,
-    pub hugging_face: HuggingFaceSettings,
     pub video: VideoSettings,
 }
 
@@ -41,26 +40,6 @@ impl Default for SpiralSettings {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct HuggingFaceSettings {
-    pub enabled: bool,
-    /// Dataset repository in `owner/name` form.
-    pub repository: String,
-    pub revision: String,
-    pub has_token: bool,
-}
-
-impl Default for HuggingFaceSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            repository: String::new(),
-            revision: "main".to_owned(),
-            has_token: false,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct VideoSettings {
     pub enabled: bool,
 }
@@ -71,17 +50,11 @@ impl Default for VideoSettings {
     }
 }
 
-/// Update from the settings screen. An omitted token preserves the stored
-/// secret; `clear_*_token` removes it explicitly.
+/// Update from the settings screen.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UpdateDataSettingsRequest {
     pub spiral: SpiralSettings,
-    pub hugging_face: HuggingFaceSettings,
     pub video: VideoSettings,
-    #[serde(default)]
-    pub hugging_face_token: Option<String>,
-    #[serde(default)]
-    pub clear_hugging_face_token: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -96,7 +69,6 @@ pub struct PublicationStatus {
     /// `queued`, `publishing`, `published`, `failed`, or `local`.
     pub state: String,
     pub spiral: Option<String>,
-    pub hugging_face: Option<String>,
     pub updated_ms: i64,
 }
 
@@ -126,7 +98,7 @@ pub struct SpiralQueryResponse {
     pub elapsed_ms: u64,
 }
 
-/// The policy family executed by the isolated PyTorch worker.
+/// The policy family executed by the native training runtime.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrainingPolicy {
@@ -194,7 +166,7 @@ impl Default for ActTrainingConfig {
     }
 }
 
-/// Authoritative lifecycle of one backend-owned training process.
+/// Authoritative lifecycle of one backend-owned native training run.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrainingRunPhase {
@@ -228,6 +200,10 @@ impl TrainingRunPhase {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct StartTrainingRequest {
     pub run_name: String,
+    /// Relational dataset selected by the operator. The configured Spiral
+    /// namespace remains a storage location; this ID is the training set.
+    #[serde(default = "default_dataset_id")]
+    pub dataset_id: String,
     #[serde(default)]
     pub policy: TrainingPolicy,
     pub sql: String,
@@ -257,6 +233,7 @@ impl Default for StartTrainingRequest {
     fn default() -> Self {
         Self {
             run_name: "act-run".to_owned(),
+            dataset_id: default_dataset_id(),
             policy: TrainingPolicy::Act,
             sql: String::new(),
             state_column: default_training_state_column(),
@@ -360,39 +337,12 @@ pub struct TrainingMetricPoint {
     pub train_loss: f64,
     pub validation_loss: Option<f64>,
     pub learning_rate: f64,
-    /// Whole-device GPU activity over the platform sampler's recent window.
-    pub gpu_utilization_pct: Option<f64>,
-    /// Bytes held by this PyTorch worker's CUDA/MPS allocator or driver.
-    pub gpu_memory_bytes: Option<u64>,
-    /// Worker process CPU where 100% equals one fully occupied logical core.
-    pub cpu_utilization_pct: f64,
     /// Latest requested video payload bytes divided by total sample preparation time.
     pub transfer_bytes_per_second: f64,
     pub examples_per_second: f64,
-    pub queue_depth: usize,
     pub elapsed_seconds: f64,
     #[serde(default)]
     pub event: Option<String>,
-}
-
-/// Serialization used by a durably ingested inference artifact.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TrainingCheckpointFormat {
-    /// Historical pickle-backed checkpoints written before SafeTensors export.
-    #[default]
-    LegacyPyTorch,
-    /// Data-only tensor storage with a versioned Spiral manifest.
-    SafeTensors,
-}
-
-impl TrainingCheckpointFormat {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::LegacyPyTorch => "Legacy PyTorch",
-            Self::SafeTensors => "SafeTensors",
-        }
-    }
 }
 
 /// An inference checkpoint durably ingested into Spiral.
@@ -403,8 +353,9 @@ pub struct TrainingCheckpoint {
     pub validation_loss: Option<f64>,
     pub spiral_table: String,
     pub byte_size: u64,
+    /// Old run-history entries default to false and cannot be selected for rollout.
     #[serde(default)]
-    pub format: TrainingCheckpointFormat,
+    pub inference_ready: bool,
 }
 
 /// Immutable Spiral identity captured when a run starts.
@@ -414,15 +365,18 @@ pub struct TrainingCheckpoint {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TrainingSource {
     pub project: String,
+    /// Configured Spiral namespace containing the managed relations.
     pub dataset: String,
+    /// Relational dataset row whose episodes supplied this run.
+    #[serde(default = "default_dataset_id")]
+    pub dataset_id: String,
     pub checkpoint_table: String,
 }
 
-/// Result of checking every dependency needed before a worker can start.
+/// Result of checking every dependency needed before a native run can start.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TrainingReadiness {
     pub ready: bool,
-    pub python_ready: bool,
     pub spiral_ready: bool,
     pub summary: String,
 }
@@ -431,14 +385,13 @@ impl Default for TrainingReadiness {
     fn default() -> Self {
         Self {
             ready: false,
-            python_ready: false,
             spiral_ready: false,
             summary: "Checking the local training runtime…".to_owned(),
         }
     }
 }
 
-/// Browser-safe run state. Checkpoint bytes and process handles never cross the
+/// Browser-safe run state. Checkpoint bytes and task handles never cross the
 /// wire; only their durable Spiral identity does.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TrainingRun {
@@ -461,7 +414,6 @@ pub struct TrainingRun {
 pub struct TrainingSnapshot {
     #[serde(default)]
     pub readiness: TrainingReadiness,
-    pub worker: String,
     pub runs: Vec<TrainingRun>,
 }
 
@@ -1124,6 +1076,10 @@ pub const CAUTION_FOLLOW_ERROR_DEGREES: f64 = 5.0;
 pub struct EpisodeSummary {
     /// Stable identifier, also the file's stem.
     pub id: String,
+    /// Dataset row this episode belongs to. Streams and samples reference the
+    /// episode; only the episode row carries dataset membership.
+    #[serde(default = "default_dataset_id")]
+    pub dataset_id: String,
     /// Name of the episode's file inside the episode directory.
     pub file: String,
     /// Arms sampled in this take, in the order their joints appear in a frame.
@@ -1192,6 +1148,9 @@ pub struct EpisodeArm {
 pub struct RecordingProgress {
     /// Identifier the finished take will have.
     pub episode: String,
+    /// Logical dataset row this take will reference when it completes.
+    #[serde(default = "default_dataset_id")]
+    pub dataset_id: String,
     pub frames: u64,
     pub elapsed_seconds: f64,
     /// Real time since Record was pressed, including deliberate pauses.
@@ -1268,8 +1227,11 @@ pub struct ReplayProgress {
 }
 
 /// Begin capturing a take.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StartRecordingRequest {
+    /// Dataset row that will own the completed episode.
+    #[serde(default = "default_dataset_id")]
+    pub dataset_id: String,
     /// Arms to sample. Empty means every connected arm, which is the useful
     /// default: a take is a record of the whole scene, not of one arm.
     #[serde(default)]
@@ -1277,6 +1239,22 @@ pub struct StartRecordingRequest {
     /// A short operator note stored with the take.
     #[serde(default)]
     pub note: Option<String>,
+}
+
+impl Default for StartRecordingRequest {
+    fn default() -> Self {
+        Self {
+            dataset_id: default_dataset_id(),
+            arms: Vec::new(),
+            note: None,
+        }
+    }
+}
+
+/// Stable fallback for old recordings and clients created before datasets
+/// became first-class rows.
+pub fn default_dataset_id() -> String {
+    "default".to_owned()
 }
 
 /// Finish the take in progress.
@@ -1567,6 +1545,7 @@ mod tests {
     fn an_unfinished_take_is_listed_but_not_offered() {
         let mut episode = EpisodeSummary {
             id: "episode_000001".to_owned(),
+            dataset_id: "default".to_owned(),
             file: "episode_000001.jsonl".to_owned(),
             arms: vec![EpisodeArm {
                 id: "follower".to_owned(),

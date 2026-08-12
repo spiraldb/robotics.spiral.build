@@ -54,5 +54,5 @@ jobs:
       - name: Check web target
         run: nix develop .#ci --command cargo check -p spiral-robotics-studio --features web --target wasm32-unknown-unknown
 
-      - name: Validate training worker
-        run: nix develop .#ci --command python -m py_compile crates/spiral-robotics-studio/python/spiral_robotics_train.py crates/spiral-robotics-studio/python/spiral_robotics_data.py crates/spiral-robotics-studio/python/spiral_robotics_policy.py
+      - name: Validate native ACT backend
+        run: nix develop .#ci --command cargo test -p spiral-robotics-inference --no-default-features

@@ -1,21 +1,21 @@
 //! Reactive assembly of the persisted frontend panel workspace.
 
 use dioxus::prelude::*;
-use spiral_robotics_core::api::{DataSettings, ModeSelection, ReplayPhase, ReplayPurpose};
+use spiral_robotics_core::api::{ModeSelection, ReplayPhase, ReplayPurpose};
 use spiral_robotics_panels::{DockZone, Panel, PanelId, PanelLayout, PanelWorkspace};
 #[cfg(test)]
 use spiral_robotics_panels::{LayoutNode, SplitAxis};
 
-use crate::frontend::api::{commands, historical, http as api};
+use crate::frontend::api::{commands, historical};
 #[cfg(test)]
 use crate::frontend::app::activity::LoadState;
 use crate::frontend::app::activity::{
     Activity, ActivityProjection, CameraIdentity, CameraRegistrySource, PanelRole,
     PrimaryVisualization, RecordedSource, TimelineSubject, TimelineTarget,
 };
-use crate::frontend::app::layout::{default_panel_layout, default_panel_layout_with_workbench};
-use crate::frontend::app::navigation::{ShellAction, ShellEffect, use_shell_controller};
-use crate::frontend::app::shell::{ActivityRail, NoticeStrip, StatusBar};
+#[cfg(test)]
+use crate::frontend::app::layout::default_panel_layout;
+use crate::frontend::app::routes::studio_configuration;
 use crate::frontend::app::state::Studio;
 use crate::frontend::panels::camera::{
     CameraEditor, CameraEditorSource, recorded_camera_registry_placeholder,
@@ -28,73 +28,58 @@ use crate::frontend::panels::timeline::panel::{
     RecordedTimelineTraces, SignalSource, StudioTimeline, StudioTimelineState,
     TimelineCapabilities, TimelineGate, TimelinePlayback, signal_lanes_from_store,
 };
-use crate::frontend::panels::timeline::state::{
-    TimelineActionContext, dispatch_timeline_action, use_timeline_controller,
-};
-use crate::frontend::screens::data::state::use_data_controller;
+use crate::frontend::panels::timeline::state::{TimelineActionContext, dispatch_timeline_action};
 use crate::frontend::screens::data::workbench::{
-    DataIntent, DataWorkbench, QueryResultView, short_id,
+    EpisodesPanel, QueryPanel, QueryResultView, short_id,
 };
 use crate::frontend::screens::live::actions::dispatch_live_action;
 use crate::frontend::screens::live::workbench::LiveWorkbench;
-use crate::frontend::screens::rollout::state::use_rollout_controller;
 use crate::frontend::screens::rollout::workspace::{
     InferencePanel, RolloutWorkbench, follower as rollout_follower,
 };
-use crate::frontend::screens::settings::panel::SettingsPanel;
-use crate::frontend::screens::training::state::use_training_controller;
-use crate::frontend::screens::training::workspace::TrainingWorkspace;
 
 use historical::{HistoricalPreview, historical_replay_slot, request_historical_preview};
 #[cfg(test)]
 use historical::{attach_historical_trace_failure, attach_historical_traces};
 
-const TAILWIND: Asset = asset!("/assets/tailwind.css");
-const FAVICON: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2337352f'/%3E%3Cpath d='M9 23V13l7-5 7 5v10' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E";
+#[derive(Clone, PartialEq)]
+pub(crate) struct ScreenWorkspaceDefinition {
+    panels: Vec<(Panel, PanelRole)>,
+    pub(crate) initial_layout: PanelLayout,
+    storage_key: String,
+}
 
-/// Application providers stay stable while the operating surface reacts to
-/// feature state. Keeping bootstrap free of telemetry reads also makes the
-/// client/server boundary explicit.
+impl ScreenWorkspaceDefinition {
+    pub(crate) fn new(
+        panels: Vec<(Panel, PanelRole)>,
+        initial_layout: PanelLayout,
+        storage_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            panels,
+            initial_layout,
+            storage_key: storage_key.into(),
+        }
+    }
+}
+
+/// Shared episode-clock behavior for the routes that need robot, camera, and
+/// timeline evidence. Each route owns its panel registry and layout; this host
+/// owns only the cross-panel synchronization contract.
 #[component]
-pub(super) fn StudioApplication() -> Element {
+pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
     let mut studio = crate::frontend::app::state::studio();
-    let shell = use_shell_controller();
-    let mut settings_busy = use_signal(|| false);
-
-    let mut settings =
-        use_resource(|| async { api::get::<DataSettings>("/api/settings/data").await });
-    let settings_result = settings.read_unchecked().clone();
-    let loaded_settings = settings_result
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .cloned();
-    let settings_error = settings_result
-        .as_ref()
-        .and_then(|result| result.as_ref().err())
-        .cloned();
-    let dataset = loaded_settings
-        .as_ref()
-        .map(|settings| settings.spiral.dataset.clone())
-        .filter(|dataset| !dataset.trim().is_empty())
-        .unwrap_or_else(|| "spiral_robotics".to_owned());
-    let spiral_query_available = loaded_settings.as_ref().is_some_and(|settings| {
-        settings.spiral.enabled
-            && (settings.spiral.uri == "spiral:memory:"
-                || !settings.spiral.project_id.trim().is_empty())
-    });
-    let data = use_data_controller(&dataset);
-    use_training_controller(
-        &dataset,
-        crate::frontend::screens::training::workspace::default_training_sql,
-    );
-    use_rollout_controller();
-    let timeline = use_timeline_controller();
+    let configuration = studio_configuration();
+    let dataset = configuration.dataset;
+    let selected_dataset = studio.selected_dataset.read().clone();
+    let spiral_query_available = configuration.spiral_query_available;
+    let timeline = crate::frontend::panels::timeline::state::timeline_controller();
     let mut playhead = timeline.playhead;
     #[cfg(feature = "web")]
     let mut sampled_preview_slot = use_signal(|| None::<(String, u64)>);
     #[cfg(feature = "web")]
     let mut preview_tick_seconds = timeline.preview_tick_seconds;
-    let mut follow_live = timeline.follow_live;
+    let follow_live = timeline.follow_live;
     let mut robot_sync_target = timeline.robot_sync_target;
     let mut historical_state = use_signal(|| None::<RecordedSource<HistoricalPreview>>);
     let mut historical_revision = use_signal(|| 0_u64);
@@ -110,7 +95,7 @@ pub(super) fn StudioApplication() -> Element {
     // take just reviewed in Live closes that gap without overriding a choice
     // the operator already made — a deliberate selection is never replaced.
     use_effect(move || {
-        if shell.activity() != Activity::Data {
+        if activity != Activity::Data {
             return;
         }
         if studio.selected_episode.read().is_some() {
@@ -165,7 +150,7 @@ pub(super) fn StudioApplication() -> Element {
     });
 
     // Live and Data deliberately own different episode selections. Recording
-    // updates the Live review target, while DataWorkbench owns
+    // updates the Live review target, while the Episodes panel owns
     // `studio.selected_episode`. Sharing one signal here was the reason a Data
     // episode stayed on screen after the operator returned to Live.
     use_effect(move || {
@@ -188,8 +173,7 @@ pub(super) fn StudioApplication() -> Element {
             sampled_replay_slot.set(None);
             return;
         };
-        let subject_episode =
-            visible_timeline_episode(studio, shell.activity(), live_review_episode());
+        let subject_episode = visible_timeline_episode(studio, activity, live_review_episode());
         if !replay_matches_timeline_subject(subject_episode.as_deref(), &replay) {
             sampled_replay_slot.set(None);
             return;
@@ -220,8 +204,7 @@ pub(super) fn StudioApplication() -> Element {
                 timeline.stop_preview();
             }
         } else if let Some(replay) = studio.replay().filter(replay_owns_timeline_transport) {
-            let subject_episode =
-                visible_timeline_episode(studio, shell.activity(), live_review_episode());
+            let subject_episode = visible_timeline_episode(studio, activity, live_review_episode());
             if replay_matches_timeline_subject(subject_episode.as_deref(), &replay) {
                 playhead.set(replay.elapsed_seconds);
                 timeline.stop_preview();
@@ -235,6 +218,21 @@ pub(super) fn StudioApplication() -> Element {
         if studio
             .recording()
             .is_some_and(|recording| !recording.paused)
+            && historical_state.peek().is_some()
+        {
+            historical_state.set(None);
+            let next_revision = historical_revision.peek().wrapping_add(1);
+            historical_revision.set(next_revision);
+        }
+    });
+
+    // Re-selecting the Live route explicitly returns to current hardware even
+    // when the route itself does not remount. The shell clears the review
+    // identity; this route-local cache follows that authoritative change.
+    use_effect(move || {
+        if activity == Activity::Live
+            && studio.recording().is_none()
+            && live_review_episode.read().is_none()
             && historical_state.peek().is_some()
         {
             historical_state.set(None);
@@ -257,7 +255,7 @@ pub(super) fn StudioApplication() -> Element {
                 return;
             }
             None => match live_review_episode() {
-                Some(episode) if shell.activity() == Activity::Live => (episode, 0.0),
+                Some(episode) if activity == Activity::Live => (episode, 0.0),
                 _ => return,
             },
         };
@@ -289,12 +287,10 @@ pub(super) fn StudioApplication() -> Element {
             .find(|episode| episode.id == id && episode.usable() && !episode.discarded)
     });
     let data_episode_context = studio.focused_episode();
-    let data_intent = data.intent();
     let projection = ActivityProjection::derive(
-        shell.activity(),
+        activity,
         studio.recording(),
         live_review,
-        data_intent.as_ref(),
         data_episode_context,
     );
     let projected_recorded_identity = match &projection.timeline {
@@ -431,8 +427,10 @@ pub(super) fn StudioApplication() -> Element {
         },
     ));
     let mut selected = studio.selected;
+    let scene_robot = (projection.activity == Activity::Rollout)
+        .then(|| rollout_follower(&studio.snapshot.read().robots).map(|robot| robot.id))
+        .flatten();
 
-    let dock_scope = projection.activity.label().to_ascii_lowercase();
     let mut dock_panels = Vec::<(Panel, PanelRole)>::new();
     match &projection.primary {
         PrimaryVisualization::LiveScene | PrimaryVisualization::RecordedScene(_) => {
@@ -458,6 +456,7 @@ pub(super) fn StudioApplication() -> Element {
                     rsx! {
                         crate::frontend::panels::scene::Viewport {
                             source: scene_source,
+                            visible_robot: scene_robot.clone(),
                             resize_revision: split_resize_revision(),
                             on_select: move |next| selected.set(next),
                         }
@@ -483,19 +482,6 @@ pub(super) fn StudioApplication() -> Element {
             PanelRole::PrimaryVisualization,
         )),
     }
-    if let Some(model) = &projection.query {
-        dock_panels.push((
-            Panel::new(
-                "query-result",
-                "Query result",
-                "primary",
-                rsx! { QueryResultView { model: model.clone() } },
-            )
-            .with_class("query-editor"),
-            PanelRole::PrimaryVisualization,
-        ));
-    }
-
     match &projection.cameras {
         CameraRegistrySource::LiveAssignments if !assigned_cameras.is_empty() => {
             for camera in &assigned_cameras {
@@ -660,73 +646,75 @@ pub(super) fn StudioApplication() -> Element {
             ),
         }
     };
-    let workbench_panel = Panel::new(
-        "workbench",
-        shell.activity().label(),
-        "workbench",
-        rsx! {
-            aside { class: "studio-v2-workbench",
-                if shell.activity() == Activity::Live {
-                    LiveWorkbench {
-                        on_action: move |action| dispatch_live_action(studio, action),
+    let timeline_panel = Panel::new("timeline", "Timeline", "timeline", timeline_panel)
+        .with_class("timeline-editor");
+    let definition = match activity {
+        Activity::Live => {
+            let workbench = Panel::new(
+                "workbench",
+                "Live",
+                "workbench",
+                rsx! {
+                    aside { class: "studio-v2-workbench",
+                        LiveWorkbench {
+                            on_action: move |action| dispatch_live_action(studio, action),
+                        }
                     }
-                } else if shell.activity() == Activity::Data {
-                    DataWorkbench {
-                        dataset: dataset.clone(),
-                        query_available: spiral_query_available,
-                        on_intent: move |next| {
-                            if let DataIntent::Episode(episode) = &next {
-                                let changed = data
-                                    .intent()
-                                    .as_ref()
-                                    .and_then(|current| match current {
-                                        DataIntent::Episode(current) => Some(current.id.as_str()),
-                                        _ => None,
-                                }) != Some(episode.id.as_str());
-                                if changed {
-                                    playhead.set(0.0);
-                                    timeline.stop_preview();
-                                    follow_live.set(false);
-                                    interactive_preview_target.set(None);
-                                    request_historical_preview(
-                                        studio,
-                                        episode.id.clone(),
-                                        0.0,
-                                        historical_state,
-                                        historical_revision,
-                                    );
-                                }
-                            }
-                        },
-                    }
-                } else if shell.activity() == Activity::Rollout {
-                    RolloutWorkbench {}
-                }
-            }
-        },
-    )
-    .with_class("workbench-editor");
-    let mut registered_panels = Vec::with_capacity(dock_panels.len() + 2);
-    registered_panels.push((workbench_panel, PanelRole::Workbench));
-    registered_panels.extend(dock_panels);
-    if shell.activity() == Activity::Rollout {
-        registered_panels.push((
-            Panel::new(
+                },
+            )
+            .with_class("workbench-editor");
+            crate::frontend::screens::live::screen::compose(workbench, dock_panels, timeline_panel)
+        }
+        Activity::Data => {
+            let episodes = Panel::new(
+                "episodes",
+                "Episodes",
+                "episodes",
+                rsx! { EpisodesPanel { namespace: dataset.clone(), spiral_available: spiral_query_available } },
+            )
+            .with_class("episodes-workbench-editor");
+            let query = Panel::new(
+                "query",
+                "Query",
+                "query",
+                rsx! { QueryPanel { namespace: dataset.clone(), dataset_id: selected_dataset.clone(), query_available: spiral_query_available } },
+            )
+            .with_class("query-workbench-editor");
+            let query_result = Panel::new(
+                "query-result",
+                "Results",
+                "query-result",
+                rsx! { QueryResultView {} },
+            )
+            .with_class("query-editor");
+            crate::frontend::screens::data::screen::compose(
+                episodes,
+                query,
+                query_result,
+                dock_panels,
+                timeline_panel,
+            )
+        }
+        Activity::Rollout => {
+            let workbench = Panel::new(
+                "workbench",
+                "Rollout",
+                "workbench",
+                rsx! { aside { class: "studio-v2-workbench", RolloutWorkbench {} } },
+            )
+            .with_class("workbench-editor");
+            let inference = Panel::new(
                 "rollout-inference",
                 "Inference",
                 "timeline",
                 rsx! { InferencePanel {} },
             )
-            .with_class("rollout-inference-editor"),
-            PanelRole::RolloutInference,
-        ));
-    } else {
-        registered_panels.push((
-            Panel::new("timeline", "Timeline", "timeline", timeline_panel)
-                .with_class("timeline-editor"),
-            PanelRole::Timeline,
-        ));
-    }
+            .with_class("rollout-inference-editor");
+            crate::frontend::screens::rollout::screen::compose(workbench, dock_panels, inference)
+        }
+        Activity::Training => unreachable!("Training owns a separate route workspace"),
+    };
+    let registered_panels = definition.panels;
     let panel_roles = registered_panels
         .iter()
         .map(|(panel, role)| (panel.id.clone(), role.clone()))
@@ -735,35 +723,14 @@ pub(super) fn StudioApplication() -> Element {
         .into_iter()
         .map(|(panel, _)| panel)
         .collect::<Vec<_>>();
-    let initial_panel_layout = if shell.activity() == Activity::Rollout {
-        default_panel_layout_with_workbench(&workspace_panels, 0.27)
-    } else {
-        default_panel_layout(&workspace_panels)
-    };
-    // v5 establishes the independent camera-row default while retaining one
-    // durable ownership scope per workbench mode. Later user docking persists
-    // inside that scope instead of following the current Data selection.
-    let panel_storage_key = format!("spiral_robotics.panel-layout.v5.{dock_scope}");
+    let initial_panel_layout = definition.initial_layout;
+    let panel_storage_key = definition.storage_key;
 
     rsx! {
-        document::Stylesheet { href: TAILWIND }
-        document::Title { "Spiral Robotics Studio" }
-        document::Link { rel: "icon", href: FAVICON }
-        document::Meta { name: "color-scheme", content: "light" }
-
         div {
-            class: "studio-shell studio-shell-v2",
+            class: "min-h-0 min-w-0 overflow-hidden",
             tabindex: "-1",
             onkeydown: move |event| {
-                if event.key() == Key::Escape && shell.settings_open() {
-                    if !(settings_busy)() {
-                        shell.dispatch(ShellAction::CloseSettings);
-                    }
-                    return;
-                }
-                if shell.settings_open() {
-                    return;
-                }
                 if event.modifiers().ctrl() || event.modifiers().meta() || event.modifiers().alt() {
                     return;
                 }
@@ -796,26 +763,20 @@ pub(super) fn StudioApplication() -> Element {
                                     );
                                 }),
                             ),
-                            None if shell.activity() == Activity::Live => {
-                                commands::start_recording(studio)
-                            }
+                            None if activity == Activity::Live => commands::start_recording(studio),
                             None => studio.report("Switch to Live to start recording."),
                         }
                     }
-                    // Only meaningful mid-take: this is the "that one was bad"
-                    // key, pressed while the arm is still moving. It destroys a
-                    // take that cost a human forty seconds of teleoperation, so
-                    // it takes Shift — a bare `x` under a startled hand should
-                    // not be the thing that throws the take away. Pressing it
-                    // alone names the real shortcut instead of doing nothing,
-                    // since it appears nowhere else in the interface.
                     Key::Character(pressed)
                         if pressed.eq_ignore_ascii_case("x")
                             && recording.is_some()
                             && !event.modifiers().shift() =>
                     {
                         event.prevent_default();
-                        studio.report_success("Press Shift+X to discard this take.");
+                        studio.report_info_from(
+                            crate::frontend::app::notifications::MessageSource::Live,
+                            "Press Shift+X to discard this take.",
+                        );
                     }
                     Key::Character(pressed)
                         if pressed.eq_ignore_ascii_case("x") && recording.is_some() =>
@@ -840,99 +801,30 @@ pub(super) fn StudioApplication() -> Element {
                     _ => {}
                 }
             },
-            if shell.settings_open() {
-                SettingsPanel {
-                    initial: loaded_settings.clone(),
-                    load_error: settings_error.clone(),
-                    on_close: move |_| {
-                        if !(settings_busy)() {
-                            shell.dispatch(ShellAction::CloseSettings);
-                        }
-                    },
-                    on_saved: move |_| settings.restart(),
-                    on_busy_change: move |busy| settings_busy.set(busy),
-                }
-            }
-            main { class: "studio-v2-body",
-                ActivityRail {
-                    activity: shell.activity(),
-                    on_activity: move |next| {
-                        timeline.stop_preview();
-                        // Live means current hardware unless an active paused
-                        // recording explicitly owns the review state. Clear a
-                        // completed-take review (including on a second click
-                        // of Live) so Data playback can never strand recorded
-                        // pixels over the live camera stream.
-                        if next == Activity::Live && studio.recording().is_none() {
-                            live_review_episode.set(None);
-                            automatic_preview_target.set(None);
-                            interactive_preview_target.set(None);
-                            let next_revision = historical_revision.peek().wrapping_add(1);
-                            historical_revision.set(next_revision);
-                            historical_state.set(None);
-                        }
-                        shell.dispatch(ShellAction::SelectActivity(next));
-                    },
-                    on_settings: move |_| { shell.dispatch(ShellAction::OpenSettings); },
-                }
-                if shell.activity() == Activity::Training {
-                    TrainingWorkspace {
-                        dataset: dataset.clone(),
-                    }
-                } else {
-                    PanelWorkspace {
-                        key: "{dock_scope}",
-                        panels: workspace_panels,
-                        initial_layout: initial_panel_layout,
-                        storage_key: Some(panel_storage_key),
-                        on_layout_change: move |_layout: PanelLayout| {},
-                        on_resize: move |_| {
-                            let next = split_resize_revision.peek().wrapping_add(1);
-                            split_resize_revision.set(next);
-                        },
-                        on_panel_activate: move |panel_id: PanelId| {
-                            if let Some((_, PanelRole::Camera(CameraIdentity::Live { robot, role, .. }))) =
-                                panel_roles
-                                    .iter()
-                                    .find(|(registered, _)| registered == &panel_id)
-                            {
-                                selected.set(Some(crate::frontend::app::state::Selection::Camera {
-                                    robot: robot.clone(),
-                                    role: role.clone(),
-                                }));
-                            }
-                        },
-                    }
-                }
-            }
-            StatusBar { mode: shell.activity() }
-            NoticeStrip {
-                on_view_episode: move |episode| {
-                    if let Some(ShellEffect::SelectEpisode(episode)) =
-                        shell.dispatch(ShellAction::OpenEpisode(episode))
+            PanelWorkspace {
+                key: "{projection.activity.label()}",
+                panels: workspace_panels,
+                initial_layout: initial_panel_layout,
+                storage_key: Some(panel_storage_key),
+                on_layout_change: move |_layout: PanelLayout| {},
+                on_resize: move |_| {
+                    let next = split_resize_revision.peek().wrapping_add(1);
+                    split_resize_revision.set(next);
+                },
+                on_panel_activate: move |panel_id: PanelId| {
+                    if let Some((_, PanelRole::Camera(CameraIdentity::Live { robot, role, .. }))) =
+                        panel_roles
+                            .iter()
+                            .find(|(registered, _)| registered == &panel_id)
                     {
-                        studio.selected_episode.set(Some(episode));
+                        selected.set(Some(crate::frontend::app::state::Selection::Camera {
+                            robot: robot.clone(),
+                            role: role.clone(),
+                        }));
                     }
                 },
             }
         }
-    }
-}
-
-/// Return a selected-episode mutation only when a Data intent actually changes
-/// semantic selection. Writing the same value would wake the workbench effect
-/// that produced the intent and create a client-side render loop.
-#[cfg(test)]
-fn data_episode_selection_change(
-    current: Option<&str>,
-    intent: &DataIntent,
-) -> Option<Option<String>> {
-    match intent {
-        DataIntent::Episode(episode) if current != Some(episode.id.as_str()) => {
-            Some(Some(episode.id.clone()))
-        }
-        DataIntent::EmptyEpisodes if current.is_some() => Some(None),
-        DataIntent::Episode(_) | DataIntent::Query(_) | DataIntent::EmptyEpisodes => None,
     }
 }
 
@@ -1111,6 +1003,7 @@ mod tests {
             episode: "take-1".to_owned(),
             timeline: EpisodeTimelineResponse {
                 episode: EpisodeSummary {
+                    dataset_id: "default".to_owned(),
                     id: "take-1".to_owned(),
                     file: "take-1.jsonl".to_owned(),
                     arms: Vec::new(),
@@ -1474,27 +1367,6 @@ mod tests {
                 .and_then(RecordedSource::renderable)
                 .and_then(|preview| preview.signal_lanes_error.as_deref()),
             None
-        );
-    }
-
-    #[test]
-    fn repeated_data_intents_do_not_rewrite_their_own_selection_dependency() {
-        let episode = preview(0.0, Vec::new()).timeline.episode;
-
-        assert_eq!(
-            data_episode_selection_change(
-                Some(episode.id.as_str()),
-                &DataIntent::Episode(episode.clone()),
-            ),
-            None
-        );
-        assert_eq!(
-            data_episode_selection_change(None, &DataIntent::EmptyEpisodes),
-            None
-        );
-        assert_eq!(
-            data_episode_selection_change(None, &DataIntent::Episode(episode.clone())),
-            Some(Some(episode.id))
         );
     }
 

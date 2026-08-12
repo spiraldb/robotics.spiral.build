@@ -15,7 +15,9 @@ use crate::frontend::api::http as api;
 use crate::frontend::app::state::Studio;
 
 pub(crate) fn recording_blocker(studio: Studio) -> Option<String> {
-    if matches!(studio.mode(), ModeSelection::Replay { .. }) {
+    if !spiral_robotics_core::spiral::is_dataset_id(studio.selected_dataset.read().trim()) {
+        Some("Choose a dataset ID using letters, numbers, '.', '_' or '-'.".to_owned())
+    } else if matches!(studio.mode(), ModeSelection::Replay { .. }) {
         Some("Stop replay before recording.".to_owned())
     } else if default_teleoperation_pair(&studio.snapshot.read().robots).is_none() {
         Some("Connect and calibrate a compatible leader and follower first.".to_owned())
@@ -31,7 +33,10 @@ pub(crate) fn start_recording(studio: Studio) {
         studio.report(reason);
         return;
     }
-    let request = StartRecordingRequest::default();
+    let request = StartRecordingRequest {
+        dataset_id: studio.selected_dataset.read().trim().to_owned(),
+        ..StartRecordingRequest::default()
+    };
     studio.run("", async move {
         api::send_json::<_, EpisodeSummary>(Method::POST, "/api/episodes/record", Some(&request))
             .await
@@ -92,16 +97,16 @@ pub(crate) fn stop_recording(
         )
         .await?;
         if keep {
-            let mut notice = studio.notice;
-            notice.set(Some(crate::frontend::app::state::Notice::about_episode(
+            studio.report_episode_success(
                 format!(
-                    "Episode {} saved — {}, {} frames.",
+                    "Episode {} saved to {} — {}, {} frames.",
                     crate::frontend::screens::data::workbench::short_id(&summary.id),
+                    summary.dataset_id,
                     format_take_duration(summary.duration_seconds),
                     summary.frames
                 ),
                 summary.id.clone(),
-            )));
+            );
         }
         on_completed.call(summary);
         Ok(())

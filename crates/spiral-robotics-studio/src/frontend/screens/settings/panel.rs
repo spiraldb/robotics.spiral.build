@@ -5,6 +5,7 @@ use gloo_net::http::Method;
 use spiral_robotics_core::api::{ConnectionTestResponse, DataSettings, UpdateDataSettingsRequest};
 
 use crate::frontend::api::http as api;
+use crate::frontend::app::notifications::MessageSource;
 use crate::frontend::app::state::studio;
 use crate::frontend::screens::settings::robots::RobotPanel;
 
@@ -12,7 +13,6 @@ use crate::frontend::screens::settings::robots::RobotPanel;
 enum SettingsSection {
     Robots,
     Spiral,
-    HuggingFace,
     Video,
 }
 
@@ -28,12 +28,18 @@ pub(crate) fn SettingsPanel(
     let settings_loaded = initial.is_some();
     let mut current = use_signal(move || initial_value);
     let mut section = use_signal(|| SettingsSection::Robots);
-    let mut hugging_face_token = use_signal(String::new);
-    let mut clear_hugging_face = use_signal(|| false);
     let mut saving = use_signal(|| false);
     let mut testing = use_signal(|| false);
     let mut test_result = use_signal(|| None::<ConnectionTestResponse>);
+    let mut initial_focus_set = use_signal(|| false);
     let studio = studio();
+
+    use_effect(move || {
+        if !initial_focus_set() {
+            focus_settings_close();
+            initial_focus_set.set(true);
+        }
+    });
 
     use_effect(use_reactive((&initial,), move |(initial,)| {
         if let Some(settings) = initial
@@ -51,11 +57,7 @@ pub(crate) fn SettingsPanel(
         on_busy_change.call(true);
         let request = UpdateDataSettingsRequest {
             spiral: current().spiral,
-            hugging_face: current().hugging_face,
             video: current().video,
-            hugging_face_token: (!hugging_face_token.read().trim().is_empty())
-                .then_some(hugging_face_token()),
-            clear_hugging_face_token: clear_hugging_face(),
         };
         spawn(async move {
             match api::send_json::<_, DataSettings>(
@@ -68,8 +70,6 @@ pub(crate) fn SettingsPanel(
                 Ok(settings) => {
                     current.set(settings);
                     on_saved.call(());
-                    hugging_face_token.set(String::new());
-                    clear_hugging_face.set(false);
                     if let Some(path) = test_path {
                         testing.set(true);
                         test_result.set(None);
@@ -84,10 +84,13 @@ pub(crate) fn SettingsPanel(
                         }
                         testing.set(false);
                     } else {
-                        studio.report_success("Data settings saved on the backend.");
+                        studio.report_success_from(
+                            MessageSource::Settings,
+                            "Data settings saved on the backend.",
+                        );
                     }
                 }
-                Err(error) => studio.report(error),
+                Err(error) => studio.report_from(MessageSource::Settings, error),
             }
             saving.set(false);
             on_busy_change.call(false);
@@ -97,23 +100,28 @@ pub(crate) fn SettingsPanel(
     rsx! {
         div { class: "settings-backdrop", onclick: move |_| if !saving() { on_close.call(()) } }
         section {
+            id: "data-settings-dialog",
             class: "data-settings-dialog",
             role: "dialog",
             "aria-modal": "true",
             "aria-labelledby": "data-settings-title",
             tabindex: "-1",
-            autofocus: true,
             onclick: move |event| event.stop_propagation(),
+            onkeydown: move |event| {
+                if event.key() == Key::Tab && trap_settings_focus(event.modifiers().shift()) {
+                    event.prevent_default();
+                }
+            },
             header { class: "settings-header",
                 div {
                     h2 { id: "data-settings-title", "Settings" }
                     p { "Robot hardware and backend-owned data destinations." }
                 }
                 button {
+                    id: "settings-close-button",
                     r#type: "button",
                     class: "icon-button",
                     "aria-label": "Close settings",
-                    autofocus: true,
                     disabled: saving(),
                     onclick: move |_| if !saving() { on_close.call(()) },
                     CloseIcon {}
@@ -123,7 +131,6 @@ pub(crate) fn SettingsPanel(
                 nav { class: "settings-nav", "aria-label": "Settings sections",
                     SettingsNavButton { label: "Robots", active: section() == SettingsSection::Robots, onclick: move |_| { section.set(SettingsSection::Robots); test_result.set(None); } }
                     SettingsNavButton { label: "SpiralDB", active: section() == SettingsSection::Spiral, onclick: move |_| { section.set(SettingsSection::Spiral); test_result.set(None); } }
-                    SettingsNavButton { label: "Hugging Face", active: section() == SettingsSection::HuggingFace, onclick: move |_| { section.set(SettingsSection::HuggingFace); test_result.set(None); } }
                     SettingsNavButton { label: "Video", active: section() == SettingsSection::Video, onclick: move |_| { section.set(SettingsSection::Video); test_result.set(None); } }
                 }
                 div { class: "settings-content",
@@ -151,18 +158,10 @@ pub(crate) fn SettingsPanel(
                                 }
                                 div { class: "settings-field-row",
                                     SettingsField { label: "Project", value: current().spiral.project_id, placeholder: "Required for a SpiralDB service", disabled: current().spiral.uri.trim() == "spiral:memory:", oninput: move |value| current.write().spiral.project_id = value }
-                                    SettingsField { label: "Dataset", value: current().spiral.dataset, placeholder: "spiral_robotics", oninput: move |value| current.write().spiral.dataset = value }
+                                    SettingsField { label: "Namespace", value: current().spiral.dataset, placeholder: "spiral_robotics", oninput: move |value| current.write().spiral.dataset = value }
                                 }
-                                p { class: "settings-help", "For a local SpiralDB stack, keep the SpiralDB service catalog selected and start this backend with SPIRAL__SERVER__URL and SPIRAL__SPFS__URL pointing at that stack. Reserve the dataset name for Spiral Robotics so it can create the root resource and child tables. The in-memory option is disposable and does not connect to the local service. The backend also requires --spiral-adbc-driver or SPIRALDB_ADBC_DRIVER." }
+                                p { class: "settings-help", "The namespace contains Spiral Robotics' datasets, episodes, streams, samples, video assets, and checkpoints tables. For a local SpiralDB stack, keep the service catalog selected and start this backend with SPIRAL__SERVER__URL and SPIRAL__SPFS__URL pointing at that stack. The in-memory option is disposable. The backend also requires --spiral-adbc-driver or SPIRALDB_ADBC_DRIVER." }
                                 button { r#type: "button", class: "btn btn-outline", disabled: saving() || testing(), onclick: move |_| save(Some("/api/settings/data/test/spiral")), if testing() { "Testing…" } else { "Save and test connection" } }
-                            },
-                            SettingsSection::HuggingFace => rsx! {
-                                ProviderHeading { title: "Hugging Face", description: "Optional Arrow/Parquet dataset mirror, committed once per completed episode." }
-                                ToggleField { label: "Mirror new episodes to Hugging Face", checked: current().hugging_face.enabled, onchange: move |value| current.write().hugging_face.enabled = value }
-                                SettingsField { label: "Dataset repository", value: current().hugging_face.repository, placeholder: "owner/dataset", oninput: move |value| current.write().hugging_face.repository = value }
-                                SettingsField { label: "Revision", value: current().hugging_face.revision, placeholder: "main", oninput: move |value| current.write().hugging_face.revision = value }
-                                SecretField { label: "Write token", has_secret: current().hugging_face.has_token, value: hugging_face_token(), oninput: move |value| { hugging_face_token.set(value); clear_hugging_face.set(false); }, on_clear: move |_| { hugging_face_token.set(String::new()); clear_hugging_face.set(true); current.write().hugging_face.has_token = false; } }
-                                button { r#type: "button", class: "btn btn-outline", disabled: saving() || testing(), onclick: move |_| save(Some("/api/settings/data/test/hugging-face")), if testing() { "Testing…" } else { "Save and test connection" } }
                             },
                             SettingsSection::Video => rsx! {
                                 ProviderHeading { title: "Video", description: "Cameras are encoded on the backend, then indexed with Spiral's MP4 and video plugins." }
@@ -185,7 +184,7 @@ pub(crate) fn SettingsPanel(
                     span { "Robot changes are saved immediately." }
                     div { button { r#type: "button", class: "btn btn-primary", onclick: move |_| on_close.call(()), "Done" } }
                 } else {
-                    span { "Secrets stay on this backend." }
+                    span { "Data settings stay on this backend." }
                     div {
                         button { r#type: "button", class: "btn", onclick: move |_| on_close.call(()), "Cancel" }
                         button { r#type: "button", class: "btn btn-primary", disabled: saving(), onclick: move |_| save(None), if saving() { "Saving…" } else { "Save settings" } }
@@ -194,6 +193,67 @@ pub(crate) fn SettingsPanel(
             }
         }
     }
+}
+
+#[cfg(feature = "web")]
+fn focus_settings_close() {
+    use wasm_bindgen::JsCast as _;
+
+    let Some(button) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id("settings-close-button"))
+        .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+    else {
+        return;
+    };
+    let _ = button.focus();
+}
+
+#[cfg(not(feature = "web"))]
+fn focus_settings_close() {}
+
+#[cfg(feature = "web")]
+fn trap_settings_focus(backwards: bool) -> bool {
+    use wasm_bindgen::JsCast as _;
+
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return false;
+    };
+    let Some(dialog) = document.get_element_by_id("data-settings-dialog") else {
+        return false;
+    };
+    let Ok(nodes) = dialog.query_selector_all(
+        "button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])",
+    ) else {
+        return false;
+    };
+    let focusable = (0..nodes.length())
+        .filter_map(|index| nodes.item(index))
+        .filter_map(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
+        .collect::<Vec<_>>();
+    let Some(active) = document.active_element() else {
+        return focusable
+            .first()
+            .is_some_and(|element| element.focus().is_ok());
+    };
+    let current = focusable
+        .iter()
+        .position(|element| active.is_same_node(Some(element.as_ref())));
+    let next = if backwards {
+        current
+            .and_then(|index| index.checked_sub(1))
+            .unwrap_or_else(|| focusable.len().saturating_sub(1))
+    } else {
+        current.map_or(0, |index| (index + 1) % focusable.len().max(1))
+    };
+    focusable
+        .get(next)
+        .is_some_and(|element| element.focus().is_ok())
+}
+
+#[cfg(not(feature = "web"))]
+fn trap_settings_focus(_backwards: bool) -> bool {
+    false
 }
 
 #[component]
@@ -236,27 +296,6 @@ fn SettingsField(
         label { class: "settings-field",
             span { class: "label", "{label}" }
             input { class: "field", value, placeholder, disabled, oninput: move |event| oninput.call(event.value()) }
-        }
-    }
-}
-
-#[component]
-fn SecretField(
-    label: &'static str,
-    has_secret: bool,
-    value: String,
-    oninput: EventHandler<String>,
-    on_clear: EventHandler<()>,
-) -> Element {
-    rsx! {
-        label { class: "settings-field",
-            span { class: "label", "{label}" }
-            div { class: "secret-field",
-                input { class: "field", r#type: "password", autocomplete: "new-password", value, placeholder: if has_secret { "Stored — enter to replace" } else { "Paste token" }, oninput: move |event| oninput.call(event.value()) }
-                if has_secret {
-                    button { r#type: "button", class: "btn", onclick: move |_| on_clear.call(()), "Clear" }
-                }
-            }
         }
     }
 }

@@ -6,11 +6,11 @@
 use dioxus::prelude::*;
 use gloo_net::http::Method;
 use spiral_robotics_core::api::{
-    RobotSummary, RolloutPhase, RolloutSnapshot, StartRolloutRequest, TrainingCheckpointFormat,
-    TrainingRun, TrainingSnapshot,
+    RobotSummary, RolloutPhase, RolloutSnapshot, StartRolloutRequest, TrainingRun, TrainingSnapshot,
 };
 
 use crate::frontend::api::http as api;
+use crate::frontend::app::notifications::MessageSource;
 use crate::frontend::app::state::studio;
 use crate::frontend::screens::rollout::state::rollout_controller;
 
@@ -23,7 +23,6 @@ struct CheckpointChoice {
     validation_loss: Option<f64>,
     byte_size: u64,
     chunk_size: usize,
-    artifact_format: &'static str,
 }
 
 /// Rollout never asks the operator to choose a target. The configured follower
@@ -133,7 +132,7 @@ pub(crate) fn RolloutWorkbench() -> Element {
                 if let Some(choice) = selected {
                     div { class: "rollout-checkpoint-meta",
                         span { "ACT · vision" }
-                        span { "{choice.artifact_format}" }
+                        span { "SafeTensors" }
                         span { "Validation {validation_loss}" }
                         span { "{format_bytes(choice.byte_size)}" }
                     }
@@ -229,7 +228,7 @@ pub(crate) fn RolloutWorkbench() -> Element {
                             if active {
                                 spawn(async move {
                                     if let Err(error) = api::post("/api/rollout/stop").await {
-                                        studio.report(error);
+                                        studio.report_from(MessageSource::Rollout, error);
                                     }
                                     requesting.set(false);
                                 });
@@ -251,7 +250,7 @@ pub(crate) fn RolloutWorkbench() -> Element {
                                     )
                                     .await;
                                     if let Err(error) = result {
-                                        studio.report(error);
+                                        studio.report_from(MessageSource::Rollout, error);
                                     }
                                     requesting.set(false);
                                 });
@@ -327,16 +326,14 @@ fn checkpoint_choices(snapshot: &TrainingSnapshot) -> Vec<CheckpointChoice> {
         .iter()
         .flat_map(checkpoints_for_run)
         .collect::<Vec<_>>();
-    choices.sort_by(|left, right| right.step.cmp(&left.step));
+    choices.sort_by_key(|choice| std::cmp::Reverse(choice.step));
     choices
 }
 
 fn checkpoints_for_run(run: &TrainingRun) -> impl Iterator<Item = CheckpointChoice> + '_ {
     run.checkpoints
         .iter()
-        .filter(|checkpoint| {
-            !run.phase.active() && checkpoint.format == TrainingCheckpointFormat::SafeTensors
-        })
+        .filter(|checkpoint| !run.phase.active() && checkpoint.inference_ready)
         .map(|checkpoint| CheckpointChoice {
             key: format!("{}::{}", run.id, checkpoint.step),
             run_id: run.id.clone(),
@@ -345,7 +342,6 @@ fn checkpoints_for_run(run: &TrainingRun) -> impl Iterator<Item = CheckpointChoi
             validation_loss: checkpoint.validation_loss,
             byte_size: checkpoint.byte_size,
             chunk_size: run.config.chunk_size,
-            artifact_format: checkpoint.format.label(),
         })
 }
 
@@ -381,7 +377,7 @@ fn rollout_precondition_blocker(
 
 fn runtime_title(rollout: &RolloutSnapshot) -> &'static str {
     match rollout.phase {
-        RolloutPhase::Idle => "Native runtime ready",
+        RolloutPhase::Idle => "Inference runtime available",
         RolloutPhase::Loading => "Loading checkpoint",
         RolloutPhase::WarmingUp => "Warming native ACT",
         RolloutPhase::Running => "Policy active",

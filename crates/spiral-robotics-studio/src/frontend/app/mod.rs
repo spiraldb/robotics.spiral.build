@@ -1,21 +1,23 @@
 //! Frontend providers and shell-level ownership boundaries.
 
 pub(crate) mod activity;
-mod layout;
+pub(crate) mod layout;
 mod navigation;
+pub(crate) mod notifications;
+pub(crate) mod routes;
 pub(crate) mod shell;
 pub(crate) mod state;
-mod workspace;
+pub(crate) mod workspace;
 
 use dioxus::prelude::*;
 
+use self::routes::StudioRouter;
 use self::state::Studio;
-use self::workspace::StudioApplication;
 
 /// Install application-wide providers once, then render the reactive shell.
 #[component]
 pub fn App() -> Element {
     Studio::use_studio();
     state::use_description();
-    rsx! { StudioApplication {} }
+    rsx! { StudioRouter {} }
 }

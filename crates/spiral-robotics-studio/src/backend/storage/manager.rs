@@ -17,11 +17,6 @@ use arrow_array::{
 };
 use arrow_json::writer::{JsonArray, WriterBuilder};
 use arrow_schema::{DataType, Field, Schema};
-use hf_hub::HFClient;
-use hf_hub::repository::CommitOperation;
-use parquet::arrow::ArrowWriter;
-use parquet::basic::Compression;
-use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use spiral_robotics_core::api::{
@@ -31,13 +26,11 @@ use spiral_robotics_core::spiral::{self, Table, column as db};
 
 use crate::backend::recording::episodes::{CompletedEpisode, EpisodeStore};
 use crate::backend::recording::spiral::{
-    SpiralEpisodeEncoder, VideoStreamRow, episode_completion_batch, episode_streams_batch,
-    joint_samples_batch, joint_samples_schema, video_streams_batch,
+    SpiralEpisodeEncoder, VideoStreamRow, dataset_batch, episode_completion_batch,
+    episode_streams_batch, joint_samples_batch, video_streams_batch,
 };
 use crate::backend::robotics::video::{VideoAsset, load_assets, save_assets};
-use crate::backend::storage::settings::{
-    DataSettingsStore, StoredDataSettings, StoredSpiralSettings,
-};
+use crate::backend::storage::settings::{DataSettingsStore, StoredSpiralSettings};
 use crate::backend::storage::sql::{self, ReadOnlyMode};
 
 const MAX_QUERY_ROWS: usize = 1_000;
@@ -67,13 +60,6 @@ pub(crate) struct StorageManager {
     driver_path: Option<PathBuf>,
     adbc: Arc<Mutex<Option<CachedAdbc>>>,
     publications: Mutex<BTreeMap<String, PublicationStatus>>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PublicationScope {
-    AllConfigured,
-    SpiralOnly,
-    HuggingFaceOnly,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -134,26 +120,16 @@ impl StorageManager {
                 .flatten()
                 .is_some_and(|receipt| receipt.matches(&destination))
             {
-                let hugging_face = existing.and_then(|status| status.hugging_face);
-                let failed = hugging_face
-                    .as_deref()
-                    .is_some_and(|value| value.starts_with("failed:"));
                 PublicationStatus {
                     episode_id: episode.id,
-                    state: if failed { "failed" } else { "published" }.to_owned(),
+                    state: "published".to_owned(),
                     spiral: Some("published".to_owned()),
-                    hugging_face,
                     updated_ms: 0,
                 }
             } else {
-                let hugging_face = existing.and_then(|status| status.hugging_face);
-                let failed = hugging_face
-                    .as_deref()
-                    .is_some_and(|value| value.starts_with("failed:"));
                 PublicationStatus {
                     episode_id: episode.id,
-                    state: if failed { "failed" } else { "local" }.to_owned(),
-                    hugging_face,
+                    state: "local".to_owned(),
                     updated_ms: 0,
                     ..PublicationStatus::default()
                 }
@@ -176,40 +152,20 @@ impl StorageManager {
             updated_ms: unix_millis(),
             ..PublicationStatus::default()
         });
-        if self.settings.get().hugging_face.enabled {
-            self.queue_publish(episode_id, videos, PublicationScope::HuggingFaceOnly);
-        }
     }
 
-    fn queue_publish(
-        self: &Arc<Self>,
-        episode_id: String,
-        videos: Vec<VideoAsset>,
-        scope: PublicationScope,
-    ) {
-        let mut status = PublicationStatus {
+    fn queue_publish(self: &Arc<Self>, episode_id: String, videos: Vec<VideoAsset>) {
+        let status = PublicationStatus {
             episode_id: episode_id.clone(),
             state: "queued".to_owned(),
+            spiral: Some("queued".to_owned()),
             updated_ms: unix_millis(),
-            ..PublicationStatus::default()
         };
-        match scope {
-            PublicationScope::SpiralOnly => status.spiral = Some("queued".to_owned()),
-            PublicationScope::HuggingFaceOnly => status.hugging_face = Some("queued".to_owned()),
-            PublicationScope::AllConfigured => {}
-        }
         self.set_status(status);
         let manager = self.clone();
         tokio::spawn(async move {
-            manager.publish(episode_id, videos, scope).await;
+            manager.publish(episode_id, videos).await;
         });
-    }
-
-    pub(crate) fn publish_existing(self: &Arc<Self>, episode_id: String) -> Result<(), String> {
-        self.ensure_not_publishing(&episode_id)?;
-        let videos = self.prepare_existing(&episode_id)?;
-        self.queue_publish(episode_id, videos, PublicationScope::AllConfigured);
-        Ok(())
     }
 
     pub(crate) fn sync_spiral_existing(self: &Arc<Self>, episode_id: String) -> Result<(), String> {
@@ -217,12 +173,12 @@ impl StorageManager {
             self.ensure_not_publishing(&episode_id)?;
             if !self.settings.get().spiral.configured() {
                 return Err(
-                    "Configure a Spiral catalog, project, and dataset in Settings before pushing"
+                    "Configure a Spiral catalog, project, and namespace in Settings before pushing"
                         .to_owned(),
                 );
             }
             let videos = self.prepare_existing(&episode_id)?;
-            self.queue_publish(episode_id.clone(), videos, PublicationScope::SpiralOnly);
+            self.queue_publish(episode_id.clone(), videos);
             Ok(())
         })();
         if let Err(error) = &outcome {
@@ -248,7 +204,7 @@ impl StorageManager {
         load_assets(self.episodes.directory(), episode_id)
     }
 
-    async fn publish(&self, episode_id: String, videos: Vec<VideoAsset>, scope: PublicationScope) {
+    async fn publish(&self, episode_id: String, videos: Vec<VideoAsset>) {
         let mut status = PublicationStatus {
             episode_id: episode_id.clone(),
             state: "publishing".to_owned(),
@@ -268,29 +224,13 @@ impl StorageManager {
             }
         };
 
-        if scope == PublicationScope::SpiralOnly && !settings.spiral.configured() {
+        if !settings.spiral.configured() {
             status.state = "failed".to_owned();
             status.spiral = Some("failed: SpiralDB is not configured".to_owned());
             status.updated_ms = unix_millis();
             self.set_status(status);
             return;
         }
-        if scope == PublicationScope::HuggingFaceOnly && !settings.hugging_face.enabled {
-            status.state = "local".to_owned();
-            status.updated_ms = unix_millis();
-            self.set_status(status);
-            return;
-        }
-        if !settings.spiral.configured()
-            && (scope == PublicationScope::SpiralOnly
-                || (scope != PublicationScope::HuggingFaceOnly && !settings.hugging_face.enabled))
-        {
-            status.state = "local".to_owned();
-            status.updated_ms = unix_millis();
-            self.set_status(status);
-            return;
-        }
-
         // Rejected takes remain in the local recovery spool so the judgement
         // can be changed later, but they must never enter a training store.
         if completed.completion.discarded {
@@ -300,43 +240,29 @@ impl StorageManager {
             return;
         }
 
-        if scope != PublicationScope::HuggingFaceOnly && settings.spiral.configured() {
-            status.spiral = Some("publishing".to_owned());
-            status.updated_ms = unix_millis();
-            self.set_status(status.clone());
-            status.spiral = Some(
-                match self
-                    .publish_spiral(&settings.spiral, &completed, &videos)
-                    .await
-                {
-                    Ok(()) => {
-                        let receipt = SpiralPublicationReceipt::new(&settings.spiral);
-                        if let Err(error) =
-                            save_spiral_receipt(self.episodes.directory(), &episode_id, &receipt)
-                        {
-                            tracing::warn!(episode = %episode_id, "could not persist SpiralDB sync receipt: {error}");
-                        }
-                        "published".to_owned()
+        status.spiral = Some("publishing".to_owned());
+        status.updated_ms = unix_millis();
+        self.set_status(status.clone());
+        status.spiral = Some(
+            match self
+                .publish_spiral(&settings.spiral, &completed, &videos)
+                .await
+            {
+                Ok(()) => {
+                    let receipt = SpiralPublicationReceipt::new(&settings.spiral);
+                    if let Err(error) =
+                        save_spiral_receipt(self.episodes.directory(), &episode_id, &receipt)
+                    {
+                        tracing::warn!(episode = %episode_id, "could not persist SpiralDB sync receipt: {error}");
                     }
-                    Err(error) => format!("failed: {error}"),
-                },
-            );
-        }
-        if scope != PublicationScope::SpiralOnly && settings.hugging_face.enabled {
-            status.hugging_face = Some("publishing".to_owned());
-            status.updated_ms = unix_millis();
-            self.set_status(status.clone());
-            status.hugging_face = Some(
-                match publish_hugging_face(&settings, &completed, &videos).await {
-                    Ok(()) => "published".to_owned(),
-                    Err(error) => format!("failed: {error}"),
-                },
-            );
-        }
+                    "published".to_owned()
+                }
+                Err(error) => format!("failed: {error}"),
+            },
+        );
         let failed = status
             .spiral
             .iter()
-            .chain(status.hugging_face.iter())
             .any(|value| value.starts_with("failed:"));
         status.state = if failed { "failed" } else { "published" }.to_owned();
         status.updated_ms = unix_millis();
@@ -349,7 +275,7 @@ impl StorageManager {
             return ConnectionTestResponse {
                 ok: false,
                 message:
-                    "Choose a Spiral catalog, project, and dataset before testing the connection"
+                    "Choose a Spiral catalog, project, and namespace before testing the connection"
                         .to_owned(),
             };
         }
@@ -448,30 +374,6 @@ impl StorageManager {
         }
     }
 
-    pub(crate) async fn test_hugging_face(&self) -> ConnectionTestResponse {
-        let settings = self.settings.get();
-        match hugging_face_repository(&settings) {
-            Ok(repository) => match repository.exists().send().await {
-                Ok(true) => ConnectionTestResponse {
-                    ok: true,
-                    message: "Connected to the Hugging Face dataset".to_owned(),
-                },
-                Ok(false) => ConnectionTestResponse {
-                    ok: false,
-                    message: "Token worked, but the dataset repository was not found".to_owned(),
-                },
-                Err(error) => ConnectionTestResponse {
-                    ok: false,
-                    message: error.to_string(),
-                },
-            },
-            Err(error) => ConnectionTestResponse {
-                ok: false,
-                message: error,
-            },
-        }
-    }
-
     pub(crate) async fn query(
         &self,
         sql: &str,
@@ -481,7 +383,7 @@ impl StorageManager {
         let settings = self.settings.get().spiral;
         if !settings.configured() {
             return Err(
-                "Configure a Spiral catalog, project, and dataset in Settings before running Query."
+                "Configure a Spiral catalog, project, and namespace in Settings before running Query."
                     .to_owned(),
             );
         }
@@ -497,10 +399,13 @@ impl StorageManager {
     /// The disposable memory catalog is intentionally rejected: it is scoped
     /// to one ADBC connection, so a dedicated streaming connection could never
     /// observe rows published through the Studio's existing connection.
-    pub(crate) fn training_source(&self) -> Result<(StoredSpiralSettings, TrainingSource), String> {
+    pub(crate) fn training_source(
+        &self,
+        dataset_id: &str,
+    ) -> Result<(StoredSpiralSettings, TrainingSource), String> {
         let settings = self.settings.get().spiral;
         if !settings.configured() {
-            return Err("Configure a Spiral project and dataset before training.".to_owned());
+            return Err("Configure a Spiral project and namespace before training.".to_owned());
         }
         if settings.uri == "spiral:memory:" {
             return Err(
@@ -519,14 +424,15 @@ impl StorageManager {
             TrainingSource {
                 project: settings.project_id,
                 dataset: settings.dataset,
+                dataset_id: dataset_id.to_owned(),
                 checkpoint_table,
             },
         ))
     }
 
-    /// Resolve the query and its Arrow contract before launching Python.
+    /// Resolve the query and its Arrow contract before starting the trainer.
     /// Unknown relations and renamed fields therefore fail the start request,
-    /// rather than becoming an asynchronous worker fatal error.
+    /// rather than becoming an asynchronous training-task failure.
     pub(crate) async fn validate_training_query(
         &self,
         settings: StoredSpiralSettings,
@@ -548,7 +454,7 @@ impl StorageManager {
                 .map_err(|error| format!("binding the Spiral training preflight: {error}"))?;
             let reader = statement.execute().map_err(|error| {
                 format!(
-                    "training query does not resolve in configured dataset {dataset:?}: {error}"
+                    "training query does not resolve in configured namespace {dataset:?}: {error}"
                 )
             })?;
             validate_training_schema(reader.schema().as_ref(), &state_column, &action_column)
@@ -556,9 +462,36 @@ impl StorageManager {
         .await
     }
 
-    /// Publish a worker-produced artifact through the backend's trusted ADBC
-    /// path. Python receives only the project/dataset names and uses the
-    /// user's normal Spiral identity; checkpoint writes stay backend-owned.
+    /// Run one training session on its own ADBC connection.
+    ///
+    /// Training performs long-running frame and action reads. Keeping this
+    /// connection separate prevents those reads from blocking Studio query
+    /// previews or checkpoint publication on the cached control connection.
+    pub(crate) async fn run_training_adbc<T, F>(
+        &self,
+        settings: StoredSpiralSettings,
+        operation: F,
+    ) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut ManagedConnection) -> Result<T, String> + Send + 'static,
+    {
+        let driver_path = self.driver_path.clone().ok_or_else(|| {
+            "Spiral ADBC driver is not configured on this backend; start it with --spiral-adbc-driver or SPIRALDB_ADBC_DRIVER".to_owned()
+        })?;
+        validate_adbc_settings(&settings, &driver_path)?;
+        tokio::task::spawn_blocking(move || {
+            let key = AdbcConnectionKey::new(&settings, driver_path);
+            let mut adbc = open_adbc(key)?;
+            operation(&mut adbc.connection)
+        })
+        .await
+        .map_err(|error| format!("Spiral training ADBC task failed: {error}"))?
+    }
+
+    /// Publish a trainer-produced artifact through the backend's trusted ADBC
+    /// control path. Checkpoint writes remain separate from the training read
+    /// connection, so publication cannot deadlock a streaming batch read.
     pub(crate) async fn publish_training_checkpoint(
         &self,
         settings: StoredSpiralSettings,
@@ -692,7 +625,7 @@ impl StorageManager {
             operation(connection)
         })
         .await
-        .map_err(|error| format!("Spiral ADBC worker failed: {error}"))?
+        .map_err(|error| format!("Spiral ADBC task failed: {error}"))?
     }
 
     fn set_status(&self, status: PublicationStatus) {
@@ -705,7 +638,6 @@ impl StorageManager {
             state: "failed".to_owned(),
             spiral: Some(format!("failed: {error}")),
             updated_ms: unix_millis(),
-            ..PublicationStatus::default()
         });
     }
 }
@@ -807,117 +739,6 @@ fn uses_managed_catalog(settings: &StoredSpiralSettings) -> bool {
     settings.uri == "spiraldb://"
 }
 
-async fn publish_hugging_face(
-    settings: &StoredDataSettings,
-    episode: &CompletedEpisode,
-    videos: &[VideoAsset],
-) -> Result<(), String> {
-    let repository = hugging_face_repository(settings)?;
-    let parquet = hugging_face_episode_parquet(episode)?;
-    let mut operations = vec![
-        CommitOperation::add_bytes(format!("data/{}.parquet", episode.start.id), parquet),
-        // The lossless local format remains available for recovery and future
-        // migrations, but the primary HF dataset surface is Arrow/Parquet.
-        CommitOperation::add_file(
-            format!("recovery/{}.jsonl", episode.start.id),
-            &episode.path,
-        ),
-    ];
-    for video in videos {
-        operations.push(CommitOperation::add_file(
-            format!(
-                "videos/{}/{}.segment-{:03}.mp4",
-                episode.start.id,
-                safe_repo_component(&video.stream_id),
-                video.segment_index,
-            ),
-            &video.path,
-        ));
-    }
-    let metadata = serde_json::to_vec_pretty(&serde_json::json!({
-        "episode_id": episode.start.id,
-        "started_ms": episode.start.started_ms,
-        "sample_hz": episode.start.sample_hz,
-        "source": episode.start.source,
-        "arms": episode.start.arms,
-        "frames": episode.samples.len(),
-        "rows": episode.samples.len() * episode.start.arms.len(),
-        "duration_seconds": episode.completion.duration_seconds,
-        "recording_gaps": episode.completion.recording_gaps,
-        "video_segments": videos.iter().map(|video| serde_json::json!({
-            "stream_id": video.stream_id,
-            "camera_id": video.camera_id,
-            "segment_index": video.segment_index,
-            "timeline_offset_seconds": video.timeline_offset_seconds,
-            "frames": video.frames,
-            "fps": video.fps,
-        })).collect::<Vec<_>>(),
-    }))
-    .map_err(|error| format!("encoding Hugging Face metadata: {error}"))?;
-    operations.push(CommitOperation::add_bytes(
-        format!("meta/episodes/{}.json", episode.start.id),
-        metadata,
-    ));
-    repository
-        .create_commit()
-        .operations(operations)
-        .commit_message(format!("Add {}", episode.start.id))
-        .revision(settings.hugging_face.revision.clone())
-        .send()
-        .await
-        .map_err(|error| format!("Hugging Face upload failed: {error}"))?;
-    Ok(())
-}
-
-fn hugging_face_episode_parquet(episode: &CompletedEpisode) -> Result<Vec<u8>, String> {
-    let properties = WriterProperties::builder()
-        .set_compression(Compression::SNAPPY)
-        .build();
-    let mut writer = ArrowWriter::try_new(Vec::new(), joint_samples_schema(), Some(properties))
-        .map_err(|error| format!("opening Hugging Face Parquet writer: {error}"))?;
-    let mut encoder =
-        SpiralEpisodeEncoder::new(episode.start.clone()).map_err(|error| error.to_string())?;
-    let mut rows = Vec::with_capacity(JOINT_BATCH_ROWS);
-    for sample in &episode.samples {
-        rows.extend(encoder.encode(sample).map_err(|error| error.to_string())?);
-        if rows.len() >= JOINT_BATCH_ROWS {
-            writer
-                .write(&joint_samples_batch(&rows).map_err(|error| error.to_string())?)
-                .map_err(|error| format!("writing Hugging Face Parquet rows: {error}"))?;
-            rows.clear();
-        }
-    }
-    if !rows.is_empty() {
-        writer
-            .write(&joint_samples_batch(&rows).map_err(|error| error.to_string())?)
-            .map_err(|error| format!("writing Hugging Face Parquet rows: {error}"))?;
-    }
-    writer
-        .into_inner()
-        .map_err(|error| format!("finishing Hugging Face Parquet: {error}"))
-}
-
-fn hugging_face_repository(
-    settings: &StoredDataSettings,
-) -> Result<hf_hub::repository::HFRepository<hf_hub::repository::RepoTypeDataset>, String> {
-    let token = settings
-        .hugging_face
-        .token
-        .as_deref()
-        .ok_or_else(|| "Hugging Face token is not configured".to_owned())?;
-    let (owner, name) = settings
-        .hugging_face
-        .repository
-        .split_once('/')
-        .filter(|(owner, name)| !owner.is_empty() && !name.is_empty() && !name.contains('/'))
-        .ok_or_else(|| "Hugging Face repository must use owner/name".to_owned())?;
-    let client = HFClient::builder()
-        .token(token)
-        .build()
-        .map_err(|error| format!("building Hugging Face client: {error}"))?;
-    Ok(client.dataset(owner, name))
-}
-
 fn publish_spiral_blocking(
     connection: &mut ManagedConnection,
     settings: &StoredSpiralSettings,
@@ -960,6 +781,14 @@ fn publish_spiral_blocking(
     // children before writing, so a retry after a process or network failure
     // can finish without duplicating already-landed rows.
     clear_episode_rows(connection, settings, &episode.start.id)?;
+    let datasets = sql::relation(&settings.dataset, Table::Datasets);
+    if !table_has_dataset(connection, &datasets, &episode.start.dataset_id)? {
+        ingest_batch(
+            connection,
+            &datasets,
+            dataset_batch(&episode.start).map_err(|error| error.to_string())?,
+        )?;
+    }
     ingest_batch(
         connection,
         &sql::relation(&settings.dataset, Table::EpisodeStreams),
@@ -1099,18 +928,16 @@ fn ensure_dataset_namespace(
         }
         Ok(_) => {
             return Err(format!(
-                "Spiral dataset namespace {dataset} exists but is not a Spiral Robotics v1 namespace; choose a new dataset name or remove that resource"
+                "SpiralDB namespace {dataset} exists but is not managed by Spiral Robotics; choose a new namespace or remove that resource"
             ));
         }
         Err(error) if error.status == AdbcStatus::NotFound => {}
         Err(error) => {
-            return Err(format!(
-                "checking Spiral dataset namespace {dataset}: {error}"
-            ));
+            return Err(format!("checking SpiralDB namespace {dataset}: {error}"));
         }
     }
     execute_update_sql(connection, &sql::create_dataset_namespace(dataset))
-        .map_err(|error| format!("creating Spiral dataset namespace {dataset}: {error}"))
+        .map_err(|error| format!("creating SpiralDB namespace {dataset}: {error}"))
 }
 
 fn clear_episode_rows(
@@ -1145,6 +972,18 @@ fn table_has_episode(
         return Ok(false);
     }
     let result = run_query(connection, &sql::episode_exists(target, episode_id), 1)?;
+    Ok(!result.rows.is_empty())
+}
+
+fn table_has_dataset(
+    connection: &mut ManagedConnection,
+    target: &str,
+    dataset_id: &str,
+) -> Result<bool, String> {
+    if !table_exists(connection, target)? {
+        return Ok(false);
+    }
+    let result = run_query(connection, &sql::dataset_exists(target, dataset_id), 1)?;
     Ok(!result.rows.is_empty())
 }
 
@@ -1615,24 +1454,11 @@ fn validate_safe_value(label: &str, value: &str) -> Result<(), String> {
 fn validate_dataset_identifier(value: &str) -> Result<(), String> {
     if !spiral::is_identifier(value) {
         return Err(
-            "Spiral dataset must start with a letter or '_' and contain only letters, numbers, or '_'"
+            "Spiral namespace must start with a letter or '_' and contain only letters, numbers, or '_'"
                 .to_owned(),
         );
     }
     Ok(())
-}
-
-fn safe_repo_component(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 fn unix_millis() -> i64 {
@@ -1685,8 +1511,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use spiral_robotics_core::api::EpisodeArm;
 
     use super::*;
@@ -1721,7 +1545,7 @@ mod tests {
     }
 
     #[test]
-    fn training_schema_drift_is_rejected_before_python() {
+    fn training_schema_drift_is_rejected_before_training() {
         let schema = Schema::new(vec![
             Field::new(db::EPISODE_ID, DataType::Utf8, false),
             Field::new(db::STREAM_ID, DataType::Utf8, false),
@@ -1906,6 +1730,135 @@ mod tests {
         assert!(!payload.is_empty());
     }
 
+    /// Reads one already-published managed MP4 through the exact frame path
+    /// used by native ACT training. This is read-only; it never republishes or
+    /// mutates the selected project.
+    #[test]
+    #[ignore = "requires a running SpiralDB service with a published video episode"]
+    fn spiral_adbc_service_decodes_native_training_tensor() {
+        let driver_path = PathBuf::from(std::env::var("SPIRALDB_ADBC_DRIVER").unwrap());
+        let project_id = std::env::var("SPIRAL_ROBOTICS_SPIRAL_PROJECT").unwrap();
+        let dataset = std::env::var("SPIRAL_ROBOTICS_SPIRAL_DATASET")
+            .unwrap_or_else(|_| "spiral_robotics".to_owned());
+        let episode_id = std::env::var("SPIRAL_ROBOTICS_TEST_EPISODE").unwrap();
+        validate_safe_value("episode ID", &episode_id).unwrap();
+        validate_dataset_identifier(&dataset).unwrap();
+        let settings = StoredSpiralSettings {
+            enabled: true,
+            uri: "spiraldb://".to_owned(),
+            project_id,
+            dataset: dataset.clone(),
+        };
+        let mut adbc = open_adbc(AdbcConnectionKey::new(&settings, driver_path)).unwrap();
+        let assets = run_query(
+            &mut adbc.connection,
+            &format!(
+                "SELECT media_relation, stream_id, segment_index FROM {dataset}.video_assets \
+                 WHERE episode_id = '{}' ORDER BY stream_id, segment_index LIMIT 1",
+                episode_id.replace('\'', "''")
+            ),
+            1,
+        )
+        .unwrap();
+        let asset = assets
+            .rows
+            .first()
+            .expect("the selected episode must have a published video asset");
+        let media_relation = asset["media_relation"].as_str().unwrap();
+        assert!(media_relation.split('.').all(spiral::is_identifier));
+        let stream_id = asset["stream_id"].as_str().unwrap();
+        let segment_index = asset["segment_index"].as_u64().unwrap();
+        let tensor_sql = format!(
+            "SELECT f.request_index, \
+             spql.image.to_tensor(\
+               spql.image.resize(\
+                 spql.video.decode(f.frame, 'auto'), $1, $2, 'bilinear'\
+               ), 'chw', 'imagenet'\
+             ) AS image \
+             FROM {media_relation} AS a CROSS JOIN LATERAL \
+             spql.video.frames(a.media, spql.video.frame_indices(ARRAY[0])) AS f \
+             WHERE a.episode_id = '{}' AND a.stream_id = '{}' \
+             AND a.segment_index = {segment_index} ORDER BY f.request_index",
+            episode_id.replace('\'', "''"),
+            stream_id.replace('\'', "''"),
+        );
+        let batches = crate::backend::training::data::query_image_batches(
+            &mut adbc.connection,
+            &tensor_sql,
+            32,
+            32,
+        )
+        .unwrap();
+        let mut decoded = 0;
+        for batch in &batches {
+            let images = batch.column_by_name("image").unwrap();
+            for row in 0..batch.num_rows() {
+                let (values, shape) =
+                    crate::backend::training::data::tensor_value(images, row).unwrap();
+                assert_eq!(shape, [3, 32, 32]);
+                assert_eq!(values.len(), 3 * 32 * 32);
+                assert!(values.iter().all(|value| value.is_finite()));
+                decoded += 1;
+            }
+        }
+        assert_eq!(decoded, 1);
+
+        let request = spiral_robotics_core::api::StartTrainingRequest {
+            sql: format!(
+                "{}\n  AND j.episode_id = '{}'",
+                spiral::default_training_sql(&dataset),
+                episode_id.replace('\'', "''"),
+            ),
+            batch_size: 1,
+            chunk_size: 4,
+            act: spiral_robotics_core::api::ActTrainingConfig {
+                camera_streams: vec![stream_id.to_owned()],
+                image_width: 32,
+                image_height: 32,
+                ..spiral_robotics_core::api::ActTrainingConfig::default()
+            },
+            ..spiral_robotics_core::api::StartTrainingRequest::default()
+        };
+        let mut loader = crate::backend::training::data::SpiralActLoader::open(
+            &mut adbc.connection,
+            &request,
+            &dataset,
+        )
+        .unwrap();
+        let loaded = loader.fetch(1, false).unwrap();
+        assert_eq!(loaded.batch.batch_size, 1);
+        assert_eq!(loaded.batch.states.len(), loader.state_dimensions());
+        assert_eq!(
+            loaded.batch.actions.len(),
+            request.chunk_size * loader.action_dimensions()
+        );
+        assert_eq!(loaded.batch.images.len(), 3 * 32 * 32);
+        assert_eq!(loaded.metrics.requested_frames, 1);
+
+        let training = spiral_robotics_inference::act::VisionActTrainingConfig {
+            state_dimensions: loader.state_dimensions(),
+            action_dimensions: loader.action_dimensions(),
+            camera_streams: vec![stream_id.to_owned()],
+            image_width: 32,
+            image_height: 32,
+            chunk_size: request.chunk_size,
+            hidden_dimensions: 64,
+            latent_dimensions: 8,
+            attention_heads: 8,
+            feedforward_dimensions: 128,
+            encoder_layers: 1,
+            decoder_layers: 1,
+            kl_weight: request.act.kl_weight,
+            learning_rate: request.learning_rate,
+            total_steps: 1,
+            seed: request.seed,
+        };
+        let mut trainer =
+            spiral_robotics_inference::act::NativeActTrainer::new(training, "cpu", None).unwrap();
+        let loss = trainer.train_step(loaded.batch, 1).unwrap();
+        assert!(loss.total.is_finite());
+    }
+
     /// Publishes one real, locally recorded episode to a running SpiralDB
     /// service, then reads its relational rows, MP4 metadata/index, and
     /// original browser payload back through the same ADBC connection.
@@ -2022,7 +1975,7 @@ mod tests {
 
             // This is the exact asynchronous path used by an explicit
             // publication request for an already staged local episode.
-            manager.publish_existing(episode_id.clone()).unwrap();
+            manager.sync_spiral_existing(episode_id.clone()).unwrap();
             tokio::time::timeout(std::time::Duration::from_secs(15), async {
                 loop {
                     let status = manager
@@ -2066,22 +2019,9 @@ mod tests {
         });
     }
 
-    #[test]
-    fn hugging_face_payload_is_columnar_and_keeps_each_stream() {
-        let episode = test_episode();
-
-        let bytes = hugging_face_episode_parquet(&episode).unwrap();
-        let reader = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes))
-            .unwrap()
-            .build()
-            .unwrap();
-        let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();
-        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
-        assert!(batches[0].column_by_name("action_position").is_some());
-    }
-
     fn test_episode() -> CompletedEpisode {
         let start = crate::backend::recording::episodes::EpisodeStart {
+            dataset_id: "default".to_owned(),
             id: "episode_000001".to_owned(),
             started_ms: 1,
             sample_hz: 30.0,
@@ -2113,7 +2053,6 @@ mod tests {
                 discarded: false,
                 condition: Vec::new(),
             },
-            path: std::path::PathBuf::new(),
         }
     }
 }

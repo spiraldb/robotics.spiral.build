@@ -117,6 +117,7 @@ impl SceneSource {
 #[component]
 pub fn Viewport(
     source: SceneSource,
+    #[props(default)] visible_robot: Option<String>,
     #[props(default)] resize_revision: u64,
     on_select: EventHandler<Option<Selection>>,
 ) -> Element {
@@ -151,8 +152,8 @@ pub fn Viewport(
     let draw_bench = bench.clone();
     let draw_urdf = urdf.clone();
     use_effect(use_reactive(
-        (&resize_revision, &source),
-        move |(_resize_revision, draw_source)| {
+        (&resize_revision, &source, &visible_robot),
+        move |(_resize_revision, draw_source, visible_robot)| {
             // A workbench divider changes this canvas without changing the
             // browser window. Its host increments the revision while dragging
             // so WebGL redraws against the canvas's new CSS bounds instead of
@@ -171,6 +172,7 @@ pub fn Viewport(
                 grid,
                 &draw_source,
                 hovered.as_ref().map(|it| &it.entity),
+                visible_robot.as_deref(),
             );
 
             let Some(canvas) = canvas() else { return };
@@ -192,7 +194,18 @@ pub fn Viewport(
         },
     ));
 
-    let arms = studio.snapshot.read().robots.clone();
+    let arms = studio
+        .snapshot
+        .read()
+        .robots
+        .iter()
+        .filter(|robot| {
+            visible_robot
+                .as_ref()
+                .is_none_or(|visible| &robot.id == visible)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     let failure = match urdf.as_ref() {
         Err(error) => Some(format!("The robot description could not be read: {error}")),
         Ok(_) => trouble(),
@@ -201,7 +214,14 @@ pub fn Viewport(
     // scene the crate just drew, so a mark cannot drift away from the part it
     // is about as the camera moves.
     let marks = if source.is_live() {
-        condition_marks(&urdf, &studio, &bench, camera(), show_grid())
+        condition_marks(
+            &urdf,
+            &studio,
+            &bench,
+            camera(),
+            show_grid(),
+            visible_robot.as_deref(),
+        )
     } else {
         Vec::new()
     };
@@ -247,6 +267,7 @@ pub fn Viewport(
                     let bench = bench.clone();
                     let urdf = urdf.clone();
                     let source = source.clone();
+                    let visible_robot = visible_robot.clone();
                     move |event| {
                         let position = point(&event);
                         if let Some((pointer, _)) = touch(&event)
@@ -278,8 +299,11 @@ pub fn Viewport(
                             &bench,
                             camera(),
                             show_grid(),
-                            &source,
-                            position,
+                            PickContext {
+                                source: &source,
+                                visible_robot: visible_robot.as_deref(),
+                                at: position,
+                            },
                         ));
                     }
                 },
@@ -287,6 +311,7 @@ pub fn Viewport(
                     let bench = bench.clone();
                     let urdf = urdf.clone();
                     let source = source.clone();
+                    let visible_robot = visible_robot.clone();
                     move |event| {
                         if let Some((pointer, _)) = touch(&event) {
                             touches.write().remove(&pointer);
@@ -302,8 +327,11 @@ pub fn Viewport(
                                 &bench,
                                 camera(),
                                 show_grid(),
-                                &source,
-                                position,
+                                PickContext {
+                                    source: &source,
+                                    visible_robot: visible_robot.as_deref(),
+                                    at: position,
+                                },
                             );
                             // Clicking bare bench clears the selection, the way
                             // clicking empty space does everywhere else.
@@ -354,7 +382,7 @@ pub fn Viewport(
                             None
                         }
                         Key::Character(value) if value.eq_ignore_ascii_case("f") => {
-                            frame_selection(&mut camera, &studio);
+                            frame_selection(&mut camera, &studio, visible_robot.as_deref());
                             None
                         }
                         _ => None,
@@ -532,6 +560,7 @@ fn compose(
     grid: bool,
     source: &SceneSource,
     hovered: Option<&RobotEntity>,
+    visible_robot: Option<&str>,
 ) -> RobotScene {
     let selected = studio.selected.read().clone();
     // Hovering a joint row in the inspector lights the motor on the bench, the
@@ -545,7 +574,7 @@ fn compose(
 
     robot::build(
         urdf,
-        &placements(studio, source),
+        &placements(studio, source, visible_robot),
         grid,
         |entity| {
             if matches_selection(selected.as_ref(), entity) {
@@ -607,6 +636,7 @@ fn condition_marks(
     bench: &Rc<RefCell<Option<Bench>>>,
     camera: Camera,
     grid: bool,
+    visible_robot: Option<&str>,
 ) -> Vec<Mark> {
     let Ok(urdf) = urdf.as_ref().as_ref() else {
         return Vec::new();
@@ -617,7 +647,7 @@ fn condition_marks(
     let Some(bench) = slot.as_ref() else {
         return Vec::new();
     };
-    let scene = compose(urdf, studio, grid, &SceneSource::Live, None);
+    let scene = compose(urdf, studio, grid, &SceneSource::Live, None, visible_robot);
     let rect = canvas().map(|canvas| canvas.get_bounding_client_rect());
     let (left, top) = rect.map_or((0.0, 0.0), |rect| (rect.left(), rect.top()));
 
@@ -645,24 +675,29 @@ fn condition_marks(
 }
 
 /// What the pointer is over, and where the note about it belongs.
+struct PickContext<'a> {
+    source: &'a SceneSource,
+    visible_robot: Option<&'a str>,
+    at: (f64, f64),
+}
+
 fn hovered(
     urdf: &crate::frontend::app::state::Description,
     studio: &crate::frontend::app::state::Studio,
     bench: &Rc<RefCell<Option<Bench>>>,
     camera: Camera,
     grid: bool,
-    source: &SceneSource,
-    at: (f64, f64),
+    pick: PickContext<'_>,
 ) -> Option<Hover> {
     let urdf = urdf.as_ref().as_ref().ok()?;
     let slot = bench.try_borrow().ok()?;
     let bench = slot.as_ref()?;
-    let scene = compose(urdf, studio, grid, source, None);
-    let key = bench.pick(&camera, &scene.scene, at)?;
+    let scene = compose(urdf, studio, grid, pick.source, None, pick.visible_robot);
+    let key = bench.pick(&camera, &scene.scene, pick.at)?;
     let rect = canvas()?.get_bounding_client_rect();
     Some(Hover {
         entity: scene.entity(key)?.clone(),
-        at: (at.0 - rect.left(), at.1 - rect.top()),
+        at: (pick.at.0 - rect.left(), pick.at.1 - rect.top()),
     })
 }
 
@@ -670,8 +705,16 @@ fn hovered(
 fn placements(
     studio: &crate::frontend::app::state::Studio,
     source: &SceneSource,
+    visible_robot: Option<&str>,
 ) -> Vec<ArmPlacement> {
-    let arms = studio.snapshot.read().robots.clone();
+    let arms = studio
+        .snapshot
+        .read()
+        .robots
+        .iter()
+        .filter(|arm| visible_robot.is_none_or(|visible| arm.id == visible))
+        .cloned()
+        .collect::<Vec<_>>();
     let count = arms.len();
     arms.iter()
         .enumerate()
@@ -694,7 +737,7 @@ fn placements(
             });
             ArmPlacement {
                 id: arm.id.clone(),
-                accent: ACCENTS[index % ACCENTS.len()].0,
+                accent: ACCENTS[studio.position_of(&arm.id) % ACCENTS.len()].0,
                 live: angles.is_some(),
                 angles: angles.unwrap_or_default(),
                 cameras: arm.cameras.iter().filter_map(mount_of).collect(),
@@ -830,19 +873,33 @@ fn ViewCube(mut camera: Signal<Camera>) -> Element {
     }
 }
 
-fn frame_selection(camera: &mut Signal<Camera>, studio: &crate::frontend::app::state::Studio) {
-    let robot = studio
-        .selected
-        .read()
-        .as_ref()
-        .map(|selection| selection.robot_id().to_owned())
-        .or_else(|| studio.focused().map(|robot| robot.id));
+fn frame_selection(
+    camera: &mut Signal<Camera>,
+    studio: &crate::frontend::app::state::Studio,
+    visible_robot: Option<&str>,
+) {
+    let robot = visible_robot.map(str::to_owned).or_else(|| {
+        studio
+            .selected
+            .read()
+            .as_ref()
+            .map(|selection| selection.robot_id().to_owned())
+            .or_else(|| studio.focused().map(|robot| robot.id))
+    });
     let Some(robot) = robot else {
         camera.set(Camera::default());
         return;
     };
-    let count = studio.snapshot.read().robots.len();
-    let index = studio.position_of(&robot);
+    let count = if visible_robot.is_some() {
+        1
+    } else {
+        studio.snapshot.read().robots.len()
+    };
+    let index = if visible_robot.is_some() {
+        0
+    } else {
+        studio.position_of(&robot)
+    };
     let base = Vec3::new(
         0.0,
         (index as f32 - count.saturating_sub(1) as f32 / 2.0) * BENCH_SPACING,

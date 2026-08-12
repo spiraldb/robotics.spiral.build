@@ -1,7 +1,8 @@
-# Spiral Robotics Inference
+# Spiral Robotics Native ACT
 
-Native robot-policy inference with no Python or PyTorch runtime. This crate is
-deliberately independent of the Studio, hardware, storage, and training crates.
+Native ACT training and inference with no external ML runtime. Studio's server
+uses this engine as part of the single Spiral Robotics backend; the binary in
+this crate is only a diagnostic interface to the same implementation.
 
 The first compatibility target is Hugging Face LeRobot's established
 [`lerobot/act_aloha_sim_transfer_cube_human`](https://huggingface.co/lerobot/act_aloha_sim_transfer_cube_human)
@@ -13,8 +14,10 @@ ACT policy:
 - ResNet-18 vision backbone, 14-dimensional state and actions, 100-step chunks;
 - reported 83% success over 500 ALOHA Transfer Cube simulation episodes.
 
-Model data is resolved into the standard Hugging Face cache and is never
-committed to this repository.
+Model data is streamed from immutable raw HTTPS URLs into Spiral Robotics' local
+cache and is never committed to this repository. The downloader does not use a
+Hub SDK or API; known files are admitted only after SHA-256 verification.
+Set `SPIRAL_ROBOTICS_CACHE_DIR` to override the platform cache directory.
 
 ## Run
 
@@ -68,10 +71,10 @@ Chunk scheduling, temporal ensembling, deadlines, stale-observation handling,
 joint compatibility, and physical safety remain with the integrating robotics
 runtime.
 
-Local files and Hugging Face are artifact-source adapters. Both produce an
-owned, content-addressed `ModelArtifact` before ACT parsing begins. An eventual
-SpiralDB source can construct that artifact directly from bytes without
-materializing paths or changing ACT or the inference interface.
+Local files and raw HTTPS downloads are artifact-source adapters. Both produce
+an owned, content-addressed `ModelArtifact` before ACT parsing begins. An
+eventual SpiralDB source can construct that artifact directly from bytes
+without materializing paths or changing ACT or the inference interface.
 
 ## Trust boundaries
 
@@ -80,8 +83,8 @@ an ambiguous runtime object:
 
 1. artifact files are copied into process-owned memory and identified by their
    actual SHA-256 digests;
-2. Hub revisions must be immutable 40-character commits, and known artifact
-   checksums are verified;
+2. remote URLs carry immutable 40-character source revisions, and known
+   artifact checksums are verified;
 3. JSON is converted into an invariant-preserving `ActConfig`; unsupported
    architectures, malformed features, zero dimensions, and arithmetic
    overflows are rejected here;
@@ -101,16 +104,16 @@ re-validating loosely related JSON and checkpoint values throughout inference.
 - stateless full-chunk prediction;
 - portable CPU, optional Apple Accelerate, and optional Metal backends.
 
-Enable `accelerate` alongside `cpu` on Apple platforms when an
-Accelerate-backed CPU fallback is useful. Metal is the intended local
-real-time path.
+Portable CPU training and inference are always available. On Apple platforms,
+`accelerate` enables an Accelerate-backed CPU path and `metal` enables the
+intended local real-time path.
 
 ## Verification
 
 The pinned checkpoint is identified by SHA-256
 `42772891cb6eba1e7bc36ad8e12c0fa0723c61f036fa235c725ce6026e6e81df`.
 For a zero state and black image, all 1,400 action values from this engine were
-compared with a separate PyTorch implementation of the upstream graph; the
+compared with a separate implementation of the upstream graph; the
 maximum absolute difference was `6.26e-7`.
 The optional checkpoint test fingerprints all 1,400 outputs at `1e-3`
 precision, in addition to checking exact output dimensions and representative

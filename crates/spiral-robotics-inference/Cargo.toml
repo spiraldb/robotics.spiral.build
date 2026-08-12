@@ -2,13 +2,12 @@
 name = "spiral-robotics-inference"
 version.workspace = true
 edition.workspace = true
-description = "Standalone native inference engine for robot policies"
+description = "Native training and inference engine for robot policies"
 publish = false
 
 [features]
 default = ["cli"]
-cpu = ["dep:burn-ndarray"]
-accelerate = ["cpu", "burn-ndarray/blas-accelerate"]
+accelerate = ["burn-ndarray/blas-accelerate"]
 metal = [
     "dep:burn-wgpu",
     "dep:futures-lite",
@@ -17,22 +16,27 @@ metal = [
     "burn-wgpu/fusion",
     "burn-wgpu/metal",
 ]
-hub = ["dep:hf-hub"]
-cli = ["dep:clap", "dep:image", "hub", "cpu"]
+download = ["dep:dirs", "dep:reqwest", "dep:tempfile"]
+cli = ["dep:clap", "dep:image", "download"]
 
 [dependencies]
 burn-core = { version = "0.21.0", default-features = false, features = ["std"] }
 burn-nn = { version = "0.21.0", default-features = false, features = ["std"] }
-burn-ndarray = { version = "0.21.0", default-features = false, features = ["std", "simd", "multi-threads"], optional = true }
+burn-autodiff = { version = "0.21.0", default-features = false, features = ["std"] }
+burn-optim = { version = "0.21.0", default-features = false, features = ["std"] }
+burn-store = { version = "0.21.0", default-features = false, features = ["safetensors", "std"] }
+burn-ndarray = { version = "0.21.0", default-features = false, features = ["std", "simd", "multi-threads"] }
 burn-wgpu = { version = "0.21.0", default-features = false, features = ["std"], optional = true }
 clap = { workspace = true, features = ["derive"], optional = true }
+dirs = { version = "6", optional = true }
 futures-lite = { version = "2.6", optional = true }
-hf-hub = { version = "1.0.0", features = ["blocking", "rustls-tls"], optional = true }
 image = { workspace = true, optional = true }
-safetensors = "0.8"
+reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls"], optional = true }
+safetensors = "0.7"
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+tempfile = { workspace = true, optional = true }
 thiserror = "2"
 wgpu = { version = "29.0.4", default-features = false, features = ["metal", "std"], optional = true }
 

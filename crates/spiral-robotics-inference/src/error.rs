@@ -19,9 +19,13 @@ pub enum Error {
     Input(String),
     #[error("inference failed: {0}")]
     Inference(String),
-    #[cfg(feature = "hub")]
-    #[error("Hugging Face Hub request failed: {0}")]
-    Hub(#[from] hf_hub::HFError),
+    #[cfg(feature = "download")]
+    #[error("could not download {url}: {source}")]
+    Download {
+        url: String,
+        #[source]
+        source: reqwest::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

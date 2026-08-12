@@ -1,35 +1,32 @@
-//! Rust-owned supervision for the Spiral-backed PyTorch worker.
-//!
-//! Python owns small read-only Spiral metadata reads through Arrow and the
-//! per-step `to_torch()` sample path. Rust retains process lifecycle, query
-//! authorization, persistence, checkpoint publication, and browser events.
+//! Rust-owned supervision for Spiral ADBC and Burn-native vision ACT.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::future::pending;
-use std::path::{Component, Path, PathBuf};
-use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
+use adbc_driver_manager::ManagedConnection;
 use spiral_robotics_core::api::{
     ConnectionTestResponse, MAX_TRAINING_HISTORY_RUNS, StartTrainingRequest, TrainingCheckpoint,
-    TrainingCheckpointFormat, TrainingMetricPoint, TrainingReadiness, TrainingRun,
-    TrainingRunPhase, TrainingSnapshot, TrainingSource, TrainingUpdate,
+    TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase, TrainingSnapshot,
+    TrainingSource, TrainingUpdate,
 };
 use spiral_robotics_core::spiral;
-use tokio::io::{AsyncBufReadExt as _, BufReader};
-use tokio::process::Command;
-use tokio::sync::{broadcast, oneshot};
+use spiral_robotics_inference::act::{
+    NativeActTrainer, VisionActCheckpoint, VisionActTrainingConfig,
+};
+use tokio::sync::{broadcast, mpsc};
 
 use crate::backend::storage::manager::{StorageManager, TrainingCheckpointWrite};
 use crate::backend::storage::settings::StoredSpiralSettings;
 use crate::backend::storage::sql::{self, ReadOnlyMode};
+use crate::backend::training::data::SpiralActLoader;
+use crate::backend::training::{ACT_ARTIFACT_FORMAT, ACT_TENSOR_NAMESPACE};
 
 const HISTORY_FILE: &str = "runs.json";
-const STOP_GRACE: Duration = Duration::from_secs(10);
+const STOP_GRACE: Duration = Duration::from_secs(30);
 // The current checkpoint relation stores one artifact per Binary cell. Stay
 // below Spiral's default 256 MiB table-operation limit with headroom for the
 // other columns in the ingest batch.
@@ -43,84 +40,32 @@ pub(crate) struct TrainingManager {
 
 struct TrainingManagerInner {
     root: PathBuf,
-    python: PathBuf,
-    worker_script: PathBuf,
     storage: Arc<StorageManager>,
-    python_probe: Result<String, String>,
     snapshot: Mutex<TrainingSnapshot>,
     updates: broadcast::Sender<TrainingUpdate>,
-    controls: Mutex<BTreeMap<String, oneshot::Sender<()>>>,
+    controls: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
 }
 
-#[derive(Debug, Serialize)]
-struct WorkerConfig {
-    run_id: String,
-    request: StartTrainingRequest,
-    spiral_project: String,
-    spiral_dataset: String,
-    stop_file: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum WorkerEvent {
-    Started {
-        message: String,
-    },
-    Metric {
-        #[serde(flatten)]
-        point: TrainingMetricPoint,
-    },
-    CheckpointReady {
+enum NativeEvent {
+    Started(String),
+    Metric(TrainingMetricPoint),
+    Checkpoint {
         step: u64,
         created_ms: i64,
         validation_loss: Option<f64>,
-        file_name: String,
-        byte_size: u64,
         manifest: serde_json::Value,
+        payload: Vec<u8>,
+        acknowledged: std::sync::mpsc::SyncSender<Result<(), String>>,
     },
-    Log {
-        message: String,
-    },
-    Completed {
-        message: String,
-    },
-    Stopped {
-        message: String,
-    },
-    Failed {
-        message: String,
-    },
-}
-
-enum WorkerTerminal {
-    Completed(String),
-    Stopped(String),
-    Failed(String),
+    Log(String),
 }
 
 impl TrainingManager {
-    pub(crate) async fn open(
-        root: PathBuf,
-        mut python: PathBuf,
-        mut worker_script: PathBuf,
-        storage: Arc<StorageManager>,
-    ) -> Result<Self, String> {
+    pub(crate) async fn open(root: PathBuf, storage: Arc<StorageManager>) -> Result<Self, String> {
         fs::create_dir_all(&root)
             .map_err(|error| format!("could not create {}: {error}", root.display()))?;
         let root = fs::canonicalize(&root)
             .map_err(|error| format!("could not resolve {}: {error}", root.display()))?;
-        let launch_directory = std::env::current_dir()
-            .map_err(|error| format!("could not resolve the launch directory: {error}"))?;
-        if worker_script.is_relative() {
-            worker_script = launch_directory.join(worker_script);
-        }
-        // A bare `python3` intentionally remains a PATH lookup. Relative
-        // interpreter paths containing a directory must be frozen before the
-        // child changes into its per-run working directory.
-        if python.is_relative() && python.components().count() > 1 {
-            python = launch_directory.join(python);
-        }
         let mut snapshot = load_snapshot(&root).unwrap_or_default();
         for run in &mut snapshot.runs {
             if run.phase.active() {
@@ -129,17 +74,12 @@ impl TrainingManager {
                 run.message = Some("The backend restarted while this run was active.".to_owned());
             }
         }
-        snapshot.worker = worker_script.display().to_string();
-        let python_probe = probe_worker(&python, &worker_script).await;
-        snapshot.readiness = readiness(&python_probe, &storage).await;
+        snapshot.readiness = readiness(&storage).await;
         let (updates, _) = broadcast::channel(512);
         let manager = Self {
             inner: Arc::new(TrainingManagerInner {
                 root,
-                python,
-                worker_script,
                 storage,
-                python_probe,
                 snapshot: Mutex::new(snapshot),
                 updates,
                 controls: Mutex::new(BTreeMap::new()),
@@ -163,7 +103,7 @@ impl TrainingManager {
     }
 
     pub(crate) async fn refresh_readiness(&self) -> TrainingReadiness {
-        let next = readiness(&self.inner.python_probe, &self.inner.storage).await;
+        let next = readiness(&self.inner.storage).await;
         if lock(&self.inner.snapshot).readiness != next {
             self.publish(
                 TrainingUpdate::Readiness {
@@ -181,7 +121,7 @@ impl TrainingManager {
         if !readiness.ready {
             return Err(readiness.summary);
         }
-        let (settings, source) = self.inner.storage.training_source()?;
+        let (settings, source) = self.inner.storage.training_source(&request.dataset_id)?;
         self.inner
             .storage
             .validate_training_query(
@@ -201,7 +141,7 @@ impl TrainingManager {
             current_step: 0,
             started_ms: now_ms(),
             finished_ms: None,
-            message: Some("Opening the Spiral stream and PyTorch runtime…".to_owned()),
+            message: Some("Opening the Spiral ADBC stream and Burn runtime…".to_owned()),
             metrics: Vec::new(),
             checkpoints: Vec::new(),
             logs: Vec::new(),
@@ -223,20 +163,20 @@ impl TrainingManager {
         }
         self.persist();
 
-        let (cancel_tx, cancel_rx) = oneshot::channel();
-        lock(&self.inner.controls).insert(id.clone(), cancel_tx);
+        let cancel = Arc::new(AtomicBool::new(false));
+        lock(&self.inner.controls).insert(id.clone(), cancel.clone());
         let manager = self.clone();
         tokio::spawn(async move {
             manager
-                .run_worker(id, request, settings, source, cancel_rx)
+                .run_native(id, request, settings, source, cancel)
                 .await;
         });
         Ok(run)
     }
 
     pub(crate) fn stop(&self, run_id: &str) -> Result<(), String> {
-        let sender = lock(&self.inner.controls).remove(run_id);
-        let Some(sender) = sender else {
+        let cancel = lock(&self.inner.controls).get(run_id).cloned();
+        let Some(cancel) = cancel else {
             return Err(format!("training run {run_id:?} is not active"));
         };
         self.set_phase(
@@ -244,18 +184,18 @@ impl TrainingManager {
             TrainingRunPhase::Stopping,
             None,
             Some(
-                "Finishing the current optimizer step and publishing a final checkpoint…"
+                "Finishing the current Arrow read or optimizer step and publishing a final checkpoint…"
                     .to_owned(),
             ),
         );
-        let _ = sender.send(());
+        cancel.store(true, Ordering::Release);
         Ok(())
     }
 
     pub(crate) async fn shutdown(&self) {
         let controls = std::mem::take(&mut *lock(&self.inner.controls));
-        for (_, sender) in controls {
-            let _ = sender.send(());
+        for (_, cancel) in controls {
+            cancel.store(true, Ordering::Release);
         }
         let _ = tokio::time::timeout(STOP_GRACE + Duration::from_secs(2), async {
             while lock(&self.inner.snapshot).active_run().is_some() {
@@ -265,334 +205,199 @@ impl TrainingManager {
         .await;
     }
 
-    async fn run_worker(
+    async fn run_native(
         &self,
         run_id: String,
         request: StartTrainingRequest,
         settings: StoredSpiralSettings,
         source: TrainingSource,
-        mut cancel: oneshot::Receiver<()>,
+        cancel: Arc<AtomicBool>,
     ) {
-        let run_directory = self.inner.root.join(&run_id);
-        if let Err(error) = tokio::fs::create_dir_all(&run_directory).await {
-            self.fail(
-                &run_id,
-                format!("could not create the run directory: {error}"),
-            );
-            return;
-        }
-        let stop_path = run_directory.join("stop-requested");
-        let _ = tokio::fs::remove_file(&stop_path).await;
-        let config_path = run_directory.join("config.json");
-        let config = WorkerConfig {
-            run_id: run_id.clone(),
-            request: request.clone(),
-            spiral_project: settings.project_id.clone(),
-            spiral_dataset: settings.dataset.clone(),
-            stop_file: stop_path.display().to_string(),
-        };
-        let config_bytes = match serde_json::to_vec_pretty(&config) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                self.fail(
-                    &run_id,
-                    format!("could not encode the run configuration: {error}"),
-                );
-                return;
+        let pretrained = if request.act.pretrained_backbone {
+            match tokio::task::spawn_blocking(load_pretrained_backbone).await {
+                Ok(Ok(bytes)) => Some(bytes),
+                Ok(Err(error)) => {
+                    self.fail(&run_id, error);
+                    return;
+                }
+                Err(error) => {
+                    self.fail(&run_id, format!("pretrained backbone task failed: {error}"));
+                    return;
+                }
             }
-        };
-        if let Err(error) = tokio::fs::write(&config_path, config_bytes).await {
-            self.fail(
-                &run_id,
-                format!("could not write the run configuration: {error}"),
-            );
-            return;
-        }
-
-        let mut command = Command::new(&self.inner.python);
-        command
-            .arg(&self.inner.worker_script)
-            .arg("--config")
-            .arg(&config_path)
-            .current_dir(&run_directory)
-            .env("PYTHONUNBUFFERED", "1")
-            .env("PYTHONNOUSERSITE", "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => {
-                self.fail(
-                    &run_id,
-                    format!(
-                        "could not launch {}: {error}. Enter the Nix development shell or set --training-python.",
-                        self.inner.python.display()
-                    ),
-                );
-                return;
-            }
+        } else {
+            None
         };
 
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stderr = child.stderr.take().expect("piped stderr");
-        let stderr_manager = self.clone();
-        let stderr_run = run_id.clone();
-        let stderr_task = tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                stderr_manager.push_log(&stderr_run, format!("stderr · {line}"));
-            }
-        });
-
-        let mut lines = BufReader::new(stdout).lines();
-        let mut stop_requested = false;
-        let mut stop_deadline = None;
-        let mut forced = false;
-        let mut terminal = None;
-        loop {
-            let deadline = stop_deadline;
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let training_request = request.clone();
+        let training_source = source.clone();
+        let training_run_id = run_id.clone();
+        let training_cancel = cancel.clone();
+        let storage = self.inner.storage.clone();
+        let training_settings = settings.clone();
+        let mut training = Box::pin(storage.run_training_adbc(
+            settings.clone(),
+            move |connection| {
+                train_blocking(
+                    connection,
+                    &training_run_id,
+                    &training_request,
+                    &training_settings,
+                    &training_source,
+                    training_cancel,
+                    pretrained.as_deref(),
+                    events_tx,
+                )
+            },
+        ));
+        let mut publication_error = None;
+        let mut events_open = true;
+        let terminal = loop {
             tokio::select! {
-                _ = &mut cancel, if !stop_requested => {
-                    stop_requested = true;
-                    let _ = tokio::fs::write(&stop_path, b"stop\n").await;
-                    stop_deadline = Some(tokio::time::Instant::now() + STOP_GRACE);
-                }
-                _ = async {
-                    if let Some(deadline) = deadline {
-                        tokio::time::sleep_until(deadline).await;
-                    } else {
-                        pending::<()>().await;
-                    }
-                } => {
-                    forced = true;
-                    let _ = child.start_kill();
-                    break;
-                }
-                line = lines.next_line() => {
-                    match line {
-                        Ok(Some(line)) => {
-                            if let Some(next) = self
-                                .handle_worker_line(
-                                    &run_id,
-                                    &run_directory,
-                                    &request,
-                                    &settings,
-                                    &source,
-                                    &line,
-                                )
-                                .await
-                            {
-                                let failed = matches!(&next, WorkerTerminal::Failed(_));
-                                if failed && !stop_requested {
-                                    stop_requested = true;
-                                    let _ = tokio::fs::write(&stop_path, b"stop\n").await;
-                                    stop_deadline = Some(tokio::time::Instant::now() + STOP_GRACE);
-                                }
-                                if !matches!(terminal.as_ref(), Some(WorkerTerminal::Failed(_))) {
-                                    terminal = Some(next);
-                                }
+                result = &mut training => break result,
+                event = events_rx.recv(), if events_open => {
+                    match event {
+                        None => events_open = false,
+                        Some(event) => match event {
+                        NativeEvent::Started(message) => {
+                            if self.phase(&run_id) == Some(TrainingRunPhase::Starting) {
+                                self.set_phase(&run_id, TrainingRunPhase::Running, None, Some(message));
                             }
                         }
-                        Ok(None) => break,
-                        Err(error) => {
-                            terminal = Some(WorkerTerminal::Failed(format!(
-                                "worker output failed: {error}"
-                            )));
-                            break;
+                        NativeEvent::Metric(point) => self.publish(
+                            TrainingUpdate::Metric {
+                                run_id: run_id.clone(),
+                                point: Box::new(point),
+                            },
+                            false,
+                        ),
+                        NativeEvent::Log(message) => self.push_log(&run_id, message),
+                        NativeEvent::Checkpoint {
+                            step,
+                            created_ms,
+                            validation_loss,
+                            manifest,
+                            payload,
+                            acknowledged,
+                        } => {
+                            let result = if publication_error.is_none() {
+                                self
+                                    .publish_checkpoint_bytes(
+                                        &run_id,
+                                        &request,
+                                        &settings,
+                                        &source,
+                                        step,
+                                        created_ms,
+                                        validation_loss,
+                                        &manifest,
+                                        payload,
+                                    )
+                                    .await
+                            } else {
+                                Err(publication_error.clone().expect("publication error"))
+                            };
+                            let _ = acknowledged.send(result.clone());
+                            if let Err(error) = result {
+                                cancel.store(true, Ordering::Release);
+                                publication_error = Some(error);
+                            }
                         }
+                        },
                     }
                 }
             }
-        }
-
-        let status = child.wait().await;
-        let _ = stderr_task.await;
-        lock(&self.inner.controls).remove(&run_id);
-        let _ = tokio::fs::remove_file(&stop_path).await;
-
-        if forced {
-            if let Some(WorkerTerminal::Failed(message)) = terminal {
-                self.fail(&run_id, message);
-                return;
-            }
-            self.set_phase(
-                &run_id,
-                TrainingRunPhase::Stopped,
-                Some(now_ms()),
-                Some("The worker did not stop within 10 seconds and was terminated.".to_owned()),
-            );
-            return;
-        }
-        match (status, terminal) {
-            (_, Some(WorkerTerminal::Failed(message))) => self.fail(&run_id, message),
-            (Ok(status), Some(WorkerTerminal::Stopped(message))) if status.success() => {
-                self.set_phase(
-                    &run_id,
-                    TrainingRunPhase::Stopped,
-                    Some(now_ms()),
-                    Some(message),
-                );
-            }
-            (Ok(status), Some(WorkerTerminal::Completed(message))) if status.success() => {
-                self.set_phase(
-                    &run_id,
-                    TrainingRunPhase::Completed,
-                    Some(now_ms()),
-                    Some(message),
-                );
-            }
-            (Ok(status), _) if status.success() && stop_requested => {
-                self.set_phase(
-                    &run_id,
-                    TrainingRunPhase::Stopped,
-                    Some(now_ms()),
-                    Some("Stopped after the current optimizer step.".to_owned()),
-                );
-            }
-            (Ok(status), _) if status.success() => {
-                self.set_phase(
-                    &run_id,
-                    TrainingRunPhase::Completed,
-                    Some(now_ms()),
-                    Some("Training completed.".to_owned()),
-                );
-            }
-            (Ok(status), _) => {
-                self.fail(&run_id, format!("the training worker exited with {status}"))
-            }
-            (Err(error), _) => {
-                self.fail(&run_id, format!("could not wait for the worker: {error}"))
-            }
-        }
-    }
-
-    async fn handle_worker_line(
-        &self,
-        run_id: &str,
-        run_directory: &Path,
-        request: &StartTrainingRequest,
-        settings: &StoredSpiralSettings,
-        source: &TrainingSource,
-        line: &str,
-    ) -> Option<WorkerTerminal> {
-        let event = match serde_json::from_str::<WorkerEvent>(line) {
-            Ok(event) => event,
-            Err(_) => {
-                self.push_log(run_id, line.to_owned());
-                return None;
-            }
         };
-        match event {
-            WorkerEvent::Started { message } => {
-                if self.phase(run_id) == Some(TrainingRunPhase::Starting) {
-                    self.set_phase(run_id, TrainingRunPhase::Running, None, Some(message));
+        while let Ok(event) = events_rx.try_recv() {
+            match event {
+                NativeEvent::Started(message) => {
+                    if self.phase(&run_id) == Some(TrainingRunPhase::Starting) {
+                        self.set_phase(&run_id, TrainingRunPhase::Running, None, Some(message));
+                    }
                 }
-                None
-            }
-            WorkerEvent::Metric { point } => {
-                self.publish(
+                NativeEvent::Metric(point) => self.publish(
                     TrainingUpdate::Metric {
-                        run_id: run_id.to_owned(),
+                        run_id: run_id.clone(),
                         point: Box::new(point),
                     },
                     false,
-                );
-                None
+                ),
+                NativeEvent::Log(message) => self.push_log(&run_id, message),
+                NativeEvent::Checkpoint { acknowledged, .. } => {
+                    let error = "trainer completed before checkpoint publication".to_owned();
+                    let _ = acknowledged.send(Err(error.clone()));
+                    publication_error.get_or_insert(error);
+                }
             }
-            WorkerEvent::CheckpointReady {
-                step,
-                created_ms,
-                validation_loss,
-                file_name,
-                byte_size,
-                manifest,
-            } => match self
-                .publish_checkpoint(
-                    run_id,
-                    run_directory,
-                    request,
-                    settings,
-                    source,
-                    step,
-                    created_ms,
-                    validation_loss,
-                    &file_name,
-                    byte_size,
-                    &manifest,
-                )
-                .await
-            {
-                Ok(()) => None,
-                Err(error) => Some(WorkerTerminal::Failed(error)),
-            },
-            WorkerEvent::Log { message } => {
-                self.push_log(run_id, message);
-                None
-            }
-            WorkerEvent::Completed { message } => Some(WorkerTerminal::Completed(message)),
-            WorkerEvent::Stopped { message } => Some(WorkerTerminal::Stopped(message)),
-            WorkerEvent::Failed { message } => {
-                self.push_log(run_id, format!("fatal · {message}"));
-                Some(WorkerTerminal::Failed(message))
-            }
+        }
+        lock(&self.inner.controls).remove(&run_id);
+        if let Some(error) = publication_error {
+            self.fail(&run_id, error);
+            return;
+        }
+        match terminal {
+            Err(error) => self.fail(&run_id, error),
+            Ok(outcome) if outcome.stopped && outcome.steps == 0 => self.set_phase(
+                &run_id,
+                TrainingRunPhase::Stopped,
+                Some(now_ms()),
+                Some(
+                    "Stopped before the first optimizer step; no checkpoint was produced."
+                        .to_owned(),
+                ),
+            ),
+            Ok(outcome) if outcome.stopped => self.set_phase(
+                &run_id,
+                TrainingRunPhase::Stopped,
+                Some(now_ms()),
+                Some(format!(
+                    "Stopped after step {}; the final checkpoint was published to Spiral.",
+                    outcome.steps
+                )),
+            ),
+            Ok(outcome) => self.set_phase(
+                &run_id,
+                TrainingRunPhase::Completed,
+                Some(now_ms()),
+                Some(format!(
+                    "Completed {} steps; the final checkpoint was published to Spiral.",
+                    outcome.steps
+                )),
+            ),
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn publish_checkpoint(
+    async fn publish_checkpoint_bytes(
         &self,
         run_id: &str,
-        run_directory: &Path,
         request: &StartTrainingRequest,
         settings: &StoredSpiralSettings,
         source: &TrainingSource,
         step: u64,
         created_ms: i64,
         validation_loss: Option<f64>,
-        file_name: &str,
-        byte_size: u64,
         manifest: &serde_json::Value,
+        payload: Vec<u8>,
     ) -> Result<(), String> {
         if step == 0 || step > request.steps {
             return Err(format!(
-                "the worker returned checkpoint step {step}, outside this run"
+                "trainer returned checkpoint step {step}, outside this run"
             ));
         }
         if validation_loss.is_some_and(|loss| !loss.is_finite()) {
-            return Err("the worker returned a non-finite validation loss".to_owned());
+            return Err("trainer returned a non-finite validation loss".to_owned());
         }
-        let relative = Path::new(file_name);
-        if relative.components().count() != 1
-            || !matches!(relative.components().next(), Some(Component::Normal(_)))
-        {
-            return Err("the worker returned an invalid checkpoint path".to_owned());
-        }
-        let path = run_directory.join(relative);
-        let metadata = tokio::fs::symlink_metadata(&path)
-            .await
-            .map_err(|error| format!("could not inspect checkpoint {file_name}: {error}"))?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != byte_size {
-            return Err(format!(
-                "checkpoint {file_name} is not the stable regular file the worker declared"
-            ));
-        }
+        let byte_size = payload.len() as u64;
         if byte_size > MAX_CHECKPOINT_BYTES {
-            return Err(format!(
-                "checkpoint {file_name} exceeds the 240 MiB single-artifact publication limit"
-            ));
+            return Err(
+                "checkpoint exceeds the 240 MiB single-artifact publication limit".to_owned(),
+            );
         }
-        let payload = tokio::fs::read(&path)
-            .await
-            .map_err(|error| format!("could not read checkpoint {file_name}: {error}"))?;
-        if payload.len() as u64 != byte_size {
-            return Err(format!(
-                "checkpoint {file_name} changed while it was being read"
-            ));
-        }
+        let file_name = format!("checkpoint-{step}.safetensors");
         let config_json =
-            validate_checkpoint_artifact(file_name, &payload, manifest, run_id, step, request)?;
+            validate_checkpoint_artifact(&file_name, &payload, manifest, run_id, step, request)?;
         let policy = serde_json::to_value(request.policy)
             .ok()
             .and_then(|value| value.as_str().map(str::to_owned))
@@ -623,17 +428,11 @@ impl TrainingManager {
                     validation_loss,
                     spiral_table: source.checkpoint_table.clone(),
                     byte_size,
-                    format: TrainingCheckpointFormat::SafeTensors,
+                    inference_ready: true,
                 },
             },
             true,
         );
-        if let Err(error) = tokio::fs::remove_file(&path).await {
-            self.push_log(
-                run_id,
-                format!("checkpoint published, but local cleanup failed: {error}"),
-            );
-        }
         Ok(())
     }
 
@@ -712,57 +511,296 @@ impl TrainingManager {
     }
 }
 
-async fn probe_worker(python: &Path, worker_script: &Path) -> Result<String, String> {
-    if !worker_script.is_file() {
-        return Err(format!(
-            "The training worker is missing at {}.",
-            worker_script.display()
-        ));
-    }
-    let output = tokio::time::timeout(
-        Duration::from_secs(10),
-        Command::new(python)
-            .arg(worker_script)
-            .arg("--probe")
-            .env("PYTHONNOUSERSITE", "1")
-            .output(),
-    )
-    .await
-    .map_err(|_| {
-        format!(
-            "The training worker probe timed out after 10 seconds using {}.",
-            python.display()
-        )
-    })?
-    .map_err(|error| format!("Could not launch {}: {error}", python.display()))?;
-    if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(if detail.is_empty() {
-            format!(
-                "The training worker probe failed using {}.",
-                python.display()
-            )
+struct NativeOutcome {
+    steps: u64,
+    stopped: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn train_blocking(
+    connection: &mut ManagedConnection,
+    run_id: &str,
+    request: &StartTrainingRequest,
+    settings: &StoredSpiralSettings,
+    source: &TrainingSource,
+    cancel: Arc<AtomicBool>,
+    pretrained: Option<&[u8]>,
+    events: mpsc::UnboundedSender<NativeEvent>,
+) -> Result<NativeOutcome, String> {
+    let _ = events.send(NativeEvent::Log(
+        "Opening the dedicated Spiral ADBC connection and indexing eligible ACT anchors…"
+            .to_owned(),
+    ));
+    let mut loader = SpiralActLoader::open(connection, request, &settings.dataset)?;
+    let config = VisionActTrainingConfig {
+        state_dimensions: loader.state_dimensions(),
+        action_dimensions: loader.action_dimensions(),
+        camera_streams: request.act.camera_streams.clone(),
+        image_width: request.act.image_width,
+        image_height: request.act.image_height,
+        chunk_size: request.chunk_size,
+        hidden_dimensions: request.act.hidden_dim,
+        latent_dimensions: request.act.latent_dim,
+        attention_heads: request.act.attention_heads,
+        feedforward_dimensions: request.act.feedforward_dim,
+        encoder_layers: request.act.encoder_layers,
+        decoder_layers: request.act.decoder_layers,
+        kl_weight: request.act.kl_weight,
+        learning_rate: request.learning_rate,
+        total_steps: request.steps,
+        seed: request.seed,
+    };
+    let mut trainer = NativeActTrainer::new(config, &request.device, pretrained)
+        .map_err(|error| error.to_string())?;
+    let _ = events.send(NativeEvent::Started(format!(
+        "Vision ACT is running on Burn/{}: {}; {:.1}M parameters.",
+        trainer.backend_name(),
+        loader.summary(),
+        trainer.parameter_count() as f64 / 1_000_000.0
+    )));
+    let _ = events.send(NativeEvent::Log(format!(
+        "ACT inputs: state={}, action={}, chunk={}, cameras={}. Spiral owns frame decode, resize, CHW conversion, and ImageNet normalization.",
+        loader.state_dimensions(),
+        loader.action_dimensions(),
+        request.chunk_size,
+        request.act.camera_streams.join(", ")
+    )));
+
+    let started = Instant::now();
+    let mut metric_started = started;
+    let mut examples_since_metric = 0_usize;
+    let validation_every = request.checkpoint_every.saturating_div(4).clamp(25, 250);
+    let mut last_validation = None;
+    let mut last_checkpoint = 0;
+    let mut completed_steps = 0;
+    for step in 1..=request.steps {
+        if cancel.load(Ordering::Acquire) {
+            break;
+        }
+        let loaded = loader.fetch(request.batch_size, false)?;
+        let loader_metrics = loaded.metrics;
+        let loss = trainer
+            .train_step(loaded.batch, step)
+            .map_err(|error| error.to_string())?;
+        completed_steps = step;
+        examples_since_metric += request.batch_size;
+        let mut event = Vec::new();
+        let validation_loss = if loader.has_validation() && step % validation_every == 0 {
+            let batch = loader.fetch(request.batch_size, true)?;
+            let loss = trainer
+                .validation_step(batch.batch)
+                .map_err(|error| error.to_string())?;
+            last_validation = Some(loss.total);
+            event.push("validation");
+            last_validation
         } else {
-            format!(
-                "The training worker probe failed using {}: {detail}",
-                python.display()
-            )
-        });
+            None
+        };
+        if loader_metrics.seconds >= 2.0 {
+            event.push("loader stall");
+        }
+        if step == 1 || step % 10 == 0 || step == request.steps || !event.is_empty() {
+            let now = Instant::now();
+            let elapsed = now.duration_since(metric_started).as_secs_f64().max(1.0e-9);
+            let _ = events.send(NativeEvent::Metric(TrainingMetricPoint {
+                step,
+                train_loss: loss.total,
+                validation_loss,
+                learning_rate: trainer.learning_rate(step),
+                transfer_bytes_per_second: loader_metrics.source_bytes as f64
+                    / loader_metrics.seconds.max(1.0e-9),
+                examples_per_second: examples_since_metric as f64 / elapsed,
+                elapsed_seconds: now.duration_since(started).as_secs_f64(),
+                event: (!event.is_empty()).then(|| event.join(" · ")),
+            }));
+            if step == 1 {
+                let _ = events.send(NativeEvent::Log(format!(
+                    "Loss components at step 1: L1={:.4}, KL={:.4}, pad={:.4}; decoded {} frame(s).",
+                    loss.l1, loss.kl, loss.pad, loader_metrics.requested_frames
+                )));
+            }
+            metric_started = now;
+            examples_since_metric = 0;
+        }
+        if step % request.checkpoint_every == 0 {
+            send_checkpoint(
+                &events,
+                run_id,
+                request,
+                source,
+                &loader,
+                &trainer,
+                step,
+                last_validation,
+            )?;
+            last_checkpoint = step;
+        }
     }
-    let detail = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    Ok(if detail.is_empty() {
-        "PyTorch worker verified".to_owned()
-    } else {
-        detail
+    if completed_steps > 0 && last_checkpoint != completed_steps {
+        send_checkpoint(
+            &events,
+            run_id,
+            request,
+            source,
+            &loader,
+            &trainer,
+            completed_steps,
+            last_validation,
+        )?;
+    }
+    Ok(NativeOutcome {
+        steps: completed_steps,
+        stopped: cancel.load(Ordering::Acquire),
     })
 }
 
-async fn readiness(
-    python_probe: &Result<String, String>,
-    storage: &StorageManager,
-) -> TrainingReadiness {
-    let python_ready = python_probe.is_ok();
-    let spiral = storage.training_source();
+#[allow(clippy::too_many_arguments)]
+fn send_checkpoint(
+    events: &mpsc::UnboundedSender<NativeEvent>,
+    run_id: &str,
+    request: &StartTrainingRequest,
+    source: &TrainingSource,
+    loader: &SpiralActLoader<'_>,
+    trainer: &NativeActTrainer,
+    step: u64,
+    validation_loss: Option<f64>,
+) -> Result<(), String> {
+    let manifest = checkpoint_manifest(run_id, request, source, loader, step);
+    let manifest_json = serde_json::to_string(&manifest)
+        .map_err(|error| format!("encoding ACT checkpoint manifest: {error}"))?;
+    let payload = trainer
+        .checkpoint(VisionActCheckpoint {
+            manifest_json: &manifest_json,
+            state_mean: &loader.stats.state_mean,
+            state_std: &loader.stats.state_std,
+            action_mean: &loader.stats.action_mean,
+            action_std: &loader.stats.action_std,
+        })
+        .map_err(|error| error.to_string())?;
+    let (acknowledged, result) = std::sync::mpsc::sync_channel(1);
+    events
+        .send(NativeEvent::Checkpoint {
+            step,
+            created_ms: now_ms(),
+            validation_loss,
+            manifest,
+            payload,
+            acknowledged,
+        })
+        .map_err(|_| "training event channel closed before checkpoint publication".to_owned())?;
+    result
+        .recv()
+        .map_err(|_| "checkpoint publisher stopped before acknowledging the artifact".to_owned())?
+}
+
+fn checkpoint_manifest(
+    run_id: &str,
+    request: &StartTrainingRequest,
+    source: &TrainingSource,
+    loader: &SpiralActLoader<'_>,
+    step: u64,
+) -> serde_json::Value {
+    let mut input_features = serde_json::Map::new();
+    input_features.insert(
+        "observation.state".to_owned(),
+        serde_json::json!({"type": "STATE", "shape": [loader.state_dimensions()]}),
+    );
+    for camera in &request.act.camera_streams {
+        input_features.insert(
+            camera.clone(),
+            serde_json::json!({
+                "type": "VISUAL",
+                "shape": [3, request.act.image_height, request.act.image_width]
+            }),
+        );
+    }
+    let model_config = serde_json::json!({
+        "type": "act",
+        "n_obs_steps": 1,
+        "normalization_mapping": {
+            "VISUAL": "MEAN_STD",
+            "STATE": "MEAN_STD",
+            "ACTION": "MEAN_STD"
+        },
+        "input_features": input_features,
+        "output_features": {
+            "action": {"type": "ACTION", "shape": [loader.action_dimensions()]}
+        },
+        "chunk_size": request.chunk_size,
+        "n_action_steps": request.chunk_size.min(10),
+        "vision_backbone": "resnet18",
+        "replace_final_stride_with_dilation": false,
+        "pre_norm": false,
+        "dim_model": request.act.hidden_dim,
+        "n_heads": request.act.attention_heads,
+        "dim_feedforward": request.act.feedforward_dim,
+        "feedforward_activation": "relu",
+        "n_encoder_layers": request.act.encoder_layers,
+        "n_decoder_layers": request.act.decoder_layers,
+        "use_vae": true,
+        "latent_dim": request.act.latent_dim,
+        "spiral_camera_embedding": true,
+        "spiral_camera_order": request.act.camera_streams,
+    });
+    serde_json::json!({
+        "format": ACT_ARTIFACT_FORMAT,
+        "artifact": "inference",
+        "run_id": run_id,
+        "step": step,
+        "request": request,
+        "source": {
+            "project": source.project,
+            "dataset": source.dataset,
+        },
+        "data_contract": {
+            "value_space": "centered_normalized",
+            "robot_type": loader.robot_type,
+            "joint_names": loader.joint_names,
+            "camera_streams": request.act.camera_streams,
+            "sample_hz": loader.sample_hz,
+            "image_layout": "chw",
+            "image_normalization": "imagenet",
+            "frame_alignment": "fixed_fps",
+            "spiral_schema_version": 5,
+        },
+        "runtime": {
+            "ml": "burn 0.21",
+            "transport": "adbc 0.24 / arrow 58.4",
+            "language": "rust",
+        },
+        "normalization": "embedded_mean_std",
+        "model_config": model_config,
+        "tensor_namespace": ACT_TENSOR_NAMESPACE,
+    })
+}
+
+fn load_pretrained_backbone() -> Result<Vec<u8>, String> {
+    let model = spiral_robotics_inference::act::reference_remote_model()
+        .map_err(|error| format!("resolving the pinned ACT backbone: {error}"))?;
+    let files = spiral_robotics_inference::download_remote_model(&model)
+        .map_err(|error| format!("downloading the pinned ImageNet ResNet-18 backbone: {error}"))?;
+    fs::read(files.weights_path()).map_err(|error| {
+        format!(
+            "reading pretrained backbone {}: {error}",
+            files.weights_path().display()
+        )
+    })
+}
+
+fn runtime_description() -> String {
+    #[cfg(target_os = "macos")]
+    let acceleration = if spiral_robotics_inference::act::metal_available() {
+        "Metal + CPU"
+    } else {
+        "CPU"
+    };
+    #[cfg(not(target_os = "macos"))]
+    let acceleration = "CPU";
+    format!("Burn 0.21 · {acceleration} · ADBC Arrow tensors verified at run start")
+}
+
+async fn readiness(storage: &StorageManager) -> TrainingReadiness {
+    let spiral = storage.training_source("default");
     let connection = if spiral.is_ok() {
         Some(
             tokio::time::timeout(Duration::from_secs(8), storage.test_spiral())
@@ -776,22 +814,22 @@ async fn readiness(
         None
     };
     let spiral_ready = connection.as_ref().is_some_and(|result| result.ok);
-    let ready = python_ready && spiral_ready;
-    let summary = match (python_probe, spiral, connection) {
-        (Err(error), _, _) => error.clone(),
-        (_, Err(error), _) => error,
-        (_, _, Some(result)) if !result.ok => {
+    let ready = spiral_ready;
+    let summary = match (spiral, connection) {
+        (Err(error), _) => error,
+        (_, Some(result)) if !result.ok => {
             format!("Spiral is not ready for training: {}", result.message)
         }
-        (Ok(probe), Ok((_, source)), Some(_)) => format!(
-            "Runtime ready · {probe} · Spiral project {} · dataset {} · query checked at run start",
-            source.project, source.dataset
+        (Ok((_, source)), Some(_)) => format!(
+            "Runtime ready · {probe} · Spiral project {} · namespace {} · query checked at run start",
+            source.project,
+            source.dataset,
+            probe = runtime_description(),
         ),
         _ => "Spiral readiness could not be determined.".to_owned(),
     };
     TrainingReadiness {
         ready,
-        python_ready,
         spiral_ready,
         summary,
     }
@@ -806,7 +844,7 @@ fn validate_checkpoint_artifact(
     request: &StartTrainingRequest,
 ) -> Result<String, String> {
     if Path::new(file_name).extension() != Some(std::ffi::OsStr::new("safetensors")) {
-        return Err("the training worker must publish a .safetensors checkpoint".to_owned());
+        return Err("the native trainer must publish a .safetensors checkpoint".to_owned());
     }
     let tensors = safetensors::SafeTensors::deserialize(payload)
         .map_err(|error| format!("checkpoint {file_name} is not valid SafeTensors: {error}"))?;
@@ -833,11 +871,10 @@ fn validate_checkpoint_artifact(
         })?;
     if &embedded_manifest != manifest {
         return Err(format!(
-            "checkpoint {file_name} metadata does not match the worker event"
+            "checkpoint {file_name} metadata does not match the trainer event"
         ));
     }
-    if manifest.get("format").and_then(serde_json::Value::as_str)
-        != Some("spiral_robotics.act.safetensors.v2")
+    if manifest.get("format").and_then(serde_json::Value::as_str) != Some(ACT_ARTIFACT_FORMAT)
         || manifest.get("artifact").and_then(serde_json::Value::as_str) != Some("inference")
         || manifest.get("run_id").and_then(serde_json::Value::as_str) != Some(run_id)
         || manifest.get("step").and_then(serde_json::Value::as_u64) != Some(step)
@@ -859,7 +896,7 @@ fn validate_checkpoint_artifact(
     if manifest
         .get("tensor_namespace")
         .and_then(serde_json::Value::as_str)
-        != Some("lerobot_act_state_dict")
+        != Some(ACT_TENSOR_NAMESPACE)
     {
         return Err(format!(
             "checkpoint {file_name} does not use the native ACT tensor namespace"
@@ -879,6 +916,11 @@ fn validate_request(request: &StartTrainingRequest) -> Result<(), String> {
     {
         return Err(
             "Run name must use 1–80 letters, numbers, '.', '_' or '-' characters.".to_owned(),
+        );
+    }
+    if !spiral::is_dataset_id(request.dataset_id.trim()) {
+        return Err(
+            "Dataset ID must use 1–96 letters, numbers, '.', '_' or '-' characters.".to_owned(),
         );
     }
     sql::ensure_read_only(&request.sql, ReadOnlyMode::Training)?;
@@ -1046,14 +1088,6 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_paths_must_be_direct_children() {
-        let safe = Path::new("checkpoint-10.safetensors");
-        let unsafe_path = Path::new("../checkpoint-10.safetensors");
-        assert_eq!(safe.components().count(), 1);
-        assert_ne!(unsafe_path.components().count(), 1);
-    }
-
-    #[test]
     fn checkpoint_publication_accepts_only_matching_safetensors_artifacts() {
         use std::collections::HashMap;
 
@@ -1061,13 +1095,13 @@ mod tests {
 
         let request = StartTrainingRequest::default();
         let manifest = serde_json::json!({
-            "format": "spiral_robotics.act.safetensors.v2",
+            "format": ACT_ARTIFACT_FORMAT,
             "artifact": "inference",
             "run_id": "train-1",
             "step": 10,
             "request": request,
             "model_config": {"type": "act"},
-            "tensor_namespace": "lerobot_act_state_dict",
+            "tensor_namespace": ACT_TENSOR_NAMESPACE,
         });
         let metadata = HashMap::from([
             ("format".to_owned(), "spiral-act".to_owned()),

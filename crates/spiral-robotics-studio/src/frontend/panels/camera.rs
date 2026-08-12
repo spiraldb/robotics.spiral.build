@@ -59,9 +59,9 @@ pub(crate) fn CameraEditor(
                 rsx! {
                     div { class: "camera-editor-meta",
                         span {
-                            if recorded.approximate { "{recorded.label} · Recorded · approximate sync" }
-                            else if updating { "{recorded.label} · Recorded · updating…" }
-                            else { "{recorded.label} · Recorded" }
+                            if recorded.approximate { "Approximate timeline sync" }
+                            else if updating { "Updating from episode…" }
+                            else { "Synced to episode timeline" }
                         }
                         span {
                             class: "status-dot",

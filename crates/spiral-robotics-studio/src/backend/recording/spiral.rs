@@ -17,6 +17,29 @@ use spiral_robotics_core::spiral::{SCHEMA_VERSION, column as db};
 
 use crate::backend::recording::episodes::{EpisodeCompletion, EpisodeError, EpisodeStart, Sample};
 
+/// Schema for [`spiral_robotics_core::spiral::Table::Datasets`].
+pub(crate) fn datasets_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new(db::DATASET_ID, DataType::Utf8, false),
+        Field::new(db::NAME, DataType::Utf8, false),
+        Field::new(db::CREATED_MS, DataType::Int64, false),
+        Field::new(db::DESCRIPTION, DataType::Utf8, true),
+    ]))
+}
+
+/// Build the owning dataset row. Dataset IDs double as their initial display
+/// name until richer dataset metadata is edited in a future workflow.
+pub(crate) fn dataset_batch(start: &EpisodeStart) -> Result<RecordBatch, EpisodeError> {
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from(vec![start.dataset_id.as_str()])),
+        Arc::new(StringArray::from(vec![start.dataset_id.as_str()])),
+        Arc::new(Int64Array::from(vec![start.started_ms])),
+        Arc::new(StringArray::from(vec![None::<&str>])),
+    ];
+    RecordBatch::try_new(datasets_schema(), columns)
+        .map_err(|error| invalid(format!("building Spiral dataset batch: {error}")))
+}
+
 /// One row destined for [`spiral_robotics_core::spiral::Table::JointSamples`].
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct JointSampleRow {
@@ -124,6 +147,7 @@ impl SpiralEpisodeEncoder {
 pub(crate) fn episodes_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new(db::EPISODE_ID, DataType::Utf8, false),
+        Field::new(db::DATASET_ID, DataType::Utf8, false),
         Field::new(db::SCHEMA_VERSION, DataType::UInt32, false),
         Field::new(db::STARTED_MS, DataType::Int64, false),
         Field::new(db::SAMPLE_HZ, DataType::Float64, false),
@@ -145,6 +169,7 @@ pub(crate) fn episode_completion_batch(
     let duration_ns = seconds_to_ns(completion.duration_seconds, "episode duration")?;
     let columns: Vec<ArrayRef> = vec![
         Arc::new(StringArray::from(vec![start.id.as_str()])),
+        Arc::new(StringArray::from(vec![start.dataset_id.as_str()])),
         Arc::new(UInt32Array::from(vec![SCHEMA_VERSION])),
         Arc::new(Int64Array::from(vec![start.started_ms])),
         Arc::new(Float64Array::from(vec![start.sample_hz])),
@@ -467,6 +492,7 @@ mod tests {
     #[test]
     fn persisted_arrow_schemas_match_the_shared_contract() {
         for (table, schema) in [
+            (Table::Datasets, datasets_schema()),
             (Table::Episodes, episodes_schema()),
             (Table::EpisodeStreams, episode_streams_schema()),
             (Table::JointSamples, joint_samples_schema()),
@@ -482,6 +508,7 @@ mod tests {
 
     fn start() -> EpisodeStart {
         EpisodeStart {
+            dataset_id: "default".to_owned(),
             id: "episode_000042".to_owned(),
             started_ms: 1_700_000_000_000,
             sample_hz: 60.0,
@@ -595,6 +622,13 @@ mod tests {
         let batch = episode_completion_batch(&start, &completion, 150).unwrap();
 
         assert_eq!(batch.num_rows(), 1);
+        let dataset = batch
+            .column_by_name("dataset_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(dataset.value(0), "default");
         let frames = batch
             .column_by_name("frames")
             .unwrap()
@@ -609,6 +643,19 @@ mod tests {
             .downcast_ref::<UInt64Array>()
             .unwrap();
         assert_eq!(duration.value(0), 2_500_000_000);
+    }
+
+    #[test]
+    fn dataset_row_precedes_its_episode_reference() {
+        let batch = dataset_batch(&start()).unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        let id = batch
+            .column_by_name("dataset_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(id.value(0), "default");
     }
 
     #[test]

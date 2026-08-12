@@ -1,52 +1,25 @@
-//! Activity navigation and shell-overlay transitions.
+//! Shell-overlay transitions. Primary screen navigation belongs to the router.
 
 use dioxus::prelude::*;
 
-use crate::frontend::app::activity::Activity;
-
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ShellState {
-    pub activity: Activity,
     pub settings_open: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ShellAction {
-    SelectActivity(Activity),
     OpenSettings,
     CloseSettings,
-    OpenEpisode(String),
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum ShellEffect {
-    SelectEpisode(String),
-}
-
-pub(crate) fn reduce_shell(
-    state: &ShellState,
-    action: ShellAction,
-) -> (ShellState, Option<ShellEffect>) {
+pub(crate) fn reduce_shell(state: &ShellState, action: ShellAction) -> ShellState {
     let mut next = state.clone();
-    let effect = match action {
-        ShellAction::SelectActivity(activity) => {
-            next.activity = activity;
-            None
-        }
-        ShellAction::OpenSettings => {
-            next.settings_open = true;
-            None
-        }
-        ShellAction::CloseSettings => {
-            next.settings_open = false;
-            None
-        }
-        ShellAction::OpenEpisode(episode) => {
-            next.activity = Activity::Data;
-            Some(ShellEffect::SelectEpisode(episode))
-        }
-    };
-    (next, effect)
+    match action {
+        ShellAction::OpenSettings => next.settings_open = true,
+        ShellAction::CloseSettings => next.settings_open = false,
+    }
+    next
 }
 
 #[derive(Clone, Copy)]
@@ -60,23 +33,18 @@ pub(crate) fn use_shell_controller() -> ShellController {
 }
 
 impl ShellController {
-    pub(super) fn activity(&self) -> Activity {
-        self.state.read().activity
-    }
-
     pub(super) fn settings_open(&self) -> bool {
         self.state.read().settings_open
     }
 
-    pub(super) fn dispatch(mut self, action: ShellAction) -> Option<ShellEffect> {
+    pub(super) fn dispatch(mut self, action: ShellAction) {
         let current = self.state.peek();
-        let (next, effect) = reduce_shell(&current, action);
+        let next = reduce_shell(&current, action);
         let changed = *current != next;
         drop(current);
         if changed {
             self.state.set(next);
         }
-        effect
     }
 }
 
@@ -85,25 +53,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn view_in_data_is_one_atomic_transition_with_one_effect() {
+    fn settings_state_is_independent_from_routing() {
         let initial = ShellState::default();
-        let (next, effect) = reduce_shell(&initial, ShellAction::OpenEpisode("take-42".to_owned()));
+        let open = reduce_shell(&initial, ShellAction::OpenSettings);
+        let closed = reduce_shell(&open, ShellAction::CloseSettings);
 
-        assert_eq!(next.activity, Activity::Data);
-        assert_eq!(effect, Some(ShellEffect::SelectEpisode("take-42".into())));
-        assert!(!next.settings_open);
-    }
-
-    #[test]
-    fn activity_switches_do_not_rewrite_settings_state() {
-        let open = ShellState {
-            settings_open: true,
-            ..ShellState::default()
-        };
-        let (next, effect) = reduce_shell(&open, ShellAction::SelectActivity(Activity::Training));
-
-        assert_eq!(next.activity, Activity::Training);
-        assert!(next.settings_open);
-        assert_eq!(effect, None);
+        assert!(open.settings_open);
+        assert!(!closed.settings_open);
     }
 }

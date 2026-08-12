@@ -2,14 +2,15 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use spiral_robotics_inference::act::{
-    REFERENCE_REPOSITORY, REFERENCE_REVISION, reference_hub_model,
+    REFERENCE_CONFIG_URL, REFERENCE_REVISION, REFERENCE_SOURCE, REFERENCE_WEIGHTS_URL,
+    reference_remote_model,
 };
 use spiral_robotics_inference::{
-    HubModel, ImageView, InferenceInput, ModelFiles, Policy, download_from_hub,
+    ImageView, InferenceInput, ModelFiles, Policy, RemoteModel, download_remote_model,
 };
 
 #[derive(Debug, Parser)]
-#[command(about = "Run native robot-policy inference without Python or PyTorch")]
+#[command(about = "Run native robot-policy inference from SafeTensors")]
 struct Arguments {
     #[command(subcommand)]
     command: Command,
@@ -46,10 +47,23 @@ enum Command {
 
 #[derive(Clone, Debug, clap::Args)]
 struct ModelArguments {
-    #[arg(long, default_value = REFERENCE_REPOSITORY)]
-    repository: String,
+    /// Raw HTTPS URL for config.json.
+    #[arg(long, default_value = REFERENCE_CONFIG_URL)]
+    config_url: String,
+    /// Raw HTTPS URL for model.safetensors.
+    #[arg(long, default_value = REFERENCE_WEIGHTS_URL)]
+    weights_url: String,
+    /// Human-readable source recorded in the model identity.
+    #[arg(long, default_value = REFERENCE_SOURCE)]
+    source: String,
     #[arg(long, default_value = REFERENCE_REVISION)]
     revision: String,
+    /// Expected SHA-256 of config.json. Must be paired with --weights-sha256.
+    #[arg(long, requires = "weights_sha256")]
+    config_sha256: Option<String>,
+    /// Expected SHA-256 of model.safetensors. Must be paired with --config-sha256.
+    #[arg(long, requires = "config_sha256")]
+    weights_sha256: Option<String>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -81,13 +95,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn download(model: &ModelArguments) -> spiral_robotics_inference::Result<ModelFiles> {
-    let model = if model.repository == REFERENCE_REPOSITORY && model.revision == REFERENCE_REVISION
+    let model = if model.config_url == REFERENCE_CONFIG_URL
+        && model.weights_url == REFERENCE_WEIGHTS_URL
+        && model.revision == REFERENCE_REVISION
     {
-        reference_hub_model()?
+        reference_remote_model()?
     } else {
-        HubModel::pinned(&model.repository, &model.revision)?
+        let remote = RemoteModel::pinned(
+            &model.source,
+            &model.revision,
+            &model.config_url,
+            &model.weights_url,
+        )?;
+        match (&model.config_sha256, &model.weights_sha256) {
+            (Some(config), Some(weights)) => remote.with_checksums(config, weights)?,
+            _ => remote,
+        }
     };
-    download_from_hub(&model)
+    download_remote_model(&model)
 }
 
 fn run(
@@ -109,7 +134,7 @@ fn run(
 
     #[cfg(feature = "metal")]
     let mut policy = spiral_robotics_inference::act::load_metal(&files)?;
-    #[cfg(all(not(feature = "metal"), feature = "cpu"))]
+    #[cfg(not(feature = "metal"))]
     let mut policy = spiral_robotics_inference::act::load_cpu(&files)?;
 
     if !cold {
@@ -149,7 +174,7 @@ fn run(
     let identity = policy.identity();
     println!(
         "model: {}@{}",
-        identity.repository().unwrap_or("local"),
+        identity.source().unwrap_or("local"),
         identity.revision().unwrap_or("unversioned")
     );
     println!(

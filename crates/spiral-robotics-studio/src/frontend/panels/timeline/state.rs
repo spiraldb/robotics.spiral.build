@@ -63,6 +63,10 @@ pub(crate) fn use_timeline_controller() -> TimelineController {
     use_context_provider(|| controller)
 }
 
+pub(crate) fn timeline_controller() -> TimelineController {
+    use_context::<TimelineController>()
+}
+
 impl TimelineController {
     pub(crate) fn start_preview(mut self, episode: String, duration_seconds: f64) {
         self.preview.set(PreviewTransport::Playing {

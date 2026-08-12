@@ -297,6 +297,7 @@ mod tests {
             episode: "take-1".to_owned(),
             timeline: EpisodeTimelineResponse {
                 episode: EpisodeSummary {
+                    dataset_id: "default".to_owned(),
                     id: "take-1".to_owned(),
                     file: "take-1.jsonl".to_owned(),
                     arms: Vec::new(),
