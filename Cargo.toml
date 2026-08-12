@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/spiral-robotics-core",
+    "crates/spiral-robotics-inference",
     "crates/spiral-robotics-panels",
     "crates/spiral-robotics-studio",
     "crates/spiral-robotics-viewport",
