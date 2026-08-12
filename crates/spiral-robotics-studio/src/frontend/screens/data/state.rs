@@ -85,35 +85,35 @@ impl DataController {
         self.generated_sql.set(next);
     }
 
-    pub fn tab(&self) -> DataWorkbenchTab {
+    pub(crate) fn tab(&self) -> DataWorkbenchTab {
         self.tab.read().to_owned()
     }
 
-    pub fn sql(&self) -> String {
+    pub(crate) fn sql(&self) -> String {
         self.sql.read().clone()
     }
 
-    pub fn max_rows(&self) -> usize {
+    pub(crate) fn max_rows(&self) -> usize {
         self.max_rows.read().to_owned()
     }
 
-    pub fn query(&self) -> QueryViewModel {
+    pub(crate) fn query(&self) -> QueryViewModel {
         self.query.read().clone()
     }
 
-    pub fn intent(&self) -> Option<DataIntent> {
+    pub(crate) fn intent(&self) -> Option<DataIntent> {
         self.intent.read().clone()
     }
 
-    pub fn publications(&self) -> Vec<PublicationStatus> {
+    pub(crate) fn publications(&self) -> Vec<PublicationStatus> {
         self.publications.read().clone()
     }
 
-    pub fn publication_error(&self) -> Option<String> {
+    pub(crate) fn publication_error(&self) -> Option<String> {
         self.publication_error.read().clone()
     }
 
-    pub fn push_to_spiral(mut self, studio: Studio, episode_id: String) {
+    pub(crate) fn push_to_spiral(mut self, studio: Studio, episode_id: String) {
         self.upsert_publication(PublicationStatus {
             episode_id: episode_id.clone(),
             state: "queued".to_owned(),
@@ -139,7 +139,7 @@ impl DataController {
         });
     }
 
-    pub fn present_episode(
+    pub(crate) fn present_episode(
         mut self,
         mut studio: Studio,
         episode: EpisodeSummary,
@@ -151,11 +151,11 @@ impl DataController {
         self.publish(DataIntent::Episode(episode), on_intent);
     }
 
-    pub fn present_empty(mut self, on_intent: EventHandler<DataIntent>) {
+    pub(crate) fn present_empty(mut self, on_intent: EventHandler<DataIntent>) {
         self.publish(DataIntent::EmptyEpisodes, on_intent);
     }
 
-    pub fn select_tab(
+    pub(crate) fn select_tab(
         mut self,
         studio: Studio,
         tab: DataWorkbenchTab,
@@ -171,7 +171,7 @@ impl DataController {
         }
     }
 
-    pub fn set_sql(mut self, sql: String, on_intent: EventHandler<DataIntent>) {
+    pub(crate) fn set_sql(mut self, sql: String, on_intent: EventHandler<DataIntent>) {
         self.invalidate_query();
         self.sql.set(sql.clone());
         let model = QueryViewModel::idle(sql, (self.max_rows)());
@@ -179,7 +179,7 @@ impl DataController {
         self.publish(DataIntent::Query(model), on_intent);
     }
 
-    pub fn set_max_rows(mut self, rows: usize, on_intent: EventHandler<DataIntent>) {
+    pub(crate) fn set_max_rows(mut self, rows: usize, on_intent: EventHandler<DataIntent>) {
         self.invalidate_query();
         self.max_rows.set(rows);
         let model = QueryViewModel::idle((self.sql)(), rows);
@@ -187,7 +187,7 @@ impl DataController {
         self.publish(DataIntent::Query(model), on_intent);
     }
 
-    pub fn run_query(
+    pub(crate) fn run_query(
         mut self,
         studio: Studio,
         query_available: bool,

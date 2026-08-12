@@ -391,7 +391,7 @@ fn Readout(
 }
 
 /// Collect an arm's calibrated joint angles out of its telemetry.
-pub fn measured_angles(joints: &[JointTelemetry]) -> JointAngles {
+pub(crate) fn measured_angles(joints: &[JointTelemetry]) -> JointAngles {
     let degrees = joints
         .iter()
         .filter_map(|joint| Some((joint.name.clone(), joint.degrees?)))

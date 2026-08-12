@@ -175,11 +175,6 @@ impl RobotConfig {
         &self.root
     }
 
-    /// Return the complete document as an owned JSON value.
-    pub fn as_value(&self) -> Value {
-        Value::Object(self.root.clone())
-    }
-
     /// Consume the document and return its complete JSON value.
     pub fn into_value(self) -> Value {
         Value::Object(self.root)
@@ -879,7 +874,7 @@ mod tests {
         assert_eq!(RobotConfig::load(&path).expect("reload config"), config);
         assert_eq!(
             serde_json::from_slice::<Value>(&bytes).unwrap(),
-            config.as_value()
+            Value::Object(config.root().clone())
         );
     }
 }

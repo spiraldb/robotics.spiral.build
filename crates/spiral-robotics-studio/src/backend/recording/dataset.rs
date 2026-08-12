@@ -43,7 +43,7 @@ const SO101_JOINTS: [&str; 6] = [
 ];
 
 /// A complete downloadable dataset package.
-pub struct DatasetArchive {
+pub(crate) struct DatasetArchive {
     pub bytes: Vec<u8>,
     pub episodes: u64,
     pub frames: u64,
@@ -77,7 +77,7 @@ struct ImportedFrame {
 }
 
 /// Export every complete, non-cancelled episode as a LeRobot v3 ZIP.
-pub fn export_lerobot_archive(store: &EpisodeStore) -> Result<DatasetArchive, EpisodeError> {
+pub(crate) fn export_lerobot_archive(store: &EpisodeStore) -> Result<DatasetArchive, EpisodeError> {
     let listed = store.list();
     let candidates = listed
         .iter()
@@ -293,7 +293,7 @@ pub fn export_lerobot_archive(store: &EpisodeStore) -> Result<DatasetArchive, Ep
 }
 
 /// Import a zipped LeRobot v2/v3 dataset into the local episode workspace.
-pub fn import_lerobot_archive(
+pub(crate) fn import_lerobot_archive(
     store: &EpisodeStore,
     bytes: &[u8],
 ) -> Result<ImportResponse, EpisodeError> {
@@ -1201,8 +1201,9 @@ mod tests {
         assert_eq!(imported.episodes, 1);
         assert_eq!(imported.frames, 4);
         let trajectory = target
-            .trajectory(imported.first_episode.as_deref().unwrap(), "follower")
-            .unwrap();
+            .trajectory_at(imported.first_episode.as_deref().unwrap(), "follower", 0.0)
+            .unwrap()
+            .frames;
         assert_eq!(trajectory[0].len(), SO101_JOINTS.len());
         assert!(
             SO101_JOINTS

@@ -21,14 +21,14 @@ use spiral_robotics_core::api::CameraStatus;
 use tokio::sync::watch;
 
 /// How long a stream runs with nobody watching before it releases the camera.
-pub const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// A healthy capture loop observes `stop` between frames. A driver that blocks
 /// forever inside `frame()` must not make the whole studio ignore Ctrl+C.
 const STREAM_SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
 /// One encoded frame, ready to be written to an HTTP response.
 #[derive(Clone, Debug)]
-pub struct Frame {
+pub(crate) struct Frame {
     pub bytes: Bytes,
     pub sequence: u64,
 }
@@ -85,13 +85,13 @@ struct ManagerState {
 
 /// Discovers cameras and owns their capture threads.
 #[derive(Default)]
-pub struct CameraManager {
+pub(crate) struct CameraManager {
     state: Mutex<ManagerState>,
 }
 
 impl CameraManager {
     /// Create an empty manager; call [`CameraManager::refresh`] to populate it.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -99,7 +99,7 @@ impl CameraManager {
     ///
     /// Probing spawns short-lived child processes, so this must not run on an
     /// async runtime thread.
-    pub fn refresh_blocking(&self) {
+    pub(crate) fn refresh_blocking(&self) {
         let (discovered, issues) = match cameras::discover() {
             Ok(outcome) => {
                 let mut issues = Vec::new();
@@ -148,7 +148,7 @@ impl CameraManager {
     }
 
     /// Cameras found by the last refresh, with their current stream state.
-    pub fn statuses(&self) -> Vec<CameraStatus> {
+    pub(crate) fn statuses(&self) -> Vec<CameraStatus> {
         let state = lock(&self.state);
         state
             .discovered
@@ -181,12 +181,12 @@ impl CameraManager {
     /// A denied permission prompt is the motivating case: cameras still
     /// enumerate and their streams still open, but no frame ever arrives, so
     /// without this the operator would see an empty preview and no reason.
-    pub fn note_issue(&self, message: impl Into<String>) {
+    pub(crate) fn note_issue(&self, message: impl Into<String>) {
         lock(&self.state).persistent_issues.push(message.into());
     }
 
     /// Non-fatal problems worth showing the operator.
-    pub fn issues(&self) -> Vec<String> {
+    pub(crate) fn issues(&self) -> Vec<String> {
         let state = lock(&self.state);
         let mut issues = state.persistent_issues.clone();
         issues.extend(state.issues.iter().cloned());
@@ -194,7 +194,10 @@ impl CameraManager {
     }
 
     /// Subscribe to a camera's frames, starting its capture thread if needed.
-    pub fn subscribe(&self, id: &str) -> Result<watch::Receiver<Option<Arc<Frame>>>, String> {
+    pub(crate) fn subscribe(
+        &self,
+        id: &str,
+    ) -> Result<watch::Receiver<Option<Arc<Frame>>>, String> {
         let mut state = lock(&self.state);
         if let Some(stream) = state.streams.get_mut(id) {
             if stream.is_running() {
@@ -217,7 +220,7 @@ impl CameraManager {
     }
 
     /// Stop a camera's capture thread and release the device.
-    pub fn close(&self, id: &str) {
+    pub(crate) fn close(&self, id: &str) {
         let stream = lock(&self.state).streams.remove(id);
         if let Some(mut stream) = stream {
             stream.shutdown();
@@ -225,7 +228,7 @@ impl CameraManager {
     }
 
     /// Stop every capture thread.
-    pub fn shutdown(&self) {
+    pub(crate) fn shutdown(&self) {
         let streams = std::mem::take(&mut lock(&self.state).streams);
         for (_, mut stream) in streams {
             stream.shutdown();

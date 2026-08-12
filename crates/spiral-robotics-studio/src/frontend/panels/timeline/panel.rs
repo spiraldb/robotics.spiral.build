@@ -42,21 +42,21 @@ pub(crate) struct StudioTimelineState {
 /// One measured point. `None` creates a visible gap rather than bridging a
 /// missing sample with a line the hardware never reported.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct TimelineSignalPoint {
+pub(crate) struct TimelineSignalPoint {
     pub seconds: f64,
     pub value: Option<f64>,
 }
 
 /// One arm's trace within a joint lane.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct TimelineSignalSeries {
+pub(crate) struct TimelineSignalSeries {
     pub arm: String,
     pub points: Vec<TimelineSignalPoint>,
 }
 
 /// One of the six fixed SO-101 joint lanes.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct TimelineSignalLane {
+pub(crate) struct TimelineSignalLane {
     pub joint: String,
     pub label: String,
     pub color: String,
@@ -65,7 +65,7 @@ pub struct TimelineSignalLane {
 
 /// Wire response from the bounded historical trace endpoint.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-pub struct RecordedTimelineTraces {
+pub(crate) struct RecordedTimelineTraces {
     pub episode: String,
     pub samples: u64,
     pub buckets: usize,
@@ -75,19 +75,19 @@ pub struct RecordedTimelineTraces {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-pub struct RecordedTimelineTraceLane {
+pub(crate) struct RecordedTimelineTraceLane {
     pub joint: String,
     pub series: Vec<RecordedTimelineTraceSeries>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-pub struct RecordedTimelineTraceSeries {
+pub(crate) struct RecordedTimelineTraceSeries {
     pub arm: String,
     pub points: Vec<RecordedTimelineTracePoint>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
-pub struct RecordedTimelineTracePoint {
+pub(crate) struct RecordedTimelineTracePoint {
     pub seconds: f64,
     pub value: Option<f64>,
 }
@@ -96,7 +96,7 @@ impl RecordedTimelineTraces {
     /// Adapt the wire response to the same fixed view model used by live
     /// [`SignalStore`] data. Missing or unknown lanes cannot disturb the
     /// canonical SO-101 order.
-    pub fn signal_lanes(&self) -> [TimelineSignalLane; 6] {
+    pub(crate) fn signal_lanes(&self) -> [TimelineSignalLane; 6] {
         std::array::from_fn(|index| {
             let definition = SO101_JOINTS[index];
             let series = self
@@ -131,7 +131,7 @@ impl RecordedTimelineTraces {
 }
 
 /// Fetch bounded historical traces for a completed or paused episode.
-pub async fn load_recorded_timeline_traces(
+pub(crate) async fn load_recorded_timeline_traces(
     episode: &str,
     buckets: usize,
 ) -> Result<RecordedTimelineTraces, String> {
@@ -145,7 +145,7 @@ pub async fn load_recorded_timeline_traces(
 
 /// Convert the studio's existing take signal store into the timeline's fixed
 /// six-lane view model. Each lane overlays the arms that reported that joint.
-pub fn signal_lanes_from_store(store: &SignalStore) -> [TimelineSignalLane; 6] {
+pub(crate) fn signal_lanes_from_store(store: &SignalStore) -> [TimelineSignalLane; 6] {
     std::array::from_fn(|index| {
         let definition = SO101_JOINTS[index];
         let series = store

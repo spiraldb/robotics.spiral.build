@@ -66,41 +66,41 @@ impl TrainingController {
         self.start_error.set(None);
     }
 
-    pub fn request(&self) -> StartTrainingRequest {
+    pub(crate) fn request(&self) -> StartTrainingRequest {
         self.request.read().clone()
     }
 
-    pub fn edit_request(mut self, edit: impl FnOnce(&mut StartTrainingRequest)) {
+    pub(crate) fn edit_request(mut self, edit: impl FnOnce(&mut StartTrainingRequest)) {
         edit(&mut self.request.write());
         self.start_error.set(None);
     }
 
-    pub fn selected_run(&self) -> Option<String> {
+    pub(crate) fn selected_run(&self) -> Option<String> {
         self.selected_run.read().clone()
     }
 
-    pub fn starting(&self) -> bool {
+    pub(crate) fn starting(&self) -> bool {
         self.starting.read().to_owned()
     }
 
-    pub fn start_error(&self) -> Option<String> {
+    pub(crate) fn start_error(&self) -> Option<String> {
         self.start_error.read().clone()
     }
 
-    pub fn stopping(&self) -> Option<String> {
+    pub(crate) fn stopping(&self) -> Option<String> {
         self.stopping.read().clone()
     }
 
-    pub fn select_run(mut self, id: String) {
+    pub(crate) fn select_run(mut self, id: String) {
         self.selected_run.set(Some(id));
         self.start_error.set(None);
     }
 
-    pub fn clear_start_error(mut self) {
+    pub(crate) fn clear_start_error(mut self) {
         self.start_error.set(None);
     }
 
-    pub fn start(mut self) {
+    pub(crate) fn start(mut self) {
         if self.starting.peek().to_owned() {
             return;
         }
@@ -122,7 +122,7 @@ impl TrainingController {
         });
     }
 
-    pub fn stop(mut self, studio: Studio, id: String) {
+    pub(crate) fn stop(mut self, studio: Studio, id: String) {
         if self.stopping.peek().is_some() {
             return;
         }

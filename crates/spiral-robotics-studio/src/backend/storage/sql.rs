@@ -8,21 +8,21 @@
 use spiral_robotics_core::spiral::{self, Table, column};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReadOnlyMode {
+pub(crate) enum ReadOnlyMode {
     Preview,
     Training,
 }
 
-pub fn relation(dataset: &str, table: Table) -> String {
+pub(crate) fn relation(dataset: &str, table: Table) -> String {
     spiral::relation(dataset, table)
 }
 
-pub fn count_rows(relation: &str) -> String {
+pub(crate) fn count_rows(relation: &str) -> String {
     format!("SELECT COUNT(*) AS rows FROM {relation}")
 }
 
 #[cfg(test)]
-pub fn count_episode_rows(relation: &str, episode_id: &str) -> String {
+pub(crate) fn count_episode_rows(relation: &str, episode_id: &str) -> String {
     format!(
         "SELECT COUNT(*) AS rows FROM {relation} WHERE {} = {}",
         column::EPISODE_ID,
@@ -30,7 +30,7 @@ pub fn count_episode_rows(relation: &str, episode_id: &str) -> String {
     )
 }
 
-pub fn episode_exists(relation: &str, episode_id: &str) -> String {
+pub(crate) fn episode_exists(relation: &str, episode_id: &str) -> String {
     format!(
         "SELECT {episode_id_column} FROM {relation} WHERE {episode_id_column} = {episode_id} LIMIT 1",
         episode_id_column = column::EPISODE_ID,
@@ -38,7 +38,7 @@ pub fn episode_exists(relation: &str, episode_id: &str) -> String {
     )
 }
 
-pub fn delete_episode(relation: &str, episode_id: &str) -> String {
+pub(crate) fn delete_episode(relation: &str, episode_id: &str) -> String {
     format!(
         "DELETE FROM {relation} WHERE {} = {}",
         column::EPISODE_ID,
@@ -46,7 +46,7 @@ pub fn delete_episode(relation: &str, episode_id: &str) -> String {
     )
 }
 
-pub fn trajectory(dataset: &str, episode_id: &str, stream_id: &str) -> String {
+pub(crate) fn trajectory(dataset: &str, episode_id: &str, stream_id: &str) -> String {
     let episodes = relation(dataset, Table::Episodes);
     let streams = relation(dataset, Table::EpisodeStreams);
     let samples = relation(dataset, Table::JointSamples);
@@ -70,7 +70,7 @@ pub fn trajectory(dataset: &str, episode_id: &str, stream_id: &str) -> String {
     )
 }
 
-pub fn video_asset(
+pub(crate) fn video_asset(
     dataset: &str,
     episode_id: &str,
     stream_id: &str,
@@ -93,7 +93,7 @@ pub fn video_asset(
     )
 }
 
-pub fn create_dataset_namespace(dataset: &str) -> String {
+pub(crate) fn create_dataset_namespace(dataset: &str) -> String {
     format!(
         "CREATE TABLE {dataset} AS SELECT {} AS {}",
         string_literal(dataset),
@@ -101,7 +101,7 @@ pub fn create_dataset_namespace(dataset: &str) -> String {
     )
 }
 
-pub fn video_sources_relation(dataset: &str, episode_id: &str, managed: bool) -> String {
+pub(crate) fn video_sources_relation(dataset: &str, episode_id: &str, managed: bool) -> String {
     if managed {
         format!(
             "{}_{}_video_sources",
@@ -113,18 +113,22 @@ pub fn video_sources_relation(dataset: &str, episode_id: &str, managed: bool) ->
     }
 }
 
-pub fn video_dataset_relation(dataset: &str, episode_id: &str) -> String {
+pub(crate) fn video_dataset_relation(dataset: &str, episode_id: &str) -> String {
     format!(
         "{dataset}.video_{}",
         spiral::identifier_component(episode_id)
     )
 }
 
-pub fn video_dataset_output(dataset: &str, episode_id: &str) -> String {
+pub(crate) fn video_dataset_output(dataset: &str, episode_id: &str) -> String {
     format!("{}.assets", video_dataset_relation(dataset, episode_id))
 }
 
-pub fn create_video_sources(sources: &str, assets: &str, episode_id: Option<&str>) -> String {
+pub(crate) fn create_video_sources(
+    sources: &str,
+    assets: &str,
+    episode_id: Option<&str>,
+) -> String {
     let source_filter = episode_id
         .map(|episode_id| {
             format!(
@@ -149,7 +153,7 @@ pub fn create_video_sources(sources: &str, assets: &str, episode_id: Option<&str
     )
 }
 
-pub fn create_video_dataset(dataset: &str, sources: &str) -> String {
+pub(crate) fn create_video_dataset(dataset: &str, sources: &str) -> String {
     format!(
         "CREATE DATASET {dataset} USING spql.mp4.dataset FROM {sources} \
          WITH (blob = '{}', index_tier = 'dependency')",
@@ -158,7 +162,7 @@ pub fn create_video_dataset(dataset: &str, sources: &str) -> String {
 }
 
 #[cfg(test)]
-pub fn video_tracks(sources: &str, episode_id: &str) -> String {
+pub(crate) fn video_tracks(sources: &str, episode_id: &str) -> String {
     format!(
         "SELECT v.{episode_id}, v.{stream_id}, tracks.* FROM {sources} v \
          CROSS JOIN LATERAL spql.mp4.tracks(v.{source}) AS tracks \
@@ -170,11 +174,11 @@ pub fn video_tracks(sources: &str, episode_id: &str) -> String {
     )
 }
 
-pub fn refresh_dataset(dataset: &str) -> String {
+pub(crate) fn refresh_dataset(dataset: &str) -> String {
     format!("REFRESH DATASET {dataset}")
 }
 
-pub fn ensure_read_only(sql: &str, mode: ReadOnlyMode) -> Result<(), String> {
+pub(crate) fn ensure_read_only(sql: &str, mode: ReadOnlyMode) -> Result<(), String> {
     let sql = sql.trim();
     let label = match mode {
         ReadOnlyMode::Preview => "Spiral preview",

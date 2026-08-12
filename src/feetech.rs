@@ -363,15 +363,6 @@ impl FeetechBus {
         self.motors.iter().map(|motor| motor.name.clone()).collect()
     }
 
-    /// Whether this bus's servos answer the full status block.
-    ///
-    /// False once the bus has settled on reading position alone, so the studio
-    /// can say why a motor has no temperature exactly once instead of implying
-    /// a fresh failure on every cycle.
-    pub fn reports_telemetry(&self) -> bool {
-        self.status_block != StatusBlock::Unsupported
-    }
-
     /// Read every configured motor's status block once.
     ///
     /// The first calls probe whether the servos answer the wide request. A
@@ -853,8 +844,9 @@ fn word_at(bytes: &[u8], offset: usize) -> Option<u16> {
 fn decode_status_block(bytes: &[u8]) -> MotorSample {
     MotorSample {
         position: decode_position(bytes),
-        speed_degrees_per_second: word_at(bytes, OFFSET_SPEED)
-            .map(|speed| crate::arm::counts_to_degrees(i64::from(decode_sign_magnitude(speed)))),
+        speed_degrees_per_second: word_at(bytes, OFFSET_SPEED).map(|speed| {
+            spiral_robotics_core::arm::counts_to_degrees(i64::from(decode_sign_magnitude(speed)))
+        }),
         load: word_at(bytes, OFFSET_LOAD)
             .map(|load| f64::from(decode_sign_magnitude_at(load, LOAD_SIGN_BIT)) / LOAD_FULL_SCALE),
         // A servo answering at all is a servo with supply voltage, so a zero

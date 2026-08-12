@@ -246,8 +246,8 @@ Real, in-repo:
 - `examples/robot.json`, `examples/calibration-input.json` — real configuration
   and calibration input.
 - `robots/leader.json`, `robots/follower.json` — a working two-arm setup.
-- `crates/spiral-robotics-studio/src/spiral_episode.rs` — the relational episode schema.
-- `crates/spiral-robotics-studio/src/video_capture.rs` — server-owned MP4 capture and
+- `crates/spiral-robotics-studio/src/backend/recording/spiral.rs` — the relational episode schema.
+- `crates/spiral-robotics-studio/src/backend/robotics/video.rs` — server-owned MP4 capture and
   timeline-aligned segment manifests.
 - A detailed `README.md` maintained in the repository.
 

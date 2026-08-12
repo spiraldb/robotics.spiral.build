@@ -19,12 +19,12 @@ use spiral_robotics_core::api::{ApiError, EpisodeSummary};
 use spiral_robotics_core::api::{StudioSnapshot, TelemetryFrame, TrainingSnapshot, TrainingUpdate};
 
 /// Fetch and decode a JSON resource.
-pub async fn get<T: DeserializeOwned>(path: &str) -> Result<T, String> {
+pub(crate) async fn get<T: DeserializeOwned>(path: &str) -> Result<T, String> {
     decode(&request(Method::GET, path, None).await?, path)
 }
 
 /// Send a request whose response body does not matter.
-pub async fn send<B: Serialize>(
+pub(crate) async fn send<B: Serialize>(
     method: Method,
     path: &str,
     body: Option<&B>,
@@ -34,7 +34,7 @@ pub async fn send<B: Serialize>(
 }
 
 /// Send a request and decode its JSON response.
-pub async fn send_json<B: Serialize, T: DeserializeOwned>(
+pub(crate) async fn send_json<B: Serialize, T: DeserializeOwned>(
     method: Method,
     path: &str,
     body: Option<&B>,
@@ -44,13 +44,13 @@ pub async fn send_json<B: Serialize, T: DeserializeOwned>(
 }
 
 /// POST with no request body.
-pub async fn post(path: &str) -> Result<(), String> {
+pub(crate) async fn post(path: &str) -> Result<(), String> {
     send::<()>(Method::POST, path, None).await
 }
 
 /// Filesystem-free metadata for one locally recorded camera stream.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
-pub struct VideoAssetMetadata {
+pub(crate) struct VideoAssetMetadata {
     pub stream_id: String,
     pub camera_id: String,
     pub width: u32,
@@ -63,7 +63,7 @@ pub struct VideoAssetMetadata {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-pub struct TimelineMetadata {
+pub(crate) struct TimelineMetadata {
     pub samples: u64,
     pub first_seconds: Option<f64>,
     pub last_seconds: Option<f64>,
@@ -71,14 +71,14 @@ pub struct TimelineMetadata {
 
 /// Local episode detail used to align timeline samples and recorded media.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
-pub struct EpisodeTimelineResponse {
+pub(crate) struct EpisodeTimelineResponse {
     pub episode: EpisodeSummary,
     pub samples: TimelineMetadata,
     pub videos: Vec<VideoAssetMetadata>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-pub struct TimelineArmSample {
+pub(crate) struct TimelineArmSample {
     pub arm: String,
     pub normalized: BTreeMap<String, Option<f64>>,
     pub raw: BTreeMap<String, i64>,
@@ -89,7 +89,7 @@ pub struct TimelineArmSample {
 
 /// The nearest stored sample to a committed historical playhead position.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-pub struct TimelineSample {
+pub(crate) struct TimelineSample {
     pub frame: u64,
     pub seconds: f64,
     pub follow_error_degrees: Option<f64>,
@@ -97,7 +97,7 @@ pub struct TimelineSample {
 }
 
 /// Upload one file and decode the server's JSON response.
-pub async fn upload_json<T: DeserializeOwned>(
+pub(crate) async fn upload_json<T: DeserializeOwned>(
     path: &str,
     bytes: &[u8],
     content_type: &str,
@@ -225,17 +225,17 @@ where
 }
 
 /// URL of a camera's live MJPEG stream.
-pub fn camera_stream_url(id: &str) -> String {
+pub(crate) fn camera_stream_url(id: &str) -> String {
     format!("/api/cameras/stream.mjpeg?id={}", encode_query(id))
 }
 
 /// Timeline detail endpoint for one local episode.
-pub fn episode_timeline_url(episode: &str) -> String {
+pub(crate) fn episode_timeline_url(episode: &str) -> String {
     format!("/api/episodes/{}/timeline", encode_query(episode))
 }
 
 /// Random-access sample endpoint for one local episode.
-pub fn timeline_sample_url(episode: &str, seconds: f64) -> String {
+pub(crate) fn timeline_sample_url(episode: &str, seconds: f64) -> String {
     format!(
         "/api/episodes/{}/timeline/sample?at={seconds:.6}",
         encode_query(episode)
@@ -243,7 +243,7 @@ pub fn timeline_sample_url(episode: &str, seconds: f64) -> String {
 }
 
 /// Browser-native MP4 endpoint for one segment of a local camera stream.
-pub fn episode_video_url(episode: &str, stream: &str, segment: u32) -> String {
+pub(crate) fn episode_video_url(episode: &str, stream: &str, segment: u32) -> String {
     format!(
         "/api/episodes/{}/videos/{}?segment={segment}",
         encode_query(episode),

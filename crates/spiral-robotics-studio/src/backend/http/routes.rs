@@ -71,7 +71,7 @@ const VIDEO_RECORDING_STOP_TICKS: u8 = 5;
 
 /// Everything a request handler can reach.
 #[derive(Clone)]
-pub struct AppState {
+pub(crate) struct AppState {
     pub workspace: Arc<RobotWorkspace>,
     pub episodes: Arc<EpisodeStore>,
     pub hardware: Arc<HardwareHandle>,
@@ -88,7 +88,7 @@ pub struct AppState {
 /// (for example, after an arm disconnects). The normal stop endpoint takes the
 /// capture out of the slot first, so the two paths cannot publish each other's
 /// video.
-pub async fn monitor_video_recording(state: AppState) {
+pub(crate) async fn monitor_video_recording(state: AppState) {
     let mut ticker = tokio::time::interval(VIDEO_RECORDING_MONITOR_INTERVAL);
     let mut missing_episode = String::new();
     let mut missing_ticks = 0_u8;
@@ -133,7 +133,7 @@ pub async fn monitor_video_recording(state: AppState) {
 
 /// Close and stage any capture whose corresponding control-loop recording has
 /// already ended. Also used during graceful backend shutdown.
-pub async fn finish_stale_video_capture(state: &AppState) {
+pub(crate) async fn finish_stale_video_capture(state: &AppState) {
     let capture = state.recording_video.lock().await.take();
     let Some(capture) = capture else {
         return;
@@ -158,7 +158,7 @@ async fn finish_video_capture(state: &AppState, capture: VideoCapture) -> Vec<Vi
 
 /// A failed request, rendered as `{"error": "..."}`.
 #[derive(Debug)]
-pub struct Failure(StatusCode, String);
+pub(crate) struct Failure(StatusCode, String);
 
 impl Failure {
     fn bad_request(message: impl Into<String>) -> Self {
@@ -211,7 +211,7 @@ impl From<String> for Failure {
 }
 
 /// Build the studio's API routes.
-pub fn api_router(state: AppState) -> Router {
+pub(crate) fn api_router(state: AppState) -> Router {
     Router::new()
         .route("/state", get(get_state))
         .route("/events", get(events))
@@ -291,7 +291,7 @@ pub fn api_router(state: AppState) -> Router {
 }
 
 /// Assemble the current setup-level view of the studio.
-pub fn build_snapshot(state: &AppState) -> StudioSnapshot {
+pub(crate) fn build_snapshot(state: &AppState) -> StudioSnapshot {
     let hardware = state.hardware.state();
     let robots = state
         .workspace
@@ -850,7 +850,7 @@ fn robot_spec(record: &RobotRecord) -> Result<RobotSpec, Failure> {
 ///
 /// A failed bus stays disconnected with its error attached; one absent arm
 /// never prevents the web interface or another arm from starting.
-pub async fn auto_connect_saved_robots(state: AppState) {
+pub(crate) async fn auto_connect_saved_robots(state: AppState) {
     for record in state.workspace.list() {
         let spec = match robot_spec(&record) {
             Ok(spec) => spec,

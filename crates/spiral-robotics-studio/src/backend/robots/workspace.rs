@@ -20,10 +20,10 @@ use spiral_robotics_core::arm;
 use spiral_robotics_core::calibration::{Calibration, MotorSpec, validate_motor_specs};
 
 /// Default robot type given to a newly created instance.
-pub const DEFAULT_ROBOT_TYPE: &str = "so101_follower";
+pub(crate) const DEFAULT_ROBOT_TYPE: &str = "so101_follower";
 
 /// Default motor-bus baud rate for SO-101 arms.
-pub const DEFAULT_BAUD_RATE: u32 = 1_000_000;
+pub(crate) const DEFAULT_BAUD_RATE: u32 = 1_000_000;
 
 /// Longest robot ID accepted, which is also the longest file stem written.
 const MAX_ROBOT_ID_LENGTH: usize = 64;
@@ -33,7 +33,7 @@ const MAX_LABEL_LENGTH: usize = 64;
 
 /// Something went wrong reading or writing the robot workspace.
 #[derive(Debug)]
-pub enum WorkspaceError {
+pub(crate) enum WorkspaceError {
     /// The requested ID could not be used as a file name.
     InvalidId(String),
     /// No robot with that ID exists.
@@ -82,7 +82,7 @@ impl From<ConfigError> for WorkspaceError {
 
 /// One robot instance, as stored on disk.
 #[derive(Clone, Debug)]
-pub struct RobotRecord {
+pub(crate) struct RobotRecord {
     pub id: String,
     pub path: PathBuf,
     pub config: RobotConfig,
@@ -90,7 +90,7 @@ pub struct RobotRecord {
 
 impl RobotRecord {
     /// The robot's declared hardware profile.
-    pub fn robot_type(&self) -> Option<String> {
+    pub(crate) fn robot_type(&self) -> Option<String> {
         self.config
             .root()
             .get("robot_type")
@@ -99,7 +99,7 @@ impl RobotRecord {
     }
 
     /// The robot's motor-bus settings, when it has been assigned a port.
-    pub fn port(&self) -> Option<PortSettings> {
+    pub(crate) fn port(&self) -> Option<PortSettings> {
         let port = self.config.root().get("port")?.as_object()?;
         let path = port.get("path")?.as_str()?;
         if path.trim().is_empty() {
@@ -118,7 +118,7 @@ impl RobotRecord {
 
     /// The raw `cameras` object, so updates can preserve fields this build does
     /// not understand.
-    pub fn camera_object(&self) -> Map<String, Value> {
+    pub(crate) fn camera_object(&self) -> Map<String, Value> {
         self.config
             .root()
             .get("cameras")
@@ -128,7 +128,7 @@ impl RobotRecord {
     }
 
     /// Cameras assigned to this robot, by role name.
-    pub fn cameras(&self) -> Vec<CameraBinding> {
+    pub(crate) fn cameras(&self) -> Vec<CameraBinding> {
         self.camera_object()
             .into_iter()
             .filter_map(|(name, value)| {
@@ -147,7 +147,7 @@ impl RobotRecord {
     }
 
     /// The robot's motors, or a description of why they cannot be read.
-    pub fn motors(&self) -> Result<BTreeMap<String, MotorSpec>, WorkspaceError> {
+    pub(crate) fn motors(&self) -> Result<BTreeMap<String, MotorSpec>, WorkspaceError> {
         let motors = self
             .config
             .deserialize_motors::<BTreeMap<String, MotorSpec>>()
@@ -163,7 +163,7 @@ impl RobotRecord {
 
     /// The robot's stored calibration, or a description of why it cannot be
     /// read.
-    pub fn calibration(&self) -> Result<Option<Calibration>, WorkspaceError> {
+    pub(crate) fn calibration(&self) -> Result<Option<Calibration>, WorkspaceError> {
         self.config
             .deserialize_calibration::<Calibration>()
             .map_err(|source| {
@@ -179,7 +179,7 @@ impl RobotRecord {
     /// A file that parses but does not describe a usable robot still produces a
     /// summary — with `problem` explaining what is wrong, because a card that
     /// renders as an empty robot tells the operator nothing.
-    pub fn summary(&self, connection: ConnectionStatus) -> RobotSummary {
+    pub(crate) fn summary(&self, connection: ConnectionStatus) -> RobotSummary {
         let problem = self
             .motors()
             .err()
@@ -242,7 +242,7 @@ impl RobotRecord {
 
 /// A directory of robot files, cached in memory.
 #[derive(Debug)]
-pub struct RobotWorkspace {
+pub(crate) struct RobotWorkspace {
     directory: PathBuf,
     state: Mutex<WorkspaceState>,
 }
@@ -264,7 +264,7 @@ type DirectoryFingerprint = Vec<(PathBuf, u64, Option<std::time::SystemTime>)>;
 
 impl RobotWorkspace {
     /// Open `directory`, creating it if necessary, and load every robot file.
-    pub fn open(directory: PathBuf) -> Result<Self, WorkspaceError> {
+    pub(crate) fn open(directory: PathBuf) -> Result<Self, WorkspaceError> {
         fs::create_dir_all(&directory).map_err(|source| WorkspaceError::Io {
             path: directory.clone(),
             source,
@@ -278,7 +278,7 @@ impl RobotWorkspace {
     }
 
     /// The directory being managed.
-    pub fn directory(&self) -> &Path {
+    pub(crate) fn directory(&self) -> &Path {
         &self.directory
     }
 
@@ -288,7 +288,7 @@ impl RobotWorkspace {
     /// files, and an operator may drop one in by hand. Polling the metadata is
     /// cheap for a handful of small files and keeps the cache honest without
     /// making every reader touch the disk.
-    pub fn reload_if_changed(&self) -> Result<bool, WorkspaceError> {
+    pub(crate) fn reload_if_changed(&self) -> Result<bool, WorkspaceError> {
         let fingerprint = self.fingerprint()?;
         if fingerprint == self.lock().fingerprint {
             return Ok(false);
@@ -298,7 +298,7 @@ impl RobotWorkspace {
     }
 
     /// Re-read every robot file from disk.
-    pub fn reload(&self) -> Result<(), WorkspaceError> {
+    pub(crate) fn reload(&self) -> Result<(), WorkspaceError> {
         let fingerprint = self.fingerprint()?;
         let mut loaded = WorkspaceState {
             fingerprint,
@@ -369,17 +369,17 @@ impl RobotWorkspace {
     }
 
     /// Every robot, in ID order.
-    pub fn list(&self) -> Vec<RobotRecord> {
+    pub(crate) fn list(&self) -> Vec<RobotRecord> {
         self.lock().robots.values().cloned().collect()
     }
 
     /// Problems found the last time the directory was read.
-    pub fn issues(&self) -> Vec<String> {
+    pub(crate) fn issues(&self) -> Vec<String> {
         self.lock().issues.clone()
     }
 
     /// One robot by ID.
-    pub fn get(&self, id: &str) -> Result<RobotRecord, WorkspaceError> {
+    pub(crate) fn get(&self, id: &str) -> Result<RobotRecord, WorkspaceError> {
         self.lock()
             .robots
             .get(id)
@@ -388,7 +388,7 @@ impl RobotWorkspace {
     }
 
     /// Create a robot file pre-populated with the stock SO-101 motor map.
-    pub fn create(
+    pub(crate) fn create(
         &self,
         id: &str,
         robot_type: Option<&str>,
@@ -429,7 +429,7 @@ impl RobotWorkspace {
     /// instance. The document's `robot_id` is the file name and stable API ID;
     /// requiring it keeps a browser upload independent of the user's local
     /// download name.
-    pub fn import_configuration(&self, bytes: &[u8]) -> Result<RobotRecord, WorkspaceError> {
+    pub(crate) fn import_configuration(&self, bytes: &[u8]) -> Result<RobotRecord, WorkspaceError> {
         let value: Value = serde_json::from_slice(bytes).map_err(|source| {
             WorkspaceError::Invalid(format!("the configuration is not valid JSON: {source}"))
         })?;
@@ -465,7 +465,7 @@ impl RobotWorkspace {
     ///
     /// Every other field, including ones this build does not understand, is
     /// preserved exactly.
-    pub fn update(
+    pub(crate) fn update(
         &self,
         id: &str,
         robot_type: Option<&str>,
@@ -498,7 +498,7 @@ impl RobotWorkspace {
     }
 
     /// Store a completed calibration alongside the motors it was measured for.
-    pub fn save_calibration(
+    pub(crate) fn save_calibration(
         &self,
         id: &str,
         motors: &BTreeMap<String, MotorSpec>,
@@ -521,7 +521,7 @@ impl RobotWorkspace {
     }
 
     /// Delete a robot file and forget the instance.
-    pub fn delete(&self, id: &str) -> Result<(), WorkspaceError> {
+    pub(crate) fn delete(&self, id: &str) -> Result<(), WorkspaceError> {
         let record = self.get(id)?;
         fs::remove_file(&record.path).map_err(|source| WorkspaceError::Io {
             path: record.path.clone(),
@@ -585,7 +585,7 @@ fn port_value(path: &str, baud_rate: Option<u32>) -> Value {
 }
 
 /// Reject robot IDs that would escape the workspace or confuse the filesystem.
-pub fn validate_robot_id(id: &str) -> Result<(), WorkspaceError> {
+pub(crate) fn validate_robot_id(id: &str) -> Result<(), WorkspaceError> {
     if is_plain_name(id, MAX_ROBOT_ID_LENGTH) {
         Ok(())
     } else {
@@ -597,7 +597,7 @@ pub fn validate_robot_id(id: &str) -> Result<(), WorkspaceError> {
 ///
 /// A role is a key in the robot file and a label in the UI, so the same
 /// restraint that applies to a robot ID applies here.
-pub fn validate_camera_role(role: &str) -> Result<(), WorkspaceError> {
+pub(crate) fn validate_camera_role(role: &str) -> Result<(), WorkspaceError> {
     if is_plain_name(role, MAX_LABEL_LENGTH) {
         Ok(())
     } else {

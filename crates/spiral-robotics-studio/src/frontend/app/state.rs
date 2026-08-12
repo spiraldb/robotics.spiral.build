@@ -20,15 +20,15 @@ use crate::frontend::panels::timeline::signals::SignalStore;
 /// numbers beside it can never come from two different readings of the file.
 /// A failure is carried rather than unwrapped: the description ships with the
 /// build, so a bad one is worth showing plainly instead of blanking the page.
-pub type Description = Rc<Result<Urdf, UrdfError>>;
+pub(crate) type Description = Rc<Result<Urdf, UrdfError>>;
 
 /// Parse the description and publish it to every panel.
-pub fn use_description() -> Description {
+pub(crate) fn use_description() -> Description {
     use_context_provider(|| Rc::new(Urdf::parse(SO101_URDF)))
 }
 
 /// Read the shared robot description from context.
-pub fn description() -> Description {
+pub(crate) fn description() -> Description {
     use_context::<Description>()
 }
 
@@ -39,7 +39,7 @@ pub fn description() -> Description {
 /// hand, and "Episode saved." was still on screen forty takes later. Putting
 /// the deadline in the value means a notice cannot be created without one.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Notice {
+pub(crate) struct Notice {
     pub text: String,
     pub failed: bool,
     /// Wall-clock milliseconds after which this notice comes off the page.
@@ -54,7 +54,7 @@ pub struct Notice {
 }
 
 impl Notice {
-    pub fn new(text: impl Into<String>, failed: bool) -> Self {
+    pub(crate) fn new(text: impl Into<String>, failed: bool) -> Self {
         let text = text.into();
         let until_ms = now_ms() + f64::from(linger_ms(&text, failed));
         Self {
@@ -66,7 +66,7 @@ impl Notice {
     }
 
     /// A success notice that can hand its episode to the Data activity.
-    pub fn about_episode(text: impl Into<String>, episode: impl Into<String>) -> Self {
+    pub(crate) fn about_episode(text: impl Into<String>, episode: impl Into<String>) -> Self {
         Self {
             view_episode: Some(episode.into()),
             ..Self::new(text, false)
@@ -106,14 +106,14 @@ fn now_ms() -> f64 {
 
 /// The one selection shared by the hierarchy, viewport, cameras, and inspector.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Selection {
+pub(crate) enum Selection {
     Robot(String),
     Joint { robot: String, joint: String },
     Camera { robot: String, role: String },
 }
 
 impl Selection {
-    pub fn robot_id(&self) -> &str {
+    pub(crate) fn robot_id(&self) -> &str {
         match self {
             Selection::Robot(robot)
             | Selection::Joint { robot, .. }
@@ -121,11 +121,11 @@ impl Selection {
         }
     }
 
-    pub fn matches_robot(&self, robot: &str) -> bool {
+    pub(crate) fn matches_robot(&self, robot: &str) -> bool {
         self.robot_id() == robot
     }
 
-    pub fn matches_joint(&self, robot: &str, joint: &str) -> bool {
+    pub(crate) fn matches_joint(&self, robot: &str, joint: &str) -> bool {
         matches!(
             self,
             Selection::Joint {
@@ -169,7 +169,7 @@ fn default_joint_selection(
 
 /// Everything the screens read, published by the server's event stream.
 #[derive(Clone, Copy)]
-pub struct Studio {
+pub(crate) struct Studio {
     pub snapshot: Signal<StudioSnapshot>,
     pub telemetry: Signal<TelemetryFrame>,
     /// Backend-owned lifecycle and metric history for local policy training.
@@ -206,7 +206,7 @@ pub struct Studio {
 
 impl Studio {
     /// Create the shared state and start following the server.
-    pub fn use_studio() -> Self {
+    pub(crate) fn use_studio() -> Self {
         // Hooks own the lifetime of every signal. The context publishes only
         // their handles; it does not construct unscoped reactive state inside
         // a provider closure.
@@ -317,7 +317,7 @@ impl Studio {
     }
 
     /// One robot's live readings, present only while it is connected.
-    pub fn robot_telemetry(&self, id: &str) -> Option<RobotTelemetry> {
+    pub(crate) fn robot_telemetry(&self, id: &str) -> Option<RobotTelemetry> {
         if !self.controls_available() {
             return None;
         }
@@ -330,12 +330,12 @@ impl Studio {
     }
 
     /// Normal controls require both an open stream and a recent event.
-    pub fn controls_available(&self) -> bool {
+    pub(crate) fn controls_available(&self) -> bool {
         let age = self.telemetry_age_seconds();
         (self.live)() && age.is_finite() && age < 2.5
     }
 
-    pub fn telemetry_age_seconds(&self) -> f64 {
+    pub(crate) fn telemetry_age_seconds(&self) -> f64 {
         let last = (self.last_event_ms)();
         if last <= 0.0 {
             return f64::INFINITY;
@@ -349,7 +349,7 @@ impl Studio {
     /// otherwise. Deriving this rather than storing a corrected copy keeps a
     /// deleted robot from leaving the panels pointed at nothing, without an
     /// effect that writes the signal it reads.
-    pub fn focused(&self) -> Option<RobotSummary> {
+    pub(crate) fn focused(&self) -> Option<RobotSummary> {
         let robots = self.snapshot.read();
         let chosen = self.selected.read();
         chosen
@@ -372,7 +372,7 @@ impl Studio {
     /// removing one arm silently repainted every other one, and "blue is the
     /// follower" is a thing an operator learns in the first minute and relies on
     /// while looking at the bench rather than the screen.
-    pub fn position_of(&self, id: &str) -> usize {
+    pub(crate) fn position_of(&self, id: &str) -> usize {
         let kind = self
             .snapshot
             .read()
@@ -398,7 +398,7 @@ impl Studio {
     }
 
     /// Every recorded take, oldest first.
-    pub fn episodes(&self) -> Vec<EpisodeSummary> {
+    pub(crate) fn episodes(&self) -> Vec<EpisodeSummary> {
         self.snapshot.read().episodes.clone()
     }
 
@@ -407,17 +407,17 @@ impl Studio {
     /// Unlike most readings this survives a telemetry gap on purpose: a
     /// recording that is still running is exactly what an operator needs to know
     /// about while the link is unreliable.
-    pub fn recording(&self) -> Option<RecordingProgress> {
+    pub(crate) fn recording(&self) -> Option<RecordingProgress> {
         self.telemetry.read().recording.clone()
     }
 
     /// The episode being played back right now.
-    pub fn replay(&self) -> Option<ReplayProgress> {
+    pub(crate) fn replay(&self) -> Option<ReplayProgress> {
         self.telemetry.read().replay.clone()
     }
 
     /// The take the timeline is showing, when it still exists.
-    pub fn focused_episode(&self) -> Option<EpisodeSummary> {
+    pub(crate) fn focused_episode(&self) -> Option<EpisodeSummary> {
         let episodes = self.snapshot.read();
         let chosen = self.selected_episode.read();
         chosen
@@ -427,7 +427,7 @@ impl Studio {
     }
 
     /// Robots whose motor bus is currently open.
-    pub fn connected_robots(&self) -> Vec<RobotSummary> {
+    pub(crate) fn connected_robots(&self) -> Vec<RobotSummary> {
         self.snapshot
             .read()
             .robots
@@ -438,17 +438,17 @@ impl Studio {
     }
 
     /// The mode the studio is in.
-    pub fn mode(&self) -> ModeSelection {
+    pub(crate) fn mode(&self) -> ModeSelection {
         self.snapshot.read().mode.selection.clone()
     }
 
     /// Whether the configured mode is actually running.
-    pub fn mode_active(&self) -> bool {
+    pub(crate) fn mode_active(&self) -> bool {
         self.snapshot.read().mode.active
     }
 
     /// True when `id` is the robot the operator is driving by hand.
-    pub fn is_manual_target(&self, id: &str) -> bool {
+    pub(crate) fn is_manual_target(&self, id: &str) -> bool {
         self.mode_active() && matches!(self.mode(), ModeSelection::Manual { robot } if robot == id)
     }
 
@@ -456,7 +456,7 @@ impl Studio {
     ///
     /// An empty `success` message means the change is visible on screen and
     /// does not need to be announced.
-    pub fn run<F>(&self, success: impl Into<String>, future: F)
+    pub(crate) fn run<F>(&self, success: impl Into<String>, future: F)
     where
         F: Future<Output = Result<(), String>> + 'static,
     {
@@ -470,7 +470,7 @@ impl Studio {
     /// Send a command whose only purpose is to move the system toward idle.
     /// This remains available during an event-stream outage because the HTTP
     /// command path may still be healthy while telemetry reconnects.
-    pub fn run_safety<F>(&self, success: impl Into<String>, future: F)
+    pub(crate) fn run_safety<F>(&self, success: impl Into<String>, future: F)
     where
         F: Future<Output = Result<(), String>> + 'static,
     {
@@ -479,7 +479,7 @@ impl Studio {
 
     /// Run a file or workspace operation that does not command live hardware.
     /// These remain useful while telemetry is reconnecting.
-    pub fn run_utility<F>(&self, success: impl Into<String>, future: F)
+    pub(crate) fn run_utility<F>(&self, success: impl Into<String>, future: F)
     where
         F: Future<Output = Result<(), String>> + 'static,
     {
@@ -506,20 +506,20 @@ impl Studio {
     }
 
     /// Report a problem the UI detected on its own.
-    pub fn report(&self, message: impl Into<String>) {
+    pub(crate) fn report(&self, message: impl Into<String>) {
         let mut notice = self.notice;
         notice.set(Some(Notice::new(message, true)));
     }
 
     /// Confirm a completed browser-side utility action.
-    pub fn report_success(&self, message: impl Into<String>) {
+    pub(crate) fn report_success(&self, message: impl Into<String>) {
         let mut notice = self.notice;
         notice.set(Some(Notice::new(message, false)));
     }
 }
 
 /// Read the shared studio state from context.
-pub fn studio() -> Studio {
+pub(crate) fn studio() -> Studio {
     use_context::<Studio>()
 }
 

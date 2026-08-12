@@ -277,14 +277,6 @@ impl SimulatedBus {
             .map(|(name, motor)| (name.clone(), motor.position))
             .collect()
     }
-
-    /// Motor IDs, for tests that check the bus was built from the right specs.
-    pub fn motor_ids(&self) -> BTreeMap<String, u32> {
-        self.motors
-            .iter()
-            .map(|(name, motor)| (name.clone(), motor.id))
-            .collect()
-    }
 }
 
 impl MotorBus for SimulatedBus {
@@ -310,7 +302,8 @@ impl MotorBus for SimulatedBus {
                     MotorSample {
                         position: motor.position,
                         speed_degrees_per_second: Some(
-                            crate::arm::counts_to_degrees(travelled) * SIMULATED_READS_PER_SECOND,
+                            spiral_robotics_core::arm::counts_to_degrees(travelled)
+                                * SIMULATED_READS_PER_SECOND,
                         ),
                         load: Some(motor.load),
                         voltage_volts: Some(SIMULATED_VOLTS),
@@ -391,7 +384,6 @@ mod tests {
             bus.motor_names(),
             ["shoulder_pan", "shoulder_lift", "elbow_flex"]
         );
-        assert_eq!(bus.motor_ids()["elbow_flex"], 3);
         let positions = bus.read_positions().unwrap();
         assert_eq!(positions.len(), 3);
         assert!(positions.values().all(|value| *value == SIMULATED_CENTER));

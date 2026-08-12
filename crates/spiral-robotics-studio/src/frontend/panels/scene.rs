@@ -38,7 +38,7 @@ use crate::frontend::api::http::{TimelineArmSample, TimelineSample};
 use crate::frontend::app::activity::RecordedSource;
 use crate::frontend::app::state::{Selection, studio};
 
-pub use spiral_robotics_viewport::tool_position;
+pub(crate) use spiral_robotics_viewport::tool_position;
 
 /// The canvas the viewport draws into. There is exactly one on the page.
 const CANVAS_ID: &str = "robot-viewport";
@@ -65,7 +65,7 @@ const ACCENTS: [([f32; 4], &str); 4] = [
 ];
 
 /// The accent for the arm at `index` in the workspace.
-pub fn accent_css(index: usize) -> &'static str {
+pub(crate) fn accent_css(index: usize) -> &'static str {
     ACCENTS[index % ACCENTS.len()].1
 }
 

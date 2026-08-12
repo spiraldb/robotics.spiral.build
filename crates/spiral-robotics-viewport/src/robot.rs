@@ -108,15 +108,6 @@ impl RobotScene {
     pub fn entity(&self, key: EntityKey) -> Option<&RobotEntity> {
         self.entities.get(key.0 as usize)
     }
-
-    /// The key standing for `entity`, so the studio can light up what its own
-    /// panels have selected without the scene owning that state.
-    pub fn key_of(&self, entity: &RobotEntity) -> Option<EntityKey> {
-        self.entities
-            .iter()
-            .position(|held| held == entity)
-            .map(|index| EntityKey(index as u32))
-    }
 }
 
 /// Build the bench from the description and what the arms are doing.

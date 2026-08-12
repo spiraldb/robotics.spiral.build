@@ -1,5 +1,5 @@
 //! Hardware, live cameras, and recorded video ownership.
 
-pub mod cameras;
-pub mod hardware;
-pub mod video;
+pub(crate) mod cameras;
+pub(crate) mod hardware;
+pub(crate) mod video;

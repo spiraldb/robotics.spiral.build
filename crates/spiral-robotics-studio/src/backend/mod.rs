@@ -1,10 +1,10 @@
 //! Server-only Studio runtime, grouped by domain boundary.
 
-pub mod http;
-pub mod recording;
-pub mod robotics;
-pub mod robots;
-pub mod storage;
-pub mod training;
+mod http;
+mod recording;
+mod robotics;
+mod robots;
+mod storage;
+mod training;
 
 pub use http::server::run;

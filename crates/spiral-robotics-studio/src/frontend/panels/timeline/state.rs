@@ -23,12 +23,12 @@ pub(crate) enum PreviewTransport {
 }
 
 impl PreviewTransport {
-    pub fn is_playing(&self) -> bool {
+    pub(crate) fn is_playing(&self) -> bool {
         matches!(self, Self::Playing { .. })
     }
 
     #[cfg(any(test, feature = "web"))]
-    pub fn target(&self) -> Option<(String, f64)> {
+    pub(crate) fn target(&self) -> Option<(String, f64)> {
         match self {
             Self::Stopped => None,
             Self::Playing {
@@ -64,25 +64,25 @@ pub(crate) fn use_timeline_controller() -> TimelineController {
 }
 
 impl TimelineController {
-    pub fn start_preview(mut self, episode: String, duration_seconds: f64) {
+    pub(crate) fn start_preview(mut self, episode: String, duration_seconds: f64) {
         self.preview.set(PreviewTransport::Playing {
             episode,
             duration_seconds,
         });
     }
 
-    pub fn stop_preview(mut self) {
+    pub(crate) fn stop_preview(mut self) {
         self.preview.set(PreviewTransport::Stopped);
         #[cfg(feature = "web")]
         self.preview_tick_seconds.set(None);
     }
 
-    pub fn preview_playing(&self) -> bool {
+    pub(crate) fn preview_playing(&self) -> bool {
         self.preview.read().is_playing()
     }
 
     #[cfg(feature = "web")]
-    pub fn preview_target(&self) -> Option<(String, f64)> {
+    pub(crate) fn preview_target(&self) -> Option<(String, f64)> {
         self.preview.read().target()
     }
 }

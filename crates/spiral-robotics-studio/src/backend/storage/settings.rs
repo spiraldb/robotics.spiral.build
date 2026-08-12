@@ -14,7 +14,7 @@ use spiral_robotics_core::spiral;
 const SETTINGS_FILE: &str = ".spiral-robotics-data-settings.json";
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct StoredDataSettings {
+pub(crate) struct StoredDataSettings {
     #[serde(default)]
     pub spiral: StoredSpiralSettings,
     #[serde(default)]
@@ -24,7 +24,7 @@ pub struct StoredDataSettings {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct StoredSpiralSettings {
+pub(crate) struct StoredSpiralSettings {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default = "default_spiral_uri")]
@@ -50,7 +50,7 @@ impl StoredSpiralSettings {
     /// Spiral is active when its destination is complete. The persisted
     /// `enabled` bit remains readable for compatibility with older settings
     /// files, but configuration—not a second toggle—is the source of truth.
-    pub fn configured(&self) -> bool {
+    pub(crate) fn configured(&self) -> bool {
         let uri = self.uri.trim();
         let dataset = self.dataset.trim();
         !dataset.is_empty()
@@ -60,7 +60,7 @@ impl StoredSpiralSettings {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct StoredHuggingFaceSettings {
+pub(crate) struct StoredHuggingFaceSettings {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
@@ -83,7 +83,7 @@ impl Default for StoredHuggingFaceSettings {
 }
 
 impl StoredDataSettings {
-    pub fn public(&self) -> DataSettings {
+    pub(crate) fn public(&self) -> DataSettings {
         DataSettings {
             spiral: SpiralSettings {
                 enabled: self.spiral.configured(),
@@ -104,13 +104,13 @@ impl StoredDataSettings {
 
 /// The settings file lives beside the recovery spool and is readable only by
 /// the backend account. No API returns a stored token.
-pub struct DataSettingsStore {
+pub(crate) struct DataSettingsStore {
     path: PathBuf,
     current: Mutex<StoredDataSettings>,
 }
 
 impl DataSettingsStore {
-    pub fn open(episode_directory: &Path) -> Result<Self, String> {
+    pub(crate) fn open(episode_directory: &Path) -> Result<Self, String> {
         let path = episode_directory.join(SETTINGS_FILE);
         let current = if path.exists() {
             let bytes = fs::read(&path)
@@ -126,15 +126,15 @@ impl DataSettingsStore {
         })
     }
 
-    pub fn get(&self) -> StoredDataSettings {
+    pub(crate) fn get(&self) -> StoredDataSettings {
         lock(&self.current).clone()
     }
 
-    pub fn public(&self) -> DataSettings {
+    pub(crate) fn public(&self) -> DataSettings {
         lock(&self.current).public()
     }
 
-    pub fn update(&self, update: UpdateDataSettingsRequest) -> Result<DataSettings, String> {
+    pub(crate) fn update(&self, update: UpdateDataSettingsRequest) -> Result<DataSettings, String> {
         validate_update(&update)?;
         let mut current = lock(&self.current);
         let mut staged = current.clone();

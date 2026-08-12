@@ -19,7 +19,7 @@ use crate::backend::recording::episodes::{EpisodeCompletion, EpisodeError, Episo
 
 /// One row destined for [`spiral_robotics_core::spiral::Table::JointSamples`].
 #[derive(Clone, Debug, PartialEq)]
-pub struct JointSampleRow {
+pub(crate) struct JointSampleRow {
     pub episode_id: String,
     pub stream_id: String,
     pub sample_index: u64,
@@ -36,7 +36,7 @@ pub struct JointSampleRow {
 
 /// Camera stream metadata stored beside joint stream descriptions.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VideoStreamRow {
+pub(crate) struct VideoStreamRow {
     pub episode_id: String,
     pub stream_id: String,
     pub camera_id: String,
@@ -50,13 +50,13 @@ pub struct VideoStreamRow {
 /// Every control frame receives one `sample_index`; every arm in that frame
 /// receives a row with the same index. The resulting stable key is
 /// `(episode_id, stream_id, sample_index)`.
-pub struct SpiralEpisodeEncoder {
+pub(crate) struct SpiralEpisodeEncoder {
     start: EpisodeStart,
     next_sample_index: u64,
 }
 
 impl SpiralEpisodeEncoder {
-    pub fn new(start: EpisodeStart) -> Result<Self, EpisodeError> {
+    pub(crate) fn new(start: EpisodeStart) -> Result<Self, EpisodeError> {
         if start.arms.is_empty() {
             return Err(invalid("a Spiral episode needs at least one arm stream"));
         }
@@ -66,16 +66,12 @@ impl SpiralEpisodeEncoder {
         })
     }
 
-    pub fn start(&self) -> &EpisodeStart {
-        &self.start
-    }
-
-    pub fn frames(&self) -> u64 {
+    pub(crate) fn frames(&self) -> u64 {
         self.next_sample_index
     }
 
     /// Convert one control frame without performing I/O.
-    pub fn encode(&mut self, sample: &Sample) -> Result<Vec<JointSampleRow>, EpisodeError> {
+    pub(crate) fn encode(&mut self, sample: &Sample) -> Result<Vec<JointSampleRow>, EpisodeError> {
         validate_sample(&self.start, sample)?;
         let episode_time_ns = seconds_to_ns(sample.seconds, "sample time")?;
         let sample_index = self.next_sample_index;
@@ -125,7 +121,7 @@ impl SpiralEpisodeEncoder {
 
 /// Schema for the completion row inserted last into
 /// [`spiral_robotics_core::spiral::Table::Episodes`].
-pub fn episodes_schema() -> SchemaRef {
+pub(crate) fn episodes_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new(db::EPISODE_ID, DataType::Utf8, false),
         Field::new(db::SCHEMA_VERSION, DataType::UInt32, false),
@@ -141,7 +137,7 @@ pub fn episodes_schema() -> SchemaRef {
 }
 
 /// Build the single row that makes an episode visible to readers.
-pub fn episode_completion_batch(
+pub(crate) fn episode_completion_batch(
     start: &EpisodeStart,
     completion: &EpisodeCompletion,
     frames: u64,
@@ -166,7 +162,7 @@ pub fn episode_completion_batch(
 }
 
 /// Schema for [`spiral_robotics_core::spiral::Table::EpisodeStreams`].
-pub fn episode_streams_schema() -> SchemaRef {
+pub(crate) fn episode_streams_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new(db::EPISODE_ID, DataType::Utf8, false),
         Field::new(db::STREAM_ID, DataType::Utf8, false),
@@ -185,7 +181,7 @@ pub fn episode_streams_schema() -> SchemaRef {
 }
 
 /// Describe every joint stream before its samples are appended.
-pub fn episode_streams_batch(start: &EpisodeStart) -> Result<RecordBatch, EpisodeError> {
+pub(crate) fn episode_streams_batch(start: &EpisodeStart) -> Result<RecordBatch, EpisodeError> {
     let mut joint_names = ListBuilder::new(StringBuilder::new()).with_field(Arc::new(Field::new(
         "item",
         DataType::Utf8,
@@ -221,7 +217,7 @@ pub fn episode_streams_batch(start: &EpisodeStart) -> Result<RecordBatch, Episod
 }
 
 /// Describe camera streams using the same keyed stream table as robot joints.
-pub fn video_streams_batch(rows: &[VideoStreamRow]) -> Result<RecordBatch, EpisodeError> {
+pub(crate) fn video_streams_batch(rows: &[VideoStreamRow]) -> Result<RecordBatch, EpisodeError> {
     let mut joint_names = ListBuilder::new(StringBuilder::new()).with_field(Arc::new(Field::new(
         "item",
         DataType::Utf8,
@@ -258,7 +254,7 @@ pub fn video_streams_batch(rows: &[VideoStreamRow]) -> Result<RecordBatch, Episo
 }
 
 /// Schema for [`spiral_robotics_core::spiral::Table::JointSamples`].
-pub fn joint_samples_schema() -> SchemaRef {
+pub(crate) fn joint_samples_schema() -> SchemaRef {
     let nullable_f64_list =
         || DataType::List(Arc::new(Field::new("item", DataType::Float64, true)));
     Arc::new(Schema::new(vec![
@@ -282,7 +278,7 @@ pub fn joint_samples_schema() -> SchemaRef {
 }
 
 /// Convert rows into a batch suitable for ADBC `bind_stream` ingestion.
-pub fn joint_samples_batch(rows: &[JointSampleRow]) -> Result<RecordBatch, EpisodeError> {
+pub(crate) fn joint_samples_batch(rows: &[JointSampleRow]) -> Result<RecordBatch, EpisodeError> {
     let mut state_position = ListBuilder::new(Float64Builder::new());
     let mut action_position = ListBuilder::new(Float64Builder::new());
     let mut raw_position = ListBuilder::new(Int64Builder::new()).with_field(Arc::new(Field::new(

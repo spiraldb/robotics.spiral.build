@@ -1,3 +1,3 @@
 //! Training process supervision.
 
-pub mod manager;
+pub(crate) mod manager;

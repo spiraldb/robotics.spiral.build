@@ -56,6 +56,7 @@ type NormalizedPose = BTreeMap<String, f64>;
 type TimestampedPose = (f64, NormalizedPose);
 
 /// A commandable trajectory and the recorded sample nearest a requested time.
+#[derive(Debug)]
 pub(crate) struct ReplayTrajectory {
     pub(crate) frames: Vec<NormalizedPose>,
     pub(crate) start_frame: usize,
@@ -64,7 +65,7 @@ pub(crate) struct ReplayTrajectory {
 
 /// Something went wrong reading or writing the episode store.
 #[derive(Debug)]
-pub enum EpisodeError {
+pub(crate) enum EpisodeError {
     /// The requested ID could not be used as a file name.
     InvalidId(String),
     /// No episode with that ID exists.
@@ -138,7 +139,7 @@ struct Header {
 /// so they are stated once here and summarised once in the footer. Every list
 /// follows this arm's joint order in [`Header::arms`].
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ArmCondition {
+pub(crate) struct ArmCondition {
     pub arm: String,
     pub temperature_celsius: Vec<Option<f64>>,
     pub voltage_volts: Vec<Option<f64>>,
@@ -167,7 +168,7 @@ struct Footer {
 
 /// The extremes one arm's motors reached during a take.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct ArmConditionSummary {
+pub(crate) struct ArmConditionSummary {
     pub arm: String,
     pub peak_temperature_celsius: Vec<Option<f64>>,
     pub min_voltage_volts: Vec<Option<f64>>,
@@ -221,7 +222,7 @@ struct FrameLine {
 
 /// One instant handed from the control loop to the writer thread.
 #[derive(Clone, Debug, Default)]
-pub struct Sample {
+pub(crate) struct Sample {
     pub seconds: f64,
     pub normalized: Vec<Vec<Option<f64>>>,
     pub raw: Vec<Vec<i64>>,
@@ -241,7 +242,7 @@ pub struct Sample {
 /// local file, a Spiral table writer, or a mirrored pair without learning how
 /// any of those destinations persist data.
 #[derive(Clone, Debug)]
-pub struct EpisodeStart {
+pub(crate) struct EpisodeStart {
     pub id: String,
     pub started_ms: i64,
     pub sample_hz: f64,
@@ -253,7 +254,7 @@ pub struct EpisodeStart {
 
 /// Values known only after the final sample has been captured.
 #[derive(Clone, Debug)]
-pub struct EpisodeCompletion {
+pub(crate) struct EpisodeCompletion {
     pub duration_seconds: f64,
     pub recording_gaps: Vec<RecordingGap>,
     pub max_follow_error_degrees: Option<f64>,
@@ -263,7 +264,7 @@ pub struct EpisodeCompletion {
 
 /// A finished local recovery copy, ready for an external publisher.
 #[derive(Clone, Debug)]
-pub struct CompletedEpisode {
+pub(crate) struct CompletedEpisode {
     pub start: EpisodeStart,
     pub samples: Vec<Sample>,
     pub completion: EpisodeCompletion,
@@ -303,7 +304,7 @@ struct TimelinePoint {
 
 /// The extent of samples that can be inspected on a take's timeline.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct TimelineMetadata {
+pub(crate) struct TimelineMetadata {
     pub samples: u64,
     pub first_seconds: Option<f64>,
     pub last_seconds: Option<f64>,
@@ -311,7 +312,7 @@ pub struct TimelineMetadata {
 
 /// One arm's values at a historical instant.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct TimelineArmSample {
+pub(crate) struct TimelineArmSample {
     pub arm: String,
     pub normalized: BTreeMap<String, Option<f64>>,
     pub raw: BTreeMap<String, i64>,
@@ -322,7 +323,7 @@ pub struct TimelineArmSample {
 
 /// The nearest recorded sample to a requested timeline time.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct TimelineSample {
+pub(crate) struct TimelineSample {
     pub frame: u64,
     pub seconds: f64,
     pub follow_error_degrees: Option<f64>,
@@ -331,7 +332,7 @@ pub struct TimelineSample {
 
 /// Bounded historical joint traces for the canonical six-lane timeline.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct TimelineTraces {
+pub(crate) struct TimelineTraces {
     pub episode: String,
     pub samples: u64,
     /// Number of time buckets used. Each arm series contributes at most two
@@ -343,19 +344,19 @@ pub struct TimelineTraces {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct TimelineTraceLane {
+pub(crate) struct TimelineTraceLane {
     pub joint: String,
     pub series: Vec<TimelineTraceSeries>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct TimelineTraceSeries {
+pub(crate) struct TimelineTraceSeries {
     pub arm: String,
     pub points: Vec<TimelineTracePoint>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct TimelineTracePoint {
+pub(crate) struct TimelineTracePoint {
     pub seconds: f64,
     /// Normalized joint position. `None` is an observed missing sample and
     /// breaks the client trace rather than inventing a bridge across it.
@@ -427,7 +428,7 @@ fn trace_bucket(seconds: f64, start: f64, end: f64, buckets: usize) -> usize {
 }
 
 /// A directory of episode files, cached in memory.
-pub struct EpisodeStore {
+pub(crate) struct EpisodeStore {
     directory: PathBuf,
     cache: Mutex<Cache>,
     timeline_indexes: Mutex<BTreeMap<String, TimelineIndex>>,
@@ -438,7 +439,7 @@ pub struct EpisodeStore {
 
 impl EpisodeStore {
     /// Open, creating the directory when it does not exist yet.
-    pub fn open(directory: PathBuf) -> Result<Self, EpisodeError> {
+    pub(crate) fn open(directory: PathBuf) -> Result<Self, EpisodeError> {
         fs::create_dir_all(&directory).map_err(|source| EpisodeError::io(&directory, source))?;
         let store = Self {
             directory,
@@ -452,7 +453,7 @@ impl EpisodeStore {
         Ok(store)
     }
 
-    pub fn directory(&self) -> &Path {
+    pub(crate) fn directory(&self) -> &Path {
         &self.directory
     }
 
@@ -461,7 +462,7 @@ impl EpisodeStore {
     /// The store is shared with whatever else writes the directory, so it
     /// cannot assume it is the only writer. Finished takes never change on
     /// their own, so in an idle studio this settles to one directory listing.
-    pub fn reload_if_changed(&self) -> Result<bool, EpisodeError> {
+    pub(crate) fn reload_if_changed(&self) -> Result<bool, EpisodeError> {
         let stamps = self.stamps()?;
         if self.cache.lock().expect("episode cache").stamps == stamps {
             return Ok(false);
@@ -471,7 +472,7 @@ impl EpisodeStore {
     }
 
     /// Re-read every take in the directory.
-    pub fn reload(&self) -> Result<(), EpisodeError> {
+    pub(crate) fn reload(&self) -> Result<(), EpisodeError> {
         let mut episodes = Vec::new();
         let mut issues = Vec::new();
 
@@ -513,17 +514,17 @@ impl EpisodeStore {
     }
 
     /// Every take, oldest first.
-    pub fn list(&self) -> Vec<EpisodeSummary> {
+    pub(crate) fn list(&self) -> Vec<EpisodeSummary> {
         self.cache.lock().expect("episode cache").episodes.clone()
     }
 
     /// Problems worth showing the operator.
-    pub fn issues(&self) -> Vec<String> {
+    pub(crate) fn issues(&self) -> Vec<String> {
         self.cache.lock().expect("episode cache").issues.clone()
     }
 
     /// One take.
-    pub fn get(&self, id: &str) -> Result<EpisodeSummary, EpisodeError> {
+    pub(crate) fn get(&self, id: &str) -> Result<EpisodeSummary, EpisodeError> {
         self.cache
             .lock()
             .expect("episode cache")
@@ -535,7 +536,7 @@ impl EpisodeStore {
     }
 
     /// Read a complete take into the provider-neutral episode contract.
-    pub fn completed(&self, id: &str) -> Result<CompletedEpisode, EpisodeError> {
+    pub(crate) fn completed(&self, id: &str) -> Result<CompletedEpisode, EpisodeError> {
         validate_episode_id(id)?;
         let summary = self.get(id)?;
         if let Some(problem) = &summary.problem {
@@ -604,7 +605,7 @@ impl EpisodeStore {
     /// free its number for reuse; every take also carries the moment it was
     /// captured, which is what tells two same-numbered takes apart if an
     /// operator ever manages to produce them.
-    pub fn next_id(&self) -> String {
+    pub(crate) fn next_id(&self) -> String {
         let highest = self
             .cache
             .lock()
@@ -618,7 +619,7 @@ impl EpisodeStore {
     }
 
     /// Start writing a take, returning the writer the control loop feeds.
-    pub fn begin(
+    pub(crate) fn begin(
         &self,
         source: String,
         note: Option<String>,
@@ -692,7 +693,7 @@ impl EpisodeStore {
     ///
     /// Only the footer is rewritten, so the samples are never touched by an
     /// opinion about them.
-    pub fn judge(&self, id: &str, discarded: bool) -> Result<EpisodeSummary, EpisodeError> {
+    pub(crate) fn judge(&self, id: &str, discarded: bool) -> Result<EpisodeSummary, EpisodeError> {
         validate_episode_id(id)?;
         let summary = self.get(id)?;
         if summary.problem.is_some() {
@@ -724,27 +725,13 @@ impl EpisodeStore {
     }
 
     /// Remove a take and its samples.
-    pub fn delete(&self, id: &str) -> Result<(), EpisodeError> {
+    pub(crate) fn delete(&self, id: &str) -> Result<(), EpisodeError> {
         validate_episode_id(id)?;
         let summary = self.get(id)?;
         let path = self.directory.join(&summary.file);
         fs::remove_file(&path).map_err(|source| EpisodeError::io(&path, source))?;
         self.reload()?;
         Ok(())
-    }
-
-    /// One arm's recorded trajectory, in normalized units.
-    ///
-    /// Normalized is the only unit the control path accepts, which is exactly
-    /// the property wanted here: a take recorded from an uncalibrated arm
-    /// cannot be turned into motion.
-    pub fn trajectory(
-        &self,
-        id: &str,
-        arm: &str,
-    ) -> Result<Vec<BTreeMap<String, f64>>, EpisodeError> {
-        self.timestamped_trajectory(id, arm)
-            .map(|samples| samples.into_iter().map(|(_, pose)| pose).collect())
     }
 
     /// One arm's trajectory plus the commandable frame nearest a Timeline time.
@@ -868,7 +855,7 @@ impl EpisodeStore {
     }
 
     /// The sample extent available for random-access timeline inspection.
-    pub fn timeline_metadata(&self, id: &str) -> Result<TimelineMetadata, EpisodeError> {
+    pub(crate) fn timeline_metadata(&self, id: &str) -> Result<TimelineMetadata, EpisodeError> {
         let (_, index) = self.timeline_index(id)?;
         Ok(TimelineMetadata {
             samples: index.points.len() as u64,
@@ -882,7 +869,7 @@ impl EpisodeStore {
     /// The small index is cached against the file's size and modification time,
     /// so it also follows a growing unfinished take when another writer owns the
     /// episode directory.
-    pub fn sample_at(&self, id: &str, seconds: f64) -> Result<TimelineSample, EpisodeError> {
+    pub(crate) fn sample_at(&self, id: &str, seconds: f64) -> Result<TimelineSample, EpisodeError> {
         if !seconds.is_finite() {
             return Err(EpisodeError::Invalid(
                 "timeline time must be a finite number of seconds".to_owned(),
@@ -969,7 +956,7 @@ impl EpisodeStore {
     /// Reduced by maximum rather than by average: the question a trace answers
     /// is "did this take ever go wrong", and an average is exactly the operation
     /// that hides a brief spike in a long clean take.
-    pub fn trace(&self, id: &str, buckets: usize) -> Result<Vec<Option<f64>>, EpisodeError> {
+    pub(crate) fn trace(&self, id: &str, buckets: usize) -> Result<Vec<Option<f64>>, EpisodeError> {
         validate_episode_id(id)?;
         let summary = self.get(id)?;
         let buckets = buckets.clamp(1, 2_048);
@@ -1008,7 +995,7 @@ impl EpisodeStore {
     /// negative spike can be averaged away. A bucket that observed any missing
     /// value also carries one explicit `None` point, which breaks the rendered
     /// line instead of pretending the arm reported through the gap.
-    pub fn timeline_traces(
+    pub(crate) fn timeline_traces(
         &self,
         id: &str,
         buckets: usize,
@@ -1102,7 +1089,7 @@ impl EpisodeStore {
     }
 
     /// Write the kept takes out as a dataset.
-    pub fn export(&self, destination: &Path) -> Result<ExportResponse, EpisodeError> {
+    pub(crate) fn export(&self, destination: &Path) -> Result<ExportResponse, EpisodeError> {
         if destination.exists() {
             return Err(EpisodeError::AlreadyExists(destination.to_path_buf()));
         }
@@ -1369,7 +1356,6 @@ pub(crate) trait EpisodeWriteSession: Send {
     fn start(&self) -> &EpisodeStart;
     fn push(&self, sample: Sample) -> bool;
     fn checkpoint(&self) -> Result<EpisodeCheckpoint, String>;
-    fn written(&self) -> u64;
     fn failure(&self) -> Option<String>;
     fn finish(
         self: Box<Self>,
@@ -1388,7 +1374,7 @@ pub(crate) type EpisodeCheckpoint = tokio::sync::oneshot::Receiver<Result<(), St
 ///
 /// Hardware owns this small facade. The concrete backend owns its worker,
 /// queue, recovery state, and publication rules.
-pub struct EpisodeWriter {
+pub(crate) struct EpisodeWriter {
     session: Box<dyn EpisodeWriteSession>,
 }
 
@@ -1399,31 +1385,27 @@ impl EpisodeWriter {
         }
     }
 
-    pub fn id(&self) -> &str {
+    pub(crate) fn id(&self) -> &str {
         &self.session.start().id
     }
 
-    pub fn started_ms(&self) -> i64 {
+    pub(crate) fn started_ms(&self) -> i64 {
         self.session.start().started_ms
     }
 
-    pub fn push(&self, sample: Sample) -> bool {
+    pub(crate) fn push(&self, sample: Sample) -> bool {
         self.session.push(sample)
     }
 
-    pub fn checkpoint(&self) -> Result<EpisodeCheckpoint, String> {
+    pub(crate) fn checkpoint(&self) -> Result<EpisodeCheckpoint, String> {
         self.session.checkpoint()
     }
 
-    pub fn written(&self) -> u64 {
-        self.session.written()
-    }
-
-    pub fn failure(&self) -> Option<String> {
+    pub(crate) fn failure(&self) -> Option<String> {
         self.session.failure()
     }
 
-    pub fn finish(
+    pub(crate) fn finish(
         self,
         duration_seconds: f64,
         recording_gaps: Vec<RecordingGap>,
@@ -1570,10 +1552,6 @@ impl EpisodeWriteSession for JsonlEpisodeWriter {
 
     fn checkpoint(&self) -> Result<EpisodeCheckpoint, String> {
         self.checkpoint_writer()
-    }
-
-    fn written(&self) -> u64 {
-        self.written_samples()
     }
 
     fn failure(&self) -> Option<String> {
@@ -1847,7 +1825,7 @@ fn unix_millis() -> i64 {
 ///
 /// The same restraint the robot workspace applies to a robot ID, for the same
 /// reason: the ID becomes a file name.
-pub fn validate_episode_id(id: &str) -> Result<(), EpisodeError> {
+pub(crate) fn validate_episode_id(id: &str) -> Result<(), EpisodeError> {
     let acceptable = !id.is_empty()
         && id.len() <= 64
         && id.chars().all(|character| {
@@ -1859,7 +1837,7 @@ pub fn validate_episode_id(id: &str) -> Result<(), EpisodeError> {
 }
 
 /// Names the arms a take will sample, rejecting duplicates.
-pub fn build_arms(arms: &[(String, Vec<String>)]) -> Result<Vec<EpisodeArm>, EpisodeError> {
+pub(crate) fn build_arms(arms: &[(String, Vec<String>)]) -> Result<Vec<EpisodeArm>, EpisodeError> {
     let mut seen = BTreeSet::new();
     let mut built = Vec::with_capacity(arms.len());
     for (id, joints) in arms {
@@ -2136,7 +2114,9 @@ mod tests {
         );
         assert!(!episodes[0].usable());
         assert!(
-            store.trajectory("episode_000001", "follower").is_err(),
+            store
+                .trajectory_at("episode_000001", "follower", 0.0)
+                .is_err(),
             "an unfinished take must not be replayable"
         );
     }
@@ -2147,13 +2127,16 @@ mod tests {
         record(&store, 3);
 
         let frames = store
-            .trajectory("episode_000001", "follower")
-            .expect("trajectory");
+            .trajectory_at("episode_000001", "follower", 0.0)
+            .expect("trajectory")
+            .frames;
         assert_eq!(frames.len(), 3);
         assert_eq!(frames[0]["gripper"], 0.5);
         assert_eq!(frames[2]["shoulder_pan"], 0.2);
         assert!(
-            store.trajectory("episode_000001", "leader").is_err(),
+            store
+                .trajectory_at("episode_000001", "leader", 0.0)
+                .is_err(),
             "an arm the take never recorded has no trajectory"
         );
     }
@@ -2321,7 +2304,7 @@ mod tests {
         store.reload().expect("reload");
 
         let error = store
-            .trajectory("episode_000001", "follower")
+            .trajectory_at("episode_000001", "follower", 0.0)
             .expect_err("nothing to replay");
         assert!(error.to_string().contains("nothing to replay"), "{error}");
     }

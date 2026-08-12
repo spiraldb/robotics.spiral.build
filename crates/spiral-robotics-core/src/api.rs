@@ -443,9 +443,9 @@ pub struct TrainingSnapshot {
     pub runs: Vec<TrainingRun>,
 }
 
-pub const MAX_TRAINING_METRIC_POINTS: usize = 1_200;
-pub const MAX_TRAINING_LOG_LINES: usize = 120;
-pub const MAX_TRAINING_CHECKPOINTS: usize = 1_000;
+const MAX_TRAINING_METRIC_POINTS: usize = 1_200;
+const MAX_TRAINING_LOG_LINES: usize = 120;
+const MAX_TRAINING_CHECKPOINTS: usize = 1_000;
 pub const MAX_TRAINING_HISTORY_RUNS: usize = 40;
 
 /// Incremental training event sent after the initial snapshot.
@@ -933,12 +933,6 @@ pub enum MotorCondition {
     Nominal,
     Caution,
     Fault,
-}
-
-impl MotorCondition {
-    pub fn is_nominal(self) -> bool {
-        self == Self::Nominal
-    }
 }
 
 /// How close to a motor's own limit is close enough to report, as a fraction.

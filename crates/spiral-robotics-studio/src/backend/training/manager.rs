@@ -37,7 +37,7 @@ const MAX_CHECKPOINT_BYTES: u64 = 240 * 1024 * 1024;
 static RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
-pub struct TrainingManager {
+pub(crate) struct TrainingManager {
     inner: Arc<TrainingManagerInner>,
 }
 
@@ -99,7 +99,7 @@ enum WorkerTerminal {
 }
 
 impl TrainingManager {
-    pub async fn open(
+    pub(crate) async fn open(
         root: PathBuf,
         mut python: PathBuf,
         mut worker_script: PathBuf,
@@ -148,20 +148,20 @@ impl TrainingManager {
         Ok(manager)
     }
 
-    pub fn snapshot(&self) -> TrainingSnapshot {
+    pub(crate) fn snapshot(&self) -> TrainingSnapshot {
         lock(&self.inner.snapshot).clone()
     }
 
     /// Capture the initial state and subscribe to later changes as one ordered
     /// operation. Publishers send while holding the same snapshot lock, so an
     /// update can appear in the snapshot or the receiver, never both.
-    pub fn subscription(&self) -> (TrainingSnapshot, broadcast::Receiver<TrainingUpdate>) {
+    pub(crate) fn subscription(&self) -> (TrainingSnapshot, broadcast::Receiver<TrainingUpdate>) {
         let snapshot = lock(&self.inner.snapshot);
         let updates = self.inner.updates.subscribe();
         (snapshot.clone(), updates)
     }
 
-    pub async fn refresh_readiness(&self) -> TrainingReadiness {
+    pub(crate) async fn refresh_readiness(&self) -> TrainingReadiness {
         let next = readiness(&self.inner.python_probe, &self.inner.storage).await;
         if lock(&self.inner.snapshot).readiness != next {
             self.publish(
@@ -174,7 +174,7 @@ impl TrainingManager {
         next
     }
 
-    pub async fn start(&self, request: StartTrainingRequest) -> Result<TrainingRun, String> {
+    pub(crate) async fn start(&self, request: StartTrainingRequest) -> Result<TrainingRun, String> {
         validate_request(&request)?;
         let readiness = self.refresh_readiness().await;
         if !readiness.ready {
@@ -233,7 +233,7 @@ impl TrainingManager {
         Ok(run)
     }
 
-    pub fn stop(&self, run_id: &str) -> Result<(), String> {
+    pub(crate) fn stop(&self, run_id: &str) -> Result<(), String> {
         let sender = lock(&self.inner.controls).remove(run_id);
         let Some(sender) = sender else {
             return Err(format!("training run {run_id:?} is not active"));
@@ -251,7 +251,7 @@ impl TrainingManager {
         Ok(())
     }
 
-    pub async fn shutdown(&self) {
+    pub(crate) async fn shutdown(&self) {
         let controls = std::mem::take(&mut *lock(&self.inner.controls));
         for (_, sender) in controls {
             let _ = sender.send(());

@@ -53,11 +53,6 @@
   --tone-viewport: #f5f5f3;
   --tone-camera: #1f1f1f;
 
-  /* The one shadow colour the studio spells out for itself; the rest come from
-     Tailwind's own `shadow-sm` and `shadow-lg`. It lived as a bare literal in
-     the mobile switcher rule, which made it the only colour in the file not
-     declared up here. */
-  --tone-lift: rgb(0 0 0 / 0.12);
 }
 
 /* Studio workbench v2 ----------------------------------------------------
@@ -120,75 +115,8 @@
     border-top: 0;
   }
 
-  /* One stable divider owns the complete Live/Data workbench against the
-     complete visualization, including the Timeline. The eight-pixel target is
-     forgiving to point at while the one-pixel rule keeps the bench visually
-     dense. These names stay distinct from the retired three-pane splitters. */
-  .studio-workbench-split {
-    @apply flex min-h-0 min-w-0 flex-1 overflow-hidden bg-canvas;
-  }
-
-  .studio-workbench-split-region {
-    @apply min-h-0 min-w-0 overflow-hidden;
-  }
-
-  .studio-workbench-split-region > * {
-    height: 100%;
-    min-height: 0;
-    min-width: 0;
-  }
-
-  .studio-workbench-split-workbench {
-    @apply shrink-0 grow-0 bg-surface;
-  }
-
-  .studio-workbench-split-visualization {
-    @apply flex-1 bg-canvas;
-  }
-
-  .studio-workbench-split .studio-v2-workbench {
-    border-right: 0;
-  }
-
-  .studio-workbench-splitter {
-    @apply relative z-20 w-2 shrink-0 cursor-col-resize touch-none bg-canvas;
-  }
-
-  .studio-workbench-splitter::after {
-    content: "";
-    @apply absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-line transition-colors duration-100;
-  }
-
-  .studio-workbench-splitter:hover::after,
-  .studio-workbench-splitter:focus-visible::after,
-  .studio-workbench-split-resizing .studio-workbench-splitter::after {
-    background: var(--tone-accent);
-  }
-
-  .studio-workbench-splitter:focus-visible {
-    outline-offset: -2px;
-  }
-
-  .studio-workbench-split-resizing,
-  .studio-workbench-split-resizing * {
-    cursor: col-resize !important;
-    user-select: none;
-  }
-
   .studio-workbench-scroll {
     @apply h-full min-h-0 overflow-y-auto bg-surface;
-  }
-
-  .workbench-title {
-    @apply sticky top-0 z-20 flex min-h-9 items-center gap-2 border-b border-line bg-surface px-3;
-  }
-
-  .workbench-title h2 {
-    @apply text-[12px] font-semibold tracking-[-0.01em];
-  }
-
-  .workbench-title span {
-    @apply ml-auto text-[10px] text-ink-faint;
   }
 
   .live-robot-roster {
@@ -253,35 +181,16 @@
     @apply ml-auto text-[10px] text-ink-faint;
   }
 
-  .workbench-summary {
-    @apply cursor-pointer list-none transition-colors hover:bg-hover;
-  }
-
-  .workbench-summary::-webkit-details-marker {
-    display: none;
-  }
-
   .studio-button {
     @apply inline-flex min-h-7 cursor-pointer items-center justify-center gap-1 bg-surface px-2 text-[11px] text-ink-soft transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-45;
   }
 
-  .studio-button-primary {
-    @apply text-accent-ink;
-    background: var(--tone-accent);
-  }
-
-  .studio-button-danger,
-  .studio-button-danger-quiet {
+  .studio-button-danger {
     color: var(--tone-danger);
   }
 
   .studio-button-danger {
     background: var(--tone-danger-soft);
-  }
-
-  .record-start-button {
-    @apply mx-3 mb-3 flex min-h-8 cursor-pointer items-center justify-center gap-2 rounded border border-line bg-surface px-3 text-[11px] font-medium transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-45;
-    width: calc(100% - 1.5rem);
   }
 
   .control-segmented {
@@ -312,13 +221,6 @@
 
   .inline-safety-confirm > span {
     @apply min-w-40 flex-1;
-  }
-
-  .studio-v2-visualization {
-    min-width: 0;
-    min-height: 0;
-    overflow: hidden;
-    background: var(--tone-canvas);
   }
 
   .camera-editor-content {
@@ -375,35 +277,6 @@
 
   .editor-empty span {
     @apply max-w-[36ch] text-[11px] text-ink-faint;
-  }
-
-  .visualization-timeline {
-    @apply min-h-0 min-w-0 overflow-hidden bg-surface;
-  }
-
-  .visualization-timeline > .studio-timeline {
-    height: 100%;
-    border-top: 0;
-  }
-
-  .empty-studio-timeline {
-    @apply flex h-full flex-col bg-surface;
-  }
-
-  .empty-studio-timeline header {
-    @apply min-h-8 border-b border-line px-3 py-2 text-[11px] font-medium;
-  }
-
-  .empty-studio-timeline > div {
-    @apply flex flex-1 flex-col items-center justify-center gap-1 text-center;
-  }
-
-  .empty-studio-timeline strong {
-    @apply text-[12px] font-medium;
-  }
-
-  .empty-studio-timeline span {
-    @apply text-[11px] text-ink-faint;
   }
 
   .studio-status-bar {
@@ -1455,29 +1328,12 @@
     scrollbar-width: thin;
   }
 
-  /* The one authored loop in the studio: the card of the take being recorded
-     right now. Border and wash, never geometry, so nothing in the strip moves. */
-  @keyframes take-pulse {
-    0%,
-    100% {
-      border-color: var(--tone-danger);
-      background: var(--tone-danger-soft);
-    }
-    50% {
-      border-color: color-mix(in srgb, var(--tone-danger) 45%, transparent);
-      background: var(--tone-surface);
-    }
-  }
-
   @media (prefers-reduced-motion: reduce) {
     *,
     *::before,
     *::after {
       scroll-behavior: auto !important;
       transition-duration: 0.01ms !important;
-      /* Animations, not just transitions: an infinite pulse ignores a
-         transition override entirely. The live take keeps its red border and
-         wash — it settles on the first keyframe rather than disappearing. */
       animation-duration: 0.01ms !important;
       animation-iteration-count: 1 !important;
     }
@@ -1534,37 +1390,6 @@
   .status-dot {
     @apply h-1.5 w-1.5 shrink-0 rounded-full;
     background: var(--tone-good);
-  }
-
-  /* The ordinary environment, stated without a badge. Simulation and "unknown"
-     keep their chips, because those are the states worth a colour; physical
-     hardware is the default, and a permanent ochre pill announcing the default
-     is how a status cluster teaches an operator to stop reading it. */
-  .status-environment {
-    @apply whitespace-nowrap text-ink-faint;
-  }
-
-  .connection-label {
-    font-variant-numeric: tabular-nums;
-  }
-
-  /*
-    A live rate redrawn twice a second cannot also be allowed to resize: the
-    whole status cluster is pushed by `ml-auto`, so one dropped digit slid every
-    chip beside it sideways. Fixed box, tabular figures, right-aligned so the
-    Hz never moves.
-  */
-  .control-rate-value {
-    @apply inline-block min-w-16 text-right font-mono;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .control-rate-slow {
-    color: var(--tone-caution);
-  }
-
-  .control-rate-slow .status-dot {
-    background: var(--tone-caution);
   }
 
   /*
@@ -1850,37 +1675,6 @@
     overflow-wrap: anywhere;
   }
 
-  .reconnect-guard {
-    @apply absolute inset-0 z-30 flex items-start justify-center bg-surface/70 pt-8 backdrop-blur-[1px];
-  }
-
-  .reconnect-card {
-    @apply flex items-center gap-1.5 rounded border border-line bg-surface px-2 py-1 text-[11px] text-ink shadow-sm;
-  }
-
-  .issue-details {
-    @apply min-w-0;
-  }
-
-  .issue-icon {
-    @apply inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border border-current text-[10px] font-bold;
-  }
-
-  /* The first issue's own words, beside the count. The class existed and had a
-     breakpoint rule written for it, but nothing ever rendered it — so what was
-     actually wrong stayed one click away at every width. */
-  .issue-preview {
-    @apply max-w-40 truncate text-ink-soft;
-  }
-
-  .issue-list {
-    @apply max-h-28 space-y-1 overflow-y-auto pb-1 text-ink-soft;
-  }
-
-  .issue-dismiss {
-    @apply min-h-6 shrink-0;
-  }
-
   .notice-positioner {
     @apply pointer-events-none fixed inset-x-0 bottom-0 z-50 flex justify-center p-2;
   }
@@ -1942,16 +1736,6 @@
   .chip {
     @apply inline-flex items-center gap-1 rounded px-1 py-0 text-[11px] text-ink-soft;
     background-color: var(--tone-hover);
-  }
-
-  .chip-danger {
-    @apply text-danger;
-    background-color: var(--tone-danger-soft);
-  }
-
-  .chip-active {
-    @apply text-accent;
-    background: var(--tone-selected);
   }
 
   .chip-caution {
@@ -2055,45 +1839,6 @@
      rule that separates it from the face buttons above. */
   .viewport-axis-key {
     @apply border-line;
-  }
-
-  /* Issues belong to the status cluster, and the first of them is readable
-     without opening anything; the rest stay one click away in a small anchored
-     popover. */
-  .issue-details {
-    @apply relative shrink-0;
-  }
-
-  .issue-summary {
-    @apply flex min-h-6 cursor-pointer list-none items-center gap-1 rounded px-1 text-[11px] text-caution hover:bg-caution-soft;
-  }
-
-  .issue-summary::-webkit-details-marker {
-    display: none;
-  }
-
-  .issue-icon {
-    @apply inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border border-current text-[10px] font-semibold;
-  }
-
-  .issue-popover {
-    @apply absolute top-[calc(100%+4px)] right-0 z-50 w-72 rounded border border-line bg-surface p-1.5 text-[11px] text-ink-soft shadow-lg;
-  }
-
-  .issue-list {
-    @apply max-h-36 space-y-1 overflow-y-auto pb-1;
-  }
-
-  .issue-list > li {
-    @apply rounded bg-sunken px-1.5 py-1;
-  }
-
-  .issue-list strong {
-    @apply block font-medium text-ink;
-  }
-
-  .issue-dismiss {
-    @apply mt-0.5 min-h-6;
   }
 
   /* Device hierarchy: identity and readiness first, setup details second, file
@@ -2262,494 +2007,5 @@
 
   .device-delete:hover {
     @apply text-danger;
-  }
-
-  /* Light, compact dataset workflow. */
-  .timeline-rail {
-    @apply flex shrink-0 flex-col border-t border-line bg-surface text-ink-soft;
-  }
-
-  .timeline-toolbar {
-    @apply flex min-h-7 items-center gap-3 border-b border-line px-2 py-0.5;
-  }
-
-  .timeline-transport {
-    @apply flex min-w-0 flex-row items-center gap-1.5;
-    width: auto;
-    max-width: none;
-    flex: 0 0 auto;
-    justify-content: flex-start;
-  }
-
-  /* The one control reached for with a hand still on the arm, so it stays the
-     tallest thing in the rail at 28px while everything around it drops to 24. */
-  .take-button {
-    @apply inline-flex min-h-7 cursor-pointer items-center justify-center gap-1.5 rounded bg-accent px-2 text-[12px] font-medium text-accent-ink transition-colors hover:brightness-110 disabled:cursor-not-allowed;
-  }
-
-  .take-button:disabled {
-    @apply bg-sunken text-ink-faint;
-    box-shadow: inset 0 0 0 1px var(--tone-line);
-  }
-
-  .take-button-live {
-    @apply bg-danger text-white;
-  }
-
-  /* Clock and caption sit on one baseline instead of stacking. The stack was
-     what set the toolbar's height: 22px of digits over a 10px caption made a
-     48px row out of a control that is 28px tall. */
-  .timeline-clock {
-    @apply flex items-baseline gap-1.5;
-  }
-
-  .timeline-elapsed {
-    @apply block min-w-14 font-mono text-[16px] leading-none font-medium tracking-[-0.02em] text-ink;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .timeline-readout-label {
-    @apply text-[10px] whitespace-nowrap text-ink-faint;
-  }
-
-  .take-cancel {
-    @apply inline-flex min-h-6 cursor-pointer items-center rounded px-1.5 text-[11px] text-ink-soft hover:bg-hover hover:text-danger;
-  }
-
-  /* Cancel carries its shortcut beside it, the way Record carries "R to
-     record" — the way out of a bad take is as visible as the way into one. */
-  .take-cancel-block {
-    @apply flex items-baseline gap-1;
-  }
-
-  /* A blocker explains why a control will not act, so it wraps to stay readable
-     instead of running off the end of a narrow toolbar. */
-  .take-blocked {
-    @apply text-[11px] leading-snug text-ink-soft;
-    min-width: 0;
-  }
-
-  /* Progress for the take currently driving an arm, beside its stop control.
-     Fixed width, because it counts to four digits while the operator is
-     watching the arm rather than the number, and Stop must not walk. */
-  .episode-progress {
-    @apply inline-block min-w-24 font-mono text-[11px] whitespace-nowrap text-ink-soft;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .timeline-summary {
-    @apply ml-auto flex min-w-0 flex-row items-center gap-2;
-  }
-
-  .session-count {
-    @apply flex items-baseline gap-1 whitespace-nowrap text-[11px] text-ink-soft;
-  }
-
-  .session-count strong {
-    @apply font-mono text-[12px] font-medium text-ink;
-  }
-
-  .session-duration {
-    @apply ml-1.5 font-mono text-[10px] text-ink-faint;
-  }
-
-  .session-excluded {
-    @apply ml-1.5 text-[10px] text-caution;
-  }
-
-  .dataset-import,
-  .dataset-download {
-    @apply whitespace-nowrap;
-  }
-
-  .dataset-importing {
-    @apply cursor-wait text-ink-faint;
-  }
-
-  .dataset-import:focus-within {
-    outline: 2px solid var(--tone-accent);
-    outline-offset: 2px;
-  }
-
-  /* The strip is the toolbar's elastic middle: it takes whatever width Record
-     and the session actions leave, and scrolls inside it. */
-  .episode-strip-wrap {
-    @apply min-w-0 flex-1;
-  }
-
-  /*
-    There is no heading row over the strip any more. "Episodes / Select one to
-    replay" spent 24 permanent pixels restating what a row of episode buttons
-    already is. The one fact that row carried which the strip cannot show — that
-    older takes exist beyond the cap — is now a card at the head of the strip,
-    where it is both truer and free.
-  */
-  /* The cards set the row's height; no floor of its own, or the toolbar would
-     reserve space the strip is not using. */
-  .episode-strip {
-    @apply flex items-center gap-1 overflow-x-auto;
-    scrollbar-color: var(--tone-line) transparent;
-  }
-
-  .episode-card,
-  .episode-strip > li {
-    @apply relative shrink-0;
-  }
-
-  .episode-strip-older {
-    @apply flex h-9 shrink-0 items-center rounded border border-dashed border-line px-1.5 text-[10px] whitespace-nowrap text-ink-faint;
-  }
-
-  /* The same height as a card, so the rail does not jump when the first take
-     lands and the empty state gives way to the strip. */
-  .episode-strip-empty {
-    @apply flex min-h-9 items-center gap-1.5 text-[11px] text-ink-faint;
-  }
-
-  .episode-strip-empty strong {
-    @apply font-medium text-ink;
-  }
-
-  /*
-    Three facts on two lines: the id and its duration share a baseline, the
-    exportable state sits under them. It was three stacked lines in a 48px card;
-    nothing was dropped, the card just stopped spending a line on each fact.
-    Delete is still revealed over the card rather than given a permanent gutter.
-  */
-  .episode-item {
-    @apply flex h-9 w-18 cursor-pointer flex-col justify-center gap-0.5 rounded border border-line bg-canvas px-1.5 py-0 text-left transition-colors hover:border-ink-faint hover:bg-hover;
-  }
-
-  .episode-item-head {
-    @apply flex items-baseline justify-between gap-1;
-  }
-
-  .episode-delete {
-    @apply invisible absolute right-0 bottom-0 z-10 inline-flex h-6 w-6 cursor-pointer items-center justify-center rounded bg-surface/90 text-ink-faint opacity-0 transition-[color,background-color,opacity] hover:bg-danger-soft hover:text-danger focus-visible:text-danger;
-  }
-
-  .episode-card:hover .episode-delete,
-  .episode-card:focus-within .episode-delete {
-    @apply visible opacity-100;
-  }
-
-  .episode-delete .ui-icon {
-    @apply h-3 w-3;
-  }
-
-  /* Sized to its buttons rather than to the card, so the confirmation can hold
-     two full-size targets instead of shrinking them below the control floor. */
-  .episode-delete-confirm {
-    @apply absolute inset-y-0 left-0 z-20 flex w-max min-w-full items-center justify-end gap-1 rounded border border-danger bg-surface p-1;
-  }
-
-  /* The confirmation is wider than the 72px card it covers, and the strip it
-     lives in scrolls horizontally — so the card makes room for it rather than
-     letting the scroller clip "Cancel" off the edge of the last take in view. */
-  .episode-card:has(.episode-delete-confirm) {
-    min-width: 8rem;
-  }
-
-  .episode-delete-yes,
-  .episode-delete-no {
-    @apply inline-flex min-h-6 cursor-pointer items-center justify-center rounded px-1.5 text-[11px] font-medium;
-  }
-
-  /* The confirm is the slower of the two choices, so it is not also the louder
-     one: destructive is red text on transparent, never a filled call to action. */
-  .episode-delete-yes {
-    @apply text-danger hover:bg-danger-soft;
-  }
-
-  .episode-delete-no {
-    @apply bg-sunken text-ink-soft hover:text-ink;
-  }
-
-  .episode-item-selected {
-    @apply border-accent bg-selected;
-    box-shadow: inset 0 0 0 1px var(--tone-accent);
-  }
-
-  .episode-item-live {
-    @apply cursor-default border-danger bg-danger-soft;
-    animation: take-pulse 1.6s ease-in-out infinite;
-  }
-
-  .episode-item-problem {
-    @apply border-danger text-danger;
-  }
-
-  .episode-item-cancelled {
-    @apply bg-sunken text-ink-faint;
-  }
-
-  .episode-index {
-    @apply truncate font-mono text-[11px] leading-none font-medium text-ink;
-  }
-
-  .episode-duration {
-    @apply shrink-0 font-mono text-[10px] leading-none text-ink-soft;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .episode-state {
-    @apply truncate text-[10px] leading-none text-ink-faint;
-  }
-
-  .episode-detail {
-    @apply flex min-h-7 items-center gap-3 px-2 py-0.5;
-  }
-
-  .episode-detail-empty {
-    @apply text-[11px] text-ink-faint;
-  }
-
-  .episode-detail-title {
-    @apply flex shrink-0 items-center gap-1.5;
-  }
-
-  .episode-detail-title strong {
-    @apply font-mono text-[11px] font-medium text-ink;
-  }
-
-  /*
-    The facts do not stretch and Replay is not pinned to the far edge. On a wide
-    window that pairing put a lone button a thousand pixels away from the take
-    it acts on, with nothing in between; the row now reads left to right and
-    simply ends, which is what a row that has run out of things to say should
-    look like.
-  */
-  .episode-facts {
-    @apply flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-0;
-  }
-
-  .episode-fact {
-    @apply flex items-baseline gap-1 whitespace-nowrap;
-  }
-
-  .episode-fact dt {
-    @apply text-[10px] text-ink-faint;
-  }
-
-  .episode-fact dd {
-    @apply font-mono text-[10px] text-ink-soft;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .episode-actions {
-    @apply flex shrink-0 flex-wrap items-center gap-1;
-  }
-
-  /* No minimum width: "Replay on follower" already sets the button's size, and
-     a floor only added blank fill around a label that was never short. */
-  .episode-replay {
-    @apply shrink-0;
-  }
-
-  .episode-problem {
-    @apply text-[10px] text-danger;
-  }
-
-  .timeline-collapsed-note {
-    @apply text-[11px] text-ink-faint;
-  }
-
-  /* The full Dataset rail is an on-demand work surface. Its collapsed state
-     keeps the recording transport visible and gives the remaining width to one
-     calm explanation instead of rendering a second toolbar of inactive tools. */
-  .timeline-rail-compact .timeline-toolbar {
-    border-bottom: 0;
-  }
-
-  .dataset-sheet-toggle,
-  .dataset-sheet-header {
-    display: none;
-  }
-
-  .timeline-rail .btn-primary {
-    @apply text-accent-ink;
-  }
-}
-
-@media (max-width: 900px) {
-  .timeline-toolbar,
-  .episode-detail {
-    flex-wrap: wrap;
-  }
-
-  /* Once the toolbar wraps, the strip takes a line of its own rather than being
-     squeezed between the transport and the session actions. */
-  .episode-strip-wrap {
-    order: 3;
-    width: 100%;
-    flex-basis: 100%;
-  }
-
-  .timeline-summary {
-    margin-left: auto;
-  }
-}
-
-@media (max-width: 760px) {
-  .timeline-rail {
-    max-height: 58vh;
-    overflow-y: auto;
-    box-shadow: 0 -6px 18px color-mix(in srgb, var(--tone-ink) 10%, transparent);
-  }
-
-  .timeline-toolbar {
-    gap: 0.5rem;
-  }
-
-  .dataset-sheet-header {
-    display: flex;
-    min-height: 2.75rem;
-    flex: 0 0 auto;
-    align-items: center;
-    justify-content: space-between;
-    border-bottom: 1px solid var(--tone-line);
-    padding: 0 0.5rem;
-    color: var(--tone-ink);
-  }
-
-  .dataset-sheet-close,
-  .dataset-sheet-toggle {
-    min-height: 2.75rem;
-    cursor: pointer;
-    border-radius: 0.25rem;
-    padding: 0 0.75rem;
-    color: var(--tone-accent);
-    font-weight: 500;
-  }
-
-  .dataset-sheet-close:hover,
-  .dataset-sheet-toggle:hover {
-    background: var(--tone-hover);
-  }
-
-  .timeline-rail-compact {
-    max-height: none;
-    overflow: hidden;
-    box-shadow: none;
-  }
-
-  .timeline-rail-compact .timeline-toolbar {
-    min-height: 2.75rem;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) max-content;
-    padding-block: 0;
-  }
-
-  .timeline-rail-compact .timeline-transport {
-    width: auto;
-    flex-wrap: wrap;
-  }
-
-  .timeline-rail-compact .timeline-readout-label {
-    display: none;
-  }
-
-  .timeline-rail-compact .take-blocked {
-    order: 10;
-    flex-basis: 100%;
-  }
-
-  .dataset-sheet-toggle {
-    display: inline-flex;
-    margin-left: auto;
-    align-items: center;
-  }
-
-  .timeline-collapsed-note {
-    display: none;
-  }
-
-  .timeline-transport {
-    width: 100%;
-  }
-
-  .take-button {
-    min-height: 2.75rem;
-  }
-
-  .timeline-summary {
-    display: grid;
-    width: 100%;
-    margin-left: 0;
-    grid-template-columns: minmax(0, 1fr) max-content;
-    align-items: center;
-    gap: 0.25rem 0.5rem;
-  }
-
-  .session-count {
-    grid-column: 1 / -1;
-    flex-wrap: wrap;
-    white-space: normal;
-  }
-
-  .dataset-import {
-    grid-column: 1;
-    justify-self: start;
-  }
-
-  .dataset-download {
-    grid-column: 2;
-    justify-self: end;
-  }
-
-  .timeline-summary > .take-blocked {
-    grid-column: 1 / -1;
-  }
-
-  .timeline-summary .btn,
-  .timeline-summary .dataset-import {
-    min-height: 2.75rem;
-  }
-
-  /* Touch has no hover, so delete stays visible here — and the card grows to
-     hold a 44px target without taking the room its own labels need. */
-  .episode-item {
-    width: 7.5rem;
-    height: 2.75rem;
-    padding-right: 2.75rem;
-  }
-
-  .episode-strip {
-    min-height: 3rem;
-  }
-
-  .episode-delete {
-    visibility: visible;
-    opacity: 1;
-    width: 2.75rem;
-    height: 2.75rem;
-  }
-
-  .episode-delete .ui-icon {
-    width: 0.875rem;
-    height: 0.875rem;
-  }
-
-  .episode-delete-yes,
-  .episode-delete-no {
-    min-height: 2.75rem;
-  }
-
-  .episode-detail-title,
-  .episode-facts,
-  .episode-actions {
-    width: 100%;
-  }
-
-  .episode-detail-title {
-    min-width: 0;
-  }
-
-  .issue-popover {
-    position: fixed;
-    top: 3rem;
-    right: 0.5rem;
-    left: 0.5rem;
-    width: auto;
   }
 }

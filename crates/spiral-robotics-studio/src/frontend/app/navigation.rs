@@ -60,15 +60,15 @@ pub(crate) fn use_shell_controller() -> ShellController {
 }
 
 impl ShellController {
-    pub fn activity(&self) -> Activity {
+    pub(super) fn activity(&self) -> Activity {
         self.state.read().activity
     }
 
-    pub fn settings_open(&self) -> bool {
+    pub(super) fn settings_open(&self) -> bool {
         self.state.read().settings_open
     }
 
-    pub fn dispatch(mut self, action: ShellAction) -> Option<ShellEffect> {
+    pub(super) fn dispatch(mut self, action: ShellAction) -> Option<ShellEffect> {
         let current = self.state.peek();
         let (next, effect) = reduce_shell(&current, action);
         let changed = *current != next;

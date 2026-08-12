@@ -41,21 +41,21 @@ use spiral_robotics_core::calibration::{
 use tokio::sync::{oneshot, watch};
 
 /// How often the control loop runs.
-pub const CONTROL_HZ: u64 = 60;
-pub const CONTROL_PERIOD: Duration = Duration::from_nanos(1_000_000_000 / CONTROL_HZ);
+pub(crate) const CONTROL_HZ: u64 = 60;
+pub(crate) const CONTROL_PERIOD: Duration = Duration::from_nanos(1_000_000_000 / CONTROL_HZ);
 
 /// Default ceiling on how far one joint may be commanded to move per cycle.
 ///
 /// At the control rate above this is roughly 100 degrees per second, which is
 /// brisk enough for teleoperation and slow enough to stay in front of.
-pub const DEFAULT_MAX_STEP_COUNTS: i64 = 20;
+pub(crate) const DEFAULT_MAX_STEP_COUNTS: i64 = 20;
 
 /// Default teleoperation ceiling on follower movement per control cycle.
 ///
 /// Manual slider moves stay deliberately gentle. A follower has to keep up
 /// with ordinary hand motion, so it gets a faster, still-bounded ramp instead
 /// of accumulating a large pose error behind the leader.
-pub const DEFAULT_TELEOP_MAX_STEP_COUNTS: i64 = 40;
+pub(crate) const DEFAULT_TELEOP_MAX_STEP_COUNTS: i64 = 40;
 
 /// Consecutive failed transfers before a bus is considered lost.
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
@@ -77,7 +77,7 @@ type Reply<T> = oneshot::Sender<Result<T, String>>;
 
 /// Everything the control thread needs to open one arm.
 #[derive(Clone, Debug)]
-pub struct RobotSpec {
+pub(crate) struct RobotSpec {
     pub id: String,
     pub port: PortSettings,
     pub motors: BTreeMap<String, MotorSpec>,
@@ -86,7 +86,7 @@ pub struct RobotSpec {
 
 /// Tuning for the control loop.
 #[derive(Clone, Copy, Debug)]
-pub struct ControlSettings {
+pub(crate) struct ControlSettings {
     pub period: Duration,
     /// Largest change in encoder counts applied to a joint in one cycle.
     pub max_step_counts: i64,
@@ -109,7 +109,7 @@ impl Default for ControlSettings {
 
 /// A published sample of everything the control thread knows.
 #[derive(Clone, Debug, Default)]
-pub struct HardwareState {
+pub(crate) struct HardwareState {
     pub telemetry: TelemetryFrame,
     /// Every robot the thread has been asked to connect, including ones whose
     /// bus has since been lost, so the reason stays visible.
@@ -393,7 +393,7 @@ impl Replay {
 
 /// The asynchronous side of the control thread.
 #[derive(Debug)]
-pub struct HardwareHandle {
+pub(crate) struct HardwareHandle {
     commands: Sender<Command>,
     state: watch::Receiver<HardwareState>,
     thread: Mutex<Option<JoinHandle<()>>>,
@@ -401,7 +401,7 @@ pub struct HardwareHandle {
 
 impl HardwareHandle {
     /// Start the control thread.
-    pub fn spawn(settings: ControlSettings) -> Self {
+    pub(crate) fn spawn(settings: ControlSettings) -> Self {
         let (commands, requests) = mpsc::channel();
         let (state, receiver) = watch::channel(HardwareState::default());
         let thread = thread::Builder::new()
@@ -416,18 +416,13 @@ impl HardwareHandle {
         }
     }
 
-    /// Watch the control thread's published state.
-    pub fn subscribe(&self) -> watch::Receiver<HardwareState> {
-        self.state.clone()
-    }
-
     /// Read the control thread's most recent state.
-    pub fn state(&self) -> HardwareState {
+    pub(crate) fn state(&self) -> HardwareState {
         self.state.borrow().clone()
     }
 
     /// Open a robot's motor bus.
-    pub async fn connect(&self, spec: RobotSpec) -> Result<(), String> {
+    pub(crate) async fn connect(&self, spec: RobotSpec) -> Result<(), String> {
         self.request(|reply| Command::Connect {
             spec: Box::new(spec),
             reply,
@@ -436,7 +431,7 @@ impl HardwareHandle {
     }
 
     /// Close a robot's motor bus.
-    pub async fn disconnect(&self, id: &str) -> Result<(), String> {
+    pub(crate) async fn disconnect(&self, id: &str) -> Result<(), String> {
         self.request(|reply| Command::Disconnect {
             id: id.to_owned(),
             reply,
@@ -445,7 +440,7 @@ impl HardwareHandle {
     }
 
     /// Switch a robot's holding torque.
-    pub async fn set_torque(&self, id: &str, enabled: bool) -> Result<(), String> {
+    pub(crate) async fn set_torque(&self, id: &str, enabled: bool) -> Result<(), String> {
         self.request(|reply| Command::SetTorque {
             id: id.to_owned(),
             enabled,
@@ -455,7 +450,7 @@ impl HardwareHandle {
     }
 
     /// Command joint targets in normalized units.
-    pub async fn set_goals(
+    pub(crate) async fn set_goals(
         &self,
         id: &str,
         normalized: BTreeMap<String, f64>,
@@ -469,12 +464,12 @@ impl HardwareHandle {
     }
 
     /// Select the operating mode.
-    pub async fn set_mode(&self, mode: ModeSelection) -> Result<(), String> {
+    pub(crate) async fn set_mode(&self, mode: ModeSelection) -> Result<(), String> {
         self.request(|reply| Command::SetMode { mode, reply }).await
     }
 
     /// Disable torque and begin recording a joint-range sweep.
-    pub async fn start_calibration(&self, id: &str) -> Result<(), String> {
+    pub(crate) async fn start_calibration(&self, id: &str) -> Result<(), String> {
         self.request(|reply| Command::StartCalibration {
             id: id.to_owned(),
             reply,
@@ -488,7 +483,7 @@ impl HardwareHandle {
     /// validate, and store a calibration from the result, and any of those can
     /// fail — discarding the operator's sweep before then would throw away
     /// minutes of work that is still perfectly good.
-    pub async fn calibration_input(&self, id: &str) -> Result<CalibrationInput, String> {
+    pub(crate) async fn calibration_input(&self, id: &str) -> Result<CalibrationInput, String> {
         self.request(|reply| Command::CalibrationInputFor {
             id: id.to_owned(),
             reply,
@@ -497,7 +492,7 @@ impl HardwareHandle {
     }
 
     /// Drop every trace of a robot, including why its bus was lost.
-    pub async fn forget(&self, id: &str) -> Result<(), String> {
+    pub(crate) async fn forget(&self, id: &str) -> Result<(), String> {
         self.request(|reply| Command::Forget {
             id: id.to_owned(),
             reply,
@@ -506,7 +501,7 @@ impl HardwareHandle {
     }
 
     /// Abandon a sweep without producing a calibration.
-    pub async fn cancel_calibration(&self, id: &str) -> Result<(), String> {
+    pub(crate) async fn cancel_calibration(&self, id: &str) -> Result<(), String> {
         self.request(|reply| Command::CancelCalibration {
             id: id.to_owned(),
             reply,
@@ -519,7 +514,7 @@ impl HardwareHandle {
     /// The writer is created by the caller because the episode store owns the
     /// directory, and handed over whole because only this thread runs at the
     /// rate a take has to be sampled at.
-    pub async fn start_recording(
+    pub(crate) async fn start_recording(
         &self,
         writer: EpisodeWriter,
         arms: Vec<EpisodeArm>,
@@ -533,13 +528,13 @@ impl HardwareHandle {
     }
 
     /// Finish the take in progress and return what was stored.
-    pub async fn stop_recording(&self, keep: bool) -> Result<EpisodeSummary, String> {
+    pub(crate) async fn stop_recording(&self, keep: bool) -> Result<EpisodeSummary, String> {
         self.request(|reply| Command::StopRecording { keep, reply })
             .await
     }
 
     /// Pause or resume sampling while keeping the same open take and ID.
-    pub async fn set_recording_paused(&self, paused: bool) -> Result<f64, String> {
+    pub(crate) async fn set_recording_paused(&self, paused: bool) -> Result<f64, String> {
         let (checkpoint, elapsed_seconds) = self
             .request(|reply| Command::SetRecordingPaused { paused, reply })
             .await?;
@@ -555,7 +550,7 @@ impl HardwareHandle {
     ///
     /// The samples arrive already loaded and already in normalized units, which
     /// is the only unit anything here can be commanded in.
-    pub async fn start_replay(
+    pub(crate) async fn start_replay(
         &self,
         robot: &str,
         episode: &str,
@@ -567,7 +562,7 @@ impl HardwareHandle {
     }
 
     /// Play a recorded trajectory beginning at one resolved trajectory frame.
-    pub async fn start_replay_at_frame(
+    pub(crate) async fn start_replay_at_frame(
         &self,
         robot: &str,
         episode: &str,
@@ -591,7 +586,7 @@ impl HardwareHandle {
     }
 
     /// Move to one committed historical pose without creating Timeline transport.
-    pub async fn start_physical_seek(
+    pub(crate) async fn start_physical_seek(
         &self,
         robot: &str,
         episode: &str,
@@ -628,13 +623,13 @@ impl HardwareHandle {
     }
 
     /// Pause or resume the loaded replay without returning to frame zero.
-    pub async fn set_replay_paused(&self, paused: bool) -> Result<(), String> {
+    pub(crate) async fn set_replay_paused(&self, paused: bool) -> Result<(), String> {
         self.request(|reply| Command::SetReplayPaused { paused, reply })
             .await
     }
 
     /// Adopt a calibration that has just been written to disk.
-    pub async fn apply_calibration(
+    pub(crate) async fn apply_calibration(
         &self,
         id: &str,
         calibration: Calibration,
@@ -648,7 +643,7 @@ impl HardwareHandle {
     }
 
     /// Stop the control thread and wait for it to finish.
-    pub async fn shutdown(&self) {
+    pub(crate) async fn shutdown(&self) {
         let _ = self.request(|reply| Command::Shutdown { reply }).await;
         let thread = self
             .thread

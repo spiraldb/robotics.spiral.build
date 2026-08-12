@@ -12,7 +12,7 @@ use tokio::sync::watch;
 use crate::backend::robotics::cameras::{CameraManager, Frame};
 
 #[derive(Clone, Debug)]
-pub struct CameraCaptureSpec {
+pub(crate) struct CameraCaptureSpec {
     pub stream_id: String,
     pub camera_id: String,
     pub width: u32,
@@ -21,7 +21,7 @@ pub struct CameraCaptureSpec {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct VideoAsset {
+pub(crate) struct VideoAsset {
     pub stream_id: String,
     pub camera_id: String,
     pub path: PathBuf,
@@ -43,7 +43,7 @@ pub struct VideoAsset {
 /// `timeline_offset_seconds` maps each segment onto the same gap-free clock as
 /// joint samples; `segment_index` selects its local HTTP asset.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct VideoAssetMetadata {
+pub(crate) struct VideoAssetMetadata {
     pub stream_id: String,
     pub camera_id: String,
     pub width: u32,
@@ -56,7 +56,7 @@ pub struct VideoAssetMetadata {
 }
 
 impl VideoAsset {
-    pub fn metadata(&self) -> VideoAssetMetadata {
+    pub(crate) fn metadata(&self) -> VideoAssetMetadata {
         VideoAssetMetadata {
             stream_id: self.stream_id.clone(),
             camera_id: self.camera_id.clone(),
@@ -77,7 +77,11 @@ impl VideoAsset {
 
 const ASSET_MANIFEST: &str = "assets.json";
 
-pub fn save_assets(root: &Path, episode_id: &str, assets: &[VideoAsset]) -> Result<(), String> {
+pub(crate) fn save_assets(
+    root: &Path,
+    episode_id: &str,
+    assets: &[VideoAsset],
+) -> Result<(), String> {
     let directory = root.join("videos").join(episode_id);
     std::fs::create_dir_all(&directory)
         .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
@@ -109,7 +113,7 @@ pub fn save_assets(root: &Path, episode_id: &str, assets: &[VideoAsset]) -> Resu
         .map_err(|error| format!("could not publish {}: {error}", path.display()))
 }
 
-pub fn load_assets(root: &Path, episode_id: &str) -> Result<Vec<VideoAsset>, String> {
+pub(crate) fn load_assets(root: &Path, episode_id: &str) -> Result<Vec<VideoAsset>, String> {
     let path = root.join("videos").join(episode_id).join(ASSET_MANIFEST);
     if !path.exists() {
         return Ok(Vec::new());
@@ -164,7 +168,7 @@ pub fn load_assets(root: &Path, episode_id: &str) -> Result<Vec<VideoAsset>, Str
     Ok(assets)
 }
 
-pub struct VideoCapture {
+pub(crate) struct VideoCapture {
     episode_id: String,
     cameras: Arc<CameraManager>,
     root: PathBuf,
@@ -197,13 +201,13 @@ enum CaptureState {
 }
 
 #[derive(Clone, Debug)]
-pub struct VideoEncoderSettings {
+pub(crate) struct VideoEncoderSettings {
     pub executable: String,
     pub codec: String,
 }
 
 impl VideoCapture {
-    pub async fn start(
+    pub(crate) async fn start(
         cameras: Arc<CameraManager>,
         root: &Path,
         episode_id: &str,
@@ -233,7 +237,7 @@ impl VideoCapture {
         Ok(Some(capture))
     }
 
-    pub fn episode_id(&self) -> &str {
+    pub(crate) fn episode_id(&self) -> &str {
         &self.episode_id
     }
 
@@ -271,14 +275,14 @@ impl VideoCapture {
 
     /// Stop feeding the current encoders immediately. Their finalized MP4s are
     /// collected after the joint-writer pause barrier has completed.
-    pub fn request_pause(&self) {
+    pub(crate) fn request_pause(&self) {
         if let Some(active) = &self.active {
             active.control.send_replace(CaptureState::Finish);
         }
     }
 
     /// Finalize and publish a provisional segment manifest for paused review.
-    pub async fn finish_pause(&mut self) -> Vec<String> {
+    pub(crate) async fn finish_pause(&mut self) -> Vec<String> {
         let failures = self.finish_active().await;
         if let Err(error) = save_assets(&self.root, &self.episode_id, &self.completed) {
             return failures.into_iter().chain([error]).collect();
@@ -287,7 +291,7 @@ impl VideoCapture {
     }
 
     /// Open the next active interval under the same episode and camera set.
-    pub fn resume(&mut self, timeline_offset_seconds: f64) -> Result<(), String> {
+    pub(crate) fn resume(&mut self, timeline_offset_seconds: f64) -> Result<(), String> {
         self.start_segment(timeline_offset_seconds)
     }
 
@@ -309,7 +313,7 @@ impl VideoCapture {
         failures
     }
 
-    pub async fn finish(mut self) -> (Vec<VideoAsset>, Vec<String>) {
+    pub(crate) async fn finish(mut self) -> (Vec<VideoAsset>, Vec<String>) {
         let failures = self.finish_active().await;
         (self.completed, failures)
     }

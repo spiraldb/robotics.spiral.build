@@ -11,4 +11,4 @@ pub mod feetech;
 pub mod robot_config;
 pub mod serial_ports;
 
-pub use spiral_robotics_core::{api, arm, calibration};
+pub use spiral_robotics_core::calibration;

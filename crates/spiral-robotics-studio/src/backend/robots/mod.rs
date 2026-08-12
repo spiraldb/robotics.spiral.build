@@ -1,3 +1,3 @@
 //! Robot configuration persistence.
 
-pub mod workspace;
+pub(crate) mod workspace;

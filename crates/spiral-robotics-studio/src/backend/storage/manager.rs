@@ -45,7 +45,7 @@ const MAX_REPLAY_ROWS: usize = 250_000;
 const JOINT_BATCH_ROWS: usize = 512;
 const SPIRAL_RECEIPT: &str = "spiral.json";
 
-pub struct TrainingCheckpointWrite {
+pub(crate) struct TrainingCheckpointWrite {
     pub run_id: String,
     pub run_name: String,
     pub policy: String,
@@ -56,7 +56,7 @@ pub struct TrainingCheckpointWrite {
     pub payload: Vec<u8>,
 }
 
-pub struct StorageManager {
+pub(crate) struct StorageManager {
     pub settings: Arc<DataSettingsStore>,
     episodes: Arc<EpisodeStore>,
     driver_path: Option<PathBuf>,
@@ -94,7 +94,7 @@ struct CachedAdbc {
 }
 
 impl StorageManager {
-    pub fn new(
+    pub(crate) fn new(
         settings: Arc<DataSettingsStore>,
         episodes: Arc<EpisodeStore>,
         driver_path: Option<PathBuf>,
@@ -108,7 +108,7 @@ impl StorageManager {
         })
     }
 
-    pub fn statuses(&self) -> Vec<PublicationStatus> {
+    pub(crate) fn statuses(&self) -> Vec<PublicationStatus> {
         let episodes = self.episodes.list();
         let mut statuses = lock(&self.publications).clone();
         statuses.retain(|episode_id, _| episodes.iter().any(|episode| &episode.id == episode_id));
@@ -161,7 +161,7 @@ impl StorageManager {
     /// Finish the backend-owned recording transaction without crossing the
     /// network boundary. Completed JSONL and camera assets form the local
     /// staging buffer until the operator explicitly pushes the episode.
-    pub fn stage_local(self: &Arc<Self>, episode_id: String, videos: Vec<VideoAsset>) {
+    pub(crate) fn stage_local(self: &Arc<Self>, episode_id: String, videos: Vec<VideoAsset>) {
         if let Err(error) = save_assets(self.episodes.directory(), &episode_id, &videos) {
             tracing::warn!(episode = %episode_id, "could not persist local video manifest: {error}");
         }
@@ -200,14 +200,14 @@ impl StorageManager {
         });
     }
 
-    pub fn publish_existing(self: &Arc<Self>, episode_id: String) -> Result<(), String> {
+    pub(crate) fn publish_existing(self: &Arc<Self>, episode_id: String) -> Result<(), String> {
         self.ensure_not_publishing(&episode_id)?;
         let videos = self.prepare_existing(&episode_id)?;
         self.queue_publish(episode_id, videos, PublicationScope::AllConfigured);
         Ok(())
     }
 
-    pub fn sync_spiral_existing(self: &Arc<Self>, episode_id: String) -> Result<(), String> {
+    pub(crate) fn sync_spiral_existing(self: &Arc<Self>, episode_id: String) -> Result<(), String> {
         let outcome = (|| {
             self.ensure_not_publishing(&episode_id)?;
             if !self.settings.get().spiral.configured() {
@@ -338,7 +338,7 @@ impl StorageManager {
         self.set_status(status);
     }
 
-    pub async fn test_spiral(&self) -> ConnectionTestResponse {
+    pub(crate) async fn test_spiral(&self) -> ConnectionTestResponse {
         let settings = self.settings.get().spiral;
         if !settings.configured() {
             return ConnectionTestResponse {
@@ -443,7 +443,7 @@ impl StorageManager {
         }
     }
 
-    pub async fn test_hugging_face(&self) -> ConnectionTestResponse {
+    pub(crate) async fn test_hugging_face(&self) -> ConnectionTestResponse {
         let settings = self.settings.get();
         match hugging_face_repository(&settings) {
             Ok(repository) => match repository.exists().send().await {
@@ -467,7 +467,11 @@ impl StorageManager {
         }
     }
 
-    pub async fn query(&self, sql: &str, max_rows: usize) -> Result<SpiralQueryResponse, String> {
+    pub(crate) async fn query(
+        &self,
+        sql: &str,
+        max_rows: usize,
+    ) -> Result<SpiralQueryResponse, String> {
         sql::ensure_read_only(sql, ReadOnlyMode::Preview)?;
         let settings = self.settings.get().spiral;
         if !settings.configured() {
@@ -488,7 +492,7 @@ impl StorageManager {
     /// The disposable memory catalog is intentionally rejected: it is scoped
     /// to one ADBC connection, so a dedicated streaming connection could never
     /// observe rows published through the Studio's existing connection.
-    pub fn training_source(&self) -> Result<(StoredSpiralSettings, TrainingSource), String> {
+    pub(crate) fn training_source(&self) -> Result<(StoredSpiralSettings, TrainingSource), String> {
         let settings = self.settings.get().spiral;
         if !settings.configured() {
             return Err("Configure a Spiral project and dataset before training.".to_owned());
@@ -518,7 +522,7 @@ impl StorageManager {
     /// Resolve the query and its Arrow contract before launching Python.
     /// Unknown relations and renamed fields therefore fail the start request,
     /// rather than becoming an asynchronous worker fatal error.
-    pub async fn validate_training_query(
+    pub(crate) async fn validate_training_query(
         &self,
         settings: StoredSpiralSettings,
         query: &str,
@@ -550,7 +554,7 @@ impl StorageManager {
     /// Publish a worker-produced artifact through the backend's trusted ADBC
     /// path. Python receives only the project/dataset names and uses the
     /// user's normal Spiral identity; checkpoint writes stay backend-owned.
-    pub async fn publish_training_checkpoint(
+    pub(crate) async fn publish_training_checkpoint(
         &self,
         settings: StoredSpiralSettings,
         target: String,
@@ -564,7 +568,7 @@ impl StorageManager {
         .await
     }
 
-    pub async fn trajectory(
+    pub(crate) async fn trajectory(
         &self,
         episode: &str,
         stream: &str,
@@ -611,7 +615,7 @@ impl StorageManager {
     /// Fetch one original MP4 payload for browser preview. Spiral's managed
     /// video dataset remains the compute/index surface; the byte asset is the
     /// correct browser delivery format and avoids decoding/re-encoding frames.
-    pub async fn video_asset(
+    pub(crate) async fn video_asset(
         &self,
         episode: &str,
         stream: &str,
