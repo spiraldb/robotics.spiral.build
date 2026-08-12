@@ -16,6 +16,7 @@ publish = false
 [workspace.dependencies]
 spiral-robotics = { path = "." }
 spiral-robotics-core = { path = "crates/spiral-robotics-core" }
+spiral-robotics-inference = { path = "crates/spiral-robotics-inference", default-features = false }
 spiral-robotics-panels = { path = "crates/spiral-robotics-panels" }
 spiral-robotics-viewport = { path = "crates/spiral-robotics-viewport" }
 clap = { version = "4.5", features = ["derive"] }

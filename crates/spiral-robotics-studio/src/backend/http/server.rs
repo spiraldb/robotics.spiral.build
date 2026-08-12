@@ -14,6 +14,7 @@ use crate::backend::robotics::hardware::{
 };
 use crate::backend::robotics::video::VideoEncoderSettings;
 use crate::backend::robots::workspace::RobotWorkspace;
+use crate::backend::rollout::manager::RolloutManager;
 use crate::backend::storage::manager::StorageManager;
 use crate::backend::storage::settings::DataSettingsStore;
 use crate::backend::training::manager::TrainingManager;
@@ -227,6 +228,12 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
         ..ControlSettings::default()
     }));
     let cameras = Arc::new(CameraManager::new());
+    let rollout = RolloutManager::new(
+        storage.clone(),
+        hardware.clone(),
+        cameras.clone(),
+        workspace.clone(),
+    );
 
     // Without permission a camera still enumerates and its stream still opens;
     // it just never delivers a frame. Say so instead of showing a blank box.
@@ -282,6 +289,7 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
         data_settings,
         storage,
         training: training.clone(),
+        rollout: rollout.clone(),
         recording_video: Arc::new(tokio::sync::Mutex::new(None)),
         video_encoder: VideoEncoderSettings {
             executable: args.ffmpeg.clone(),
@@ -333,6 +341,7 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
     tracing::info!("releasing motors and cameras");
     let cleanup = async {
         training.shutdown().await;
+        rollout.shutdown().await;
         hardware.shutdown().await;
         routes::finish_stale_video_capture(&cleanup_state).await;
         let camera_result = tokio::task::spawn_blocking({

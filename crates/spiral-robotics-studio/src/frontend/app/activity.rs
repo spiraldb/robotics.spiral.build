@@ -9,13 +9,14 @@ use spiral_robotics_core::api::{EpisodeSummary, RecordingProgress};
 
 use crate::frontend::screens::data::workbench::{DataIntent, QueryViewModel};
 
-/// The Studio's three primary activities.
+/// The Studio's four primary activities.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum Activity {
     #[default]
     Live,
     Data,
     Training,
+    Rollout,
 }
 
 impl Activity {
@@ -24,6 +25,7 @@ impl Activity {
             Self::Live => "Live",
             Self::Data => "Data",
             Self::Training => "Training",
+            Self::Rollout => "Rollout",
         }
     }
 }
@@ -56,6 +58,9 @@ impl TimelineSubject {
             Activity::Data => "Select an episode to inspect its shared clock.",
             Activity::Training => {
                 "Training metrics use optimization steps instead of the episode clock."
+            }
+            Activity::Rollout => {
+                "Rollout inference uses live observations instead of the episode clock."
             }
         };
         Self::Empty {
@@ -253,6 +258,13 @@ impl ActivityProjection {
                 cameras: CameraRegistrySource::None,
                 timeline: TimelineSubject::empty(activity),
             },
+            Activity::Rollout => Self {
+                activity,
+                primary: PrimaryVisualization::LiveScene,
+                query: None,
+                cameras: CameraRegistrySource::LiveAssignments,
+                timeline: TimelineSubject::empty(activity),
+            },
         }
     }
 }
@@ -347,6 +359,7 @@ pub(crate) enum PanelRole {
     PrimaryVisualization,
     Camera(CameraIdentity),
     Timeline,
+    RolloutInference,
     Placeholder,
 }
 
@@ -429,5 +442,19 @@ mod tests {
             }
         ));
         assert_eq!(projection.cameras, CameraRegistrySource::None);
+    }
+
+    #[test]
+    fn rollout_projects_live_scene_and_follower_camera_context() {
+        let projection = ActivityProjection::derive(Activity::Rollout, None, None, None, None);
+        assert_eq!(projection.primary, PrimaryVisualization::LiveScene);
+        assert_eq!(projection.cameras, CameraRegistrySource::LiveAssignments);
+        assert!(matches!(
+            projection.timeline,
+            TimelineSubject::Empty {
+                activity: Activity::Rollout,
+                ..
+            }
+        ));
     }
 }

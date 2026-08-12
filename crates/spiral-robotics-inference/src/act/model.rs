@@ -56,18 +56,36 @@ impl<B: Backend> ActModel<B> {
             .forward(Tensor::<B, 2>::zeros([1, config.latent_dim], device))
             .unsqueeze_dim(1);
 
-        let (feature_height, feature_width) = config.image_feature_size();
-        let image_position =
-            position_embedding_2d::<B>(feature_height, feature_width, config.dim_model, device);
         let one_dimensional_position: Tensor<B, 2> = weights.tensor_exact(
             &format!("{prefix}.encoder_1d_feature_pos_embed.weight"),
             [2, config.dim_model],
             device,
         )?;
-        let encoder_position = Tensor::cat(
-            vec![one_dimensional_position.unsqueeze_dim(0), image_position],
-            1,
-        );
+        let camera_embedding = if config.camera_embedding {
+            Some(weights.tensor_exact::<B, 2>(
+                &format!("{prefix}.camera_embed.weight"),
+                [config.image_feature_sizes().len(), config.dim_model],
+                device,
+            )?)
+        } else {
+            None
+        };
+        let mut encoder_positions = vec![one_dimensional_position.unsqueeze_dim(0)];
+        for (camera, &(feature_height, feature_width)) in
+            config.image_feature_sizes().iter().enumerate()
+        {
+            let mut image_position =
+                position_embedding_2d::<B>(feature_height, feature_width, config.dim_model, device);
+            if let Some(camera_embedding) = &camera_embedding {
+                image_position = image_position
+                    + camera_embedding
+                        .clone()
+                        .narrow(0, camera, 1)
+                        .unsqueeze_dim(0);
+            }
+            encoder_positions.push(image_position);
+        }
+        let encoder_position = Tensor::cat(encoder_positions, 1);
 
         let mut encoder = Vec::new();
         for layer in 0..config.n_encoder_layers {
@@ -129,21 +147,26 @@ impl<B: Backend> ActModel<B> {
     }
 
     /// Inputs are normalized and batch-first with a fixed batch size of one.
-    pub fn forward(&self, state: Tensor<B, 2>, image: Tensor<B, 4>) -> Tensor<B, 3> {
-        let features = self.image_projection.forward(self.backbone.forward(image));
-        let [batch, channels, height, width] = features.dims();
-        let image_tokens = features
-            .reshape([batch, channels, height * width])
-            .swap_dims(1, 2);
+    pub fn forward(&self, state: Tensor<B, 2>, images: Vec<Tensor<B, 4>>) -> Tensor<B, 3> {
+        let mut image_tokens = Vec::with_capacity(images.len());
+        for image in images {
+            let features = self.image_projection.forward(self.backbone.forward(image));
+            let [batch, channels, height, width] = features.dims();
+            image_tokens.push(
+                features
+                    .reshape([batch, channels, height * width])
+                    .swap_dims(1, 2),
+            );
+        }
         let state_token = self.state_projection.forward(state).unsqueeze_dim(1);
-        let mut encoder_output = Tensor::cat(
-            vec![self.latent_token.clone(), state_token, image_tokens],
-            1,
-        );
+        let mut encoder_inputs = vec![self.latent_token.clone(), state_token];
+        encoder_inputs.extend(image_tokens);
+        let mut encoder_output = Tensor::cat(encoder_inputs, 1);
         for layer in &self.encoder {
             encoder_output = layer.forward(encoder_output, &self.encoder_position);
         }
 
+        let [batch, _, _] = encoder_output.dims();
         let mut decoder_output = Tensor::zeros(
             [batch, self.chunk_size, self.dimensions],
             &encoder_output.device(),

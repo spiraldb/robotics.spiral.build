@@ -9,6 +9,15 @@ use spiral_robotics_panels::{LayoutNode, Panel, PanelId, PanelLayout, SplitAxis}
 /// The canonical first-open arrangement. Persistence takes over after this,
 /// while panel `home` ids tell hot-plugged content where it belongs.
 pub(super) fn default_panel_layout(panels: &[Panel]) -> PanelLayout {
+    default_panel_layout_with_workbench(panels, 1.0 / 3.0)
+}
+
+/// Rollout gives the scene more room than the editing-heavy activities while
+/// keeping the same durable dock topology.
+pub(super) fn default_panel_layout_with_workbench(
+    panels: &[Panel],
+    workbench_fraction: f64,
+) -> PanelLayout {
     let ids_in = |home: &str| {
         panels
             .iter()
@@ -39,7 +48,7 @@ pub(super) fn default_panel_layout(panels: &[Panel]) -> PanelLayout {
     PanelLayout::new(LayoutNode::split(
         "studio-columns",
         SplitAxis::Horizontal,
-        1.0 / 3.0,
+        workbench_fraction,
         LayoutNode::tile("workbench", ids_in("workbench")),
         visualization,
     ))

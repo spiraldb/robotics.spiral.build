@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
@@ -149,9 +150,10 @@ impl ModelFiles {
 
 /// Owned, content-addressed model bytes. Artifact sources converge on this
 /// type before policy-specific parsing or backend materialization begins.
+#[derive(Clone)]
 pub struct ModelArtifact {
-    config: Vec<u8>,
-    weights: Vec<u8>,
+    config: Arc<[u8]>,
+    weights: Arc<[u8]>,
     weights_label: String,
     identity: ModelIdentity,
 }
@@ -203,8 +205,8 @@ impl ModelArtifact {
         identity.config_sha256 = Some(config_sha256);
         identity.weights_sha256 = Some(weights_sha256);
         Ok(Self {
-            config,
-            weights,
+            config: config.into(),
+            weights: weights.into(),
             weights_label,
             identity,
         })
@@ -214,7 +216,7 @@ impl ModelArtifact {
         &self.identity
     }
 
-    pub(crate) fn into_parts(self) -> (Vec<u8>, Vec<u8>, String, ModelIdentity) {
+    pub(crate) fn into_parts(self) -> (Arc<[u8]>, Arc<[u8]>, String, ModelIdentity) {
         (self.config, self.weights, self.weights_label, self.identity)
     }
 }

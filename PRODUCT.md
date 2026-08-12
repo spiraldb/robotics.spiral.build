@@ -31,8 +31,9 @@ terminal without managing a Python environment themselves.
 
 The durable scope is the **full robot-learning loop**: connect → calibrate →
 teleoperate → record → inspect/query → publish/export → train → run a policy.
-Everything through local vision-conditioned ACT training exists today; policy
-inference and robot rollout do not.
+The loop now crosses the Studio backend boundary: vision-conditioned ACT
+training publishes a native artifact, and Rollout loads, supervises, measures,
+and applies it through the follower's bounded control path.
 
 Success is an ML engineer collecting a usable dataset, understanding any
 episode against one synchronized clock, training from Spiral, and replaying it
@@ -112,9 +113,13 @@ The physical scene matters: an operator may have one hand supporting an arm
 during calibration or teleoperation. Releasing torque lets an arm fall under
 its own weight, so controls and consequences must remain reachable and stable.
 
-Policy inference is not built. A future external inference service may produce
-actions, but the Spiral Robotics backend remains the authority that validates and
-applies them; the browser never becomes the motor-control runtime.
+Studio policy execution is backend-owned. Training exports the exact native ACT
+graph and normalization contract as SafeTensors; rollout loads that artifact
+from Spiral, warms the Burn backend, binds its ordered state and camera inputs,
+and admits one session-scoped policy mode to the bounded motor control thread.
+The backend stops the session on stale inputs, motor faults, mode changes,
+inference failures, or excessive observation-to-action latency. The browser
+selects and monitors a rollout but never becomes the motor-control runtime.
 
 ## Capabilities and Constraints
 
@@ -123,7 +128,7 @@ applies them; the browser never becomes the motor-control runtime.
 - Three CLIs — `spiral-robotics-find-port`, `spiral-robotics-find-cameras`, and
   `spiral-robotics-calibrate` — cover the Studio’s hardware setup flow for scripting and
   machines without a browser.
-- A fullstack Dioxus Studio with three primary operating activities:
+- A fullstack Dioxus Studio with four primary operating activities:
   - **Live** owns recording, arm selection, Hold / Release / Teleop, joint
     control, health, and camera status.
   - **Data** owns the local episode buffer, per-episode Local / Synced state,
@@ -133,6 +138,10 @@ applies them; the browser never becomes the motor-control runtime.
     Spiral Python relation API, local vision ACT configuration, learning and
     resource telemetry, graceful cancellation, and Rust-published Spiral
     checkpoints.
+  - **Rollout** owns checkpoint selection, fixed-follower readiness, simple
+    action-chunk and control-rate settings, the live 3D scene, one follower
+    camera, authoritative start/stop lifecycle, and measured native inference
+    evidence.
   - **Settings** owns robot setup (ports, camera assignment, calibration,
     add/import/delete) and backend data destinations. Setup is not mixed into
     the live operating flow.
@@ -181,8 +190,12 @@ applies them; the browser never becomes the motor-control runtime.
 - A `--simulate` mode with emulated motors allows calibration, teleoperation,
   recording, and replay without hardware.
 
-**Not yet built, but in scope:** trained-policy inference. Replaying a recorded
-action trajectory exists; producing new actions from a model does not.
+**Shipped with a safety boundary:** Studio-managed ACT execution from a durable
+Spiral checkpoint. The same control thread that bounds manual, teleoperation,
+and replay motion gates policy commands by an unguessable active session. On
+macOS rollout prefers Metal and falls back to Accelerate CPU; an inference that
+cannot meet the observation safety window is rejected before a new action is
+sent.
 
 **Constraints**
 
@@ -216,7 +229,7 @@ action trajectory exists; producing new actions from a model does not.
 **Terminology:** *robot instance* (one arm), *leader* / *follower*, *joint*,
 *calibration*, *travel*, *torque*, *Hold* / *Release* / *Teleop*, *workspace*
 (the directory of robot JSON files), *Studio* (the browser interface),
-*workbench* (Live or Data operating panel), *panel* (one registered content
+*workbench* (Live, Data, or Rollout operating panel), *panel* (one registered content
 surface), *tile* (a tab group in the layout tree), *dataset* (a collection of
 episodes), *episode* / *take* (one recording; *episode* is canonical in data and
 wire naming), *Timeline* / *playhead* (the shared episode clock and its current
@@ -228,7 +241,7 @@ time), and *Follow Δ* (the gap between measured and commanded joint position).
   Studio**.
 - The interface follows the compact, information-dense Notion/Rerun direction
   recorded in `notes.md`, while its panel mechanics use familiar VS Code
-  tab-and-tile behavior. Live, Data, and Training are the primary activities;
+  tab-and-tile behavior. Live, Data, Training, and Rollout are the primary activities;
   panels are spatial composition, not a proliferation of navigation modes.
 - **`notes.md` is the single source of truth for conflicting changes and must
   not be edited unless explicitly requested.**

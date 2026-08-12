@@ -11,6 +11,8 @@ cpu = ["dep:burn-ndarray"]
 accelerate = ["cpu", "burn-ndarray/blas-accelerate"]
 metal = [
     "dep:burn-wgpu",
+    "dep:futures-lite",
+    "dep:wgpu",
     "burn-wgpu/autotune",
     "burn-wgpu/fusion",
     "burn-wgpu/metal",
@@ -24,6 +26,7 @@ burn-nn = { version = "0.21.0", default-features = false, features = ["std"] }
 burn-ndarray = { version = "0.21.0", default-features = false, features = ["std", "simd", "multi-threads"], optional = true }
 burn-wgpu = { version = "0.21.0", default-features = false, features = ["std"], optional = true }
 clap = { workspace = true, features = ["derive"], optional = true }
+futures-lite = { version = "2.6", optional = true }
 hf-hub = { version = "1.0.0", features = ["blocking", "rustls-tls"], optional = true }
 image = { workspace = true, optional = true }
 safetensors = "0.8"
@@ -31,6 +34,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
 thiserror = "2"
+wgpu = { version = "29.0.4", default-features = false, features = ["metal", "std"], optional = true }
 
 [[bin]]
 name = "spiral-robotics-infer"

@@ -30,7 +30,7 @@ enum Command {
         #[arg(long)]
         image: Option<PathBuf>,
         /// Comma-separated robot state. Zeros are used when omitted.
-        #[arg(long, value_parser = parse_state)]
+        #[arg(long, value_delimiter = ',')]
         state: Option<Vec<f32>>,
         /// Number of forward passes to run in the same warmed-up process.
         #[arg(long, default_value_t = 1)]
@@ -199,18 +199,4 @@ fn load_rgb(
         .into());
     }
     Ok(image.into_raw())
-}
-
-fn parse_state(value: &str) -> Result<Vec<f32>, String> {
-    if value.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    value
-        .split(',')
-        .map(|part| {
-            part.trim()
-                .parse::<f32>()
-                .map_err(|error| format!("invalid state value {part:?}: {error}"))
-        })
-        .collect()
 }

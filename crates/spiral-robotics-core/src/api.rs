@@ -375,7 +375,27 @@ pub struct TrainingMetricPoint {
     pub event: Option<String>,
 }
 
-/// A model/optimizer snapshot durably ingested into Spiral.
+/// Serialization used by a durably ingested inference artifact.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrainingCheckpointFormat {
+    /// Historical pickle-backed checkpoints written before SafeTensors export.
+    #[default]
+    LegacyPyTorch,
+    /// Data-only tensor storage with a versioned Spiral manifest.
+    SafeTensors,
+}
+
+impl TrainingCheckpointFormat {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::LegacyPyTorch => "Legacy PyTorch",
+            Self::SafeTensors => "SafeTensors",
+        }
+    }
+}
+
+/// An inference checkpoint durably ingested into Spiral.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct TrainingCheckpoint {
     pub step: u64,
@@ -383,6 +403,8 @@ pub struct TrainingCheckpoint {
     pub validation_loss: Option<f64>,
     pub spiral_table: String,
     pub byte_size: u64,
+    #[serde(default)]
+    pub format: TrainingCheckpointFormat,
 }
 
 /// Immutable Spiral identity captured when a run starts.
@@ -480,6 +502,64 @@ pub enum TrainingUpdate {
         run_id: String,
         line: String,
     },
+}
+
+/// Operator-approved launch parameters for one backend-owned policy session.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StartRolloutRequest {
+    pub run_id: String,
+    pub checkpoint_step: u64,
+    pub robot: String,
+    pub action_steps: usize,
+    pub control_rate_hz: u32,
+}
+
+/// Authoritative lifecycle of the native inference and motor-control task.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RolloutPhase {
+    #[default]
+    Idle,
+    Loading,
+    WarmingUp,
+    Running,
+    Stopping,
+    Failed,
+}
+
+impl RolloutPhase {
+    pub const fn active(self) -> bool {
+        matches!(
+            self,
+            Self::Loading | Self::WarmingUp | Self::Running | Self::Stopping
+        )
+    }
+}
+
+/// Measurements accumulated by the active native rollout session.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct RolloutMetrics {
+    pub inference_count: u64,
+    pub command_count: u64,
+    pub missed_deadlines: u64,
+    pub last_latency_ms: Option<f64>,
+    pub last_model_ms: Option<f64>,
+    pub mean_latency_ms: Option<f64>,
+    pub max_latency_ms: Option<f64>,
+}
+
+/// Browser-safe state for rollout. Model bytes and device handles stay server-side.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct RolloutSnapshot {
+    pub phase: RolloutPhase,
+    pub session_id: Option<String>,
+    pub run_id: Option<String>,
+    pub checkpoint_step: Option<u64>,
+    pub robot: Option<String>,
+    pub started_ms: Option<i64>,
+    pub finished_ms: Option<i64>,
+    pub message: Option<String>,
+    pub metrics: RolloutMetrics,
 }
 
 impl TrainingSnapshot {
@@ -788,6 +868,8 @@ pub enum ModeSelection {
     /// which loads the episode server-side and hands the samples to the
     /// control thread directly.
     Replay { robot: String, episode: String },
+    /// A backend-owned native policy session commands one calibrated arm.
+    Policy { robot: String, session: String },
 }
 
 impl ModeSelection {
@@ -798,6 +880,7 @@ impl ModeSelection {
             Self::Manual { .. } => "Manual",
             Self::Teleoperate { .. } => "Teleoperation",
             Self::Replay { .. } => "Replay",
+            Self::Policy { .. } => "Policy",
         }
     }
 }
@@ -1431,6 +1514,13 @@ mod tests {
                     episode: "episode_000007".to_owned(),
                 },
                 r#"{"mode":"replay","robot":"right","episode":"episode_000007"}"#,
+            ),
+            (
+                ModeSelection::Policy {
+                    robot: "right".to_owned(),
+                    session: "rollout-1".to_owned(),
+                },
+                r#"{"mode":"policy","robot":"right","session":"rollout-1"}"#,
             ),
         ];
 

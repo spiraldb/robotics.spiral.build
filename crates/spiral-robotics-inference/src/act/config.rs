@@ -9,7 +9,7 @@ use crate::{Error, ImageInputSpecification, PolicyKind, PolicySpecification, Res
 #[derive(Clone, Debug)]
 pub struct ActConfig {
     state: VectorFeature,
-    image: ImageFeature,
+    images: Vec<ImageFeature>,
     action: VectorFeature,
     pub(super) chunk_size: usize,
     action_steps: usize,
@@ -19,8 +19,8 @@ pub struct ActConfig {
     pub(super) n_encoder_layers: usize,
     pub(super) n_decoder_layers: usize,
     pub(super) latent_dim: usize,
-    feature_height: usize,
-    feature_width: usize,
+    image_feature_sizes: Vec<(usize, usize)>,
+    pub(super) camera_embedding: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -57,6 +57,10 @@ struct RawActConfig {
     n_decoder_layers: usize,
     use_vae: bool,
     latent_dim: usize,
+    #[serde(default)]
+    spiral_camera_embedding: bool,
+    #[serde(default)]
+    spiral_camera_order: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
@@ -91,12 +95,16 @@ impl ActConfig {
         PolicySpecification {
             kind: PolicyKind::Act,
             state_dimensions: self.state.dimensions,
-            image_inputs: vec![ImageInputSpecification {
-                name: self.image.name.clone(),
-                channels: 3,
-                height: self.image.height,
-                width: self.image.width,
-            }],
+            image_inputs: self
+                .images
+                .iter()
+                .map(|image| ImageInputSpecification {
+                    name: image.name.clone(),
+                    channels: 3,
+                    height: image.height,
+                    width: image.width,
+                })
+                .collect(),
             action_dimensions: self.action.dimensions,
             action_chunk_size: self.chunk_size,
             recommended_action_steps: self.action_steps,
@@ -111,12 +119,8 @@ impl ActConfig {
         self.state.dimensions
     }
 
-    pub(super) fn image_name(&self) -> &str {
-        &self.image.name
-    }
-
-    pub(super) fn image_feature_size(&self) -> (usize, usize) {
-        (self.feature_height, self.feature_width)
+    pub(super) fn image_feature_sizes(&self) -> &[(usize, usize)] {
+        &self.image_feature_sizes
     }
 
     pub(super) fn action_name(&self) -> &str {
@@ -199,9 +203,9 @@ impl TryFrom<RawActConfig> for ActConfig {
                 )));
             }
         }
-        if raw.input_features.len() != 2 || raw.output_features.len() != 1 {
+        if raw.input_features.len() < 2 || raw.output_features.len() != 1 {
             return Err(Error::Configuration(format!(
-                "the runtime requires exactly one state and one image input plus one action output; found {} inputs and {} outputs",
+                "the runtime requires one state, one or more image inputs, and one action output; found {} inputs and {} outputs",
                 raw.input_features.len(),
                 raw.output_features.len()
             )));
@@ -209,30 +213,68 @@ impl TryFrom<RawActConfig> for ActConfig {
 
         let (state_name, state_feature) =
             exactly_one(&raw.input_features, FeatureKind::State, "state")?;
-        let (image_name, image_feature) =
-            exactly_one(&raw.input_features, FeatureKind::Visual, "image")?;
         let (action_name, action_feature) =
             exactly_one(&raw.output_features, FeatureKind::Action, "action")?;
         let state_dimensions = vector_dimensions(state_name, state_feature, "state")?;
         let action_dimensions = vector_dimensions(action_name, action_feature, "action")?;
-        let [3, height, width] = image_feature.shape.as_slice() else {
-            return Err(Error::Configuration(format!(
-                "image feature {image_name:?} must have shape [3, height, width], found {:?}",
-                image_feature.shape
-            )));
-        };
-        if *height == 0 || *width == 0 {
-            return Err(Error::Configuration(format!(
-                "image feature {image_name:?} has zero spatial extent"
-            )));
+        let visual_features = raw
+            .input_features
+            .iter()
+            .filter(|(_, feature)| feature.kind == FeatureKind::Visual)
+            .collect::<BTreeMap<_, _>>();
+        if visual_features.is_empty() {
+            return Err(Error::Configuration(
+                "ACT config has no image feature".to_owned(),
+            ));
         }
-        let (feature_height, feature_width) = resnet18_feature_size(*height, *width)?;
-
-        checked_product(&[3, *height, *width], "image element count overflows usize")?;
-        checked_product(
-            &[feature_height, feature_width, raw.dim_model],
-            "image positional embedding size overflows usize",
-        )?;
+        let image_names = if raw.spiral_camera_order.is_empty() {
+            visual_features.keys().map(|name| (*name).clone()).collect()
+        } else {
+            let unique = raw
+                .spiral_camera_order
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>();
+            if unique.len() != raw.spiral_camera_order.len()
+                || raw.spiral_camera_order.len() != visual_features.len()
+                || raw
+                    .spiral_camera_order
+                    .iter()
+                    .any(|name| !visual_features.contains_key(name))
+            {
+                return Err(Error::Configuration(
+                    "spiral_camera_order must list every visual feature exactly once".to_owned(),
+                ));
+            }
+            raw.spiral_camera_order.clone()
+        };
+        let mut images = Vec::with_capacity(image_names.len());
+        let mut image_feature_sizes = Vec::with_capacity(image_names.len());
+        for image_name in image_names {
+            let image_feature = visual_features[&image_name];
+            let [3, height, width] = image_feature.shape.as_slice() else {
+                return Err(Error::Configuration(format!(
+                    "image feature {image_name:?} must have shape [3, height, width], found {:?}",
+                    image_feature.shape
+                )));
+            };
+            if *height == 0 || *width == 0 {
+                return Err(Error::Configuration(format!(
+                    "image feature {image_name:?} has zero spatial extent"
+                )));
+            }
+            let feature_size = resnet18_feature_size(*height, *width)?;
+            checked_product(&[3, *height, *width], "image element count overflows usize")?;
+            checked_product(
+                &[feature_size.0, feature_size.1, raw.dim_model],
+                "image positional embedding size overflows usize",
+            )?;
+            images.push(ImageFeature {
+                name: image_name,
+                height: *height,
+                width: *width,
+            });
+            image_feature_sizes.push(feature_size);
+        }
         checked_product(
             &[raw.chunk_size, action_dimensions],
             "action chunk size overflows usize",
@@ -267,11 +309,7 @@ impl TryFrom<RawActConfig> for ActConfig {
                 name: state_name.to_owned(),
                 dimensions: state_dimensions,
             },
-            image: ImageFeature {
-                name: image_name.to_owned(),
-                height: *height,
-                width: *width,
-            },
+            images,
             action: VectorFeature {
                 name: action_name.to_owned(),
                 dimensions: action_dimensions,
@@ -284,8 +322,8 @@ impl TryFrom<RawActConfig> for ActConfig {
             n_encoder_layers: raw.n_encoder_layers,
             n_decoder_layers: raw.n_decoder_layers,
             latent_dim: raw.latent_dim,
-            feature_height,
-            feature_width,
+            image_feature_sizes,
+            camera_embedding: raw.spiral_camera_embedding,
         })
     }
 }
@@ -370,7 +408,7 @@ mod tests {
         assert_eq!(specification.action_chunk_size, 100);
         assert_eq!(specification.recommended_action_steps, 100);
         assert_eq!(specification.image_inputs[0].height, 480);
-        assert_eq!(config.image_feature_size(), (15, 20));
+        assert_eq!(config.image_feature_sizes(), &[(15, 20)]);
     }
 
     #[test]
@@ -396,5 +434,26 @@ mod tests {
         document["input_features"]["unused"] = serde_json::json!({"type": "STATE", "shape": [1]});
         let bytes = serde_json::to_vec(&document).unwrap();
         assert!(ActConfig::from_slice(&bytes).is_err());
+    }
+
+    #[test]
+    fn studio_camera_order_is_explicit_for_multi_view_checkpoints() {
+        let mut document: serde_json::Value = serde_json::from_str(REFERENCE).unwrap();
+        document["input_features"]["observation.images.wrist"] =
+            serde_json::json!({"type": "VISUAL", "shape": [3, 240, 320]});
+        document["spiral_camera_embedding"] = serde_json::json!(true);
+        document["spiral_camera_order"] =
+            serde_json::json!(["observation.images.wrist", "observation.images.top"]);
+        let config = ActConfig::from_slice(&serde_json::to_vec(&document).unwrap()).unwrap();
+        let specification = config.specification();
+        assert_eq!(
+            specification
+                .image_inputs
+                .iter()
+                .map(|image| image.name.as_str())
+                .collect::<Vec<_>>(),
+            ["observation.images.wrist", "observation.images.top"]
+        );
+        assert_eq!(config.image_feature_sizes(), &[(8, 10), (15, 20)]);
     }
 }

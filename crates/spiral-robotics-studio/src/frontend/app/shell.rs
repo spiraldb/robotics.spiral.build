@@ -3,7 +3,9 @@
 use dioxus::prelude::*;
 
 use crate::frontend::app::activity::Activity;
-use crate::frontend::components::icons::{DataIcon, RobotPanelIcon, SettingsIcon, TrainingIcon};
+use crate::frontend::components::icons::{
+    DataIcon, RobotPanelIcon, RolloutIcon, SettingsIcon, TrainingIcon,
+};
 
 #[component]
 pub(crate) fn ActivityRail(
@@ -36,6 +38,14 @@ pub(crate) fn ActivityRail(
                 onclick: move |_| on_activity.call(Activity::Training),
                 TrainingIcon {}
                 span { "Training" }
+            }
+            button {
+                r#type: "button",
+                class: if activity == Activity::Rollout { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
+                "aria-pressed": activity == Activity::Rollout,
+                onclick: move |_| on_activity.call(Activity::Rollout),
+                RolloutIcon {}
+                span { "Rollout" }
             }
             button {
                 r#type: "button",

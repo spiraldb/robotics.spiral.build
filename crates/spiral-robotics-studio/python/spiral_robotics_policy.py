@@ -120,16 +120,206 @@ def _position_2d(
 ) -> torch.Tensor:
     if dim % 4 != 0:
         raise ValueError("ACT hidden_dim must be divisible by four")
-    quarter = dim // 4
-    scale = torch.exp(
-        torch.arange(quarter, device=device, dtype=dtype)
-        * (-math.log(10_000.0) / max(quarter - 1, 1))
+    axis_dim = dim // 2
+    indices = torch.arange(axis_dim, device=device, dtype=dtype)
+    inverse_frequency = torch.pow(
+        torch.tensor(10_000.0, device=device, dtype=dtype),
+        2.0 * torch.floor(indices / 2.0) / axis_dim,
     )
-    y = torch.arange(height, device=device, dtype=dtype).unsqueeze(1) * scale.unsqueeze(0)
-    x = torch.arange(width, device=device, dtype=dtype).unsqueeze(1) * scale.unsqueeze(0)
-    y = torch.cat((y.sin(), y.cos()), dim=1)[:, None, :].expand(height, width, -1)
-    x = torch.cat((x.sin(), x.cos()), dim=1)[None, :, :].expand(height, width, -1)
-    return torch.cat((y, x), dim=2).reshape(height * width, dim)
+    y = (
+        torch.arange(1, height + 1, device=device, dtype=dtype)
+        / (float(height) + 1.0e-6)
+        * (2.0 * math.pi)
+    )
+    x = (
+        torch.arange(1, width + 1, device=device, dtype=dtype)
+        / (float(width) + 1.0e-6)
+        * (2.0 * math.pi)
+    )
+    y_angles = y[:, None] / inverse_frequency[None, :]
+    x_angles = x[:, None] / inverse_frequency[None, :]
+    y_embedding = torch.where(
+        (torch.arange(axis_dim, device=device) % 2)[None, :] == 0,
+        y_angles.sin(),
+        y_angles.cos(),
+    )[:, None, :].expand(height, width, -1)
+    x_embedding = torch.where(
+        (torch.arange(axis_dim, device=device) % 2)[None, :] == 0,
+        x_angles.sin(),
+        x_angles.cos(),
+    )[None, :, :].expand(height, width, -1)
+    return torch.cat((y_embedding, x_embedding), dim=2).reshape(height * width, dim)
+
+
+class _EncoderLayer(nn.Module):
+    """Post-norm DETR encoder layer used by the native ACT runtime."""
+
+    def __init__(self, hidden: int, heads: int, feedforward: int) -> None:
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(hidden, heads, dropout=0.1, batch_first=True)
+        self.linear1 = nn.Linear(hidden, feedforward)
+        self.dropout = nn.Dropout(0.1)
+        self.linear2 = nn.Linear(feedforward, hidden)
+        self.norm1 = nn.LayerNorm(hidden)
+        self.norm2 = nn.LayerNorm(hidden)
+        self.dropout1 = nn.Dropout(0.1)
+        self.dropout2 = nn.Dropout(0.1)
+
+    def forward(self, value: torch.Tensor, position: torch.Tensor) -> torch.Tensor:
+        query_key = value + position
+        attended = self.self_attn(query_key, query_key, value, need_weights=False)[0]
+        value = self.norm1(value + self.dropout1(attended))
+        feedforward = self.linear2(self.dropout(functional.relu(self.linear1(value))))
+        return self.norm2(value + self.dropout2(feedforward))
+
+
+class _Encoder(nn.Module):
+    def __init__(self, hidden: int, heads: int, feedforward: int, layers: int) -> None:
+        super().__init__()
+        self.layers = nn.ModuleList(
+            _EncoderLayer(hidden, heads, feedforward) for _ in range(layers)
+        )
+
+    def forward(self, value: torch.Tensor, position: torch.Tensor) -> torch.Tensor:
+        for layer in self.layers:
+            value = layer(value, position)
+        return value
+
+
+class _DecoderLayer(nn.Module):
+    """Post-norm DETR decoder layer used by the native ACT runtime."""
+
+    def __init__(self, hidden: int, heads: int, feedforward: int) -> None:
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(hidden, heads, dropout=0.1, batch_first=True)
+        self.multihead_attn = nn.MultiheadAttention(hidden, heads, dropout=0.1, batch_first=True)
+        self.linear1 = nn.Linear(hidden, feedforward)
+        self.dropout = nn.Dropout(0.1)
+        self.linear2 = nn.Linear(feedforward, hidden)
+        self.norm1 = nn.LayerNorm(hidden)
+        self.norm2 = nn.LayerNorm(hidden)
+        self.norm3 = nn.LayerNorm(hidden)
+        self.dropout1 = nn.Dropout(0.1)
+        self.dropout2 = nn.Dropout(0.1)
+        self.dropout3 = nn.Dropout(0.1)
+
+    def forward(
+        self,
+        value: torch.Tensor,
+        memory: torch.Tensor,
+        query_position: torch.Tensor,
+        memory_position: torch.Tensor,
+    ) -> torch.Tensor:
+        query_key = value + query_position
+        attended = self.self_attn(query_key, query_key, value, need_weights=False)[0]
+        value = self.norm1(value + self.dropout1(attended))
+        attended = self.multihead_attn(
+            value + query_position,
+            memory + memory_position,
+            memory,
+            need_weights=False,
+        )[0]
+        value = self.norm2(value + self.dropout2(attended))
+        feedforward = self.linear2(self.dropout(functional.relu(self.linear1(value))))
+        return self.norm3(value + self.dropout3(feedforward))
+
+
+class _Decoder(nn.Module):
+    def __init__(self, hidden: int, heads: int, feedforward: int, layers: int) -> None:
+        super().__init__()
+        self.layers = nn.ModuleList(
+            _DecoderLayer(hidden, heads, feedforward) for _ in range(layers)
+        )
+        self.norm = nn.LayerNorm(hidden)
+
+    def forward(
+        self,
+        value: torch.Tensor,
+        memory: torch.Tensor,
+        query_position: torch.Tensor,
+        memory_position: torch.Tensor,
+    ) -> torch.Tensor:
+        for layer in self.layers:
+            value = layer(value, memory, query_position, memory_position)
+        return self.norm(value)
+
+
+class _InferenceModel(nn.Module):
+    """Native-loadable ACT graph; attribute names are the artifact ABI."""
+
+    def __init__(
+        self,
+        state_dim: int,
+        action_dim: int,
+        camera_count: int,
+        chunk_size: int,
+        hidden: int,
+        latent_dim: int,
+        heads: int,
+        feedforward: int,
+        encoder_layers: int,
+        decoder_layers: int,
+        pretrained_backbone: bool,
+    ) -> None:
+        super().__init__()
+        self.hidden_dim = hidden
+        self.camera_count = camera_count
+        self.chunk_size = chunk_size
+        self.backbone = ResNet18Backbone(pretrained=pretrained_backbone)
+        self.encoder_img_feat_input_proj = nn.Conv2d(
+            self.backbone.output_channels, hidden, 1
+        )
+        self.encoder_robot_state_input_proj = nn.Linear(state_dim, hidden)
+        self.encoder_latent_input_proj = nn.Linear(latent_dim, hidden)
+        self.encoder_1d_feature_pos_embed = nn.Embedding(2, hidden)
+        self.camera_embed = nn.Embedding(camera_count, hidden)
+        self.encoder = _Encoder(hidden, heads, feedforward, encoder_layers)
+        self.decoder_pos_embed = nn.Embedding(chunk_size, hidden)
+        self.decoder = _Decoder(hidden, heads, feedforward, decoder_layers)
+        self.action_head = nn.Linear(hidden, action_dim)
+        nn.init.normal_(self.encoder_1d_feature_pos_embed.weight, std=0.02)
+        nn.init.normal_(self.camera_embed.weight, std=0.02)
+        nn.init.normal_(self.decoder_pos_embed.weight, std=0.02)
+
+    def forward(
+        self, state: torch.Tensor, images: torch.Tensor, latent: torch.Tensor
+    ) -> torch.Tensor:
+        batch, cameras, channels, height, width = images.shape
+        features = self.backbone(images.reshape(batch * cameras, channels, height, width))
+        features = self.encoder_img_feat_input_proj(features)
+        _, _, feature_height, feature_width = features.shape
+        features = features.flatten(2).transpose(1, 2).reshape(
+            batch, cameras, -1, self.hidden_dim
+        )
+        spatial_position = _position_2d(
+            feature_height, feature_width, self.hidden_dim, images.device, features.dtype
+        )
+        image_position = (
+            self.camera_embed.weight[:, None, :] + spatial_position[None, :, :]
+        ).reshape(1, -1, self.hidden_dim)
+        image_tokens = features.reshape(batch, -1, self.hidden_dim)
+
+        prefix = torch.stack(
+            (
+                self.encoder_latent_input_proj(latent),
+                self.encoder_robot_state_input_proj(state),
+            ),
+            dim=1,
+        )
+        memory = torch.cat((prefix, image_tokens), dim=1)
+        memory_position = torch.cat(
+            (self.encoder_1d_feature_pos_embed.weight.unsqueeze(0), image_position), dim=1
+        )
+        memory = self.encoder(memory, memory_position)
+        query_position = self.decoder_pos_embed.weight.unsqueeze(0)
+        queries = torch.zeros(
+            (batch, self.chunk_size, self.hidden_dim),
+            device=state.device,
+            dtype=state.dtype,
+        )
+        return self.action_head(
+            self.decoder(queries, memory, query_position, memory_position)
+        )
 
 
 class ActPolicy(nn.Module):
@@ -153,23 +343,28 @@ class ActPolicy(nn.Module):
         self.chunk_size = chunk_size
         self.hidden_dim = hidden
 
-        self.backbone = ResNet18Backbone(
-            pretrained=bool(config.get("pretrained_backbone", True))
+        self.model = _InferenceModel(
+            state_dim,
+            action_dim,
+            camera_count,
+            chunk_size,
+            hidden,
+            int(config["latent_dim"]),
+            heads,
+            feedforward,
+            int(config["encoder_layers"]),
+            int(config["decoder_layers"]),
+            bool(config.get("pretrained_backbone", True)),
         )
-        self.image_projection = nn.Conv2d(self.backbone.output_channels, hidden, 1)
-        self.camera_embedding = nn.Embedding(camera_count, hidden)
-        self.state_projection = nn.Linear(state_dim, hidden)
-        self.latent_projection = nn.Linear(int(config["latent_dim"]), hidden)
-        self.memory_prefix_position = nn.Embedding(2, hidden)
 
         cvae_layer = nn.TransformerEncoderLayer(
             d_model=hidden,
             nhead=heads,
             dim_feedforward=feedforward,
             dropout=0.1,
-            activation="gelu",
+            activation="relu",
             batch_first=True,
-            norm_first=True,
+            norm_first=False,
         )
         self.cvae_encoder = nn.TransformerEncoder(
             cvae_layer,
@@ -182,39 +377,16 @@ class ActPolicy(nn.Module):
         self.cvae_position = nn.Embedding(chunk_size + 2, hidden)
         self.latent_stats = nn.Linear(hidden, int(config["latent_dim"]) * 2)
 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=hidden,
-            nhead=heads,
-            dim_feedforward=feedforward,
-            dropout=0.1,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.encoder = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=int(config["encoder_layers"]),
-            enable_nested_tensor=False,
-        )
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=hidden,
-            nhead=heads,
-            dim_feedforward=feedforward,
-            dropout=0.1,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.decoder = nn.TransformerDecoder(
-            decoder_layer, num_layers=int(config["decoder_layers"])
-        )
-        self.action_queries = nn.Embedding(chunk_size, hidden)
-        self.action_head = nn.Linear(hidden, action_dim)
         self.pad_head = nn.Linear(hidden, 1)
-        nn.init.normal_(self.camera_embedding.weight, std=0.02)
-        nn.init.normal_(self.memory_prefix_position.weight, std=0.02)
-        nn.init.normal_(self.action_queries.weight, std=0.02)
         nn.init.normal_(self.cvae_position.weight, std=0.02)
+
+    def inference_state_dict(self) -> dict[str, torch.Tensor]:
+        """Only the graph and names consumed by the native runtime."""
+        return {
+            name: value
+            for name, value in self.state_dict().items()
+            if name.startswith("model.")
+        }
 
     def _latent(
         self,
@@ -253,28 +425,9 @@ class ActPolicy(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         if images.ndim != 5 or images.shape[1] != self.camera_count:
             raise ValueError("ACT images must have shape [batch, cameras, 3, height, width]")
-        batch, cameras, channels, height, width = images.shape
-        features = self.backbone(images.reshape(batch * cameras, channels, height, width))
-        features = self.image_projection(features)
-        _, _, feature_height, feature_width = features.shape
-        features = features.flatten(2).transpose(1, 2).reshape(
-            batch, cameras, -1, self.hidden_dim
-        )
-        spatial_position = _position_2d(
-            feature_height, feature_width, self.hidden_dim, images.device, features.dtype
-        )
-        camera_position = self.camera_embedding.weight[:, None, :] + spatial_position[None, :, :]
-        image_tokens = (features + camera_position[None, :, :, :]).reshape(
-            batch, -1, self.hidden_dim
-        )
-
         latent, mean, log_variance = self._latent(state, actions, action_is_pad)
-        prefix = torch.stack((self.latent_projection(latent), self.state_projection(state)), dim=1)
-        prefix = prefix + self.memory_prefix_position.weight.unsqueeze(0)
-        memory = self.encoder(torch.cat((prefix, image_tokens), dim=1))
-        queries = self.action_queries.weight.unsqueeze(0).expand(batch, -1, -1)
-        decoded = self.decoder(queries, memory)
-        return self.action_head(decoded), self.pad_head(decoded).squeeze(-1), mean, log_variance
+        predicted = self.model(state, images, latent)
+        return predicted, self.pad_head(predicted.new_zeros((*predicted.shape[:-1], self.hidden_dim))).squeeze(-1), mean, log_variance
 
 
 def act_loss(

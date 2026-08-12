@@ -12,7 +12,7 @@ pub use engine::ActPolicy;
 #[cfg(feature = "cpu")]
 pub use engine::{CpuActPolicy, load_cpu, load_cpu_artifact};
 #[cfg(feature = "metal")]
-pub use engine::{MetalActPolicy, load_metal, load_metal_artifact};
+pub use engine::{MetalActPolicy, load_metal, load_metal_artifact, metal_available};
 
 /// Official LeRobot checkpoint used by examples and compatibility tests.
 pub const REFERENCE_REPOSITORY: &str = "lerobot/act_aloha_sim_transfer_cube_human";

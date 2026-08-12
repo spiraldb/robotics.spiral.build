@@ -35,8 +35,8 @@ SPIRAL_ROBOTICS_TRAINING_PYTHON=/path/to/spiraldb/lang/python/spiral-engine/.ven
 dx serve --release
 ```
 
-That environment must contain PyTorch, PyArrow, NumPy, and a matching SpiralDB
-build with the video/image relation operators. Studio verifies a real
+That environment must contain PyTorch, PyArrow, NumPy, SafeTensors, and a
+matching SpiralDB build with the video/image relation operators. Studio verifies a real
 `to_torch()` conversion before enabling training. Spiral—not Python—selects,
 decodes, resizes, and normalizes every requested camera frame.
 

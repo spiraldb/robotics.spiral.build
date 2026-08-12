@@ -31,6 +31,7 @@ const STREAM_SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 pub(crate) struct Frame {
     pub bytes: Bytes,
     pub sequence: u64,
+    pub captured_at: Instant,
 }
 
 #[derive(Debug, Default)]
@@ -266,6 +267,7 @@ fn spawn_stream(camera: DetectedCamera) -> Stream {
                         frames.send_replace(Some(Arc::new(Frame {
                             bytes: Bytes::from(frame.bytes),
                             sequence,
+                            captured_at: Instant::now(),
                         })));
                         lock(&status).frames = sequence;
 
@@ -350,6 +352,7 @@ mod tests {
             sender.send_replace(Some(Arc::new(Frame {
                 bytes: Bytes::from_static(b"jpeg"),
                 sequence,
+                captured_at: Instant::now(),
             })));
         }
 

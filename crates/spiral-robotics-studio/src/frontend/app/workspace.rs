@@ -13,7 +13,7 @@ use crate::frontend::app::activity::{
     Activity, ActivityProjection, CameraIdentity, CameraRegistrySource, PanelRole,
     PrimaryVisualization, RecordedSource, TimelineSubject, TimelineTarget,
 };
-use crate::frontend::app::layout::default_panel_layout;
+use crate::frontend::app::layout::{default_panel_layout, default_panel_layout_with_workbench};
 use crate::frontend::app::navigation::{ShellAction, ShellEffect, use_shell_controller};
 use crate::frontend::app::shell::{ActivityRail, NoticeStrip, StatusBar};
 use crate::frontend::app::state::Studio;
@@ -37,6 +37,10 @@ use crate::frontend::screens::data::workbench::{
 };
 use crate::frontend::screens::live::actions::dispatch_live_action;
 use crate::frontend::screens::live::workbench::LiveWorkbench;
+use crate::frontend::screens::rollout::state::use_rollout_controller;
+use crate::frontend::screens::rollout::workspace::{
+    InferencePanel, RolloutWorkbench, follower as rollout_follower,
+};
 use crate::frontend::screens::settings::panel::SettingsPanel;
 use crate::frontend::screens::training::state::use_training_controller;
 use crate::frontend::screens::training::workspace::TrainingWorkspace;
@@ -83,6 +87,7 @@ pub(super) fn StudioApplication() -> Element {
         &dataset,
         crate::frontend::screens::training::workspace::default_training_sql,
     );
+    use_rollout_controller();
     let timeline = use_timeline_controller();
     let mut playhead = timeline.playhead;
     #[cfg(feature = "web")]
@@ -331,7 +336,7 @@ pub(super) fn StudioApplication() -> Element {
         let store = studio.recording_signals.read();
         signal_lanes_from_store(&store)
     };
-    let assigned_cameras = assigned_cameras();
+    let assigned_cameras = assigned_cameras(projection.activity);
     let review_episode = subject.recorded_episode().map(str::to_owned);
     let historical_source = historical_state
         .read()
@@ -694,6 +699,8 @@ pub(super) fn StudioApplication() -> Element {
                             }
                         },
                     }
+                } else if shell.activity() == Activity::Rollout {
+                    RolloutWorkbench {}
                 }
             }
         },
@@ -702,11 +709,24 @@ pub(super) fn StudioApplication() -> Element {
     let mut registered_panels = Vec::with_capacity(dock_panels.len() + 2);
     registered_panels.push((workbench_panel, PanelRole::Workbench));
     registered_panels.extend(dock_panels);
-    registered_panels.push((
-        Panel::new("timeline", "Timeline", "timeline", timeline_panel)
-            .with_class("timeline-editor"),
-        PanelRole::Timeline,
-    ));
+    if shell.activity() == Activity::Rollout {
+        registered_panels.push((
+            Panel::new(
+                "rollout-inference",
+                "Inference",
+                "timeline",
+                rsx! { InferencePanel {} },
+            )
+            .with_class("rollout-inference-editor"),
+            PanelRole::RolloutInference,
+        ));
+    } else {
+        registered_panels.push((
+            Panel::new("timeline", "Timeline", "timeline", timeline_panel)
+                .with_class("timeline-editor"),
+            PanelRole::Timeline,
+        ));
+    }
     let panel_roles = registered_panels
         .iter()
         .map(|(panel, role)| (panel.id.clone(), role.clone()))
@@ -715,7 +735,11 @@ pub(super) fn StudioApplication() -> Element {
         .into_iter()
         .map(|(panel, _)| panel)
         .collect::<Vec<_>>();
-    let initial_panel_layout = default_panel_layout(&workspace_panels);
+    let initial_panel_layout = if shell.activity() == Activity::Rollout {
+        default_panel_layout_with_workbench(&workspace_panels, 0.27)
+    } else {
+        default_panel_layout(&workspace_panels)
+    };
     // v5 establishes the independent camera-row default while retaining one
     // durable ownership scope per workbench mode. Later user docking persists
     // inside that scope instead of following the current Data selection.
@@ -936,7 +960,7 @@ fn visible_timeline_episode(
             .map(|recording| recording.episode)
             .or(live_review_episode),
         Activity::Data => studio.selected_episode.peek().clone(),
-        Activity::Training => None,
+        Activity::Training | Activity::Rollout => None,
     }
 }
 
@@ -951,16 +975,26 @@ fn timeline_target_episode(target: &TimelineTarget) -> &str {
     }
 }
 
-fn assigned_cameras() -> Vec<(String, String, String)> {
+fn assigned_cameras(activity: Activity) -> Vec<(String, String, String)> {
     let studio = crate::frontend::app::state::studio();
-    let Some(focused) = studio.focused() else {
+    let robot = if activity == Activity::Rollout {
+        rollout_follower(&studio.snapshot.read().robots)
+    } else {
+        studio.focused()
+    };
+    let Some(focused) = robot else {
         return Vec::new();
     };
-    focused
+    let cameras = focused
         .cameras
         .iter()
         .map(|binding| (focused.id.clone(), binding.name.clone(), binding.id.clone()))
-        .collect()
+        .collect::<Vec<_>>();
+    if activity == Activity::Rollout {
+        cameras.into_iter().take(1).collect()
+    } else {
+        cameras
+    }
 }
 
 fn camera_panel_id(camera: &(String, String, String)) -> String {
@@ -986,7 +1020,7 @@ fn timeline_capabilities(
     activity: Activity,
     subject: &TimelineSubject,
 ) -> TimelineCapabilities {
-    let record = if activity == Activity::Data {
+    let record = if activity != Activity::Live {
         TimelineGate::blocked("Switch to Live to start recording.")
     } else if let Some(reason) = commands::recording_blocker(studio) {
         TimelineGate::blocked(reason)

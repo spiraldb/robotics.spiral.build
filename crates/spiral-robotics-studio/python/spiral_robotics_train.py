@@ -22,8 +22,10 @@ from typing import Any
 
 import numpy as np
 import pyarrow as pa
+import safetensors
 import spiraldb as sp
 import torch
+from safetensors.torch import save_file as save_safetensors
 from torch import nn
 
 from spiral_robotics_data import (
@@ -32,6 +34,10 @@ from spiral_robotics_data import (
     self_test as data_self_test,
 )
 from spiral_robotics_policy import ActPolicy, act_loss, self_test as policy_self_test
+
+
+IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).reshape(3, 1, 1)
+IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).reshape(3, 1, 1)
 
 
 def emit(kind: str, **values: Any) -> None:
@@ -115,46 +121,112 @@ def save_checkpoint(
     step: int,
     validation_loss: float | None,
 ) -> None:
-    file_name = f"checkpoint-{step}.pt"
+    request = config["request"]
+    act = request["act"]
+    state_name = "observation.state"
+    action_name = "action"
+    input_features = {
+        state_name: {"type": "STATE", "shape": [loader.state_dim]},
+        **{
+            camera: {
+                "type": "VISUAL",
+                "shape": [3, loader.image_height, loader.image_width],
+            }
+            for camera in loader.camera_streams
+        },
+    }
+    model_config = {
+        "type": "act",
+        "n_obs_steps": 1,
+        "normalization_mapping": {
+            "VISUAL": "MEAN_STD",
+            "STATE": "MEAN_STD",
+            "ACTION": "MEAN_STD",
+        },
+        "input_features": input_features,
+        "output_features": {
+            action_name: {"type": "ACTION", "shape": [loader.action_dim]}
+        },
+        "chunk_size": int(request["chunk_size"]),
+        "n_action_steps": min(10, int(request["chunk_size"])),
+        "vision_backbone": "resnet18",
+        "replace_final_stride_with_dilation": False,
+        "pre_norm": False,
+        "dim_model": int(act["hidden_dim"]),
+        "n_heads": int(act["attention_heads"]),
+        "dim_feedforward": int(act["feedforward_dim"]),
+        "feedforward_activation": "relu",
+        "n_encoder_layers": int(act["encoder_layers"]),
+        "n_decoder_layers": int(act["decoder_layers"]),
+        "use_vae": True,
+        "latent_dim": int(act["latent_dim"]),
+        "spiral_camera_embedding": True,
+        "spiral_camera_order": list(loader.camera_streams),
+    }
+    manifest = {
+        "format": "spiral_robotics.act.safetensors.v2",
+        "artifact": "inference",
+        "run_id": config["run_id"],
+        "step": step,
+        "request": config["request"],
+        "source": {
+            "project": config["spiral_project"],
+            "dataset": config["spiral_dataset"],
+        },
+        "data_contract": {
+            "value_space": "centered_normalized",
+            "robot_type": loader.robot_type,
+            "joint_names": loader.joint_names,
+            "camera_streams": loader.camera_streams,
+            "sample_hz": float(loader.sample_hz),
+            "image_layout": "chw",
+            "image_normalization": "imagenet",
+            "frame_alignment": "fixed_fps",
+            "spiral_schema_version": 5,
+        },
+        "runtime": {
+            "torch": torch.__version__,
+            "safetensors": safetensors.__version__,
+            "spiraldb": sp.__version__,
+            "pyarrow": pa.__version__,
+        },
+        "normalization": loader.stats.as_checkpoint(),
+        "model_config": model_config,
+        "tensor_namespace": "lerobot_act_state_dict",
+    }
+    # Tensor-valued diagnostics cannot be encoded into the manifest. The
+    # authoritative normalization values live in the SafeTensors namespace.
+    manifest["normalization"] = "embedded_mean_std"
+    manifest_json = json.dumps(manifest, separators=(",", ":"))
+    tensors = {
+        name: value.detach().to(device="cpu").contiguous()
+        for name, value in model.inference_state_dict().items()
+    }
+    state_prefix = state_name.replace(".", "_").replace("/", "_")
+    action_prefix = action_name.replace(".", "_").replace("/", "_")
+    tensors[f"normalize_inputs.buffer_{state_prefix}.mean"] = loader.stats.state_mean
+    tensors[f"normalize_inputs.buffer_{state_prefix}.std"] = loader.stats.state_std
+    for camera in loader.camera_streams:
+        camera_prefix = camera.replace(".", "_").replace("/", "_")
+        tensors[f"normalize_inputs.buffer_{camera_prefix}.mean"] = IMAGENET_MEAN
+        tensors[f"normalize_inputs.buffer_{camera_prefix}.std"] = IMAGENET_STD
+    tensors[f"unnormalize_outputs.buffer_{action_prefix}.mean"] = loader.stats.action_mean
+    tensors[f"unnormalize_outputs.buffer_{action_prefix}.std"] = loader.stats.action_std
+    tensors = {
+        name: value.detach().to(device="cpu", dtype=torch.float32).contiguous()
+        for name, value in tensors.items()
+    }
+    if not tensors:
+        raise RuntimeError("refusing to publish a checkpoint with no tensors")
+
+    file_name = f"checkpoint-{step}.safetensors"
     target = run_directory / file_name
     temporary = run_directory / f".{file_name}.partial"
-    torch.save(
-        {
-            "format": "spiral_robotics.act_cvae.v4",
-            "artifact": "inference",
-            "run_id": config["run_id"],
-            "step": step,
-            "request": config["request"],
-            "source": {
-                "project": config["spiral_project"],
-                "dataset": config["spiral_dataset"],
-            },
-            "data_contract": {
-                "value_space": "centered_normalized",
-                "robot_type": loader.robot_type,
-                "joint_names": loader.joint_names,
-                "camera_streams": loader.camera_streams,
-                "sample_hz": float(loader.sample_hz),
-                "image_layout": "chw",
-                "image_normalization": "imagenet",
-                "frame_alignment": "fixed_fps",
-                "spiral_schema_version": 5,
-            },
-            "runtime": {
-                "torch": torch.__version__,
-                "spiraldb": sp.__version__,
-                "pyarrow": pa.__version__,
-            },
-            "normalization": loader.stats.as_checkpoint(),
-            "model": model.state_dict(),
-            "random_state": {
-                "torch": torch.random.get_rng_state(),
-                "numpy": np.random.get_state(),
-                "loader_train": loader.train_random.bit_generator.state,
-                "loader_validation": loader.validation_random.bit_generator.state,
-            },
-        },
+    temporary.unlink(missing_ok=True)
+    save_safetensors(
+        tensors,
         temporary,
+        metadata={"format": "spiral-act", "spiral_robotics": manifest_json},
     )
     os.replace(temporary, target)
     emit(
@@ -164,6 +236,7 @@ def save_checkpoint(
         validation_loss=validation_loss,
         file_name=file_name,
         byte_size=target.stat().st_size,
+        manifest=manifest,
     )
 
 
@@ -396,7 +469,8 @@ def main() -> int:
             raise RuntimeError("Spiral to_torch() probe returned an unexpected tensor shape")
         print(
             f"PyTorch {torch.__version__} · SpiralDB {sp.__version__} · "
-            f"Arrow {pa.__version__} · to_torch verified"
+            f"Arrow {pa.__version__} · SafeTensors {safetensors.__version__} · "
+            "to_torch verified"
         )
         return 0
     if args.self_test:

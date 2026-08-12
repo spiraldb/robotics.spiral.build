@@ -93,6 +93,21 @@ pub(crate) fn video_asset(
     )
 }
 
+pub(crate) fn training_checkpoint(dataset: &str, run_id: &str, step: u64) -> String {
+    let checkpoints = relation(dataset, Table::TrainingCheckpoints);
+    format!(
+        "SELECT {config}, {checkpoint} FROM {checkpoints} \
+         WHERE {run_column} = {run_id} AND {step_column} = {step} \
+         ORDER BY {created} DESC LIMIT 2",
+        config = column::CONFIG_JSON,
+        checkpoint = column::CHECKPOINT,
+        run_column = column::RUN_ID,
+        run_id = string_literal(run_id),
+        step_column = column::STEP,
+        created = column::CREATED_MS,
+    )
+}
+
 pub(crate) fn create_dataset_namespace(dataset: &str) -> String {
     format!(
         "CREATE TABLE {dataset} AS SELECT {} AS {}",

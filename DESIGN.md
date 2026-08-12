@@ -1,6 +1,6 @@
 ---
 name: Spiral Robotics Studio
-description: A compact, dockable one-light workbench for operating robots, understanding episodes, and training policies.
+description: A compact, dockable one-light workbench for operating robots, understanding episodes, training policies, and staging fixed-follower rollouts.
 colors:
   canvas: "#ffffff"
   surface: "#ffffff"
@@ -211,9 +211,10 @@ make it feel like a precise bench utility rather than a dashboard. Camera pixels
 alone keep a dark mat for honest letterboxing; application chrome never changes
 visual worlds when the operator changes tasks.
 
-The Studio has three primary activities: **Live** for operating hardware and
-recording, **Data** for episodes and query, and **Training** for configuring and
-observing policy runs. Everything else is a panel. A
+The Studio has four primary activities: **Live** for operating hardware and
+recording, **Data** for episodes and query, **Training** for configuring and
+observing policy runs, and **Rollout** for staging a trained checkpoint against
+the configured follower. Everything else is a panel. A
 reusable tab-and-tile system lets the operator attach a panel as a tab, split a
 tile, resize the result, or move it with the keyboard. This borrows VS Code’s
 learned spatial grammar without importing its visual weight: the layout is
@@ -244,13 +245,14 @@ put reads as a bench tool.
 
 - One light neutral world across activity rail, panels, WebGL, plots,
   Timeline, settings, and status bar; camera pixels alone use the dark mat.
-- Live, Data, and Training are the primary activities; independent content
-  registers as panels instead of growing one-off shell regions.
+- Live, Data, Training, and Rollout are the primary activities; independent
+  content registers as panels instead of growing one-off shell regions.
 - A persisted tab-and-tile workspace supports docking, tabbing, splitting,
   resizing, keyboard operation, and hot-plugged panel reconciliation.
-- The default desktop composition is one-third workbench and two-thirds
-  visualization, with Timeline in the lower 42% and each camera visible in its
-  own row of the named camera column.
+- The default Live/Data desktop composition is one-third workbench and
+  two-thirds visualization, with Timeline in the lower 42% and each camera
+  visible in its own row of the named camera column. Rollout narrows the
+  workbench to 27% and replaces the Timeline slot with one low Inference lane.
 - One playhead synchronizes every representation of an episode.
 - Compact 12px type, 24px controls, 32px panel tabs, small radii, and hairlines.
 - Monospace tabular figures for elapsed time, rates, durations, counts, and IDs.
@@ -381,18 +383,19 @@ tracked kickers, decorative display faces, or all-caps panel titles.
 
 The first viewport is a full-height application shell:
 
-- a 60px activity rail spanning the body, with Live/Data/Training at the top and
-  Settings anchored at the bottom;
+- a 60px activity rail spanning the body, with Live/Data/Training/Rollout at the
+  top and Settings anchored at the bottom;
 - the remaining body area owned by one `PanelWorkspace`, without a separate top
   menu row;
 - a 20px bottom status bar for connection, environment, activity, recording,
   torque, rate, and issues;
 - transient notices floating above the shell rather than inserting a new row.
 
-Live, Data, and Training are activity changes, not panel tabs. Each activity
-registers its own panel set and uses an independent versioned persistence key.
-Switching activity therefore changes both the operating content and its
-visualization without moving Live camera tabs into Data, or vice versa.
+Live, Data, Training, and Rollout are activity changes, not panel tabs. Each
+activity registers its own panel set and uses an independent versioned
+persistence key. Switching activity therefore changes both the operating
+content and its visualization without moving Live camera tabs into Data, or
+vice versa.
 
 The canonical first-open desktop layout is:
 
@@ -443,11 +446,23 @@ places resource lanes below. The run builder remains a peer panel at left, and
 the whole activity persists through the same tab-and-tile workspace mechanics
 as Live and Data.
 
+Rollout is a compact physical-policy bench, not an ML dashboard. Its first-open
+desktop composition uses a 27% workbench beside a dominant live Scene, the
+first assigned follower camera, and one low Inference evidence lane. The
+workbench contains only checkpoint selection, fixed-follower readiness, simple
+execution inputs, and the primary Run policy action; on a tall workbench, that
+action area anchors to the bottom. Follower connection, calibration, and camera
+state read as one compact line; do not rebuild them as a readiness checklist.
+
 At 760px and below, the split tree is not squeezed into unusable slivers. A
 horizontally scrollable panel switcher presents one registered panel at a time;
 the desktop tree remains persisted and unchanged. At narrower widths, optional
 status facts may drop, but active recording, torque, blockers, and the control
 that stops motion remain reachable.
+
+At 480px and below, Rollout uses that same mobile panel switcher. Its execution
+fields stack into one column, the three essential inference metrics remain one
+compact strip, and interactive controls preserve 44px reachability.
 
 ### Named Rules
 
@@ -487,13 +502,18 @@ StudioShell
 │   └── PanelWorkspace                       layout mechanics only
 │       ├── SemanticWorkbenchPanel
 │       │   ├── LiveWorkbench                operate / record semantics
-│       │   └── DataWorkbench                episode / query semantics
+│       │   ├── DataWorkbench                episode / query semantics
+│       │   ├── TrainingWorkbench            train / observe semantics
+│       │   └── RolloutWorkbench             fixed-follower policy semantics
 │       ├── PrimaryVisualizationPanel
 │       │   ├── Scene
 │       │   ├── QueryResult
+│       │   ├── TrainingEvidence
 │       │   └── EmptyOrLoadingState
 │       ├── CameraPanel(s)
-│       └── TimelinePanel                    one shared clock contract
+│       └── EvidencePanel
+│           ├── TimelinePanel                one shared episode-clock contract
+│           └── RolloutInferencePanel        measured policy-loop evidence
 ├── StatusBar
 └── OverlayLayer                             settings / notices / confirmations
 ```
@@ -504,9 +524,10 @@ tabs, docking, splits, resizing, mobile panel switching, reconciliation, and
 persistence. It does not know what an episode, camera, robot, query, or
 playhead means.
 
-The workbench, primary visualization, camera panels, and Timeline are peers in
-the panel registry even when the default layout places the workbench on the
-left, visualization on the upper right, and Timeline on the lower right.
+The workbench, primary visualization, camera panels, and evidence panel are
+peers in the panel registry even when the default layout places the workbench
+on the left, visualization on the upper right, and Timeline or Rollout
+Inference on the lower right.
 
 ### Semantic Intent and Activity Projection
 
@@ -515,12 +536,12 @@ means to inspect or operate. The right side is the **visual consequence** of
 that meaning. The workbench never reaches across the layout to construct,
 replace, or mutate another panel directly.
 
-One logical **Activity Controller** sits between user intent, backend state, and
-rendering. It may be implemented as a reducer or model rather than as a visible
-component. It receives:
+One logical **Activity Controller** per activity sits between user intent,
+backend state, and rendering. It may be implemented as a reducer or model
+rather than as a visible component. It receives:
 
 - activity selection from the Activity Rail;
-- semantic intents from the Live or Data workbench;
+- semantic intents from the active workbench;
 - time and transport intents from the Timeline;
 - typed panel-focus intents, such as choosing a camera stream;
 - authoritative snapshots, telemetry, and request results from the backend.
@@ -533,7 +554,7 @@ Timeline action ───────┼──→ Activity Controller ──→ 
 Panel focus intent ────┤                                  ├── Primary visualization
 Backend event ─────────┘                                  ├── Camera panels
                                                           ├── Signal lanes
-                                                          └── Timeline model
+                                                          └── Timeline or inference evidence
 ```
 
 An Activity Projection is a coherent description of the complete active
@@ -544,9 +565,9 @@ together. A Query result may keep an explicitly named episode context or have
 no episode context; it never replaces the Scene panel identity, and the Scene,
 cameras, and Timeline must all report the same choice.
 
-Live and Data own independent controller state. Switching activities restores
-the target activity's semantic selection, projection, playhead subject, and
-panel layout without letting hidden activity state mutate the visible one.
+Each activity owns independent controller state. Switching activities restores
+the target activity's semantic selection, projection, time/evidence subject,
+and panel layout without letting hidden activity state mutate the visible one.
 
 ### Visualization Source Boundary
 
@@ -574,6 +595,12 @@ camera panels derive from the selected episode's stream identities. Activating
 a camera panel emits that typed live-camera or recorded-stream identity; domain
 meaning is never recovered by parsing a panel ID string.
 
+Rollout's Scene and camera are explicit live sources scoped to the configured
+follower: the Scene may show both arms for physical context, while the one
+camera panel comes from the follower's first assigned camera. Inference
+evidence is a separate measured source and stays empty until the backend has
+completed a native inference.
+
 ### Timeline Interface Contract
 
 There is one canonical Timeline component and one action vocabulary in Live,
@@ -581,6 +608,10 @@ Data, review, query-context, loading, and empty states. The Timeline is never
 replaced by a second empty-state component with a smaller behavioral boundary.
 Unavailable actions remain part of the interface and are disabled with a
 specific reason.
+
+Rollout does not own an episode clock, so it deliberately registers Inference
+instead of Timeline. That exception does not create another playhead or reuse
+episode transport for model execution.
 
 The Timeline owns:
 
@@ -619,6 +650,7 @@ physical motion is sent only for the committed seek.
 | Live robot and camera selection | Live Activity Controller | Live Workbench, Scene, Live camera registry |
 | Live recording and review subject | Live Activity Controller, reconciled with backend truth | Live Workbench, Timeline, recorded preview surfaces |
 | Data tool, selected episode, and query | Data Activity Controller | Data Workbench and the complete Data projection |
+| Rollout checkpoint, execution inputs, fixed follower, and readiness | Rollout Activity Controller, reconciled with backend truth | Rollout Workbench, live Scene, follower Camera, Inference lane |
 | Timeline subject, playhead, preview playback, and Follow Live | Timeline Controller within the active activity | Scene, Cameras, Signals, Timeline |
 | Panel geometry and active tab | `PanelWorkspace` | Panel chrome and persisted layout only |
 | Hardware, recording, replay, storage, and safety state | Backend | Activity Controller through the wire API |
@@ -642,6 +674,12 @@ physical seek additionally becomes a backend request.
 
 **Receive live telemetry:** `Backend event → Live Activity Controller → Live
 projection → Scene + Cameras + Signals + Timeline`.
+
+**Select a rollout checkpoint:** `RolloutWorkbench → SelectCheckpoint(id) →
+Rollout Activity Controller → fixed follower + live Scene + first follower
+Camera + truthful Inference state`. Run remains disabled until the checkpoint,
+follower, camera binding, calibration, and fresh control stream are available;
+the backend revalidates the complete model and hardware contract before motion.
 
 ### Named Rules
 
@@ -766,9 +804,9 @@ This is the signature component system.
 ### Application Chrome
 
 - **Activity rail:** 60px wide on desktop and the only global navigation
-  surface. Live, Data, and Training stay at the top; Settings stays at the
-  bottom. Active activities use blue ink, a paper surface, and a 2px left edge.
-  There is no separate top menu.
+  surface. Live, Data, Training, and Rollout stay at the top; Settings stays at
+  the bottom. Active activities use blue ink, a paper surface, and a 2px left
+  edge. There is no separate top menu.
 - **Status bar:** 20px, 10px type, hairline-separated facts. It owns global
   connection, environment, current activity, recording, holding, rate, and
   issue truth.
@@ -853,6 +891,40 @@ resource lanes explain whether the input pipeline and machine are feeding it.
 **The Shared-Optimizer-Step Rule.** Any training view that plots, marks, or
 summarizes run progress keys that evidence to optimizer step so learning and
 system behavior can be compared without correlating unrelated axes by eye.
+
+### Rollout
+
+Rollout is a simplified safety console for evaluating a trained checkpoint at
+the physical bench. It stays compact enough that the live 3D scene, one
+follower camera, and inference evidence remain the visual authority.
+
+- **Checkpoint:** One picker lists checkpoints produced by completed Training
+  runs and reveals only a compact policy, validation, and file-size summary.
+- **Fixed follower:** The target is always the one robot configured with the
+  follower role. Show its identity, motor connection, calibration, and first
+  camera assignment in one compact read-only line; never add target-arm
+  selection or a second readiness checklist.
+- **Execution:** Expose only action steps and control rate. The fixed-follower
+  summary already makes the physical target explicit.
+- **Readiness and action:** Runtime availability gets one compact note above
+  Run policy. Run is the single filled action and its region bottom-anchors on
+  tall workbenches. A failed hardware precondition keeps one specific blocker
+  adjacent instead of restating every passing check.
+- **Current truth boundary:** Training publishes the native ACT tensor namespace,
+  model configuration, normalization buffers, joint order, camera order, and
+  robot type in one SafeTensors artifact. Rollout state and metrics come only
+  from the backend-owned native session. Loading and warm-up precede policy
+  mode; a failed contract or safety check never becomes physical motion.
+- **Inference evidence:** The low lane exposes Latency, Model, and Misses as
+  tabular metrics. Values remain em dashes and the lane says “No measurements
+  yet” until backend measurements arrive; never draw synthetic timing traces.
+- **Responsive:** The desktop workbench begins at 27%. At 480px and below,
+  Rollout uses the shared mobile panel switcher, stacks fields, keeps the three
+  metrics in one compact strip, and preserves 44px interactive controls.
+
+**The Fixed-Follower Rule.** Rollout never asks the operator to choose a motion
+target. It commands only the configured follower, and backend readiness—not
+ambient browser selection—decides whether execution may begin.
 
 ### Camera Panels
 
@@ -946,8 +1018,9 @@ deadline belongs to the notice value, not the component that draws it.
   one light neutral world; reserve the dark mat for camera imagery.
 - **Do** register independent surfaces as panels and give them durable IDs and
   meaningful home tiles.
-- **Do** preserve the one-third/two-thirds default while treating persisted user
-  layout as the active composition.
+- **Do** preserve the one-third/two-thirds Live/Data default and Rollout's 27%
+  workbench default while treating persisted user layout as the active
+  composition.
 - **Do** give every drag, dock, split, resize, and tab action a keyboard path,
   visible focus, and reduced-motion behavior.
 - **Do** derive Live camera panels from robot assignments and Data camera panels
@@ -962,9 +1035,9 @@ deadline belongs to the notice value, not the component that draws it.
 - **Do** render exceptional status only when it helps the operator act.
 - **Do** put disabled-action reasons and physical consequences on the page.
 - **Do** move robot and destination configuration into Settings.
-- **Do** keep Live, Data, and Training layout state independent, and keep
-  episode selection and camera ownership activity-scoped so switching cannot
-  move content between them.
+- **Do** keep Live, Data, Training, and Rollout layout state independent, and
+  keep episode selection and camera ownership activity-scoped so switching
+  cannot move content between them.
 - **Do** route workbench, Timeline, panel-focus, and backend events through one
   activity controller that derives the complete visible projection.
 - **Do** represent Live, Recorded Loading, Recorded Ready, Recorded Unavailable,
@@ -977,6 +1050,11 @@ deadline belongs to the notice value, not the component that draws it.
   and centralized series roles.
 - **Do** show truthful Training empty, waiting, unavailable, and locked states;
   never substitute synthetic telemetry for backend evidence.
+- **Do** keep Rollout fixed to the configured follower, with one live follower
+  camera and a specific disabled-action reason beside Run policy.
+- **Do** keep Rollout metrics empty until native measurements arrive, keep
+  loading/stopping/error states authoritative, and name the exact recovery for
+  every blocked or stopped session.
 - **Do** keep `tailwind_input` and `tailwind_output` in `Dioxus.toml`; DX owns
   stylesheet compilation for serve, build, and bundle.
 
@@ -987,8 +1065,8 @@ deadline belongs to the notice value, not the component that draws it.
 - **Don't** add fixed one-off panel arrangements in the Studio; extend
   `spiral-robotics-panels` when the mechanic is generic and register domain content in
   the Studio.
-- **Don't** turn every tool into primary navigation. Live, Data, and Training
-  are activities; panel tabs are spatial grouping inside them.
+- **Don't** turn every tool into primary navigation. Live, Data, Training, and
+  Rollout are activities; panel tabs are spatial grouping inside them.
 - **Don't** let a Data action mutate Live camera tabs, or derive recorded camera
   tabs from current hardware assignment.
 - **Don't** duplicate a camera stream merely because its panel moved or another
@@ -1019,5 +1097,9 @@ deadline belongs to the notice value, not the component that draws it.
   tokens.
 - **Don't** turn Training data-path stages or resource lanes into elevated
   dashboard cards, or give related training evidence unrelated axes.
+- **Don't** turn Rollout into an ML dashboard with a target-arm picker,
+  model-contract table, sampling controls, or a stack of diagnostic panels.
+- **Don't** fabricate rollout motion, readiness, latency, chunk timing, or
+  deadline-miss values; every one comes from the backend session.
 - **Don't** add uppercase tracked kickers, decorative display type, pill-shaped
   containers, a fixed-dark workspace, or ornamental looping animation.

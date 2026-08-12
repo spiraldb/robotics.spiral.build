@@ -4,6 +4,7 @@ mod http;
 mod recording;
 mod robotics;
 mod robots;
+mod rollout;
 mod storage;
 mod training;
 

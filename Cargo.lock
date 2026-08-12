@@ -6635,6 +6635,7 @@ dependencies = [
  "burn-nn",
  "burn-wgpu",
  "clap",
+ "futures-lite",
  "hf-hub",
  "image",
  "safetensors",
@@ -6642,6 +6643,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.19",
+ "wgpu",
 ]
 
 [[package]]
@@ -6673,12 +6675,15 @@ dependencies = [
  "gloo-net 0.7.0",
  "gloo-timers",
  "hf-hub",
+ "image",
  "js-sys",
  "parquet",
+ "safetensors",
  "serde",
  "serde_json",
  "spiral-robotics",
  "spiral-robotics-core",
+ "spiral-robotics-inference",
  "spiral-robotics-panels",
  "spiral-robotics-viewport",
  "tempfile",

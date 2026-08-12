@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use burn_core::tensor::backend::Backend;
 use burn_core::tensor::{Tensor, TensorData};
 use safetensors::{Dtype, SafeTensors};
@@ -7,12 +9,13 @@ use crate::{Error, Result};
 /// Process-owned, structurally valid SafeTensors bytes.
 pub(super) struct Weights {
     label: String,
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
 }
 
 impl Weights {
-    pub fn from_bytes(label: impl Into<String>, bytes: Vec<u8>) -> Result<Self> {
+    pub fn from_bytes(label: impl Into<String>, bytes: impl Into<Arc<[u8]>>) -> Result<Self> {
         let label = label.into();
+        let bytes = bytes.into();
         SafeTensors::deserialize(&bytes)
             .map_err(|error| Error::Checkpoint(format!("{label}: {error}")))?;
         Ok(Self { label, bytes })

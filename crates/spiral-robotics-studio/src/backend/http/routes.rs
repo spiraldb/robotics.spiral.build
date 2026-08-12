@@ -28,11 +28,11 @@ use spiral_robotics_core::api::{
     ApiError, CameraBinding, CameraStatus, ConnectionTestResponse, CreateRobotRequest,
     DataSettings, EpisodeSummary, ExportRequest, ExportResponse, GoalRequest, IdentifyPortRequest,
     IdentifyPortResponse, ImportResponse, JudgeEpisodeRequest, ModeSelection, PublicationStatus,
-    RobotSummary, SerialPortSummary, SetRecordingPausedRequest, SetReplayPausedRequest,
-    SpiralQueryRequest, SpiralQueryResponse, StartRecordingRequest, StartReplayRequest,
-    StartSpiralReplayRequest, StartTrainingRequest, StopRecordingRequest, StudioSnapshot,
-    TorqueRequest, TrainingRun, TrainingSnapshot, UpdateDataSettingsRequest, UpdateRobotRequest,
-    default_teleoperation_pair,
+    RobotSummary, RolloutSnapshot, SerialPortSummary, SetRecordingPausedRequest,
+    SetReplayPausedRequest, SpiralQueryRequest, SpiralQueryResponse, StartRecordingRequest,
+    StartReplayRequest, StartRolloutRequest, StartSpiralReplayRequest, StartTrainingRequest,
+    StopRecordingRequest, StudioSnapshot, TorqueRequest, TrainingCheckpointFormat, TrainingRun,
+    TrainingSnapshot, UpdateDataSettingsRequest, UpdateRobotRequest, default_teleoperation_pair,
 };
 use spiral_robotics_core::calibration::build_calibration;
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
@@ -51,6 +51,7 @@ use crate::backend::robotics::video::{
 use crate::backend::robots::workspace::{
     RobotRecord, RobotWorkspace, WorkspaceError, validate_camera_role,
 };
+use crate::backend::rollout::manager::RolloutManager;
 use crate::backend::storage::manager::StorageManager;
 use crate::backend::storage::settings::DataSettingsStore;
 use crate::backend::training::manager::TrainingManager;
@@ -79,6 +80,7 @@ pub(crate) struct AppState {
     pub data_settings: Arc<DataSettingsStore>,
     pub storage: Arc<StorageManager>,
     pub training: Arc<TrainingManager>,
+    pub rollout: Arc<RolloutManager>,
     pub recording_video: Arc<tokio::sync::Mutex<Option<VideoCapture>>>,
     pub video_encoder: VideoEncoderSettings,
     pub simulated: bool,
@@ -287,6 +289,8 @@ pub(crate) fn api_router(state: AppState) -> Router {
             get(list_training_runs).post(start_training),
         )
         .route("/training/runs/{id}/stop", post(stop_training))
+        .route("/rollout", get(get_rollout).post(start_rollout))
+        .route("/rollout/stop", post(stop_rollout))
         .with_state(state)
 }
 
@@ -377,12 +381,20 @@ async fn events(
         let mut snapshot_timer = tokio::time::interval(SNAPSHOT_INTERVAL);
         let mut telemetry_timer = tokio::time::interval(TELEMETRY_INTERVAL);
         let (initial_training, mut training) = state.training.subscription();
+        let initial_rollout = state.rollout.snapshot();
+        let mut rollout = state.rollout.subscribe();
         let mut last_snapshot: Option<StudioSnapshot> = None;
         let mut last_sequence = 0_u64;
 
         if let Ok(event) = Event::default()
             .event("training_snapshot")
             .json_data(&initial_training)
+        {
+            yield Ok(event);
+        }
+        if let Ok(event) = Event::default()
+            .event("rollout_state")
+            .json_data(&initial_rollout)
         {
             yield Ok(event);
         }
@@ -432,6 +444,18 @@ async fn events(
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
+                changed = rollout.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    let snapshot = rollout.borrow_and_update().clone();
+                    if let Ok(event) = Event::default()
+                        .event("rollout_state")
+                        .json_data(&snapshot)
+                    {
+                        yield Ok(event);
+                    }
+                }
             }
         }
     };
@@ -456,6 +480,42 @@ async fn stop_training(
     Path(id): Path<String>,
 ) -> Result<StatusCode, Failure> {
     state.training.stop(&id)?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn get_rollout(State(state): State<AppState>) -> Json<RolloutSnapshot> {
+    Json(state.rollout.snapshot())
+}
+
+async fn start_rollout(
+    State(state): State<AppState>,
+    Json(request): Json<StartRolloutRequest>,
+) -> Result<(StatusCode, Json<RolloutSnapshot>), Failure> {
+    let training = state.training.snapshot();
+    let run = training
+        .runs
+        .iter()
+        .find(|run| run.id == request.run_id)
+        .ok_or_else(|| Failure::bad_request("the selected training run is no longer available"))?;
+    if run.phase.active() {
+        return Err(Failure::bad_request(
+            "stop or finish training before starting a rollout",
+        ));
+    }
+    if !run.checkpoints.iter().any(|checkpoint| {
+        checkpoint.step == request.checkpoint_step
+            && checkpoint.format == TrainingCheckpointFormat::SafeTensors
+    }) {
+        return Err(Failure::bad_request(
+            "the selected checkpoint is no longer available",
+        ));
+    }
+    let snapshot = state.rollout.start(request).await?;
+    Ok((StatusCode::ACCEPTED, Json(snapshot)))
+}
+
+async fn stop_rollout(State(state): State<AppState>) -> Result<StatusCode, Failure> {
+    state.rollout.stop().await?;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -955,6 +1015,11 @@ async fn set_mode(
     if matches!(selection, ModeSelection::Replay { .. }) {
         return Err(Failure::bad_request(
             "start a replay with POST /api/episodes/replay, which loads the take first",
+        ));
+    }
+    if matches!(selection, ModeSelection::Policy { .. }) {
+        return Err(Failure::bad_request(
+            "start policy control with POST /api/rollout, which validates and warms the checkpoint first",
         ));
     }
     state.hardware.set_mode(selection).await?;
@@ -2081,6 +2146,7 @@ fn describe_mode(selection: &ModeSelection) -> String {
             format!("Teleoperation — {leader} → {follower}")
         }
         ModeSelection::Replay { robot, episode } => format!("Replay — {episode} on {robot}"),
+        ModeSelection::Policy { robot, session } => format!("Policy — {session} on {robot}"),
     }
 }
 
@@ -2244,6 +2310,7 @@ mod tests {
         let frame = Frame {
             bytes: Bytes::from_static(&[0xff, 0xd8, 0x00, 0xff, 0xd9]),
             sequence: 1,
+            captured_at: std::time::Instant::now(),
         };
 
         let part = multipart_part(&frame);

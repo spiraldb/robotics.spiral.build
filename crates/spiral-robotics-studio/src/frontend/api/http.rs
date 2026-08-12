@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use spiral_robotics_core::api::{ApiError, EpisodeSummary};
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
-use spiral_robotics_core::api::{StudioSnapshot, TelemetryFrame, TrainingSnapshot, TrainingUpdate};
+use spiral_robotics_core::api::{
+    RolloutSnapshot, StudioSnapshot, TelemetryFrame, TrainingSnapshot, TrainingUpdate,
+};
 
 /// Fetch and decode a JSON resource.
 pub(crate) async fn get<T: DeserializeOwned>(path: &str) -> Result<T, String> {
@@ -162,6 +164,7 @@ pub enum StudioEvent {
     Telemetry(Box<TelemetryFrame>),
     TrainingSnapshot(Box<TrainingSnapshot>),
     TrainingUpdate(Box<TrainingUpdate>),
+    Rollout(Box<RolloutSnapshot>),
 }
 
 /// Consume the server's event stream, handing every message to `on_event`.
@@ -188,9 +191,12 @@ where
     let training_updates = source
         .subscribe("training_update")
         .map_err(|error| format!("could not subscribe to training updates: {error}"))?;
+    let rollout = source
+        .subscribe("rollout_state")
+        .map_err(|error| format!("could not subscribe to rollout state: {error}"))?;
 
     let mut events = stream::select(
-        stream::select(snapshots, telemetry),
+        stream::select(stream::select(snapshots, telemetry), rollout),
         stream::select(training_snapshots, training_updates),
     );
     while let Some(Ok((kind, message))) = events.next().await {
@@ -216,6 +222,11 @@ where
             "training_update" => {
                 if let Ok(update) = serde_json::from_str(&text) {
                     on_event(StudioEvent::TrainingUpdate(Box::new(update)));
+                }
+            }
+            "rollout_state" => {
+                if let Ok(snapshot) = serde_json::from_str(&text) {
+                    on_event(StudioEvent::Rollout(Box::new(snapshot)));
                 }
             }
             _ => {}

@@ -108,6 +108,7 @@
             }))
             ps.pyarrow
             ps.numpy
+            ps.safetensors
           ]);
           sharedShell = {
             packages =

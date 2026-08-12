@@ -16,8 +16,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use spiral_robotics_core::api::{
     ConnectionTestResponse, MAX_TRAINING_HISTORY_RUNS, StartTrainingRequest, TrainingCheckpoint,
-    TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase, TrainingSnapshot,
-    TrainingSource, TrainingUpdate,
+    TrainingCheckpointFormat, TrainingMetricPoint, TrainingReadiness, TrainingRun,
+    TrainingRunPhase, TrainingSnapshot, TrainingSource, TrainingUpdate,
 };
 use spiral_robotics_core::spiral;
 use tokio::io::{AsyncBufReadExt as _, BufReader};
@@ -77,6 +77,7 @@ enum WorkerEvent {
         validation_loss: Option<f64>,
         file_name: String,
         byte_size: u64,
+        manifest: serde_json::Value,
     },
     Log {
         message: String,
@@ -506,6 +507,7 @@ impl TrainingManager {
                 validation_loss,
                 file_name,
                 byte_size,
+                manifest,
             } => match self
                 .publish_checkpoint(
                     run_id,
@@ -518,6 +520,7 @@ impl TrainingManager {
                     validation_loss,
                     &file_name,
                     byte_size,
+                    &manifest,
                 )
                 .await
             {
@@ -550,6 +553,7 @@ impl TrainingManager {
         validation_loss: Option<f64>,
         file_name: &str,
         byte_size: u64,
+        manifest: &serde_json::Value,
     ) -> Result<(), String> {
         if step == 0 || step > request.steps {
             return Err(format!(
@@ -587,12 +591,12 @@ impl TrainingManager {
                 "checkpoint {file_name} changed while it was being read"
             ));
         }
+        let config_json =
+            validate_checkpoint_artifact(file_name, &payload, manifest, run_id, step, request)?;
         let policy = serde_json::to_value(request.policy)
             .ok()
             .and_then(|value| value.as_str().map(str::to_owned))
             .unwrap_or_else(|| "act".to_owned());
-        let config_json = serde_json::to_string(request)
-            .map_err(|error| format!("could not encode checkpoint configuration: {error}"))?;
         self.inner
             .storage
             .publish_training_checkpoint(
@@ -619,6 +623,7 @@ impl TrainingManager {
                     validation_loss,
                     spiral_table: source.checkpoint_table.clone(),
                     byte_size,
+                    format: TrainingCheckpointFormat::SafeTensors,
                 },
             },
             true,
@@ -723,14 +728,25 @@ async fn probe_worker(python: &Path, worker_script: &Path) -> Result<String, Str
             .output(),
     )
     .await
-    .map_err(|_| "The pinned PyTorch worker probe timed out after 10 seconds.".to_owned())?
+    .map_err(|_| {
+        format!(
+            "The training worker probe timed out after 10 seconds using {}.",
+            python.display()
+        )
+    })?
     .map_err(|error| format!("Could not launch {}: {error}", python.display()))?;
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         return Err(if detail.is_empty() {
-            "The pinned PyTorch worker probe failed.".to_owned()
+            format!(
+                "The training worker probe failed using {}.",
+                python.display()
+            )
         } else {
-            format!("The pinned PyTorch worker probe failed: {detail}")
+            format!(
+                "The training worker probe failed using {}: {detail}",
+                python.display()
+            )
         });
     }
     let detail = String::from_utf8_lossy(&output.stdout).trim().to_owned();
@@ -779,6 +795,78 @@ async fn readiness(
         spiral_ready,
         summary,
     }
+}
+
+fn validate_checkpoint_artifact(
+    file_name: &str,
+    payload: &[u8],
+    manifest: &serde_json::Value,
+    run_id: &str,
+    step: u64,
+    request: &StartTrainingRequest,
+) -> Result<String, String> {
+    if Path::new(file_name).extension() != Some(std::ffi::OsStr::new("safetensors")) {
+        return Err("the training worker must publish a .safetensors checkpoint".to_owned());
+    }
+    let tensors = safetensors::SafeTensors::deserialize(payload)
+        .map_err(|error| format!("checkpoint {file_name} is not valid SafeTensors: {error}"))?;
+    if tensors.is_empty() {
+        return Err(format!("checkpoint {file_name} contains no tensors"));
+    }
+    let (_, metadata) = safetensors::SafeTensors::read_metadata(payload)
+        .map_err(|error| format!("checkpoint {file_name} metadata is invalid: {error}"))?;
+    let metadata = metadata
+        .metadata()
+        .as_ref()
+        .ok_or_else(|| format!("checkpoint {file_name} has no artifact metadata"))?;
+    if metadata.get("format").map(String::as_str) != Some("spiral-act") {
+        return Err(format!(
+            "checkpoint {file_name} does not declare its tensor framework"
+        ));
+    }
+    let embedded_manifest = metadata
+        .get("spiral_robotics")
+        .ok_or_else(|| format!("checkpoint {file_name} has no Spiral manifest"))?;
+    let embedded_manifest: serde_json::Value =
+        serde_json::from_str(embedded_manifest).map_err(|error| {
+            format!("checkpoint {file_name} has an invalid Spiral manifest: {error}")
+        })?;
+    if &embedded_manifest != manifest {
+        return Err(format!(
+            "checkpoint {file_name} metadata does not match the worker event"
+        ));
+    }
+    if manifest.get("format").and_then(serde_json::Value::as_str)
+        != Some("spiral_robotics.act.safetensors.v2")
+        || manifest.get("artifact").and_then(serde_json::Value::as_str) != Some("inference")
+        || manifest.get("run_id").and_then(serde_json::Value::as_str) != Some(run_id)
+        || manifest.get("step").and_then(serde_json::Value::as_u64) != Some(step)
+    {
+        return Err(format!(
+            "checkpoint {file_name} has the wrong format, purpose, run, or step"
+        ));
+    }
+    let request_json = serde_json::to_value(request)
+        .map_err(|error| format!("could not validate checkpoint configuration: {error}"))?;
+    if manifest.get("request") != Some(&request_json) {
+        return Err(format!(
+            "checkpoint {file_name} configuration does not match the active run"
+        ));
+    }
+    let model_config = manifest
+        .get("model_config")
+        .ok_or_else(|| format!("checkpoint {file_name} has no native model configuration"))?;
+    if manifest
+        .get("tensor_namespace")
+        .and_then(serde_json::Value::as_str)
+        != Some("lerobot_act_state_dict")
+    {
+        return Err(format!(
+            "checkpoint {file_name} does not use the native ACT tensor namespace"
+        ));
+    }
+    serde_json::to_string(model_config)
+        .map_err(|error| format!("could not encode native model configuration: {error}"))
 }
 
 fn validate_request(request: &StartTrainingRequest) -> Result<(), String> {
@@ -959,9 +1047,73 @@ mod tests {
 
     #[test]
     fn checkpoint_paths_must_be_direct_children() {
-        let safe = Path::new("checkpoint-10.pt");
-        let unsafe_path = Path::new("../checkpoint-10.pt");
+        let safe = Path::new("checkpoint-10.safetensors");
+        let unsafe_path = Path::new("../checkpoint-10.safetensors");
         assert_eq!(safe.components().count(), 1);
         assert_ne!(unsafe_path.components().count(), 1);
+    }
+
+    #[test]
+    fn checkpoint_publication_accepts_only_matching_safetensors_artifacts() {
+        use std::collections::HashMap;
+
+        use safetensors::tensor::{Dtype, TensorView, serialize};
+
+        let request = StartTrainingRequest::default();
+        let manifest = serde_json::json!({
+            "format": "spiral_robotics.act.safetensors.v2",
+            "artifact": "inference",
+            "run_id": "train-1",
+            "step": 10,
+            "request": request,
+            "model_config": {"type": "act"},
+            "tensor_namespace": "lerobot_act_state_dict",
+        });
+        let metadata = HashMap::from([
+            ("format".to_owned(), "spiral-act".to_owned()),
+            (
+                "spiral_robotics".to_owned(),
+                serde_json::to_string(&manifest).unwrap(),
+            ),
+        ]);
+        let data = [0_u8; 4];
+        let tensor = TensorView::new(Dtype::F32, vec![1], &data).unwrap();
+        let payload = serialize([("weight", tensor)], Some(metadata)).unwrap();
+
+        assert!(
+            validate_checkpoint_artifact(
+                "checkpoint-10.safetensors",
+                &payload,
+                &manifest,
+                "train-1",
+                10,
+                &request,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_checkpoint_artifact(
+                "checkpoint-10.pt",
+                &payload,
+                &manifest,
+                "train-1",
+                10,
+                &request,
+            )
+            .unwrap_err()
+            .contains(".safetensors")
+        );
+        assert!(
+            validate_checkpoint_artifact(
+                "checkpoint-10.safetensors",
+                b"pickle",
+                &manifest,
+                "train-1",
+                10,
+                &request,
+            )
+            .unwrap_err()
+            .contains("not valid SafeTensors")
+        );
     }
 }

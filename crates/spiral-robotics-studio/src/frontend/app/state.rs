@@ -6,7 +6,7 @@ use std::rc::Rc;
 use dioxus::prelude::*;
 use spiral_robotics_core::api::{
     EpisodeSummary, ModeSelection, RecordingProgress, ReplayProgress, RobotSummary, RobotTelemetry,
-    StudioSnapshot, TelemetryFrame, TrainingSnapshot,
+    RolloutSnapshot, StudioSnapshot, TelemetryFrame, TrainingSnapshot,
 };
 use spiral_robotics_core::urdf::{SO101_URDF, Urdf, UrdfError};
 
@@ -174,6 +174,8 @@ pub(crate) struct Studio {
     pub telemetry: Signal<TelemetryFrame>,
     /// Backend-owned lifecycle and metric history for local policy training.
     pub training: Signal<TrainingSnapshot>,
+    /// Backend-owned native inference and motor-control lifecycle.
+    pub rollout: Signal<RolloutSnapshot>,
     /// True while the event stream is connected.
     pub live: Signal<bool>,
     /// Wall-clock time of the last valid event and a periodically updated clock.
@@ -213,6 +215,7 @@ impl Studio {
         let snapshot = use_signal(StudioSnapshot::default);
         let telemetry = use_signal(TelemetryFrame::default);
         let training = use_signal(TrainingSnapshot::default);
+        let rollout = use_signal(RolloutSnapshot::default);
         let live = use_signal(|| false);
         let last_event_ms = use_signal(|| 0.0);
         let clock_ms = use_signal(|| 0.0);
@@ -225,6 +228,7 @@ impl Studio {
             snapshot,
             telemetry,
             training,
+            rollout,
             live,
             last_event_ms,
             // Keep the server's first render identical to the browser's first
@@ -258,6 +262,7 @@ impl Studio {
                 mut snapshot,
                 mut telemetry,
                 mut training,
+                mut rollout,
                 mut live,
                 mut last_event_ms,
                 mut recording_signals,
@@ -275,6 +280,7 @@ impl Studio {
                         StudioEvent::Snapshot(value) => snapshot.set(*value),
                         StudioEvent::TrainingSnapshot(value) => training.set(*value),
                         StudioEvent::TrainingUpdate(update) => training.write().apply(*update),
+                        StudioEvent::Rollout(value) => rollout.set(*value),
                         StudioEvent::Telemetry(frame) => {
                             // Only a frame that can change the store touches it.
                             // Idle writes would mark the signal dirty and

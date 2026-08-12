@@ -70,3 +70,14 @@ pub fn TrainingIcon() -> Element {
         }
     }
 }
+
+/// Policy rollout: a predicted action moving into the follower control path.
+#[component]
+pub fn RolloutIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M3 2.75v10.5l8-5.25-8-5.25Z" }
+            path { d: "M11.75 4.5h1.5v7h-1.5" }
+        }
+    }
+}

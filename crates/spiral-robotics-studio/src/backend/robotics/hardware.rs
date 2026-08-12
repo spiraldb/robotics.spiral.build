@@ -157,6 +157,16 @@ enum Command {
         normalized: BTreeMap<String, f64>,
         reply: Reply<()>,
     },
+    SetPolicyGoals {
+        id: String,
+        session: String,
+        normalized: BTreeMap<String, f64>,
+        reply: Reply<()>,
+    },
+    StopPolicySession {
+        session: String,
+        reply: Reply<()>,
+    },
     SetMode {
         mode: ModeSelection,
         reply: Reply<()>,
@@ -458,6 +468,31 @@ impl HardwareHandle {
         self.request(|reply| Command::SetGoals {
             id: id.to_owned(),
             normalized,
+            reply,
+        })
+        .await
+    }
+
+    /// Command normalized targets for the currently admitted policy session.
+    pub(crate) async fn set_policy_goals(
+        &self,
+        id: &str,
+        session: &str,
+        normalized: BTreeMap<String, f64>,
+    ) -> Result<(), String> {
+        self.request(|reply| Command::SetPolicyGoals {
+            id: id.to_owned(),
+            session: session.to_owned(),
+            normalized,
+            reply,
+        })
+        .await
+    }
+
+    /// Leave policy mode only when the named session still owns it.
+    pub(crate) async fn stop_policy_session(&self, session: &str) -> Result<(), String> {
+        self.request(|reply| Command::StopPolicySession {
+            session: session.to_owned(),
             reply,
         })
         .await
@@ -1194,6 +1229,25 @@ impl Controller {
             } => {
                 let _ = reply.send(self.set_goals(&id, &normalized));
             }
+            Command::SetPolicyGoals {
+                id,
+                session,
+                normalized,
+                reply,
+            } => {
+                let _ = reply.send(self.set_policy_goals(&id, &session, &normalized));
+            }
+            Command::StopPolicySession { session, reply } => {
+                let result = if matches!(
+                    &self.mode.selection,
+                    ModeSelection::Policy { session: active, .. } if active == &session
+                ) {
+                    self.set_mode(ModeSelection::Idle)
+                } else {
+                    Ok(())
+                };
+                let _ = reply.send(result);
+            }
             Command::SetMode { mode, reply } => {
                 let _ = reply.send(self.set_mode(mode));
             }
@@ -1733,6 +1787,32 @@ impl Controller {
             ));
         }
 
+        self.set_normalized_goals(id, normalized)
+    }
+
+    fn set_policy_goals(
+        &mut self,
+        id: &str,
+        session: &str,
+        normalized: &BTreeMap<String, f64>,
+    ) -> Result<(), String> {
+        if !matches!(
+            &self.mode.selection,
+            ModeSelection::Policy { robot, session: active }
+                if robot == id && active == session
+        ) {
+            return Err(format!(
+                "policy session {session:?} is not allowed to command robot {id:?}"
+            ));
+        }
+        self.set_normalized_goals(id, normalized)
+    }
+
+    fn set_normalized_goals(
+        &mut self,
+        id: &str,
+        normalized: &BTreeMap<String, f64>,
+    ) -> Result<(), String> {
         let robot = self
             .robots
             .get_mut(id)
@@ -1800,6 +1880,9 @@ impl Controller {
             ModeSelection::Replay { robot, .. } => {
                 self.require_calibrated(robot)?;
             }
+            ModeSelection::Policy { robot, .. } => {
+                self.require_calibrated(robot)?;
+            }
         }
 
         // A mode change of any kind ends a replay: the trajectory belongs to
@@ -1838,6 +1921,10 @@ impl Controller {
         // the arm holds where it stands until the seek starts walking it to the
         // take's first frame.
         if let ModeSelection::Replay { robot, .. } = &selection {
+            let robot = robot.clone();
+            self.set_torque(&robot, true)?;
+        }
+        if let ModeSelection::Policy { robot, .. } = &selection {
             let robot = robot.clone();
             self.set_torque(&robot, true)?;
         }
@@ -1987,6 +2074,7 @@ impl Controller {
                 .as_ref()
                 .filter(|replay| replay.phase == ReplayPhase::Playing)
                 .map(|_| robot.as_str()),
+            ModeSelection::Policy { robot, .. } => Some(robot.as_str()),
             _ => None,
         };
         for (id, robot) in &mut self.robots {
@@ -2158,6 +2246,7 @@ impl Controller {
             ModeSelection::Manual { robot } => robot == id,
             ModeSelection::Teleoperate { leader, follower } => leader == id || follower == id,
             ModeSelection::Replay { robot, .. } => robot == id,
+            ModeSelection::Policy { robot, .. } => robot == id,
         };
         if involved {
             self.replay = None;
@@ -2971,6 +3060,62 @@ mod tests {
             .expect("an out-of-range command is clamped, not rejected");
 
         assert_eq!(controller.robots["arm"].target["gripper"], 2548);
+    }
+
+    #[test]
+    fn policy_commands_are_scoped_to_the_admitted_session() {
+        let mut controller = controller();
+        controller
+            .connect(spec("arm", Some(calibration(2048, 500))))
+            .expect("connect");
+        controller
+            .set_mode(ModeSelection::Policy {
+                robot: "arm".to_owned(),
+                session: "rollout-1".to_owned(),
+            })
+            .expect("policy mode");
+        assert!(controller.robots["arm"].torque);
+        let robot = controller.robots.get_mut("arm").unwrap();
+        robot.positions = robot
+            .spec
+            .motors
+            .keys()
+            .map(|name| (name.clone(), 2048))
+            .collect();
+        robot.follow_measured_positions();
+
+        let goals = BTreeMap::from([("gripper".to_owned(), 0.5)]);
+        assert!(
+            controller
+                .set_policy_goals("arm", "old-rollout", &goals)
+                .expect_err("stale session")
+                .contains("not allowed")
+        );
+        controller
+            .set_policy_goals("arm", "rollout-1", &goals)
+            .expect("active session may command");
+        assert_eq!(controller.robots["arm"].target["gripper"], 2298);
+        let before = controller.robots["arm"].commanded["gripper"];
+        controller.drive_robots();
+        let after = controller.robots["arm"].commanded["gripper"];
+        assert_ne!(
+            after, before,
+            "the admitted policy target reaches the motor ramp"
+        );
+        assert!(
+            after.abs_diff(before) <= controller.settings.teleop_max_step_counts.unsigned_abs(),
+            "policy motion stays inside the fast control-path step bound"
+        );
+
+        controller
+            .set_mode(ModeSelection::Idle)
+            .expect("stop policy");
+        assert!(
+            controller
+                .set_policy_goals("arm", "rollout-1", &goals)
+                .expect_err("finished session")
+                .contains("not allowed")
+        );
     }
 
     #[test]

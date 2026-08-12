@@ -20,6 +20,25 @@ pub type CpuActPolicy = ActPolicy<burn_ndarray::NdArray<f32>>;
 #[cfg(feature = "metal")]
 pub type MetalActPolicy = ActPolicy<burn_wgpu::Metal>;
 
+/// Probe Metal without initializing Burn's global compute runtime. WGPU's
+/// higher-level Burn setup panics when adapter discovery returns nothing, so
+/// callers use this fallible boundary before selecting the backend.
+#[cfg(feature = "metal")]
+pub fn metal_available() -> bool {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::METAL,
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    !futures_lite::future::block_on(instance.enumerate_adapters(wgpu::Backends::METAL)).is_empty()
+}
+
+#[cfg(feature = "metal")]
+fn ensure_metal_available() -> Result<()> {
+    metal_available()
+        .then_some(())
+        .ok_or_else(|| Error::Inference("no Metal compute adapter is available".to_owned()))
+}
+
 /// Load ACT with the portable CPU runtime.
 #[cfg(feature = "cpu")]
 pub fn load_cpu(files: &ModelFiles) -> Result<CpuActPolicy> {
@@ -34,11 +53,13 @@ pub fn load_cpu_artifact(artifact: ModelArtifact) -> Result<CpuActPolicy> {
 /// Load ACT with Burn's WGPU backend restricted to Metal by the crate feature.
 #[cfg(feature = "metal")]
 pub fn load_metal(files: &ModelFiles) -> Result<MetalActPolicy> {
+    ensure_metal_available()?;
     ActPolicy::load(files, Default::default())
 }
 
 #[cfg(feature = "metal")]
 pub fn load_metal_artifact(artifact: ModelArtifact) -> Result<MetalActPolicy> {
+    ensure_metal_available()?;
     ActPolicy::from_artifact(artifact, Default::default())
 }
 
@@ -74,7 +95,7 @@ impl<B: Backend> ActPolicy<B> {
         })
     }
 
-    fn prepare(&self, input: InferenceInput<'_>) -> Result<(Tensor<B, 2>, Tensor<B, 4>)> {
+    fn prepare(&self, input: InferenceInput<'_>) -> Result<(Tensor<B, 2>, Vec<Tensor<B, 4>>)> {
         if input.state.len() != self.specification.state_dimensions {
             return Err(Error::Input(format!(
                 "state has {} values, model expects {}",
@@ -85,11 +106,13 @@ impl<B: Backend> ActPolicy<B> {
         if input.state.iter().any(|value| !value.is_finite()) {
             return Err(Error::Input("state contains a non-finite value".to_owned()));
         }
-        let image_spec = self.specification.image_inputs.first().ok_or_else(|| {
-            Error::Inference("validated ACT policy has no image specification".to_owned())
-        })?;
-        let image = required_image(input.images, &image_spec.name)?;
-        validate_image(image, image_spec.width, image_spec.height)?;
+        if input.images.len() != self.specification.image_inputs.len() {
+            return Err(Error::Input(format!(
+                "received {} images, model expects {}",
+                input.images.len(),
+                self.specification.image_inputs.len()
+            )));
+        }
 
         let state = input
             .state
@@ -103,26 +126,31 @@ impl<B: Backend> ActPolicy<B> {
             &self.device,
         );
 
-        let plane = image.width * image.height;
-        let mut pixels = vec![0.0; plane * 3];
-        for y in 0..image.height {
-            let row = &image.data[y * image.row_stride..y * image.row_stride + image.width * 3];
-            for x in 0..image.width {
-                for channel in 0..3 {
-                    let value = row[x * 3 + channel] as f32 / 255.0;
-                    pixels[channel * plane + y * image.width + x] = normalize(
-                        value,
-                        self.normalization.image_mean[channel],
-                        self.normalization.image_std[channel],
-                    );
+        let mut prepared_images = Vec::with_capacity(self.specification.image_inputs.len());
+        for (index, image_spec) in self.specification.image_inputs.iter().enumerate() {
+            let image = required_image(input.images, &image_spec.name)?;
+            validate_image(image, image_spec.width, image_spec.height)?;
+            let plane = image.width * image.height;
+            let mut pixels = vec![0.0; plane * 3];
+            for y in 0..image.height {
+                let row = &image.data[y * image.row_stride..y * image.row_stride + image.width * 3];
+                for x in 0..image.width {
+                    for channel in 0..3 {
+                        let value = row[x * 3 + channel] as f32 / 255.0;
+                        pixels[channel * plane + y * image.width + x] = normalize(
+                            value,
+                            self.normalization.image_mean[index][channel],
+                            self.normalization.image_std[index][channel],
+                        );
+                    }
                 }
             }
+            prepared_images.push(Tensor::from_data(
+                TensorData::new(pixels, [1, 3, image.height, image.width]),
+                &self.device,
+            ));
         }
-        let image = Tensor::from_data(
-            TensorData::new(pixels, [1, 3, image.height, image.width]),
-            &self.device,
-        );
-        Ok((state, image))
+        Ok((state, prepared_images))
     }
 }
 
@@ -137,29 +165,31 @@ impl<B: Backend> Policy for ActPolicy<B> {
 
     fn warm_up(&mut self) -> Result<InferenceStats> {
         let state = vec![0.0; self.specification.state_dimensions];
-        let image = self
-            .specification
-            .image_inputs
-            .first()
-            .ok_or_else(|| {
-                Error::Inference("validated ACT policy has no image specification".to_owned())
-            })?
-            .clone();
-        let pixels = vec![0; image.width * image.height * image.channels];
-        let image_view = ImageView::packed_rgb8(&image.name, image.width, image.height, &pixels)?;
+        let image_inputs = self.specification.image_inputs.clone();
+        let pixels = image_inputs
+            .iter()
+            .map(|image| vec![0; image.width * image.height * image.channels])
+            .collect::<Vec<_>>();
+        let image_views = image_inputs
+            .iter()
+            .zip(&pixels)
+            .map(|(image, pixels)| {
+                ImageView::packed_rgb8(&image.name, image.width, image.height, pixels)
+            })
+            .collect::<Result<Vec<_>>>()?;
         self.infer(InferenceInput {
             state: &state,
-            images: &[image_view],
+            images: &image_views,
         })
         .map(|chunk| chunk.stats)
     }
 
     fn infer(&mut self, input: InferenceInput<'_>) -> Result<ActionChunk> {
         let started = Instant::now();
-        let (state, image) = self.prepare(input)?;
+        let (state, images) = self.prepare(input)?;
         let preprocessing = started.elapsed();
         let model_started = Instant::now();
-        let output = self.model.forward(state, image);
+        let output = self.model.forward(state, images);
         let output_shape = output.dims();
         let expected_shape = [
             1,
@@ -207,8 +237,8 @@ impl<B: Backend> Policy for ActPolicy<B> {
 struct Normalization {
     state_mean: Vec<f32>,
     state_std: Vec<f32>,
-    image_mean: Vec<f32>,
-    image_std: Vec<f32>,
+    image_mean: Vec<Vec<f32>>,
+    image_std: Vec<Vec<f32>>,
     action_mean: Vec<f32>,
     action_std: Vec<f32>,
 }
@@ -217,17 +247,22 @@ impl Normalization {
     fn load(config: &ActConfig, weights: &Weights) -> Result<Self> {
         let state_name = config.state_name();
         let action_name = config.action_name();
-        let image_name = config.image_name();
         let state_prefix = normalization_prefix("normalize_inputs", state_name);
-        let image_prefix = normalization_prefix("normalize_inputs", image_name);
         let action_prefix = normalization_prefix("unnormalize_outputs", action_name);
+        let mut image_mean = Vec::with_capacity(config.specification().image_inputs.len());
+        let mut image_std = Vec::with_capacity(config.specification().image_inputs.len());
+        for image in config.specification().image_inputs {
+            let image_prefix = normalization_prefix("normalize_inputs", &image.name);
+            image_mean.push(weights.values_exact(&format!("{image_prefix}.mean"), &[3, 1, 1])?);
+            image_std.push(weights.values_exact(&format!("{image_prefix}.std"), &[3, 1, 1])?);
+        }
         let normalization = Self {
             state_mean: weights
                 .vector_exact(&format!("{state_prefix}.mean"), config.state_dimensions())?,
             state_std: weights
                 .vector_exact(&format!("{state_prefix}.std"), config.state_dimensions())?,
-            image_mean: weights.values_exact(&format!("{image_prefix}.mean"), &[3, 1, 1])?,
-            image_std: weights.values_exact(&format!("{image_prefix}.std"), &[3, 1, 1])?,
+            image_mean,
+            image_std,
             action_mean: weights
                 .vector_exact(&format!("{action_prefix}.mean"), config.action_dimensions())?,
             action_std: weights
@@ -245,8 +280,16 @@ impl Normalization {
                 config.state_dimensions(),
             ),
             ("state std", self.state_std.len(), config.state_dimensions()),
-            ("image mean", self.image_mean.len(), 3),
-            ("image std", self.image_std.len(), 3),
+            (
+                "image mean sets",
+                self.image_mean.len(),
+                config.specification().image_inputs.len(),
+            ),
+            (
+                "image std sets",
+                self.image_std.len(),
+                config.specification().image_inputs.len(),
+            ),
             (
                 "action mean",
                 self.action_mean.len(),
@@ -266,9 +309,19 @@ impl Normalization {
             }
         }
         if self
+            .image_mean
+            .iter()
+            .chain(&self.image_std)
+            .any(|values| values.len() != 3)
+        {
+            return Err(Error::Checkpoint(
+                "every image normalization tensor must contain three channels".to_owned(),
+            ));
+        }
+        if self
             .state_mean
             .iter()
-            .chain(&self.image_mean)
+            .chain(self.image_mean.iter().flatten())
             .chain(&self.action_mean)
             .any(|value| !value.is_finite())
         {
@@ -279,7 +332,7 @@ impl Normalization {
         if self
             .state_std
             .iter()
-            .chain(&self.image_std)
+            .chain(self.image_std.iter().flatten())
             .chain(&self.action_std)
             .any(|value| !value.is_finite() || *value < 0.0)
         {

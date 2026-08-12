@@ -482,6 +482,7 @@ pub(crate) fn StudioTimeline(
         Activity::Live => "Live Timeline",
         Activity::Data => "Data Timeline",
         Activity::Training => "Training step timeline",
+        Activity::Rollout => "Rollout live timeline",
     };
 
     rsx! {

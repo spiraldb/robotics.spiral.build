@@ -13,7 +13,7 @@ use adbc_core::{Connection as _, Database as _, Driver as _, Optionable as _, St
 use adbc_driver_manager::{ManagedConnection, ManagedDatabase, ManagedDriver};
 use arrow_array::{
     Array as _, ArrayRef, BinaryArray, BinaryViewArray, Float64Array, Int64Array, LargeBinaryArray,
-    RecordBatch, StringArray, UInt32Array, UInt64Array,
+    LargeStringArray, RecordBatch, StringArray, StringViewArray, UInt32Array, UInt64Array,
 };
 use arrow_json::writer::{JsonArray, WriterBuilder};
 use arrow_schema::{DataType, Field, Schema};
@@ -53,6 +53,11 @@ pub(crate) struct TrainingCheckpointWrite {
     pub created_ms: i64,
     pub validation_loss: Option<f64>,
     pub config_json: String,
+    pub payload: Vec<u8>,
+}
+
+pub(crate) struct TrainingCheckpointArtifact {
+    pub config_json: Vec<u8>,
     pub payload: Vec<u8>,
 }
 
@@ -564,6 +569,22 @@ impl StorageManager {
             let batch = training_checkpoint_batch(checkpoint)?;
             ingest_batch(connection, &target, batch)
                 .map_err(|error| format!("publishing training checkpoint to {target}: {error}"))
+        })
+        .await
+    }
+
+    pub(crate) async fn training_checkpoint(
+        &self,
+        run_id: &str,
+        step: u64,
+    ) -> Result<TrainingCheckpointArtifact, String> {
+        let settings = self.settings.get().spiral;
+        if !settings.configured() {
+            return Err("Configure the Spiral project containing this checkpoint.".to_owned());
+        }
+        let query = sql::training_checkpoint(&settings.dataset, run_id, step);
+        self.run_adbc(settings, move |connection| {
+            run_training_checkpoint_query(connection, &query)
         })
         .await
     }
@@ -1487,6 +1508,71 @@ fn run_binary_query(connection: &mut ManagedConnection, sql: &str) -> Result<Vec
         ));
     }
     Err("No video matched that episode and stream".to_owned())
+}
+
+fn run_training_checkpoint_query(
+    connection: &mut ManagedConnection,
+    sql: &str,
+) -> Result<TrainingCheckpointArtifact, String> {
+    let mut statement = connection
+        .new_statement()
+        .map_err(|error| format!("opening Spiral checkpoint query: {error}"))?;
+    statement
+        .set_sql_query(sql)
+        .map_err(|error| format!("binding Spiral checkpoint query: {error}"))?;
+    let reader = statement
+        .execute()
+        .map_err(|error| format!("executing Spiral checkpoint query: {error}"))?;
+    let mut artifact = None;
+    for batch in reader {
+        let batch = batch.map_err(|error| format!("reading Spiral checkpoint: {error}"))?;
+        for row in 0..batch.num_rows() {
+            if artifact.is_some() {
+                return Err("Spiral returned duplicate rows for that checkpoint".to_owned());
+            }
+            let config = batch.column_by_name(db::CONFIG_JSON).ok_or_else(|| {
+                format!(
+                    "Spiral checkpoint query returned no UTF-8 {} column",
+                    db::CONFIG_JSON
+                )
+            })?;
+            let checkpoint = batch.column_by_name(db::CHECKPOINT).ok_or_else(|| {
+                format!(
+                    "Spiral checkpoint query returned no {} column",
+                    db::CHECKPOINT
+                )
+            })?;
+            let payload = if let Some(values) = checkpoint.as_any().downcast_ref::<BinaryArray>() {
+                values.value(row).to_vec()
+            } else if let Some(values) = checkpoint.as_any().downcast_ref::<LargeBinaryArray>() {
+                values.value(row).to_vec()
+            } else if let Some(values) = checkpoint.as_any().downcast_ref::<BinaryViewArray>() {
+                values.value(row).to_vec()
+            } else {
+                return Err(format!(
+                    "Spiral checkpoint payload has unexpected type {}",
+                    checkpoint.data_type()
+                ));
+            };
+            let config_json = if let Some(values) = config.as_any().downcast_ref::<StringArray>() {
+                values.value(row).as_bytes().to_vec()
+            } else if let Some(values) = config.as_any().downcast_ref::<LargeStringArray>() {
+                values.value(row).as_bytes().to_vec()
+            } else if let Some(values) = config.as_any().downcast_ref::<StringViewArray>() {
+                values.value(row).as_bytes().to_vec()
+            } else {
+                return Err(format!(
+                    "Spiral checkpoint config has unexpected type {}",
+                    config.data_type()
+                ));
+            };
+            artifact = Some(TrainingCheckpointArtifact {
+                config_json,
+                payload,
+            });
+        }
+    }
+    artifact.ok_or_else(|| "No checkpoint matched that training run and step".to_owned())
 }
 
 fn batches_to_json(batches: &[RecordBatch]) -> Result<Vec<JsonMap<String, JsonValue>>, String> {

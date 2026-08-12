@@ -864,6 +864,190 @@
 
 }
 
+@layer components {
+  /* Rollout -------------------------------------------------------------
+     The workbench stays intentionally shorter than Training: choose one
+     checkpoint, verify the fixed follower, set two execution values, and run.
+     The lower panel is reserved for measured inference evidence rather than a
+     generic dashboard or synthetic preview. */
+  .rollout-workbench,
+  .rollout-inference {
+    color: var(--tone-ink);
+  }
+
+  .rollout-workbench {
+    @apply flex min-h-full flex-col;
+  }
+
+  .rollout-section {
+    @apply border-b border-line px-3 py-3;
+  }
+
+  .rollout-section-heading {
+    @apply mb-2 flex min-h-5 items-center gap-2;
+  }
+
+  .rollout-section-heading h3 {
+    @apply min-w-0 flex-1 text-[11px] font-semibold;
+  }
+
+  .rollout-state {
+    @apply inline-flex min-h-5 items-center rounded px-1.5 text-[10px] font-medium;
+    background: var(--tone-caution-soft);
+    color: var(--tone-caution);
+  }
+
+  .rollout-state-ready {
+    background: var(--tone-good-soft);
+    color: var(--tone-good);
+  }
+
+  .rollout-field {
+    @apply flex min-w-0 flex-col gap-1 text-[10px] text-ink-soft;
+  }
+
+  .rollout-field input,
+  .rollout-field select {
+    @apply min-h-7 w-full rounded border border-line bg-surface px-2 text-[11px] text-ink outline-none transition-colors disabled:cursor-not-allowed disabled:bg-sunken disabled:text-ink-faint;
+  }
+
+  .rollout-field input:focus,
+  .rollout-field select:focus {
+    border-color: var(--tone-accent);
+    box-shadow: 0 0 0 1px var(--tone-accent);
+  }
+
+  .rollout-field-grid {
+    @apply grid grid-cols-2 gap-2;
+  }
+
+  .rollout-checkpoint-meta {
+    @apply mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-ink-faint;
+  }
+
+  .rollout-checkpoint-meta span:not(:first-child) {
+    @apply font-mono tabular-nums;
+  }
+
+  .rollout-empty-copy {
+    @apply mt-2 text-[10px] leading-4 text-ink-faint;
+  }
+
+  .rollout-target-row {
+    @apply flex min-h-8 items-center gap-2;
+  }
+
+  .rollout-target-row > div {
+    @apply flex min-w-0 flex-1 flex-col;
+  }
+
+  .rollout-target-row strong {
+    @apply truncate text-[11px] font-semibold;
+  }
+
+  .rollout-target-row small {
+    @apply truncate text-[10px] text-ink-faint;
+  }
+
+  .rollout-action-area {
+    @apply sticky bottom-0 mt-auto border-t border-line bg-surface px-3 py-3;
+  }
+
+  .rollout-runtime-note {
+    @apply mb-2 grid grid-cols-[0.5rem_minmax(0,1fr)] items-center gap-2 text-[10px];
+  }
+
+  .rollout-runtime-note > div {
+    @apply flex min-w-0 items-baseline gap-2;
+  }
+
+  .rollout-runtime-note strong {
+    @apply shrink-0 font-medium;
+  }
+
+  .rollout-runtime-note small {
+    @apply min-w-0 truncate text-ink-faint;
+  }
+
+  .rollout-runtime-dot {
+    @apply h-1.5 w-1.5 rounded-full;
+    background: var(--tone-caution);
+  }
+
+  .rollout-runtime-note-active .rollout-runtime-dot {
+    background: var(--tone-accent);
+    box-shadow: 0 1px 5px color-mix(in srgb, var(--tone-accent) 28%, transparent);
+  }
+
+  .rollout-runtime-note-failed,
+  .rollout-runtime-note-failed small {
+    color: var(--tone-danger);
+  }
+
+  .rollout-runtime-note-failed .rollout-runtime-dot {
+    background: var(--tone-danger);
+  }
+
+  .rollout-run-button {
+    @apply flex min-h-8 w-full cursor-pointer items-center justify-center rounded px-3 text-[11px] font-semibold text-accent-ink transition-colors disabled:cursor-not-allowed disabled:opacity-45;
+    background: var(--tone-accent);
+  }
+
+  .rollout-run-button:hover:not(:disabled) {
+    filter: brightness(0.94);
+  }
+
+  .rollout-run-button:focus-visible {
+    outline: 2px solid var(--tone-accent);
+    outline-offset: 2px;
+  }
+
+  .rollout-blocker {
+    @apply mt-2 text-[10px] leading-4;
+    color: var(--tone-caution);
+  }
+
+  .rollout-inference {
+    @apply flex h-full min-h-0 flex-col bg-surface;
+  }
+
+  .rollout-metric-strip {
+    @apply grid shrink-0 grid-cols-3 border-b border-line;
+  }
+
+  .rollout-metric {
+    @apply flex min-h-12 min-w-0 items-center gap-2 border-r border-line px-3 last:border-r-0;
+  }
+
+  .rollout-metric dt {
+    @apply min-w-0 flex-1 truncate text-[10px] text-ink-faint;
+  }
+
+  .rollout-metric dd {
+    @apply flex shrink-0 items-baseline gap-1 font-mono tabular-nums;
+  }
+
+  .rollout-metric dd span {
+    @apply text-[12px] font-medium;
+  }
+
+  .rollout-metric dd small {
+    @apply text-[10px] text-ink-faint;
+  }
+
+  .rollout-inference-empty {
+    @apply relative flex min-h-32 flex-1 flex-col items-center justify-center px-4 text-center;
+  }
+
+  .rollout-inference-empty strong {
+    @apply relative text-[11px] font-medium;
+  }
+
+  .rollout-inference-empty p {
+    @apply relative mt-1 max-w-[34rem] text-[10px] leading-4 text-ink-faint;
+  }
+}
+
 @media (max-width: 980px) {
   .studio-v2-body {
     grid-template-columns: 3.25rem minmax(0, 1fr);
@@ -895,8 +1079,13 @@
 
   .training-form-grid,
   .training-column-row,
-  .training-resource-grid {
+  .training-resource-grid,
+  .rollout-field-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rollout-metric-strip {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .training-resource-lane {
@@ -939,8 +1128,15 @@
   .training-stop-button,
   .training-history-row,
   .training-run-result summary,
-  .training-query-section > summary {
+  .training-query-section > summary,
+  .rollout-run-button {
     min-height: 44px;
+  }
+
+  .rollout-field input,
+  .rollout-field select {
+    min-height: 44px;
+    font-size: 16px;
   }
 }
 
