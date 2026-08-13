@@ -570,6 +570,8 @@ pub struct RolloutSnapshot {
     pub started_ms: Option<i64>,
     pub finished_ms: Option<i64>,
     pub message: Option<String>,
+    #[serde(default)]
+    pub warning: Option<String>,
     pub metrics: RolloutMetrics,
 }
 

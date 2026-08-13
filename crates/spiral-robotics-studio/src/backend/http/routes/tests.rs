@@ -359,6 +359,7 @@ fn training_and_rollout_presenters_round_trip_semantic_state() {
         started_ms: Some(1),
         finished_ms: None,
         message: None,
+        warning: Some("clamped wrist".to_owned()),
         metrics: spiral_robotics_contracts::api::RolloutMetrics {
             inference_count: 2,
             command_count: 1,

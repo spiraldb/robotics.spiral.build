@@ -1346,10 +1346,14 @@
   }
 
   .rollout-runtime-note {
-    @apply mb-2 grid grid-cols-[0.5rem_minmax(0,1fr)] items-center gap-2 text-[10px];
+    @apply mb-2 grid grid-cols-[0.5rem_minmax(0,1fr)] items-start gap-2 text-[10px];
   }
 
   .rollout-runtime-note > div {
+    @apply flex min-w-0 flex-col gap-0.5;
+  }
+
+  .rollout-runtime-summary {
     @apply flex min-w-0 items-baseline gap-2;
   }
 
@@ -1361,6 +1365,11 @@
     @apply min-w-0 truncate text-ink-faint;
   }
 
+  .rollout-runtime-note .rollout-runtime-warning {
+    @apply whitespace-normal text-caution;
+    overflow-wrap: anywhere;
+  }
+
   .rollout-runtime-dot {
     @apply h-1.5 w-1.5 rounded-full;
     background: var(--tone-caution);
@@ -1369,6 +1378,10 @@
   .rollout-runtime-note-active .rollout-runtime-dot {
     background: var(--tone-accent);
     box-shadow: 0 1px 5px color-mix(in srgb, var(--tone-accent) 28%, transparent);
+  }
+
+  .rollout-runtime-note-warning .rollout-runtime-dot {
+    background: var(--tone-caution);
   }
 
   .rollout-runtime-note-failed,

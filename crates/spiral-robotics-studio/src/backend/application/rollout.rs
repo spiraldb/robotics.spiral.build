@@ -85,6 +85,7 @@ pub(crate) struct RolloutSnapshot {
     pub started_ms: Option<i64>,
     pub finished_ms: Option<i64>,
     pub message: Option<String>,
+    pub warning: Option<String>,
     pub metrics: RolloutMetrics,
 }
 
@@ -185,6 +186,7 @@ impl RolloutCoordinator {
             started_ms: Some(started_ms),
             finished_ms: None,
             message: Some("Loading checkpoint…".to_owned()),
+            warning: None,
             metrics: RolloutMetrics::default(),
         };
         self.active = Some(ActiveSession {
@@ -390,6 +392,28 @@ impl RolloutCoordinator {
         self.snapshot.metrics.missed_deadlines += u64::from(missed_deadline);
         self.publish();
         Ok(())
+    }
+
+    pub(crate) fn record_action_clamp_warning(
+        &mut self,
+        session: &str,
+        warning: String,
+    ) -> Result<bool, String> {
+        let active = self.session(session)?;
+        if active.phase != SessionPhase::Running
+            && !(active.phase == SessionPhase::Stopping
+                && active.stop_stage == Some(StopStage::Running))
+        {
+            return Err(format!(
+                "policy session {session:?} cannot publish action warnings while not running"
+            ));
+        }
+        if self.snapshot.warning.as_deref() == Some(warning.as_str()) {
+            return Ok(false);
+        }
+        self.snapshot.warning = Some(warning);
+        self.publish();
+        Ok(true)
     }
 
     pub(crate) fn begin_cleanup(
@@ -654,6 +678,36 @@ mod tests {
                 .iter()
                 .any(|snapshot| snapshot.phase == RolloutPhase::WarmingUp)
         );
+    }
+
+    #[test]
+    fn action_clamp_warning_is_visible_without_stopping_the_rollout() {
+        let (events, mut coordinator) = coordinator();
+        coordinator
+            .admit("session-1".to_owned(), 100, request())
+            .unwrap();
+        coordinator.warming_up("session-1").unwrap();
+        coordinator.awaiting_control("session-1").unwrap();
+        coordinator.running("session-1", 60.0, 10).unwrap();
+
+        let warning =
+            "Policy output for joint \"wrist_flex\" exceeded normalized [-1, 1]; the command was clamped to the limit."
+                .to_owned();
+        assert!(
+            coordinator
+                .record_action_clamp_warning("session-1", warning.clone())
+                .unwrap()
+        );
+        let published = events.0.lock().unwrap().len();
+        assert!(
+            !coordinator
+                .record_action_clamp_warning("session-1", warning.clone())
+                .unwrap()
+        );
+
+        assert_eq!(coordinator.snapshot.phase, RolloutPhase::Running);
+        assert_eq!(coordinator.snapshot.warning, Some(warning));
+        assert_eq!(events.0.lock().unwrap().len(), published);
     }
 
     #[test]

@@ -232,8 +232,13 @@ pub(crate) fn RolloutWorkbench() -> Element {
                     role: "status",
                     span { class: "rollout-runtime-dot", "aria-hidden": "true" }
                     div {
-                        strong { "{runtime_title(&rollout)}" }
-                        small { "{runtime_detail(&rollout)}" }
+                        div { class: "rollout-runtime-summary",
+                            strong { "{runtime_title(&rollout)}" }
+                            small { "{runtime_detail(&rollout)}" }
+                        }
+                        if let Some(warning) = rollout.warning.as_ref() {
+                            small { class: "rollout-runtime-warning", "{warning}" }
+                        }
                     }
                 }
                 div { class: "rollout-action-buttons",
@@ -526,6 +531,9 @@ fn runtime_detail(rollout: &RolloutSnapshot) -> String {
 
 fn runtime_note_class(rollout: &RolloutSnapshot) -> &'static str {
     match rollout.phase {
+        RolloutPhase::Running if rollout.warning.is_some() => {
+            "rollout-runtime-note rollout-runtime-note-warning"
+        }
         RolloutPhase::Running => "rollout-runtime-note rollout-runtime-note-active",
         RolloutPhase::Failed => "rollout-runtime-note rollout-runtime-note-failed",
         _ => "rollout-runtime-note",
@@ -560,13 +568,13 @@ fn format_loss(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use spiral_robotics_contracts::api::{
-        CameraBinding, CameraStatus, ConnectionStatus, RobotSummary, TrainingCheckpoint,
-        TrainingRun, TrainingRunPhase,
+        CameraBinding, CameraStatus, ConnectionStatus, RobotSummary, RolloutPhase, RolloutSnapshot,
+        TrainingCheckpoint, TrainingRun, TrainingRunPhase,
     };
 
     use super::{
         RolloutCameraSummary, camera_roles, checkpoints_for_run, follower, rollout_camera_summary,
-        rollout_precondition_blocker,
+        rollout_precondition_blocker, runtime_note_class,
     };
 
     fn robot(id: &str, role: &str) -> RobotSummary {
@@ -595,6 +603,20 @@ mod tests {
         assert_eq!(
             follower(&robots).map(|robot| robot.id),
             Some("follower".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_active_clamp_warning_uses_the_caution_runtime_state() {
+        let rollout = RolloutSnapshot {
+            phase: RolloutPhase::Running,
+            warning: Some("Policy output was clamped.".to_owned()),
+            ..RolloutSnapshot::default()
+        };
+
+        assert_eq!(
+            runtime_note_class(&rollout),
+            "rollout-runtime-note rollout-runtime-note-warning"
         );
     }
 

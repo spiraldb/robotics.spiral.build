@@ -381,6 +381,7 @@ pub(super) fn application_rollout_snapshot(
         started_ms: snapshot.started_ms,
         finished_ms: snapshot.finished_ms,
         message: snapshot.message,
+        warning: snapshot.warning,
         metrics: ApplicationRolloutMetrics {
             inference_count: snapshot.metrics.inference_count,
             command_count: snapshot.metrics.command_count,
@@ -419,6 +420,7 @@ pub(super) fn contract_rollout_snapshot(snapshot: ApplicationRolloutSnapshot) ->
         started_ms: snapshot.started_ms,
         finished_ms: snapshot.finished_ms,
         message: snapshot.message,
+        warning: snapshot.warning,
         metrics: spiral_robotics_contracts::api::RolloutMetrics {
             inference_count: snapshot.metrics.inference_count,
             command_count: snapshot.metrics.command_count,

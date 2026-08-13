@@ -529,10 +529,35 @@ impl RolloutManager {
                 .as_ref()
                 .and_then(|chunk| chunk.action(action_index))
                 .ok_or_else(|| "policy returned an incomplete action sequence".to_owned())?;
-            let goals = prepare_action_goals(&joint_names, action)
+            let prepared = prepare_action_goals(&joint_names, action)
                 .map_err(|error| format!("stopped policy: {error}"))?;
+            if let Some(clamp) = prepared.clamps.first() {
+                let additional = prepared.clamps.len().saturating_sub(1);
+                let warning = if additional == 0 {
+                    format!(
+                        "Policy output for joint {:?} exceeded normalized [-1, 1]; the command was clamped to the limit.",
+                        clamp.joint
+                    )
+                } else {
+                    format!(
+                        "Policy output for joint {:?} and {additional} other joint{} exceeded normalized [-1, 1]; the commands were clamped to the limits.",
+                        clamp.joint,
+                        if additional == 1 { "" } else { "s" }
+                    )
+                };
+                if lock(&self.coordinator).record_action_clamp_warning(session, warning)? {
+                    tracing::warn!(
+                        joint = %clamp.joint,
+                        index = clamp.index,
+                        requested = clamp.requested,
+                        applied = clamp.applied,
+                        additional_clamps = additional,
+                        "clamped policy action outside normalized range"
+                    );
+                }
+            }
             self.hardware
-                .set_policy_goals(&request.robot, session, goals)
+                .set_policy_goals(&request.robot, session, prepared.goals)
                 .await?;
             action_index += 1;
             lock(&self.coordinator).record_command(session, cycle_started.elapsed() > period)?;
@@ -580,6 +605,7 @@ fn contract_snapshot(snapshot: &RolloutSnapshot) -> ContractRolloutSnapshot {
         started_ms: snapshot.started_ms,
         finished_ms: snapshot.finished_ms,
         message: snapshot.message.clone(),
+        warning: snapshot.warning.clone(),
         metrics: contract_metrics(&snapshot.metrics),
     }
 }

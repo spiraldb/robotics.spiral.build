@@ -134,19 +134,35 @@ fn artifact_data_must_have_unique_names_and_a_safe_rate() {
 }
 
 #[test]
-fn action_output_must_have_exact_shape_and_normalized_values() {
+fn action_output_must_have_exact_shape_and_finite_values() {
     let joints = vec!["shoulder".to_owned(), "elbow".to_owned()];
     assert_eq!(
-        prepare_action_goals(&joints, &[1.0, -1.0]).unwrap(),
+        prepare_action_goals(&joints, &[1.0, -1.0]).unwrap().goals,
         BTreeMap::from([("elbow".to_owned(), -1.0), ("shoulder".to_owned(), 1.0)])
     );
     assert!(prepare_action_goals(&joints, &[0.25]).is_err());
     assert!(prepare_action_goals(&joints, &[0.25, 0.5, 0.75]).is_err());
     assert!(prepare_action_goals(&joints, &[0.25, f32::NAN]).is_err());
-    for action in [[1.000_001, 0.0], [-1.000_001, 0.0]] {
-        let error = prepare_action_goals(&joints, &action).unwrap_err();
-        assert!(error.to_string().contains("index 0"));
-    }
+}
+
+#[test]
+fn finite_action_overshoots_are_clamped_and_reported() {
+    let joints = vec!["shoulder".to_owned(), "elbow".to_owned()];
+    let prepared = prepare_action_goals(&joints, &[1.049_266_2, -1.005_372_2]).unwrap();
+
+    assert_eq!(
+        prepared.goals,
+        BTreeMap::from([("elbow".to_owned(), -1.0), ("shoulder".to_owned(), 1.0)])
+    );
+    assert_eq!(prepared.clamps.len(), 2);
+    assert_eq!(prepared.clamps[0].index, 0);
+    assert_eq!(prepared.clamps[0].joint, "shoulder");
+    assert_eq!(prepared.clamps[0].requested, 1.049_266_2);
+    assert_eq!(prepared.clamps[0].applied, 1.0);
+    assert_eq!(prepared.clamps[1].index, 1);
+    assert_eq!(prepared.clamps[1].joint, "elbow");
+    assert_eq!(prepared.clamps[1].requested, -1.005_372_2);
+    assert_eq!(prepared.clamps[1].applied, -1.0);
 }
 
 #[test]

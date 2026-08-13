@@ -221,11 +221,28 @@ pub(crate) fn require_fresh_observations(
     Ok(())
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PreparedActionGoals {
+    pub goals: BTreeMap<String, f64>,
+    pub clamps: Vec<ActionClamp>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ActionClamp {
+    pub index: usize,
+    pub joint: String,
+    pub requested: f32,
+    pub applied: f32,
+}
+
 /// Bind one model action to the exact ordered joint contract before hardware.
+///
+/// Finite values outside the normalized range are safe to saturate at the
+/// calibrated endpoint. Shape mismatches and non-finite values remain fatal.
 pub(crate) fn prepare_action_goals(
     joint_names: &[String],
     action: &[f32],
-) -> Result<BTreeMap<String, f64>, ApplicationError> {
+) -> Result<PreparedActionGoals, ApplicationError> {
     if action.len() != joint_names.len() {
         return invalid(format!(
             "policy returned {} action values for {} joints",
@@ -233,24 +250,26 @@ pub(crate) fn prepare_action_goals(
             joint_names.len()
         ));
     }
-    joint_names
-        .iter()
-        .zip(action)
-        .enumerate()
-        .map(|(index, (joint, value))| {
-            if !value.is_finite() {
-                return Err(ApplicationError::Conflict(format!(
-                    "policy returned a non-finite action at index {index} for joint {joint:?}"
-                )));
-            }
-            if !(-1.0..=1.0).contains(value) {
-                return Err(ApplicationError::Conflict(format!(
-                    "policy returned action {value} outside normalized [-1, 1] at index {index} for joint {joint:?}"
-                )));
-            }
-            Ok((joint.clone(), f64::from(*value)))
-        })
-        .collect()
+    let mut goals = BTreeMap::new();
+    let mut clamps = Vec::new();
+    for (index, (joint, value)) in joint_names.iter().zip(action).enumerate() {
+        if !value.is_finite() {
+            return Err(ApplicationError::Conflict(format!(
+                "policy returned a non-finite action at index {index} for joint {joint:?}"
+            )));
+        }
+        let applied = value.clamp(-1.0, 1.0);
+        if applied != *value {
+            clamps.push(ActionClamp {
+                index,
+                joint: joint.clone(),
+                requested: *value,
+                applied,
+            });
+        }
+        goals.insert(joint.clone(), f64::from(applied));
+    }
+    Ok(PreparedActionGoals { goals, clamps })
 }
 
 #[derive(Clone, Debug, PartialEq)]
