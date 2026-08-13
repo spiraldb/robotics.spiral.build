@@ -19,11 +19,15 @@ use arrow_json::writer::{JsonArray, WriterBuilder};
 use arrow_schema::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use spiral_robotics_core::api::{
+use spiral_robotics_contracts::api::{
     ConnectionTestResponse, PublicationStatus, QueryColumn, SpiralQueryResponse, TrainingSource,
 };
-use spiral_robotics_core::spiral::{self, Table, column as db};
+use spiral_robotics_contracts::spiral::{self, Table, column as db};
 
+use crate::backend::application::checkpoints::{
+    CheckpointArtifact, CheckpointFuture, CheckpointKey, CheckpointPublication,
+    CheckpointRepository, CheckpointSource, validate_checkpoint_artifact_size,
+};
 use crate::backend::recording::episodes::{CompletedEpisode, EpisodeStore};
 use crate::backend::recording::spiral::{
     SpiralEpisodeEncoder, VideoStreamRow, dataset_batch, episode_completion_batch,
@@ -42,22 +46,6 @@ const JOINT_BATCH_ROWS: usize = 512;
 const SPIRAL_RECEIPT: &str = "spiral.json";
 const HOSTED_ADBC_CONNECTIONS: usize = 4;
 
-pub(crate) struct TrainingCheckpointWrite {
-    pub run_id: String,
-    pub run_name: String,
-    pub policy: String,
-    pub step: u64,
-    pub created_ms: i64,
-    pub validation_loss: Option<f64>,
-    pub config_json: String,
-    pub payload: Vec<u8>,
-}
-
-pub(crate) struct TrainingCheckpointArtifact {
-    pub config_json: Vec<u8>,
-    pub payload: Vec<u8>,
-}
-
 pub(crate) struct StorageManager {
     pub settings: Arc<DataSettingsStore>,
     episodes: Arc<EpisodeStore>,
@@ -69,7 +57,20 @@ pub(crate) struct StorageManager {
     /// operation. The pool mutex is never held across network or query work.
     hosted_adbc: Arc<Mutex<Vec<CachedAdbc>>>,
     hosted_adbc_slots: Arc<tokio::sync::Semaphore>,
+    /// Serialize the check-and-append that creates one logical dataset row.
+    ///
+    /// Episode publication remains concurrent across unrelated dataset IDs,
+    /// while two first episodes for the same destination cannot both observe
+    /// the dataset row as absent on different hosted connections.
+    dataset_publications:
+        Mutex<BTreeMap<PublicationDatasetKey, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     publications: Mutex<BTreeMap<String, PublicationStatus>>,
+    /// Credential-free checkpoint destinations frozen when training runs start.
+    ///
+    /// Training history rehydrates this registry before rollout is constructed,
+    /// so changing Settings cannot redirect an existing run to another project
+    /// or namespace.
+    training_sources: Mutex<BTreeMap<String, CheckpointSource>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -94,6 +95,14 @@ struct CachedAdbc {
     connection: ManagedConnection,
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct PublicationDatasetKey {
+    uri: String,
+    project_id: String,
+    namespace: String,
+    dataset_id: String,
+}
+
 impl StorageManager {
     pub(crate) fn new(
         settings: Arc<DataSettingsStore>,
@@ -107,7 +116,9 @@ impl StorageManager {
             memory_adbc: Arc::new(Mutex::new(None)),
             hosted_adbc: Arc::new(Mutex::new(Vec::new())),
             hosted_adbc_slots: Arc::new(tokio::sync::Semaphore::new(HOSTED_ADBC_CONNECTIONS)),
+            dataset_publications: Mutex::new(BTreeMap::new()),
             publications: Mutex::new(BTreeMap::new()),
+            training_sources: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -154,26 +165,50 @@ impl StorageManager {
     /// Finish the backend-owned recording transaction without crossing the
     /// network boundary. Completed JSONL and camera assets form the local
     /// staging buffer until the operator explicitly pushes the episode.
-    pub(crate) fn stage_local(self: &Arc<Self>, episode_id: String, videos: Vec<VideoAsset>) {
-        if let Err(error) = save_assets(self.episodes.directory(), &episode_id, &videos) {
-            tracing::warn!(episode = %episode_id, "could not persist local video manifest: {error}");
-        }
+    pub(crate) fn stage_local(
+        self: &Arc<Self>,
+        episode_id: String,
+        videos: Vec<VideoAsset>,
+    ) -> Result<(), String> {
+        save_assets(self.episodes.directory(), &episode_id, &videos).map_err(|error| {
+            self.set_status(PublicationStatus {
+                episode_id: episode_id.clone(),
+                state: "failed".to_owned(),
+                spiral: Some(format!("failed: local video manifest: {error}")),
+                updated_ms: unix_millis(),
+            });
+            format!("could not durably stage video manifest for {episode_id}: {error}")
+        })?;
         self.set_status(PublicationStatus {
             episode_id: episode_id.clone(),
             state: "local".to_owned(),
             updated_ms: unix_millis(),
             ..PublicationStatus::default()
         });
+        Ok(())
     }
 
-    fn queue_publish(self: &Arc<Self>, episode_id: String, videos: Vec<VideoAsset>) {
-        let status = PublicationStatus {
-            episode_id: episode_id.clone(),
-            state: "queued".to_owned(),
-            spiral: Some("queued".to_owned()),
-            updated_ms: unix_millis(),
-        };
-        self.set_status(status);
+    fn claim_publish(&self, episode_id: &str) -> Result<(), String> {
+        let mut publications = lock(&self.publications);
+        if publications
+            .get(episode_id)
+            .is_some_and(|status| matches!(status.state.as_str(), "queued" | "publishing"))
+        {
+            return Err(format!("{episode_id} is already being published"));
+        }
+        publications.insert(
+            episode_id.to_owned(),
+            PublicationStatus {
+                episode_id: episode_id.to_owned(),
+                state: "queued".to_owned(),
+                spiral: Some("queued".to_owned()),
+                updated_ms: unix_millis(),
+            },
+        );
+        Ok(())
+    }
+
+    fn queue_claimed_publish(self: &Arc<Self>, episode_id: String, videos: Vec<VideoAsset>) {
         let manager = self.clone();
         tokio::spawn(async move {
             manager.publish(episode_id, videos).await;
@@ -182,7 +217,6 @@ impl StorageManager {
 
     pub(crate) fn sync_spiral_existing(self: &Arc<Self>, episode_id: String) -> Result<(), String> {
         let outcome = (|| {
-            self.ensure_not_publishing(&episode_id)?;
             if !self.settings.get().spiral.configured() {
                 return Err(
                     "Configure a Spiral catalog, project, and namespace in Settings before pushing"
@@ -190,23 +224,21 @@ impl StorageManager {
                 );
             }
             let videos = self.prepare_existing(&episode_id)?;
-            self.queue_publish(episode_id.clone(), videos);
+            // Claim and publish are one local transaction: no second caller can
+            // pass admission before queued state becomes visible.
+            self.claim_publish(&episode_id)?;
+            self.queue_claimed_publish(episode_id.clone(), videos);
             Ok(())
         })();
         if let Err(error) = &outcome {
-            self.set_spiral_failed(&episode_id, error);
+            let publication_is_active = lock(&self.publications)
+                .get(&episode_id)
+                .is_some_and(|status| matches!(status.state.as_str(), "queued" | "publishing"));
+            if !publication_is_active {
+                self.set_spiral_failed(&episode_id, error);
+            }
         }
         outcome
-    }
-
-    fn ensure_not_publishing(&self, episode_id: &str) -> Result<(), String> {
-        if lock(&self.publications)
-            .get(episode_id)
-            .is_some_and(|status| matches!(status.state.as_str(), "queued" | "publishing"))
-        {
-            return Err(format!("{episode_id} is already being published"));
-        }
-        Ok(())
     }
 
     fn prepare_existing(&self, episode_id: &str) -> Result<Vec<VideoAsset>, String> {
@@ -214,6 +246,27 @@ impl StorageManager {
             .completed(episode_id)
             .map_err(|error| error.to_string())?;
         load_assets(self.episodes.directory(), episode_id)
+    }
+
+    fn dataset_publication_lock(
+        &self,
+        settings: &StoredSpiralSettings,
+        dataset_id: &str,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let key = PublicationDatasetKey {
+            uri: settings.uri.clone(),
+            project_id: settings.project_id.clone(),
+            namespace: settings.dataset.clone(),
+            dataset_id: dataset_id.to_owned(),
+        };
+        let mut locks = lock(&self.dataset_publications);
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(existing) = locks.get(&key).and_then(std::sync::Weak::upgrade) {
+            return existing;
+        }
+        let publication = Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(key, Arc::downgrade(&publication));
+        publication
     }
 
     async fn publish(&self, episode_id: String, videos: Vec<VideoAsset>) {
@@ -447,6 +500,42 @@ impl StorageManager {
         ))
     }
 
+    /// Remember the immutable, browser-safe destination owned by one run.
+    ///
+    /// Re-registering the same identity is harmless. Reusing a run ID for a
+    /// different destination is rejected so neither publication nor rollout can
+    /// silently cross project boundaries.
+    fn register_checkpoint_source(
+        &self,
+        run_id: &str,
+        source: CheckpointSource,
+    ) -> Result<(), String> {
+        if run_id.trim().is_empty() {
+            return Err("training source requires a run ID".to_owned());
+        }
+        frozen_training_settings(&source)?;
+        let mut sources = lock(&self.training_sources);
+        if let Some(existing) = sources.get(run_id) {
+            if existing != &source {
+                return Err(format!(
+                    "training run {run_id:?} is already bound to a different Spiral source"
+                ));
+            }
+            return Ok(());
+        }
+        sources.insert(run_id.to_owned(), source);
+        Ok(())
+    }
+
+    /// Compensate a failed training admission without disturbing a source that
+    /// may have been rebound by a later operation.
+    pub(crate) fn unregister_run_source(&self, run_id: &str, source: &CheckpointSource) {
+        let mut sources = lock(&self.training_sources);
+        if sources.get(run_id) == Some(source) {
+            sources.remove(run_id);
+        }
+    }
+
     /// Resolve the query and its Arrow contract before starting the trainer.
     /// Unknown relations and renamed fields therefore fail the start request,
     /// rather than becoming an asynchronous training-task failure.
@@ -509,34 +598,48 @@ impl StorageManager {
     /// Publish a trainer-produced artifact through the backend's trusted ADBC
     /// control path. Checkpoint writes remain separate from the training read
     /// connection, so publication cannot deadlock a streaming batch read.
-    pub(crate) async fn publish_training_checkpoint(
+    async fn publish_checkpoint_artifact(
         &self,
-        settings: StoredSpiralSettings,
-        target: String,
-        checkpoint: TrainingCheckpointWrite,
+        publication: CheckpointPublication,
     ) -> Result<(), String> {
+        self.register_checkpoint_source(&publication.run_id, publication.source.clone())?;
+        let settings = frozen_training_settings(&publication.source)?;
+        let target = sql::relation(&publication.source.namespace, Table::TrainingCheckpoints);
         self.run_adbc(settings, move |connection| {
-            let batch = training_checkpoint_batch(checkpoint)?;
+            let batch = training_checkpoint_batch(publication)?;
             ingest_batch(connection, &target, batch)
                 .map_err(|error| format!("publishing training checkpoint to {target}: {error}"))
         })
         .await
     }
 
-    pub(crate) async fn training_checkpoint(
+    async fn load_checkpoint_artifact(
         &self,
-        run_id: &str,
-        step: u64,
-    ) -> Result<TrainingCheckpointArtifact, String> {
-        let settings = self.settings.get().spiral;
-        if !settings.configured() {
-            return Err("Configure the Spiral project containing this checkpoint.".to_owned());
-        }
-        let query = sql::training_checkpoint(&settings.dataset, run_id, step);
+        key: CheckpointKey,
+    ) -> Result<CheckpointArtifact, String> {
+        let (settings, query) = self.training_checkpoint_lookup(&key.run_id, key.step)?;
         self.run_adbc(settings, move |connection| {
             run_training_checkpoint_query(connection, &query)
         })
         .await
+    }
+
+    fn training_checkpoint_lookup(
+        &self,
+        run_id: &str,
+        step: u64,
+    ) -> Result<(StoredSpiralSettings, String), String> {
+        let source = lock(&self.training_sources)
+            .get(run_id)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "training run {run_id:?} has no frozen checkpoint source; train it again to create a rollout-ready checkpoint"
+                )
+            })?;
+        let settings = frozen_training_settings(&source)?;
+        let query = sql::training_checkpoint(&source.namespace, run_id, step);
+        Ok((settings, query))
     }
 
     pub(crate) async fn trajectory(
@@ -556,31 +659,7 @@ impl StorageManager {
                 "Spiral trajectory exceeds the replay safety limit of {MAX_REPLAY_ROWS} rows"
             ));
         }
-        let mut sample_hz = None;
-        let mut trajectory = Vec::with_capacity(result.rows.len());
-        for row in result.rows {
-            sample_hz = sample_hz.or_else(|| row.get(db::SAMPLE_HZ).and_then(JsonValue::as_f64));
-            let names = row
-                .get(db::JOINT_NAMES)
-                .and_then(JsonValue::as_array)
-                .ok_or_else(|| format!("Spiral trajectory is missing {}", db::JOINT_NAMES))?;
-            let values = row
-                .get(db::REPLAY_POSITION)
-                .and_then(JsonValue::as_array)
-                .ok_or_else(|| format!("Spiral trajectory is missing {}", db::REPLAY_POSITION))?;
-            let pose = names
-                .iter()
-                .zip(values)
-                .filter_map(|(name, value)| Some((name.as_str()?.to_owned(), value.as_f64()?)))
-                .collect::<BTreeMap<_, _>>();
-            if !pose.is_empty() {
-                trajectory.push(pose);
-            }
-        }
-        if trajectory.is_empty() {
-            return Err("Spiral returned no commandable trajectory rows".to_owned());
-        }
-        Ok((sample_hz.unwrap_or(60.0), trajectory))
+        decode_trajectory(result.rows)
     }
 
     /// Fetch one original MP4 payload for browser preview. Spiral's managed
@@ -606,6 +685,13 @@ impl StorageManager {
         completed: &CompletedEpisode,
         videos: &[VideoAsset],
     ) -> Result<(), String> {
+        // `publish_spiral_blocking` performs a read-before-append for the
+        // owning dataset row. Keep that pair atomic relative to every other
+        // episode targeting the same logical dataset, even though hosted ADBC
+        // work otherwise uses a small concurrent connection pool.
+        let dataset_publication =
+            self.dataset_publication_lock(settings, &completed.start.dataset_id);
+        let _dataset_guard = dataset_publication.lock().await;
         let settings = settings.clone();
         let completed = completed.clone();
         let videos = videos.to_vec();
@@ -699,6 +785,103 @@ impl StorageManager {
     }
 }
 
+/// Decode remote replay data without dropping malformed joints or inventing a
+/// clock. Physical replay is all-or-nothing: every row must declare the same
+/// finite sample rate and one exact, unique, finite pose.
+fn decode_trajectory(
+    rows: Vec<JsonMap<String, JsonValue>>,
+) -> Result<(f64, Vec<BTreeMap<String, f64>>), String> {
+    let mut sample_hz: Option<f64> = None;
+    let mut trajectory = Vec::with_capacity(rows.len());
+    for (row_index, row) in rows.into_iter().enumerate() {
+        let row_hz = row
+            .get(db::SAMPLE_HZ)
+            .and_then(JsonValue::as_f64)
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .ok_or_else(|| {
+                format!(
+                    "Spiral trajectory row {row_index} has no finite positive {}",
+                    db::SAMPLE_HZ
+                )
+            })?;
+        if sample_hz.is_some_and(|expected| expected.to_bits() != row_hz.to_bits()) {
+            return Err(format!(
+                "Spiral trajectory row {row_index} changed {}",
+                db::SAMPLE_HZ
+            ));
+        }
+        sample_hz.get_or_insert(row_hz);
+
+        let names = row
+            .get(db::JOINT_NAMES)
+            .and_then(JsonValue::as_array)
+            .ok_or_else(|| {
+                format!(
+                    "Spiral trajectory row {row_index} is missing {}",
+                    db::JOINT_NAMES
+                )
+            })?;
+        let values = row
+            .get(db::REPLAY_POSITION)
+            .and_then(JsonValue::as_array)
+            .ok_or_else(|| {
+                format!(
+                    "Spiral trajectory row {row_index} is missing {}",
+                    db::REPLAY_POSITION
+                )
+            })?;
+        if names.is_empty() || names.len() != values.len() {
+            return Err(format!(
+                "Spiral trajectory row {row_index} has {} joint names but {} positions",
+                names.len(),
+                values.len()
+            ));
+        }
+        let mut pose = BTreeMap::new();
+        for (joint_index, (name, value)) in names.iter().zip(values).enumerate() {
+            let name = name
+                .as_str()
+                .filter(|name| !name.trim().is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "Spiral trajectory row {row_index} joint {joint_index} has no valid name"
+                    )
+                })?;
+            let value = value
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| {
+                    format!(
+                        "Spiral trajectory row {row_index} joint {name:?} has no finite position"
+                    )
+                })?;
+            if pose.insert(name.to_owned(), value).is_some() {
+                return Err(format!(
+                    "Spiral trajectory row {row_index} repeats joint {name:?}"
+                ));
+            }
+        }
+        trajectory.push(pose);
+    }
+    let sample_hz =
+        sample_hz.ok_or_else(|| "Spiral returned no commandable trajectory rows".to_owned())?;
+    Ok((sample_hz, trajectory))
+}
+
+impl CheckpointRepository for StorageManager {
+    fn register_run_source(&self, run_id: &str, source: CheckpointSource) -> Result<(), String> {
+        self.register_checkpoint_source(run_id, source)
+    }
+
+    fn publish_checkpoint(&self, publication: CheckpointPublication) -> CheckpointFuture<'_, ()> {
+        Box::pin(async move { self.publish_checkpoint_artifact(publication).await })
+    }
+
+    fn load_checkpoint(&self, key: CheckpointKey) -> CheckpointFuture<'_, CheckpointArtifact> {
+        Box::pin(async move { self.load_checkpoint_artifact(key).await })
+    }
+}
+
 impl AdbcConnectionKey {
     fn new(settings: &StoredSpiralSettings, driver_path: PathBuf) -> Self {
         Self {
@@ -784,6 +967,28 @@ fn validate_adbc_settings(settings: &StoredSpiralSettings, driver: &Path) -> Res
         validate_safe_value("Spiral project", &settings.project_id)?;
     }
     validate_dataset_identifier(&settings.dataset)
+}
+
+/// Reconstruct the hosted connection identity captured by [`CheckpointSource`].
+///
+/// The source deliberately contains no secrets. Hosted Spiral authentication is
+/// process-owned, while the project and namespace are sufficient to ensure an
+/// existing run cannot be retargeted by later Settings changes.
+fn frozen_training_settings(source: &CheckpointSource) -> Result<StoredSpiralSettings, String> {
+    if source.project.trim().is_empty() {
+        return Err("training source has no Spiral project".to_owned());
+    }
+    validate_safe_value("Spiral project", &source.project)?;
+    validate_dataset_identifier(&source.namespace)?;
+    if !spiral::is_dataset_id(&source.dataset_id) {
+        return Err("training source has an invalid relational dataset ID".to_owned());
+    }
+    Ok(StoredSpiralSettings {
+        enabled: true,
+        uri: "spiraldb://".to_owned(),
+        project_id: source.project.clone(),
+        dataset: source.namespace.clone(),
+    })
 }
 
 fn spiral_server_endpoint() -> String {
@@ -1165,7 +1370,8 @@ fn validate_training_schema(
     Ok(())
 }
 
-fn training_checkpoint_batch(checkpoint: TrainingCheckpointWrite) -> Result<RecordBatch, String> {
+fn training_checkpoint_batch(checkpoint: CheckpointPublication) -> Result<RecordBatch, String> {
+    validate_checkpoint_artifact_size(checkpoint.config_json.len(), checkpoint.payload.len())?;
     let schema = training_checkpoint_schema();
     let columns: Vec<ArrayRef> = vec![
         Arc::new(StringArray::from(vec![checkpoint.run_id])),
@@ -1444,7 +1650,7 @@ fn run_binary_query(connection: &mut ManagedConnection, sql: &str) -> Result<Vec
 fn run_training_checkpoint_query(
     connection: &mut ManagedConnection,
     sql: &str,
-) -> Result<TrainingCheckpointArtifact, String> {
+) -> Result<CheckpointArtifact, String> {
     let mut statement = connection
         .new_statement()
         .map_err(|error| format!("opening Spiral checkpoint query: {error}"))?;
@@ -1474,11 +1680,17 @@ fn run_training_checkpoint_query(
                 )
             })?;
             let payload = if let Some(values) = checkpoint.as_any().downcast_ref::<BinaryArray>() {
-                values.value(row).to_vec()
+                let value = values.value(row);
+                validate_checkpoint_artifact_size(0, value.len())?;
+                value.to_vec()
             } else if let Some(values) = checkpoint.as_any().downcast_ref::<LargeBinaryArray>() {
-                values.value(row).to_vec()
+                let value = values.value(row);
+                validate_checkpoint_artifact_size(0, value.len())?;
+                value.to_vec()
             } else if let Some(values) = checkpoint.as_any().downcast_ref::<BinaryViewArray>() {
-                values.value(row).to_vec()
+                let value = values.value(row);
+                validate_checkpoint_artifact_size(0, value.len())?;
+                value.to_vec()
             } else {
                 return Err(format!(
                     "Spiral checkpoint payload has unexpected type {}",
@@ -1486,18 +1698,24 @@ fn run_training_checkpoint_query(
                 ));
             };
             let config_json = if let Some(values) = config.as_any().downcast_ref::<StringArray>() {
-                values.value(row).as_bytes().to_vec()
+                let value = values.value(row).as_bytes();
+                validate_checkpoint_artifact_size(value.len(), payload.len())?;
+                value.to_vec()
             } else if let Some(values) = config.as_any().downcast_ref::<LargeStringArray>() {
-                values.value(row).as_bytes().to_vec()
+                let value = values.value(row).as_bytes();
+                validate_checkpoint_artifact_size(value.len(), payload.len())?;
+                value.to_vec()
             } else if let Some(values) = config.as_any().downcast_ref::<StringViewArray>() {
-                values.value(row).as_bytes().to_vec()
+                let value = values.value(row).as_bytes();
+                validate_checkpoint_artifact_size(value.len(), payload.len())?;
+                value.to_vec()
             } else {
                 return Err(format!(
                     "Spiral checkpoint config has unexpected type {}",
                     config.data_type()
                 ));
             };
-            artifact = Some(TrainingCheckpointArtifact {
+            artifact = Some(CheckpointArtifact {
                 config_json,
                 payload,
             });
@@ -1602,7 +1820,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_core::api::EpisodeArm;
+    use spiral_robotics_contracts::api::EpisodeArm;
 
     use super::*;
 
@@ -1647,6 +1865,68 @@ mod tests {
         assert!(bytes <= 64);
     }
 
+    fn trajectory_row(
+        hz: JsonValue,
+        names: JsonValue,
+        values: JsonValue,
+    ) -> JsonMap<String, JsonValue> {
+        JsonMap::from_iter([
+            (db::SAMPLE_HZ.to_owned(), hz),
+            (db::JOINT_NAMES.to_owned(), names),
+            (db::REPLAY_POSITION.to_owned(), values),
+        ])
+    }
+
+    #[test]
+    fn remote_trajectory_requires_one_exact_finite_pose_and_real_clock_per_row() {
+        let good = trajectory_row(
+            serde_json::json!(60.0),
+            serde_json::json!(["shoulder", "elbow"]),
+            serde_json::json!([0.25, -0.5]),
+        );
+        let (hz, poses) = decode_trajectory(vec![good.clone()]).unwrap();
+        assert_eq!(hz, 60.0);
+        assert_eq!(poses[0].len(), 2);
+
+        let cases = [
+            trajectory_row(
+                JsonValue::Null,
+                serde_json::json!(["shoulder"]),
+                serde_json::json!([0.25]),
+            ),
+            trajectory_row(
+                serde_json::json!(60.0),
+                serde_json::json!(["shoulder", "elbow"]),
+                serde_json::json!([0.25]),
+            ),
+            trajectory_row(
+                serde_json::json!(60.0),
+                serde_json::json!(["shoulder"]),
+                serde_json::json!(["not-a-number"]),
+            ),
+            trajectory_row(
+                serde_json::json!(60.0),
+                serde_json::json!(["shoulder", "shoulder"]),
+                serde_json::json!([0.25, 0.5]),
+            ),
+        ];
+        for malformed in cases {
+            assert!(decode_trajectory(vec![malformed]).is_err());
+        }
+        assert!(decode_trajectory(Vec::new()).is_err());
+        assert!(
+            decode_trajectory(vec![
+                good,
+                trajectory_row(
+                    serde_json::json!(30.0),
+                    serde_json::json!(["shoulder"]),
+                    serde_json::json!([0.25]),
+                ),
+            ])
+            .is_err()
+        );
+    }
+
     #[test]
     fn hosted_adbc_work_has_a_small_bounded_connection_budget() {
         let directory = tempfile::tempdir().unwrap();
@@ -1658,6 +1938,185 @@ mod tests {
             HOSTED_ADBC_CONNECTIONS
         );
         assert!(manager.hosted_adbc.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn publication_claim_is_atomic_per_episode() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings = Arc::new(DataSettingsStore::open(directory.path()).unwrap());
+        let episodes = Arc::new(EpisodeStore::open(directory.path().to_path_buf()).unwrap());
+        let manager = Arc::new(StorageManager::new(settings, episodes, None).unwrap());
+        let barrier = Arc::new(std::sync::Barrier::new(9));
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let manager = Arc::clone(&manager);
+            let barrier = Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                manager.claim_publish("episode_000001")
+            }));
+        }
+        barrier.wait();
+        let results = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 7);
+        assert_eq!(
+            lock(&manager.publications)["episode_000001"].state,
+            "queued"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_first_episodes_create_one_dataset_row() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let directory = tempfile::tempdir().unwrap();
+        let stored = Arc::new(DataSettingsStore::open(directory.path()).unwrap());
+        let episodes = Arc::new(EpisodeStore::open(directory.path().to_path_buf()).unwrap());
+        let manager = Arc::new(StorageManager::new(stored, episodes, None).unwrap());
+        let destination = StoredSpiralSettings {
+            enabled: true,
+            uri: "spiraldb://".to_owned(),
+            project_id: "project-a".to_owned(),
+            dataset: "robotics".to_owned(),
+        };
+        let barrier = Arc::new(tokio::sync::Barrier::new(9));
+        let rows = Arc::new(Mutex::new(Vec::<String>::new()));
+        let inserts = Arc::new(AtomicUsize::new(0));
+        let active_mutations = Arc::new(AtomicUsize::new(0));
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let manager = Arc::clone(&manager);
+            let destination = destination.clone();
+            let barrier = Arc::clone(&barrier);
+            let rows = Arc::clone(&rows);
+            let inserts = Arc::clone(&inserts);
+            let active_mutations = Arc::clone(&active_mutations);
+            workers.push(tokio::spawn(async move {
+                let publication = manager.dataset_publication_lock(&destination, "shared-data");
+                barrier.wait().await;
+                let _guard = publication.lock().await;
+                assert_eq!(active_mutations.fetch_add(1, Ordering::SeqCst), 0);
+                // This is the same read-before-append shape used by
+                // `publish_spiral_blocking`, backed by a deterministic fake
+                // relation so the race is exercised without an ADBC driver.
+                let absent = !lock(&rows).iter().any(|row| row == "shared-data");
+                tokio::task::yield_now().await;
+                if absent {
+                    lock(&rows).push("shared-data".to_owned());
+                    inserts.fetch_add(1, Ordering::SeqCst);
+                }
+                tokio::task::yield_now().await;
+                assert_eq!(active_mutations.fetch_sub(1, Ordering::SeqCst), 1);
+            }));
+        }
+        barrier.wait().await;
+        for worker in workers {
+            worker.await.unwrap();
+        }
+
+        assert_eq!(inserts.load(Ordering::SeqCst), 1);
+        assert_eq!(lock(&rows).len(), 1);
+
+        // A retry after every initial publisher has finished obtains a fresh
+        // process-local lock but still observes the durable logical row and is
+        // idempotent rather than appending it again.
+        let retry = manager.dataset_publication_lock(&destination, "shared-data");
+        let _guard = retry.lock().await;
+        if !lock(&rows).iter().any(|row| row == "shared-data") {
+            lock(&rows).push("shared-data".to_owned());
+            inserts.fetch_add(1, Ordering::SeqCst);
+        }
+        assert_eq!(inserts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn local_video_manifest_failure_is_visible_and_not_marked_staged() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings = Arc::new(DataSettingsStore::open(directory.path()).unwrap());
+        let episodes = Arc::new(EpisodeStore::open(directory.path().join("episodes")).unwrap());
+        std::fs::write(
+            episodes.directory().join("videos"),
+            "blocks directory creation",
+        )
+        .unwrap();
+        let manager = Arc::new(StorageManager::new(settings, episodes, None).unwrap());
+
+        let error = manager
+            .stage_local("episode_000001".to_owned(), Vec::new())
+            .unwrap_err();
+        assert!(error.contains("video manifest"));
+        let status = &lock(&manager.publications)["episode_000001"];
+        assert_eq!(status.state, "failed");
+        assert!(status.spiral.as_deref().unwrap().contains("video manifest"));
+    }
+
+    #[test]
+    fn settings_changes_cannot_retarget_a_training_checkpoint_lookup() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings = Arc::new(DataSettingsStore::open(directory.path()).unwrap());
+        let episodes = Arc::new(EpisodeStore::open(directory.path().to_path_buf()).unwrap());
+        let manager = StorageManager::new(settings.clone(), episodes, None).unwrap();
+
+        let mut original = spiral_robotics_contracts::api::UpdateDataSettingsRequest::default();
+        original.spiral.uri = "spiraldb://".to_owned();
+        original.spiral.project_id = "project-a".to_owned();
+        original.spiral.dataset = "training_a".to_owned();
+        settings.update(original).unwrap();
+
+        let source = CheckpointSource {
+            project: "project-a".to_owned(),
+            namespace: "training_a".to_owned(),
+            dataset_id: "dataset-a".to_owned(),
+        };
+        manager
+            .register_run_source("run-1", source.clone())
+            .unwrap();
+
+        let mut replacement = spiral_robotics_contracts::api::UpdateDataSettingsRequest::default();
+        replacement.spiral.uri = "spiraldb://".to_owned();
+        replacement.spiral.project_id = "project-b".to_owned();
+        replacement.spiral.dataset = "training_b".to_owned();
+        settings.update(replacement).unwrap();
+
+        let (lookup, query) = manager.training_checkpoint_lookup("run-1", 20_000).unwrap();
+        assert_eq!(lookup.project_id, "project-a");
+        assert_eq!(lookup.dataset, "training_a");
+        assert!(query.contains("FROM training_a.training_checkpoints"));
+        assert!(!query.contains("training_b"));
+        assert_eq!(lock(&manager.training_sources).get("run-1"), Some(&source));
+    }
+
+    #[test]
+    fn a_run_id_cannot_be_rebound_to_another_checkpoint_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings = Arc::new(DataSettingsStore::open(directory.path()).unwrap());
+        let episodes = Arc::new(EpisodeStore::open(directory.path().to_path_buf()).unwrap());
+        let manager = StorageManager::new(settings, episodes, None).unwrap();
+        let source = CheckpointSource {
+            project: "project-a".to_owned(),
+            namespace: "training_a".to_owned(),
+            dataset_id: "dataset-a".to_owned(),
+        };
+
+        manager
+            .register_run_source("run-1", source.clone())
+            .unwrap();
+        let error = manager
+            .register_run_source(
+                "run-1",
+                CheckpointSource {
+                    project: "project-b".to_owned(),
+                    namespace: "training_b".to_owned(),
+                    ..source
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.contains("already bound"));
     }
 
     #[test]
@@ -1701,7 +2160,9 @@ mod tests {
         let episodes = Arc::new(EpisodeStore::open(directory.path().to_path_buf()).unwrap());
         let manager = Arc::new(StorageManager::new(settings, episodes, None).unwrap());
 
-        manager.stage_local("episode_000024".to_owned(), Vec::new());
+        manager
+            .stage_local("episode_000024".to_owned(), Vec::new())
+            .unwrap();
 
         let publications = lock(&manager.publications);
         let status = publications.get("episode_000024").unwrap();
@@ -1919,7 +2380,7 @@ mod tests {
         }
         assert_eq!(decoded, 1);
 
-        let request = spiral_robotics_core::api::StartTrainingRequest {
+        let request = spiral_robotics_contracts::api::StartTrainingRequest {
             sql: format!(
                 "{}\n  AND j.episode_id = '{}'",
                 spiral::default_training_sql(&dataset),
@@ -1927,13 +2388,13 @@ mod tests {
             ),
             batch_size: 1,
             chunk_size: 4,
-            act: spiral_robotics_core::api::ActTrainingConfig {
+            act: spiral_robotics_contracts::api::ActTrainingConfig {
                 camera_streams: vec![stream_id.to_owned()],
                 image_width: 32,
                 image_height: 32,
-                ..spiral_robotics_core::api::ActTrainingConfig::default()
+                ..spiral_robotics_contracts::api::ActTrainingConfig::default()
             },
-            ..spiral_robotics_core::api::StartTrainingRequest::default()
+            ..spiral_robotics_contracts::api::StartTrainingRequest::default()
         };
         let mut loader = crate::backend::training::data::SpiralActLoader::open(
             &mut adbc.connection,

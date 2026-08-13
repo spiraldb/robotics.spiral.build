@@ -17,10 +17,11 @@
 //! application draw its own labels over the scene without this crate ever
 //! learning what a label says.
 //!
-//! [`robot`] is the layer that does know what an arm is. It turns a robot
-//! description, some measured joint angles, and any mounted cameras into a
-//! [`Scene`], and hands back the table that says which key is which joint. It
-//! depends on `spiral-robotics-core` and on nothing else.
+//! [`robot`] is the layer that does know what an arm is. Together with [`urdf`],
+//! it owns the renderer-facing description, parser, and pose construction. It
+//! accepts neutral measured joint angles from `spiral-robotics-core`, turns
+//! them and any mounted cameras into a [`Scene`], and hands back the table that
+//! says which key is which joint.
 //!
 //! The seam between them is the useful one: **this crate answers where a thing
 //! is on screen, and the application answers what should be said about it.**
@@ -31,9 +32,17 @@ pub mod pick;
 pub mod render;
 pub mod robot;
 pub mod scene;
+pub mod urdf;
+
+/// Re-export the viewport's matrix types so callers use its presentation
+/// geometry without depending on the domain crate for rendering details.
+pub use glam;
 
 pub use camera::Camera;
 pub use gesture::{Drag, Gesture, Pinch};
 pub use pick::Viewport;
-pub use robot::{ArmPlacement, CameraMount, RobotEntity, RobotScene, tool_position};
+pub use robot::{
+    ArmPlacement, CameraMount, RobotEntity, RobotScene, so101_joint_positions, tool_position,
+};
 pub use scene::{Condition, Entity, EntityKey, Interaction, Scene};
+pub use urdf::{SO101_URDF, Urdf, UrdfError};

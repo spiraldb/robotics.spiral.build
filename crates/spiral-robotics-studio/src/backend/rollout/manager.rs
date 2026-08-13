@@ -1,31 +1,44 @@
 //! Backend-owned native policy lifecycle and deadline-aware motor loop.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
+use futures_util::FutureExt as _;
 use image::imageops::FilterType;
 use safetensors::SafeTensors;
 use serde::Deserialize;
-use spiral_robotics_core::api::{
-    MAX_ROLLOUT_DURATION_SECONDS, ModeSelection, ModeStatus, RolloutPhase, RolloutSnapshot,
+use spiral_robotics_contracts::api::{
+    ModeSelection, ModeStatus, RolloutMetrics as ContractRolloutMetrics,
+    RolloutPhase as ContractRolloutPhase, RolloutSnapshot as ContractRolloutSnapshot,
     StartRolloutRequest,
 };
 use spiral_robotics_inference::{ImageView, InferenceInput, ModelArtifact, Policy};
-use tokio::sync::{Mutex as AsyncMutex, watch};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
 
+use crate::backend::adapters::clock::SystemClock;
+use crate::backend::application::checkpoints::{
+    CheckpointArtifact, CheckpointKey, CheckpointRepository,
+};
+use crate::backend::application::clock::{Clock, StableIdSequence};
+use crate::backend::application::policy_runtime::{
+    ArtifactIdentity, CameraBindingContract, ControlOwner, JointObservation, ObservationFreshness,
+    PolicyDataContract, PolicyModelContract, TargetRobotContract, prepare_action_goals,
+    prepare_observation_state, require_fresh_observations, validate_artifact_identity,
+    validate_rollout_contract,
+};
+use crate::backend::application::rollout::{
+    CompletionReason, ControlDecision, ExecutionOutcome, RolloutCoordinator, RolloutEventPort,
+    RolloutMetrics, RolloutPhase, RolloutRequest, RolloutSnapshot,
+};
 use crate::backend::robotics::cameras::{CameraManager, Frame};
 use crate::backend::robotics::hardware::{HardwareHandle, HardwareState};
 use crate::backend::robots::workspace::RobotWorkspace;
-use crate::backend::storage::manager::{StorageManager, TrainingCheckpointArtifact};
-use crate::backend::training::{ACT_ARTIFACT_FORMAT, ACT_TENSOR_NAMESPACE};
 
 const INPUT_STALE_AFTER: Duration = Duration::from_millis(350);
 const INITIAL_CAMERA_TIMEOUT: Duration = Duration::from_secs(5);
-static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static SESSION_IDS: StableIdSequence = StableIdSequence::new("rollout", 1);
 
 #[derive(Debug, Deserialize)]
 struct ArtifactManifest {
@@ -40,16 +53,54 @@ struct ArtifactManifest {
 
 #[derive(Debug, Deserialize)]
 struct ArtifactDataContract {
+    value_space: String,
     robot_type: String,
     joint_names: Vec<String>,
     camera_streams: Vec<String>,
     sample_hz: f64,
+    image_layout: String,
+    image_normalization: String,
+    frame_alignment: String,
+    spiral_schema_version: u32,
 }
 
 struct ActiveRollout {
     session: String,
     stop: watch::Sender<bool>,
-    task: Option<JoinHandle<()>>,
+    task: JoinHandle<()>,
+}
+
+fn publish_active_rollout(
+    active: &mut Option<ActiveRollout>,
+    session: String,
+    stop: watch::Sender<bool>,
+    task: JoinHandle<()>,
+) {
+    debug_assert!(active.is_none(), "rollout admission is exclusive");
+    *active = Some(ActiveRollout {
+        session,
+        stop,
+        task,
+    });
+}
+
+fn take_active_rollout(active: &Mutex<Option<ActiveRollout>>) -> Option<ActiveRollout> {
+    lock(active).take()
+}
+
+async fn stop_and_join_active(active: ActiveRollout) {
+    let _ = active.stop.send(true);
+    let _ = active.task.await;
+}
+
+struct WatchRolloutEvents {
+    state: watch::Sender<ContractRolloutSnapshot>,
+}
+
+impl RolloutEventPort for WatchRolloutEvents {
+    fn publish(&self, snapshot: &RolloutSnapshot) {
+        self.state.send_replace(contract_snapshot(snapshot));
+    }
 }
 
 struct CameraInput {
@@ -65,76 +116,87 @@ struct DecodedImage {
 }
 
 pub(crate) struct RolloutManager {
-    storage: Arc<StorageManager>,
+    checkpoints: Arc<dyn CheckpointRepository>,
     hardware: Arc<HardwareHandle>,
     cameras: Arc<CameraManager>,
     workspace: Arc<RobotWorkspace>,
-    state: watch::Sender<RolloutSnapshot>,
-    active: AsyncMutex<Option<ActiveRollout>>,
+    clock: Arc<dyn Clock>,
+    state: watch::Sender<ContractRolloutSnapshot>,
+    coordinator: Mutex<RolloutCoordinator>,
+    active: Mutex<Option<ActiveRollout>>,
 }
 
 impl RolloutManager {
-    pub(crate) fn new(
-        storage: Arc<StorageManager>,
+    pub(crate) fn new<R>(
+        checkpoints: Arc<R>,
         hardware: Arc<HardwareHandle>,
         cameras: Arc<CameraManager>,
         workspace: Arc<RobotWorkspace>,
-    ) -> Arc<Self> {
-        let (state, receiver) = watch::channel(RolloutSnapshot::default());
-        drop(receiver);
-        Arc::new(Self {
-            storage,
+    ) -> Arc<Self>
+    where
+        R: CheckpointRepository + 'static,
+    {
+        Self::new_with_clock(
+            checkpoints,
             hardware,
             cameras,
             workspace,
+            Arc::new(SystemClock),
+        )
+    }
+
+    pub(crate) fn new_with_clock<R>(
+        checkpoints: Arc<R>,
+        hardware: Arc<HardwareHandle>,
+        cameras: Arc<CameraManager>,
+        workspace: Arc<RobotWorkspace>,
+        clock: Arc<dyn Clock>,
+    ) -> Arc<Self>
+    where
+        R: CheckpointRepository + 'static,
+    {
+        let (state, receiver) = watch::channel(ContractRolloutSnapshot::default());
+        drop(receiver);
+        let events = Arc::new(WatchRolloutEvents {
+            state: state.clone(),
+        });
+        Arc::new(Self {
+            checkpoints,
+            hardware,
+            cameras,
+            workspace,
+            clock,
             state,
-            active: AsyncMutex::new(None),
+            coordinator: Mutex::new(RolloutCoordinator::new(events)),
+            active: Mutex::new(None),
         })
     }
 
-    pub(crate) fn snapshot(&self) -> RolloutSnapshot {
+    pub(crate) fn snapshot(&self) -> ContractRolloutSnapshot {
         self.state.borrow().clone()
     }
 
-    pub(crate) fn subscribe(&self) -> watch::Receiver<RolloutSnapshot> {
+    pub(crate) fn subscribe(&self) -> watch::Receiver<ContractRolloutSnapshot> {
         self.state.subscribe()
     }
 
     pub(crate) async fn start(
         self: &Arc<Self>,
         request: StartRolloutRequest,
-    ) -> Result<RolloutSnapshot, String> {
-        validate_request(&request)?;
-        let mut active = self.active.lock().await;
-        if let Some(existing) = active.as_ref() {
-            return Err(format!(
-                "policy session {:?} is already active",
-                existing.session
-            ));
-        }
-        let session = format!(
-            "rollout-{}-{}",
-            now_ms(),
-            SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        );
+    ) -> Result<ContractRolloutSnapshot, String> {
+        let mut active = lock(&self.active);
+        let identity = SESSION_IDS.next(self.clock.as_ref());
+        let session = identity.value;
         let (stop, stop_receiver) = watch::channel(false);
-        *active = Some(ActiveRollout {
-            session: session.clone(),
-            stop,
-            task: None,
-        });
-        self.state.send_replace(RolloutSnapshot {
-            phase: RolloutPhase::Loading,
-            session_id: Some(session.clone()),
-            run_id: Some(request.run_id.clone()),
-            checkpoint_step: Some(request.checkpoint_step),
-            robot: Some(request.robot.clone()),
-            duration_seconds: Some(request.duration_seconds),
-            started_ms: Some(now_ms()),
-            message: Some("Loading checkpoint…".to_owned()),
-            ..RolloutSnapshot::default()
-        });
-
+        lock(&self.coordinator).admit(
+            session.clone(),
+            identity.created_ms,
+            rollout_request(&request),
+        )?;
+        // Spawn and publish the task handle while holding the same mutex used
+        // by shutdown. Once an active session is observable its cleanup task
+        // is therefore always joinable; there is no `active + task=None`
+        // window for graceful shutdown to miss.
         let manager = self.clone();
         let task_session = session.clone();
         let task = tokio::spawn(async move {
@@ -142,23 +204,17 @@ impl RolloutManager {
                 .run_and_finish(task_session, request, stop_receiver)
                 .await;
         });
-        if let Some(current) = active.as_mut().filter(|item| item.session == session) {
-            current.task = Some(task);
-        } else {
-            task.abort();
-        }
+        publish_active_rollout(&mut active, session, stop, task);
         Ok(self.snapshot())
     }
 
     pub(crate) async fn stop(&self) -> Result<(), String> {
-        let active = self.active.lock().await;
+        let active = lock(&self.active);
         let Some(active) = active.as_ref() else {
             return Err("no policy rollout is active".to_owned());
         };
-        self.update_session(&active.session, |snapshot| {
-            snapshot.phase = RolloutPhase::Stopping;
-            snapshot.message = Some("Stopping after the current control cycle…".to_owned());
-        });
+        let signal = lock(&self.coordinator).request_stop()?;
+        debug_assert_eq!(signal.session, active.session);
         active
             .stop
             .send(true)
@@ -166,15 +222,14 @@ impl RolloutManager {
     }
 
     pub(crate) async fn shutdown(&self) {
-        let active = self.active.lock().await.take();
-        let Some(mut active) = active else {
-            return;
+        let task = {
+            let Some(active) = take_active_rollout(&self.active) else {
+                return;
+            };
+            let _ = lock(&self.coordinator).request_stop();
+            active
         };
-        let _ = active.stop.send(true);
-        if let Some(task) = active.task.take() {
-            let _ = task.await;
-        }
-        let _ = self.hardware.stop_policy_session(&active.session).await;
+        stop_and_join_active(task).await;
     }
 
     async fn run_and_finish(
@@ -183,21 +238,34 @@ impl RolloutManager {
         request: StartRolloutRequest,
         stop: watch::Receiver<bool>,
     ) {
-        let result = self.run_session(&session, &request, stop).await;
-        let _ = self.hardware.stop_policy_session(&session).await;
-        match result {
-            Ok(message) => self.update_session(&session, |snapshot| {
-                snapshot.phase = RolloutPhase::Idle;
-                snapshot.finished_ms = Some(now_ms());
-                snapshot.message = Some(message);
-            }),
-            Err(error) => self.update_session(&session, |snapshot| {
-                snapshot.phase = RolloutPhase::Failed;
-                snapshot.finished_ms = Some(now_ms());
-                snapshot.message = Some(error);
-            }),
+        let outcome = match std::panic::AssertUnwindSafe(self.run_session(&session, &request, stop))
+            .catch_unwind()
+            .await
+        {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(error)) => ExecutionOutcome::Failed(error),
+            Err(_) => ExecutionOutcome::Failed("policy executor panicked unexpectedly".to_owned()),
+        };
+        let ticket = lock(&self.coordinator).begin_cleanup(&session, outcome);
+        // Hardware cleanup is unconditional. Even an internal lifecycle bug
+        // must not strand the arm under policy ownership.
+        let cleanup = self.hardware.stop_policy_session(&session).await;
+        let mut active = lock(&self.active);
+        match ticket {
+            Ok(ticket) => {
+                if let Err(error) =
+                    lock(&self.coordinator).finish_cleanup(ticket, self.clock.now_ms(), cleanup)
+                {
+                    tracing::error!(session, "rollout cleanup could not be finalized: {error}");
+                }
+            }
+            Err(error) => {
+                tracing::error!(session, "rollout cleanup was not admitted: {error}");
+                if let Err(cleanup) = cleanup {
+                    tracing::error!(session, "emergency hardware cleanup also failed: {cleanup}");
+                }
+            }
         }
-        let mut active = self.active.lock().await;
         if active.as_ref().is_some_and(|item| item.session == session) {
             active.take();
         }
@@ -208,22 +276,14 @@ impl RolloutManager {
         session: &str,
         request: &StartRolloutRequest,
         mut stop: watch::Receiver<bool>,
-    ) -> Result<String, String> {
-        let artifact = self
-            .storage
-            .training_checkpoint(&request.run_id, request.checkpoint_step)
-            .await?;
+    ) -> Result<ExecutionOutcome, String> {
+        let artifact = load_selected_checkpoint(self.checkpoints.as_ref(), request).await;
         if *stop.borrow() {
-            return Ok("Stopped before model loading.".to_owned());
+            return lock(&self.coordinator).stopped_outcome(session);
         }
+        let artifact = artifact?;
         let manifest = parse_manifest(&artifact)?;
         validate_manifest(&manifest, request, &artifact.config_json)?;
-        let (joint_names, camera_streams, robot_type) = (
-            manifest.data_contract.joint_names.clone(),
-            manifest.data_contract.camera_streams.clone(),
-            manifest.data_contract.robot_type.clone(),
-        );
-        let sample_hz = manifest.data_contract.sample_hz;
         let model_artifact = ModelArtifact::from_bytes(artifact.config_json, artifact.payload)
             .map_err(|error| format!("checkpoint identity is invalid: {error}"))?;
         let (mut policy, _backend): (Box<dyn Policy>, &'static str) =
@@ -232,100 +292,91 @@ impl RolloutManager {
                 .map_err(|error| format!("policy loader stopped unexpectedly: {error}"))?
                 .map_err(|error| format!("checkpoint could not be loaded: {error}"))?;
         let specification = policy.specification().clone();
-        if specification.state_dimensions != joint_names.len()
-            || specification.action_dimensions != joint_names.len()
-        {
-            return Err(format!(
-                "checkpoint joint contract has {} names but the model expects {} state and {} action values",
-                joint_names.len(),
-                specification.state_dimensions,
-                specification.action_dimensions
-            ));
-        }
-        let action_steps = specification.recommended_action_steps;
-        if action_steps == 0 || action_steps > specification.action_chunk_size {
-            return Err(format!(
-                "checkpoint recommends {action_steps} action steps for chunk size {}",
-                specification.action_chunk_size
-            ));
-        }
-        let model_images = specification
-            .image_inputs
-            .iter()
-            .map(|image| image.name.as_str())
-            .collect::<Vec<_>>();
-        if model_images
-            != camera_streams
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-        {
-            return Err("checkpoint camera order does not match its configuration".to_owned());
-        }
-
         let hardware_state = self.hardware.state();
         let record = self
             .workspace
             .get(&request.robot)
             .map_err(|error| error.to_string())?;
-        if record.robot_type().as_deref() != Some(robot_type.as_str()) {
-            return Err(format!(
-                "checkpoint was trained for {robot_type:?}, but robot {:?} is {:?}",
-                request.robot,
-                record.robot_type()
-            ));
-        }
         let connection = hardware_state
             .connections
             .get(&request.robot)
             .cloned()
             .unwrap_or_default();
         let summary = record.summary(connection);
-        if summary.problem.is_some() || !summary.connection.connected || !summary.calibrated {
-            return Err(format!(
-                "robot {:?} must be valid, connected, and calibrated before rollout",
-                request.robot
-            ));
-        }
-        let configured_joints = summary
-            .motors
-            .iter()
-            .map(|motor| motor.name.as_str())
-            .collect::<BTreeSet<_>>();
-        if configured_joints != joint_names.iter().map(String::as_str).collect() {
-            return Err("checkpoint joint names do not exactly match the target robot".to_owned());
-        }
-        let mut cameras = Vec::with_capacity(specification.image_inputs.len());
-        for image in &specification.image_inputs {
-            let binding = summary
-                .cameras
-                .iter()
-                .find(|binding| camera_matches(&image.name, &binding.name))
-                .ok_or_else(|| {
-                    format!(
-                        "robot {:?} has no camera binding for checkpoint stream {:?}",
-                        request.robot, image.name
-                    )
-                })?;
+        let contract = validate_rollout_contract(
+            PolicyDataContract {
+                value_space: manifest.data_contract.value_space,
+                robot_type: manifest.data_contract.robot_type,
+                joint_names: manifest.data_contract.joint_names,
+                camera_streams: manifest.data_contract.camera_streams,
+                sample_hz: manifest.data_contract.sample_hz,
+                image_layout: manifest.data_contract.image_layout,
+                image_normalization: manifest.data_contract.image_normalization,
+                frame_alignment: manifest.data_contract.frame_alignment,
+                schema_version: manifest.data_contract.spiral_schema_version,
+                supported_schema_version: spiral_robotics_contracts::spiral::SCHEMA_VERSION,
+            },
+            &PolicyModelContract {
+                state_dimensions: specification.state_dimensions,
+                action_dimensions: specification.action_dimensions,
+                action_chunk_size: specification.action_chunk_size,
+                recommended_action_steps: specification.recommended_action_steps,
+                image_streams: specification
+                    .image_inputs
+                    .iter()
+                    .map(|image| image.name.clone())
+                    .collect(),
+            },
+            &TargetRobotContract {
+                id: summary.id.clone(),
+                robot_type: summary.robot_type.clone(),
+                joint_names: summary
+                    .motors
+                    .iter()
+                    .map(|motor| motor.name.clone())
+                    .collect(),
+                camera_bindings: summary
+                    .cameras
+                    .iter()
+                    .map(|binding| CameraBindingContract {
+                        role: binding.name.clone(),
+                        camera_id: binding.id.clone(),
+                    })
+                    .collect(),
+                connected: summary.connection.connected,
+                calibrated: summary.calibrated,
+                problem: summary.problem.clone(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let joint_names = contract.joint_names;
+        let action_steps = contract.action_steps;
+        let period = contract.sample_period;
+        let sample_hz = contract.sample_hz;
+        let mut cameras = Vec::with_capacity(contract.camera_bindings.len());
+        for binding in contract.camera_bindings {
             cameras.push(CameraInput {
-                name: image.name.clone(),
-                receiver: self.cameras.subscribe(&binding.id)?,
+                name: binding.stream,
+                receiver: self.cameras.subscribe(&binding.camera_id)?,
             });
         }
 
-        self.update_session(session, |snapshot| {
-            snapshot.phase = RolloutPhase::WarmingUp;
-            snapshot.message = Some("Preparing policy and waiting for cameras…".to_owned());
-        });
+        if !lock(&self.coordinator).warming_up(session)? {
+            return lock(&self.coordinator).stopped_outcome(session);
+        }
         let warmup = tokio::task::block_in_place(|| policy.warm_up())
             .map_err(|error| format!("policy setup failed: {error}"))?;
-        self.update_session(session, |snapshot| {
-            snapshot.metrics.last_latency_ms = Some(duration_ms(warmup.total));
-            snapshot.metrics.last_model_ms = Some(duration_ms(warmup.model));
-        });
+        lock(&self.coordinator).record_warmup(
+            session,
+            duration_ms(warmup.total),
+            duration_ms(warmup.model),
+        )?;
         wait_for_camera_frames(&mut cameras, &mut stop).await?;
         if *stop.borrow() {
-            return Ok("Stopped before the arm was enabled.".to_owned());
+            return lock(&self.coordinator).stopped_outcome(session);
+        }
+        if !lock(&self.coordinator).awaiting_control(session)? {
+            return lock(&self.coordinator).stopped_outcome(session);
         }
 
         self.hardware
@@ -335,20 +386,24 @@ impl RolloutManager {
             })
             .await?;
         let mut hardware_updates = self.hardware.subscribe();
-        if let Some(message) =
-            wait_for_policy_admission(&mut hardware_updates, &request.robot, session).await?
+        match wait_for_policy_admission(&mut hardware_updates, &mut stop, &request.robot, session)
+            .await?
         {
-            return Ok(message);
+            PolicyAdmission::Admitted => {}
+            PolicyAdmission::Stopped => {
+                return lock(&self.coordinator).stopped_outcome(session);
+            }
+            PolicyAdmission::Replaced(mode) => {
+                if let Some(outcome) = self.classify_control(session, &mode)? {
+                    return Ok(outcome);
+                }
+                return Err("policy admission ended without a control transition".to_owned());
+            }
         }
-        self.update_session(session, |snapshot| {
-            snapshot.phase = RolloutPhase::Running;
-            snapshot.message = Some(format!(
-                "Controlling the follower at {sample_hz:.1} Hz · {action_steps} actions per observation · {} maximum.",
-                format_duration(request.duration_seconds)
-            ));
-        });
+        if !lock(&self.coordinator).running(session, sample_hz, action_steps)? {
+            return lock(&self.coordinator).stopped_outcome(session);
+        }
 
-        let period = Duration::from_secs_f64(1.0 / sample_hz);
         let deadline =
             TokioInstant::now() + Duration::from_secs(u64::from(request.duration_seconds));
         let mut ticker = tokio::time::interval(period);
@@ -357,21 +412,18 @@ impl RolloutManager {
         let mut action_index = 0_usize;
         let mut last_hardware_sequence = 0_u64;
         let mut hardware_changed_at = Instant::now();
-        let mut latency_sum = 0.0;
-        let mut latency_max = 0.0_f64;
 
         loop {
             tokio::select! {
                 changed = stop.changed() => {
                     if changed.is_err() || *stop.borrow() {
-                        return Ok("Policy stopped safely; the follower is holding its current position.".to_owned());
+                        return lock(&self.coordinator).stopped_outcome(session);
                     }
                 }
                 _ = tokio::time::sleep_until(deadline) => {
-                    return Ok(format!(
-                        "Policy completed its configured {} duration; the follower is holding its current position.",
-                        format_duration(request.duration_seconds)
-                    ));
+                    return Ok(ExecutionOutcome::Completed(CompletionReason::DurationReached {
+                        duration_seconds: request.duration_seconds,
+                    }));
                 }
                 _ = ticker.tick() => {}
             }
@@ -383,8 +435,8 @@ impl RolloutManager {
             } else if hardware_changed_at.elapsed() > INPUT_STALE_AFTER {
                 return Err("stopped policy: hardware telemetry became stale".to_owned());
             }
-            if let Some(message) = policy_exit(&hardware.mode, &request.robot, session)? {
-                return Ok(message);
+            if let Some(outcome) = self.classify_control(session, &hardware.mode)? {
+                return Ok(outcome);
             }
             let robot = hardware
                 .telemetry
@@ -402,7 +454,18 @@ impl RolloutManager {
                 ));
             }
             require_fresh_cameras(&cameras)?;
-            let state = ordered_state(robot, &joint_names)?;
+            let state = prepare_observation_state(
+                &joint_names,
+                &robot
+                    .joints
+                    .iter()
+                    .map(|joint| JointObservation {
+                        joint: joint.name.clone(),
+                        normalized: joint.normalized,
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|error| format!("stopped policy: {error}"))?;
 
             if chunk.is_none() || action_index >= action_steps {
                 let decoded = decode_images(&cameras, &specification.image_inputs)?;
@@ -433,8 +496,8 @@ impl RolloutManager {
                     ));
                 }
                 let refreshed = self.hardware.state();
-                if let Some(message) = policy_exit(&refreshed.mode, &request.robot, session)? {
-                    return Ok(message);
+                if let Some(outcome) = self.classify_control(session, &refreshed.mode)? {
+                    return Ok(outcome);
                 }
                 let refreshed_robot = refreshed
                     .telemetry
@@ -454,16 +517,11 @@ impl RolloutManager {
                 }
                 require_fresh_cameras(&cameras)?;
                 let latency = duration_ms(inference.stats.total);
-                latency_sum += latency;
-                latency_max = latency_max.max(latency);
-                self.update_session(session, |snapshot| {
-                    snapshot.metrics.inference_count += 1;
-                    snapshot.metrics.last_latency_ms = Some(latency);
-                    snapshot.metrics.last_model_ms = Some(duration_ms(inference.stats.model));
-                    snapshot.metrics.mean_latency_ms =
-                        Some(latency_sum / snapshot.metrics.inference_count as f64);
-                    snapshot.metrics.max_latency_ms = Some(latency_max);
-                });
+                lock(&self.coordinator).record_inference(
+                    session,
+                    latency,
+                    duration_ms(inference.stats.model),
+                )?;
                 chunk = Some(inference);
                 action_index = 0;
             }
@@ -471,57 +529,77 @@ impl RolloutManager {
                 .as_ref()
                 .and_then(|chunk| chunk.action(action_index))
                 .ok_or_else(|| "policy returned an incomplete action sequence".to_owned())?;
-            let goals = joint_names
-                .iter()
-                .zip(action)
-                .map(|(name, value)| (name.clone(), f64::from(*value)))
-                .collect::<BTreeMap<_, _>>();
+            let goals = prepare_action_goals(&joint_names, action)
+                .map_err(|error| format!("stopped policy: {error}"))?;
             self.hardware
                 .set_policy_goals(&request.robot, session, goals)
                 .await?;
             action_index += 1;
-            self.update_session(session, |snapshot| {
-                snapshot.metrics.command_count += 1;
-                if cycle_started.elapsed() > period {
-                    snapshot.metrics.missed_deadlines += 1;
-                }
-            });
+            lock(&self.coordinator).record_command(session, cycle_started.elapsed() > period)?;
         }
     }
 
-    fn update_session(&self, session: &str, update: impl FnOnce(&mut RolloutSnapshot)) {
-        self.state.send_modify(|snapshot| {
-            if snapshot.session_id.as_deref() == Some(session) {
-                update(snapshot);
-            }
-        });
-    }
-}
-
-fn validate_request(request: &StartRolloutRequest) -> Result<(), String> {
-    if request.run_id.trim().is_empty() || request.robot.trim().is_empty() {
-        return Err("rollout requires a training run and target robot".to_owned());
-    }
-    if request.checkpoint_step == 0 {
-        return Err("checkpoint step must be greater than zero".to_owned());
-    }
-    if !(1..=MAX_ROLLOUT_DURATION_SECONDS).contains(&request.duration_seconds) {
-        return Err(format!(
-            "rollout duration_seconds must be between 1 and {MAX_ROLLOUT_DURATION_SECONDS}"
-        ));
-    }
-    Ok(())
-}
-
-fn format_duration(seconds: u32) -> String {
-    match seconds {
-        1 => "1 second".to_owned(),
-        value if value % 60 == 0 => {
-            let minutes = value / 60;
-            format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
+    fn classify_control(
+        &self,
+        session: &str,
+        mode: &ModeStatus,
+    ) -> Result<Option<ExecutionOutcome>, String> {
+        let owner = control_owner(&mode.selection);
+        match lock(&self.coordinator).observe_control(session, &owner, mode.error.as_deref())? {
+            ControlDecision::Continue => Ok(None),
+            ControlDecision::Finish(reason) => Ok(Some(ExecutionOutcome::Completed(reason))),
+            ControlDecision::Fail(error) => Ok(Some(ExecutionOutcome::Failed(error))),
         }
-        value => format!("{value} seconds"),
     }
+}
+
+fn rollout_request(request: &StartRolloutRequest) -> RolloutRequest {
+    RolloutRequest {
+        run_id: request.run_id.clone(),
+        checkpoint_step: request.checkpoint_step,
+        robot: request.robot.clone(),
+        duration_seconds: request.duration_seconds,
+    }
+}
+
+fn contract_snapshot(snapshot: &RolloutSnapshot) -> ContractRolloutSnapshot {
+    ContractRolloutSnapshot {
+        phase: match snapshot.phase {
+            RolloutPhase::Idle => ContractRolloutPhase::Idle,
+            RolloutPhase::Loading => ContractRolloutPhase::Loading,
+            RolloutPhase::WarmingUp => ContractRolloutPhase::WarmingUp,
+            RolloutPhase::Running => ContractRolloutPhase::Running,
+            RolloutPhase::Stopping => ContractRolloutPhase::Stopping,
+            RolloutPhase::Failed => ContractRolloutPhase::Failed,
+        },
+        session_id: snapshot.session_id.clone(),
+        run_id: snapshot.run_id.clone(),
+        checkpoint_step: snapshot.checkpoint_step,
+        robot: snapshot.robot.clone(),
+        duration_seconds: snapshot.duration_seconds,
+        started_ms: snapshot.started_ms,
+        finished_ms: snapshot.finished_ms,
+        message: snapshot.message.clone(),
+        metrics: contract_metrics(&snapshot.metrics),
+    }
+}
+
+fn contract_metrics(metrics: &RolloutMetrics) -> ContractRolloutMetrics {
+    ContractRolloutMetrics {
+        inference_count: metrics.inference_count,
+        command_count: metrics.command_count,
+        missed_deadlines: metrics.missed_deadlines,
+        last_latency_ms: metrics.last_latency_ms,
+        last_model_ms: metrics.last_model_ms,
+        mean_latency_ms: metrics.mean_latency_ms,
+        max_latency_ms: metrics.max_latency_ms,
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Wait until the control thread publishes the Policy mode it already accepted.
@@ -531,67 +609,61 @@ fn format_duration(seconds: u32) -> String {
 /// immediately after `set_mode` can therefore still return the previous Idle
 /// snapshot. Admission is complete only when the exact robot/session pair is
 /// visible in an authoritative published state.
+enum PolicyAdmission {
+    Admitted,
+    Stopped,
+    Replaced(ModeStatus),
+}
+
 async fn wait_for_policy_admission(
     hardware: &mut watch::Receiver<HardwareState>,
+    stop: &mut watch::Receiver<bool>,
     expected_robot: &str,
     expected_session: &str,
-) -> Result<Option<String>, String> {
+) -> Result<PolicyAdmission, String> {
     let deadline = TokioInstant::now() + INPUT_STALE_AFTER;
     loop {
+        if *stop.borrow() {
+            return Ok(PolicyAdmission::Stopped);
+        }
         let state = hardware.borrow().clone();
         if matches!(
             &state.mode.selection,
             ModeSelection::Policy { robot, session }
                 if robot == expected_robot && session == expected_session
         ) {
-            return Ok(None);
+            return Ok(PolicyAdmission::Admitted);
         }
 
-        match tokio::time::timeout_at(deadline, hardware.changed()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(_)) => {
-                return Err(
-                    "stopped policy: hardware telemetry closed before policy control was admitted"
-                        .to_owned(),
-                );
+        tokio::select! {
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() {
+                    return Ok(PolicyAdmission::Stopped);
+                }
             }
-            Err(_) => {
-                let current = hardware.borrow().clone();
-                return policy_exit(&current.mode, expected_robot, expected_session);
+            changed = hardware.changed() => {
+                if changed.is_err() {
+                    return Err(
+                        "stopped policy: hardware telemetry closed before policy control was admitted"
+                            .to_owned(),
+                    );
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                return Ok(PolicyAdmission::Replaced(hardware.borrow().mode.clone()));
             }
         }
     }
 }
 
-/// Confirm that this rollout still owns the exclusive hardware-control state.
-///
-/// Selecting another healthy mode is an operator-requested state transition,
-/// not a failed rollout. A hardware-owned transition carries its reason in the
-/// mode error and remains a failure. The session check matters as much as the
-/// mode name: cleanup for an old rollout must never command through or stop a
-/// newer policy session.
-fn policy_exit(
-    mode: &ModeStatus,
-    expected_robot: &str,
-    expected_session: &str,
-) -> Result<Option<String>, String> {
-    if matches!(
-        &mode.selection,
-        ModeSelection::Policy { robot, session }
-            if robot == expected_robot && session == expected_session
-    ) {
-        return Ok(None);
+fn control_owner(selection: &ModeSelection) -> ControlOwner {
+    match selection {
+        ModeSelection::Policy { robot, session } => ControlOwner::Policy {
+            robot: robot.clone(),
+            session: session.clone(),
+        },
+        selection => ControlOwner::Other(describe_control_state(selection)),
     }
-
-    let replacement = describe_control_state(&mode.selection);
-    if let Some(error) = &mode.error {
-        return Err(format!(
-            "stopped policy: hardware control transitioned to {replacement}: {error}"
-        ));
-    }
-    Ok(Some(format!(
-        "Policy stopped; hardware control transitioned to {replacement}."
-    )))
 }
 
 fn describe_control_state(selection: &ModeSelection) -> String {
@@ -610,7 +682,19 @@ fn describe_control_state(selection: &ModeSelection) -> String {
     }
 }
 
-fn parse_manifest(artifact: &TrainingCheckpointArtifact) -> Result<ArtifactManifest, String> {
+async fn load_selected_checkpoint(
+    repository: &dyn CheckpointRepository,
+    request: &StartRolloutRequest,
+) -> Result<CheckpointArtifact, String> {
+    repository
+        .load_checkpoint(CheckpointKey {
+            run_id: request.run_id.clone(),
+            step: request.checkpoint_step,
+        })
+        .await
+}
+
+fn parse_manifest(artifact: &CheckpointArtifact) -> Result<ArtifactManifest, String> {
     let (_, metadata) = SafeTensors::read_metadata(&artifact.payload)
         .map_err(|error| format!("checkpoint metadata is invalid: {error}"))?;
     let manifest = metadata
@@ -627,29 +711,22 @@ fn validate_manifest(
     request: &StartRolloutRequest,
     config: &[u8],
 ) -> Result<(), String> {
-    if manifest.format != ACT_ARTIFACT_FORMAT
-        || manifest.artifact != "inference"
-        || manifest.tensor_namespace != ACT_TENSOR_NAMESPACE
-    {
-        return Err("checkpoint is not a native Spiral ACT inference artifact".to_owned());
-    }
-    if manifest.run_id != request.run_id || manifest.step != request.checkpoint_step {
-        return Err("checkpoint manifest identity does not match the requested run".to_owned());
-    }
+    validate_artifact_identity(
+        &ArtifactIdentity {
+            format: manifest.format.clone(),
+            purpose: manifest.artifact.clone(),
+            run_id: manifest.run_id.clone(),
+            step: manifest.step,
+            tensor_namespace: manifest.tensor_namespace.clone(),
+        },
+        &request.run_id,
+        request.checkpoint_step,
+    )
+    .map_err(|error| error.to_string())?;
     let stored_config: serde_json::Value = serde_json::from_slice(config)
         .map_err(|error| format!("stored native model config is invalid: {error}"))?;
     if stored_config != manifest.model_config {
         return Err("stored native model config does not match the checkpoint manifest".to_owned());
-    }
-    if manifest.data_contract.joint_names.is_empty()
-        || manifest.data_contract.camera_streams.is_empty()
-    {
-        return Err("checkpoint has an empty robot or camera contract".to_owned());
-    }
-    if !manifest.data_contract.sample_hz.is_finite()
-        || !(1.0..=100.0).contains(&manifest.data_contract.sample_hz)
-    {
-        return Err("checkpoint sample_hz must be between 1 and 100".to_owned());
     }
     Ok(())
 }
@@ -663,13 +740,7 @@ async fn wait_for_camera_frames(
         if *stop.borrow() {
             return Ok(());
         }
-        if cameras.iter().all(|camera| {
-            camera
-                .receiver
-                .borrow()
-                .as_ref()
-                .is_some_and(|frame| frame.captured_at.elapsed() <= INPUT_STALE_AFTER)
-        }) {
+        if require_fresh_cameras(cameras).is_ok() {
             return Ok(());
         }
         if started.elapsed() >= INITIAL_CAMERA_TIMEOUT {
@@ -724,40 +795,21 @@ fn decode_images(
 }
 
 fn require_fresh_cameras(cameras: &[CameraInput]) -> Result<(), String> {
-    for camera in cameras {
-        let frame = camera
-            .receiver
-            .borrow()
-            .clone()
-            .ok_or_else(|| format!("camera {:?} has no frame", camera.name))?;
-        if frame.captured_at.elapsed() > INPUT_STALE_AFTER {
-            return Err(format!("camera {:?} became stale", camera.name));
-        }
-    }
-    Ok(())
-}
-
-fn ordered_state(
-    robot: &spiral_robotics_core::api::RobotTelemetry,
-    joint_names: &[String],
-) -> Result<Vec<f32>, String> {
-    joint_names
-        .iter()
-        .map(|name| {
-            robot
-                .joints
-                .iter()
-                .find(|joint| joint.name == *name)
-                .and_then(|joint| joint.normalized)
-                .filter(|value| value.is_finite())
-                .map(|value| value as f32)
-                .ok_or_else(|| format!("joint {name:?} has no finite calibrated telemetry"))
-        })
-        .collect()
-}
-
-fn camera_matches(stream: &str, role: &str) -> bool {
-    stream == role || stream.ends_with(&format!(".{role}"))
+    require_fresh_observations(
+        &cameras
+            .iter()
+            .map(|camera| ObservationFreshness {
+                source: camera.name.clone(),
+                age: camera
+                    .receiver
+                    .borrow()
+                    .as_ref()
+                    .map(|frame| frame.captured_at.elapsed()),
+            })
+            .collect::<Vec<_>>(),
+        INPUT_STALE_AFTER,
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn duration_ms(duration: Duration) -> f64 {
@@ -803,82 +855,181 @@ fn load_native_policy(
         .map(|policy| (Box::new(policy) as Box<dyn Policy>, "CPU"))
 }
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(i64::MAX)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactDataContract, ArtifactManifest, CameraInput, INPUT_STALE_AFTER,
-        MAX_ROLLOUT_DURATION_SECONDS, camera_matches, format_duration, policy_exit,
-        require_fresh_cameras, validate_manifest, validate_request, wait_for_policy_admission,
+        ArtifactDataContract, ArtifactManifest, CameraInput, INPUT_STALE_AFTER, PolicyAdmission,
+        load_selected_checkpoint, publish_active_rollout, require_fresh_cameras,
+        stop_and_join_active, take_active_rollout, validate_manifest, wait_for_policy_admission,
+    };
+    use crate::backend::application::checkpoints::{
+        CheckpointArtifact, CheckpointFuture, CheckpointKey, CheckpointPublication,
+        CheckpointRepository, CheckpointSource,
+    };
+    use crate::backend::application::policy_runtime::{
+        ACT_ARTIFACT_FORMAT, ACT_TENSOR_NAMESPACE, CameraBindingContract, PolicyDataContract,
+        PolicyModelContract, TargetRobotContract, validate_rollout_contract,
     };
     use crate::backend::robotics::hardware::HardwareState;
-    use crate::backend::training::{ACT_ARTIFACT_FORMAT, ACT_TENSOR_NAMESPACE};
     use bytes::Bytes;
-    use spiral_robotics_core::api::{ModeSelection, ModeStatus, StartRolloutRequest};
-    use std::sync::Arc;
+    use spiral_robotics_contracts::api::{ModeSelection, ModeStatus, StartRolloutRequest};
+    use std::sync::{Arc, Mutex, mpsc};
     use std::time::{Duration, Instant};
+
+    struct FakeCheckpointRepository {
+        loads: Mutex<Vec<CheckpointKey>>,
+        artifact: CheckpointArtifact,
+    }
+
+    #[test]
+    fn shutdown_waits_for_task_publication_and_cleanup() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+        let active = Arc::new(Mutex::new(None));
+        let (publisher_holds_lock, publisher_is_released) = mpsc::sync_channel(0);
+        let (release_publisher, publisher_release) = mpsc::sync_channel(0);
+        let (cleanup_finished, cleanup_observed) = mpsc::sync_channel(0);
+
+        let publisher = std::thread::spawn({
+            let active = active.clone();
+            move || {
+                let mut guard = active.lock().unwrap();
+                publisher_holds_lock.send(()).unwrap();
+                publisher_release.recv().unwrap();
+                let (stop, mut stopped) = tokio::sync::watch::channel(false);
+                let task = handle.spawn(async move {
+                    stopped.changed().await.unwrap();
+                    cleanup_finished.send(()).unwrap();
+                });
+                publish_active_rollout(&mut guard, "session-1".to_owned(), stop, task);
+            }
+        });
+
+        publisher_is_released.recv().unwrap();
+        let (shutdown_attempted, attempt_observed) = mpsc::sync_channel(0);
+        let (shutdown_finished, shutdown_observed) = mpsc::sync_channel(0);
+        let shutdown = std::thread::spawn({
+            let active = active.clone();
+            move || {
+                shutdown_attempted.send(()).unwrap();
+                let active = take_active_rollout(&active).expect("published rollout");
+                runtime.block_on(stop_and_join_active(active));
+                shutdown_finished.send(()).unwrap();
+            }
+        });
+
+        attempt_observed.recv().unwrap();
+        assert!(
+            shutdown_observed.try_recv().is_err(),
+            "shutdown cannot pass the registration barrier"
+        );
+        release_publisher.send(()).unwrap();
+        cleanup_observed.recv().unwrap();
+        shutdown_observed.recv().unwrap();
+        publisher.join().unwrap();
+        shutdown.join().unwrap();
+        assert!(active.lock().unwrap().is_none());
+    }
+
+    impl CheckpointRepository for FakeCheckpointRepository {
+        fn register_run_source(
+            &self,
+            _run_id: &str,
+            _source: CheckpointSource,
+        ) -> Result<(), String> {
+            Err("rollout must not register training sources".to_owned())
+        }
+
+        fn publish_checkpoint(
+            &self,
+            _publication: CheckpointPublication,
+        ) -> CheckpointFuture<'_, ()> {
+            Box::pin(async { Err("rollout must not publish checkpoints".to_owned()) })
+        }
+
+        fn load_checkpoint(&self, key: CheckpointKey) -> CheckpointFuture<'_, CheckpointArtifact> {
+            self.loads.lock().unwrap().push(key);
+            let artifact = self.artifact.clone();
+            Box::pin(async move { Ok(artifact) })
+        }
+    }
+
+    #[tokio::test]
+    async fn rollout_loads_the_selected_run_and_step_without_settings_access() {
+        let repository = FakeCheckpointRepository {
+            loads: Mutex::new(Vec::new()),
+            artifact: CheckpointArtifact {
+                config_json: br#"{"type":"act"}"#.to_vec(),
+                payload: b"opaque model bytes".to_vec(),
+            },
+        };
+        let request = StartRolloutRequest {
+            run_id: "run-from-project-a".to_owned(),
+            checkpoint_step: 20_000,
+            robot: "follower".to_owned(),
+            duration_seconds: 30,
+        };
+
+        let loaded = load_selected_checkpoint(&repository, &request)
+            .await
+            .expect("the fake repository has no Settings dependency");
+
+        assert_eq!(loaded, repository.artifact);
+        assert_eq!(
+            *repository.loads.lock().unwrap(),
+            [CheckpointKey {
+                run_id: "run-from-project-a".to_owned(),
+                step: 20_000,
+            }]
+        );
+    }
 
     #[test]
     fn camera_roles_resolve_persisted_training_stream_ids() {
-        assert!(camera_matches("follower.camera.wrist", "wrist"));
-        assert!(camera_matches("top", "top"));
-        assert!(!camera_matches("follower.camera.top", "wrist"));
-    }
-
-    #[test]
-    fn rollout_request_only_selects_checkpoint_and_robot() {
-        let request = StartRolloutRequest {
-            run_id: "run-1".to_owned(),
-            checkpoint_step: 10,
-            robot: "follower".to_owned(),
-            duration_seconds: 30,
-        };
-        assert!(validate_request(&request).is_ok());
-    }
-
-    #[test]
-    fn rollout_duration_is_bounded_and_operator_readable() {
-        let mut request = StartRolloutRequest {
-            run_id: "run-1".to_owned(),
-            checkpoint_step: 10,
-            robot: "follower".to_owned(),
-            duration_seconds: 30,
-        };
-        assert!(validate_request(&request).is_ok());
-        request.duration_seconds = 0;
-        assert!(validate_request(&request).is_err());
-        request.duration_seconds = MAX_ROLLOUT_DURATION_SECONDS + 1;
-        assert!(validate_request(&request).is_err());
-        assert_eq!(format_duration(1), "1 second");
-        assert_eq!(format_duration(60), "1 minute");
-        assert_eq!(format_duration(120), "2 minutes");
-    }
-
-    #[test]
-    fn the_admitted_policy_session_keeps_running() {
-        let mode = ModeStatus {
-            selection: ModeSelection::Policy {
-                robot: "follower".to_owned(),
-                session: "rollout-1".to_owned(),
+        let contract = validate_rollout_contract(
+            PolicyDataContract {
+                value_space: "centered_normalized".to_owned(),
+                robot_type: "so101_follower".to_owned(),
+                joint_names: vec!["shoulder".to_owned()],
+                camera_streams: vec!["follower.camera.wrist".to_owned()],
+                sample_hz: 60.0,
+                image_layout: "chw".to_owned(),
+                image_normalization: "imagenet".to_owned(),
+                frame_alignment: "fixed_fps".to_owned(),
+                schema_version: spiral_robotics_contracts::spiral::SCHEMA_VERSION,
+                supported_schema_version: spiral_robotics_contracts::spiral::SCHEMA_VERSION,
             },
-            active: true,
-            error: None,
-        };
-
-        assert_eq!(policy_exit(&mode, "follower", "rollout-1"), Ok(None));
+            &PolicyModelContract {
+                state_dimensions: 1,
+                action_dimensions: 1,
+                action_chunk_size: 10,
+                recommended_action_steps: 1,
+                image_streams: vec!["follower.camera.wrist".to_owned()],
+            },
+            &TargetRobotContract {
+                id: "follower".to_owned(),
+                robot_type: Some("so101_follower".to_owned()),
+                joint_names: vec!["shoulder".to_owned()],
+                camera_bindings: vec![CameraBindingContract {
+                    role: "wrist".to_owned(),
+                    camera_id: "camera-1".to_owned(),
+                }],
+                connected: true,
+                calibrated: true,
+                problem: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(contract.camera_bindings[0].camera_id, "camera-1");
     }
 
     #[tokio::test]
     async fn policy_start_waits_for_the_control_thread_to_publish_admission() {
         let (publisher, mut hardware) = tokio::sync::watch::channel(HardwareState::default());
+        let (_stop_sender, mut stop) = tokio::sync::watch::channel(false);
         let publish = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(10)).await;
             publisher.send_modify(|state| {
@@ -893,56 +1044,11 @@ mod tests {
             });
         });
 
-        assert_eq!(
-            wait_for_policy_admission(&mut hardware, "follower", "rollout-1").await,
-            Ok(None),
-            "the stale Idle snapshot before publication must not stop the new policy"
-        );
+        assert!(matches!(
+            wait_for_policy_admission(&mut hardware, &mut stop, "follower", "rollout-1").await,
+            Ok(PolicyAdmission::Admitted)
+        ));
         publish.await.expect("policy publication task");
-    }
-
-    #[test]
-    fn a_commanded_mode_transition_completes_the_policy_cleanly() {
-        let mode = ModeStatus {
-            selection: ModeSelection::Manual {
-                robot: "follower".to_owned(),
-            },
-            active: true,
-            error: None,
-        };
-
-        let message = policy_exit(&mode, "follower", "rollout-1")
-            .expect("a commanded transition is not a rollout failure")
-            .expect("the policy no longer owns hardware control");
-        assert!(message.contains("Manual on follower"));
-    }
-
-    #[test]
-    fn stop_and_hold_completes_the_policy_in_idle() {
-        let mode = ModeStatus {
-            selection: ModeSelection::Idle,
-            active: false,
-            error: None,
-        };
-
-        let message = policy_exit(&mode, "follower", "rollout-1")
-            .expect("stop and hold is not a rollout failure")
-            .expect("the policy no longer owns hardware control");
-        assert!(message.contains("transitioned to Idle"));
-    }
-
-    #[test]
-    fn a_hardware_forced_mode_transition_fails_the_policy_with_its_reason() {
-        let mode = ModeStatus {
-            selection: ModeSelection::Idle,
-            active: false,
-            error: Some("stopped Policy: its motor bus stopped responding".to_owned()),
-        };
-
-        let error = policy_exit(&mode, "follower", "rollout-1")
-            .expect_err("a hardware failure must remain a failed rollout");
-        assert!(error.contains("transitioned to Idle"));
-        assert!(error.contains("motor bus stopped responding"));
     }
 
     #[test]
@@ -960,10 +1066,15 @@ mod tests {
             run_id: request.run_id.clone(),
             step: request.checkpoint_step,
             data_contract: ArtifactDataContract {
+                value_space: "centered_normalized".to_owned(),
                 robot_type: "so101_follower".to_owned(),
                 joint_names: vec!["shoulder".to_owned()],
                 camera_streams: vec!["wrist".to_owned()],
                 sample_hz: 60.0,
+                image_layout: "chw".to_owned(),
+                image_normalization: "imagenet".to_owned(),
+                frame_alignment: "fixed_fps".to_owned(),
+                spiral_schema_version: spiral_robotics_contracts::spiral::SCHEMA_VERSION,
             },
             model_config: model_config.clone(),
             tensor_namespace: ACT_TENSOR_NAMESPACE.to_owned(),

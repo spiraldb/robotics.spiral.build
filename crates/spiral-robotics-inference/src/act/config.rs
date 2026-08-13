@@ -4,6 +4,10 @@ use serde::Deserialize;
 
 use crate::{Error, ImageInputSpecification, PolicyKind, PolicySpecification, Result};
 
+/// Bound artifact-driven allocation and weight-loading work to the same model
+/// depth Studio permits when it creates ACT checkpoints.
+const MAX_TRANSFORMER_LAYERS: usize = 12;
+
 /// Validated ACT contract. Unsupported or internally inconsistent JSON cannot
 /// be represented by this type.
 #[derive(Clone, Debug)]
@@ -189,6 +193,13 @@ impl TryFrom<RawActConfig> for ActConfig {
             return Err(Error::Configuration(
                 "feedforward and latent dimensions must be positive".to_owned(),
             ));
+        }
+        if !(1..=MAX_TRANSFORMER_LAYERS).contains(&raw.n_encoder_layers)
+            || !(1..=MAX_TRANSFORMER_LAYERS).contains(&raw.n_decoder_layers)
+        {
+            return Err(Error::Configuration(format!(
+                "ACT encoder and decoder layer counts must each be between 1 and {MAX_TRANSFORMER_LAYERS}"
+            )));
         }
         if raw.chunk_size == 0 || raw.n_action_steps == 0 || raw.n_action_steps > raw.chunk_size {
             return Err(Error::Configuration(format!(
@@ -395,7 +406,7 @@ fn resnet18_feature_size(mut height: usize, mut width: usize) -> Result<(usize, 
 
 #[cfg(test)]
 mod tests {
-    use super::ActConfig;
+    use super::{ActConfig, MAX_TRANSFORMER_LAYERS};
 
     const REFERENCE: &str = include_str!("../../fixtures/act-config.json");
 
@@ -426,6 +437,24 @@ mod tests {
         document["input_features"]["observation.state"]["shape"] = serde_json::json!([]);
         let bytes = serde_json::to_vec(&document).unwrap();
         assert!(ActConfig::from_slice(&bytes).is_err());
+    }
+
+    #[test]
+    fn transformer_depth_is_positive_and_bounded() {
+        for (field, value) in [
+            ("n_encoder_layers", 0),
+            ("n_decoder_layers", 0),
+            ("n_encoder_layers", MAX_TRANSFORMER_LAYERS + 1),
+            ("n_decoder_layers", MAX_TRANSFORMER_LAYERS + 1),
+        ] {
+            let mut document: serde_json::Value = serde_json::from_str(REFERENCE).unwrap();
+            document[field] = serde_json::json!(value);
+            let bytes = serde_json::to_vec(&document).unwrap();
+            assert!(
+                ActConfig::from_slice(&bytes).is_err(),
+                "{field}={value} must be rejected"
+            );
+        }
     }
 
     #[test]

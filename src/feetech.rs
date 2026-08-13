@@ -22,7 +22,11 @@ use std::time::{Duration, Instant};
 
 use serialport::{ClearBuffer, SerialPort};
 
+use crate::bus::{BusError, MotorBus};
 use crate::calibration::MotorSpec;
+// Keep the original paths available to callers while making the types
+// themselves owned by the protocol-neutral bus boundary.
+pub use crate::bus::{MotorFault, MotorFaults, MotorLimits, MotorSample};
 
 const BROADCAST_ID: u8 = 0xfe;
 const INSTRUCTION_READ: u8 = 0x02;
@@ -126,106 +130,12 @@ struct Motor {
     id: u8,
 }
 
-/// A fault the servo is reporting about itself.
-///
-/// These are the servo's own verdicts, not thresholds this program applies.
-/// Only the bits whose meaning is unambiguous across the supported models are
-/// named; [`MotorFaults::raw`] keeps the whole byte so an unnamed bit is still
-/// visible to an operator rather than silently dropped.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MotorFault {
-    Voltage,
-    Overheat,
-    Overload,
-}
-
-/// The servo's own fault byte, decoded as far as it is safe to decode it.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct MotorFaults {
-    pub raw: u8,
-}
-
-impl MotorFaults {
-    const VOLTAGE: u8 = 0x01;
-    const OVERHEAT: u8 = 0x04;
-    const OVERLOAD: u8 = 0x20;
-
-    /// True when the servo is reporting anything at all.
-    pub fn any(self) -> bool {
-        self.raw != 0
-    }
-
-    /// The faults this program can name, in the order it names them.
-    pub fn named(self) -> Vec<MotorFault> {
-        let mut faults = Vec::new();
-        if self.raw & Self::OVERHEAT != 0 {
-            faults.push(MotorFault::Overheat);
-        }
-        if self.raw & Self::OVERLOAD != 0 {
-            faults.push(MotorFault::Overload);
-        }
-        if self.raw & Self::VOLTAGE != 0 {
-            faults.push(MotorFault::Voltage);
-        }
-        faults
-    }
-
-    /// Bits that are set but not named above.
-    pub fn unnamed(self) -> u8 {
-        self.raw & !(Self::VOLTAGE | Self::OVERHEAT | Self::OVERLOAD)
-    }
-}
-
-impl fmt::Display for MotorFault {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Voltage => "supply voltage",
-            Self::Overheat => "overheating",
-            Self::Overload => "overloaded",
-        })
-    }
-}
-
-/// Everything one motor reports about itself in a single status read.
-///
-/// Values are in physical units, converted here because this is the only layer
-/// that knows the register scales. Every field but the position is optional:
-/// the position is the one reading the bus falls back to when a servo will not
-/// answer the wider request, and reporting a missing measurement as zero would
-/// put a plausible lie in front of an operator.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct MotorSample {
-    pub position: i64,
-    /// Shaft speed in degrees per second, signed.
-    pub speed_degrees_per_second: Option<f64>,
-    /// Load as a signed fraction of the servo's rated torque.
-    pub load: Option<f64>,
-    pub voltage_volts: Option<f64>,
-    pub temperature_celsius: Option<f64>,
-    pub current_amps: Option<f64>,
-    pub moving: Option<bool>,
-    pub faults: MotorFaults,
-}
-
-/// The limits a servo enforces on itself, as stored in its EEPROM.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct MotorLimits {
-    pub max_temperature_celsius: Option<f64>,
-    pub min_voltage_volts: Option<f64>,
-    pub max_voltage_volts: Option<f64>,
-    /// Configured torque ceiling as a fraction of the servo's rated torque.
-    pub max_load: Option<f64>,
-}
-
 /// Errors reported while opening or communicating with a Feetech motor bus.
 #[derive(Debug)]
 pub enum FeetechError {
     InvalidMotorId {
         motor: String,
         id: u32,
-    },
-    InvalidModel {
-        motor: String,
     },
     UnsupportedModel {
         motor: String,
@@ -257,6 +167,13 @@ pub enum FeetechError {
         requested: bool,
         value: u8,
     },
+    /// Enabling may have reached the motors before its verification failed.
+    /// `release_error == None` means the compensating torque-off was verified;
+    /// otherwise physical state remains unknown and both errors are retained.
+    TorqueEnableFailed {
+        cause: Box<FeetechError>,
+        release_error: Option<Box<FeetechError>>,
+    },
 }
 
 impl fmt::Display for FeetechError {
@@ -265,10 +182,6 @@ impl fmt::Display for FeetechError {
             Self::InvalidMotorId { motor, id } => write!(
                 formatter,
                 "motor {motor:?} has ID {id}; Feetech IDs must be between 0 and 253"
-            ),
-            Self::InvalidModel { motor } => write!(
-                formatter,
-                "motor {motor:?} has a non-string 'model'; live calibration expects a Feetech model name"
             ),
             Self::UnsupportedModel { motor, model } => write!(
                 formatter,
@@ -306,6 +219,20 @@ impl fmt::Display for FeetechError {
                 "motor {motor:?} (id {id}) reports Torque_Enable={value} after torque was turned {}",
                 if *requested { "on" } else { "off" }
             ),
+            Self::TorqueEnableFailed {
+                cause,
+                release_error: None,
+            } => write!(
+                formatter,
+                "could not enable torque: {cause}; compensating torque-off was verified"
+            ),
+            Self::TorqueEnableFailed {
+                cause,
+                release_error: Some(release_error),
+            } => write!(
+                formatter,
+                "could not enable torque: {cause}; compensating torque-off also failed: {release_error}"
+            ),
         }
     }
 }
@@ -315,8 +242,8 @@ impl Error for FeetechError {
         match self {
             Self::Open { source, .. } => Some(source),
             Self::Communication { source, .. } => Some(source),
+            Self::TorqueEnableFailed { cause, .. } => Some(cause.as_ref()),
             Self::InvalidMotorId { .. }
-            | Self::InvalidModel { .. }
             | Self::UnsupportedModel { .. }
             | Self::Protocol { .. }
             | Self::UnknownMotor { .. }
@@ -535,11 +462,22 @@ impl FeetechBus {
     /// register. Without that, a servo would snap to whatever goal was left in
     /// its registers by a previous session the instant it is energized.
     pub fn set_torque(&mut self, enabled: bool) -> Result<(), FeetechError> {
-        if enabled {
-            let positions = self.read_positions()?;
-            self.write_goal_positions(&positions)?;
+        if !enabled {
+            return self.apply_torque_and_verify(false);
         }
 
+        let enable = (|| {
+            let positions = self.read_positions()?;
+            self.write_goal_positions(&positions)?;
+            self.apply_torque_and_verify(true)
+        })();
+
+        compensate_failed_torque_enable(enable, || self.apply_torque_and_verify(false))
+    }
+
+    /// Broadcast one torque state and read every motor back. Once the packet
+    /// write begins, an error cannot prove the broadcast had no physical effect.
+    fn apply_torque_and_verify(&mut self, enabled: bool) -> Result<(), FeetechError> {
         let value = u8::from(enabled);
         let mut parameters = Vec::with_capacity(2 + self.motors.len() * 2);
         parameters.extend_from_slice(&[TORQUE_ENABLE_ADDRESS, 1]);
@@ -749,6 +687,55 @@ impl FeetechBus {
     }
 }
 
+/// Adapt the concrete serial driver to the policy-facing motor-bus boundary.
+///
+/// This is the only place where driver errors cross that seam. Samples and
+/// limits have already been decoded from Feetech registers into the neutral
+/// physical-unit types owned by [`crate::bus`].
+impl MotorBus for FeetechBus {
+    fn motor_names(&self) -> Vec<String> {
+        FeetechBus::motor_names(self)
+    }
+
+    fn read_positions(&mut self) -> Result<BTreeMap<String, i64>, BusError> {
+        FeetechBus::read_positions(self).map_err(BusError::driver)
+    }
+
+    fn read_samples(&mut self) -> Result<BTreeMap<String, MotorSample>, BusError> {
+        FeetechBus::read_samples(self).map_err(BusError::driver)
+    }
+
+    fn read_limits(&mut self) -> BTreeMap<String, MotorLimits> {
+        FeetechBus::read_limits(self)
+    }
+
+    fn write_goal_positions(&mut self, goals: &BTreeMap<String, i64>) -> Result<(), BusError> {
+        FeetechBus::write_goal_positions(self, goals).map_err(BusError::driver)
+    }
+
+    fn set_torque(&mut self, enabled: bool) -> Result<(), BusError> {
+        FeetechBus::set_torque(self, enabled).map_err(BusError::driver)
+    }
+}
+
+/// Finish an enable transition without losing either the enable failure or the
+/// outcome of the compensating physical release.
+fn compensate_failed_torque_enable(
+    enable: Result<(), FeetechError>,
+    release: impl FnOnce() -> Result<(), FeetechError>,
+) -> Result<(), FeetechError> {
+    match enable {
+        Ok(()) => Ok(()),
+        Err(cause) => {
+            let release_error = release().err().map(Box::new);
+            Err(FeetechError::TorqueEnableFailed {
+                cause: Box::new(cause),
+                release_error,
+            })
+        }
+    }
+}
+
 fn motors_from_specs(specs: &BTreeMap<String, MotorSpec>) -> Result<Vec<Motor>, FeetechError> {
     if specs.len() > MAX_SYNC_WRITE_MOTORS {
         return Err(FeetechError::TooManyMotors {
@@ -766,16 +753,13 @@ fn motors_from_specs(specs: &BTreeMap<String, MotorSpec>) -> Result<Vec<Motor>, 
                 motor: name.clone(),
                 id: spec.id,
             })?;
-        if let Some(value) = spec.extra.get("model") {
-            let model = value.as_str().ok_or_else(|| FeetechError::InvalidModel {
+        if let Some(model) = spec.model.as_deref()
+            && !SUPPORTED_MODELS.contains(&model)
+        {
+            return Err(FeetechError::UnsupportedModel {
                 motor: name.clone(),
-            })?;
-            if !SUPPORTED_MODELS.contains(&model) {
-                return Err(FeetechError::UnsupportedModel {
-                    motor: name.clone(),
-                    model: model.to_owned(),
-                });
-            }
+                model: model.to_owned(),
+            });
         }
         motors.push(Motor {
             name: name.clone(),
@@ -965,7 +949,7 @@ fn take_status_packet(
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use std::cell::Cell;
 
     use super::*;
     use crate::calibration::Direction;
@@ -979,16 +963,49 @@ mod tests {
         packet
     }
 
-    fn spec(id: u32, model: Option<serde_json::Value>) -> MotorSpec {
-        let mut extra = BTreeMap::new();
-        if let Some(model) = model {
-            extra.insert("model".to_owned(), model);
-        }
+    fn spec(id: u32, model: Option<&str>) -> MotorSpec {
         MotorSpec {
             id,
             direction: Direction::Normal,
-            extra,
+            model: model.map(str::to_owned),
         }
+    }
+
+    fn torque_mismatch(requested: bool, value: u8) -> FeetechError {
+        FeetechError::TorqueMismatch {
+            motor: "joint".to_owned(),
+            id: 1,
+            requested,
+            value,
+        }
+    }
+
+    #[test]
+    fn failed_enable_always_attempts_release_and_preserves_both_outcomes() {
+        let releases = Cell::new(0);
+        let error = compensate_failed_torque_enable(Err(torque_mismatch(true, 0)), || {
+            releases.set(releases.get() + 1);
+            Ok(())
+        })
+        .expect_err("verification failure must fail the enable");
+        assert_eq!(releases.get(), 1, "torque-off compensation is mandatory");
+        assert!(error.to_string().contains("torque-off was verified"));
+
+        let error = compensate_failed_torque_enable(Err(torque_mismatch(true, 0)), || {
+            releases.set(releases.get() + 1);
+            Err(torque_mismatch(false, 1))
+        })
+        .expect_err("failed compensation keeps the transition failed");
+        assert_eq!(releases.get(), 2);
+        let FeetechError::TorqueEnableFailed {
+            cause,
+            release_error: Some(release_error),
+        } = error
+        else {
+            panic!("both errors must remain structured")
+        };
+        assert!(cause.to_string().contains("turned on"));
+        assert!(release_error.to_string().contains("turned off"));
     }
 
     #[test]
@@ -1128,7 +1145,7 @@ mod tests {
     #[test]
     fn validates_motor_ids_and_models_and_sorts_by_id() {
         let motors = motors_from_specs(&BTreeMap::from([
-            ("elbow".to_owned(), spec(2, Some(json!("sts3215")))),
+            ("elbow".to_owned(), spec(2, Some("sts3215"))),
             ("shoulder".to_owned(), spec(1, None)),
         ]))
         .unwrap();
@@ -1142,7 +1159,7 @@ mod tests {
         assert!(matches!(
             motors_from_specs(&BTreeMap::from([(
                 "joint".to_owned(),
-                spec(1, Some(json!("dynamixel")))
+                spec(1, Some("dynamixel"))
             )])),
             Err(FeetechError::UnsupportedModel { .. })
         ));

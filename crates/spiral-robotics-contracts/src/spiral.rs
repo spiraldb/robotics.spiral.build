@@ -1,8 +1,8 @@
-//! Shared Spiral Robotics relational contract for SpiralDB.
+//! Shared Spiral Robotics relational contract for SpiralDB adapters.
 //!
-//! This module is deliberately dependency-free so the native backend and the
-//! WebAssembly frontend use the same relation and column names. Arrow types,
-//! ADBC execution, and SQL authorization remain backend concerns.
+//! This module keeps the native backend and WebAssembly frontend on the same
+//! relation and column names. Arrow types, ADBC execution, and SQL construction
+//! remain backend concerns; read-only authorization belongs to core policy.
 
 use std::fmt;
 
@@ -326,20 +326,13 @@ pub fn default_training_sql_for_dataset(namespace: &str, dataset_id: &str) -> St
 
 /// Whether a value is safe to interpolate as an unquoted SQL identifier.
 pub fn is_identifier(value: &str) -> bool {
-    let mut bytes = value.bytes();
-    bytes
-        .next()
-        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
-        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    spiral_robotics_core::query::is_identifier(value)
 }
 
 /// Whether a value is safe as a logical dataset row identifier.
 pub fn is_dataset_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 96
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    spiral_robotics_core::identity::DatasetId::parse(value)
+        .is_ok_and(|identity| identity.as_str() == value)
 }
 
 /// Convert an external immutable ID into one component of a generated name.

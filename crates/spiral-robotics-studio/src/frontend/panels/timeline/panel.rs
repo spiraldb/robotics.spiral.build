@@ -6,16 +6,26 @@
 //! when the caller passes an allowed robot-sync [`TimelineGate`] and the
 //! operator has explicitly enabled “Sync robot”.
 
+use charming::Chart;
+use charming::component::{Axis, Grid};
+use charming::datatype::{CompositeValue, DataFrame, DataPoint};
+use charming::element::{
+    AxisLabel, AxisLine, AxisTick, AxisType, Emphasis, LineStyle, Sampling, SplitLine, Symbol,
+};
+use charming::series::Line;
 use dioxus::prelude::*;
 use serde::Deserialize;
 use spiral_robotics_core::arm::SO101_JOINTS;
 
 use crate::frontend::app::activity::{Activity, TimelineSubject, TimelineTarget};
+use crate::frontend::components::charts::{
+    CharmingChart, downsample_extrema, studio_numeric_tooltip,
+};
 use crate::frontend::panels::timeline::signals::{SignalStore, signal_color};
 
-const TRACE_WIDTH: f64 = 1_000.0;
-const TRACE_HEIGHT: f64 = 32.0;
-const TRACE_POINT_BUDGET: usize = 256;
+const TIMELINE_CHART_ID: &str = "studio-timeline-signal-chart";
+const TRACE_POINT_BUDGET: usize = 512;
+const TRACE_LANE_HEIGHT: f64 = 28.0;
 
 /// Whether the Timeline clock is stopped, previewing recorded data, or being
 /// driven by the server-owned consequence of robot synchronization.
@@ -484,6 +494,8 @@ pub(crate) fn StudioTimeline(
         Activity::Training => "Training step timeline",
         Activity::Rollout => "Rollout live timeline",
     };
+    let signal_chart = timeline_signal_chart(&signal_lanes, duration);
+    let signal_chart_label = format!("Six robot joint signals over {}", format_clock(duration));
 
     rsx! {
         section {
@@ -676,99 +688,107 @@ pub(crate) fn StudioTimeline(
 
             div { class: "min-h-0 overflow-auto",
                 div {
-                    class: "relative grid min-w-[42rem]",
-                    style: "grid-template-columns: 8.5rem minmax(30rem, 1fr)",
+                    class: "timeline-signal-grid",
 
-                    div { class: "border-b border-r border-line bg-sunken px-2 py-1 text-[10px] text-ink-faint", "Time" }
-                    div { class: "relative h-8 border-b border-line bg-sunken",
-                        for tick in ticks.iter() {
+                    div { class: "timeline-signal-labels",
+                        div { class: "timeline-time-label", "Time" }
+                        for lane in signal_lanes.iter() {
                             div {
-                                key: "tick-{tick.ordinal}",
-                                class: "absolute inset-y-0 border-l border-line",
-                                style: "left: {tick.position:.4}%",
-                                span {
-                                    class: "absolute left-1 top-1 whitespace-nowrap font-mono text-[10px] tabular-nums text-ink-faint",
-                                    "{tick.label}"
-                                }
+                                key: "label-{lane.joint}",
+                                class: "timeline-signal-label",
+                                span { class: "timeline-signal-swatch", style: "background: {lane.color}" }
+                                span { class: "truncate", "{lane.label}" }
                             }
                         }
-                        input {
-                            r#type: "range",
-                            class: "absolute inset-0 z-20 h-full w-full cursor-ew-resize opacity-0",
-                            min: "0",
-                            max: "{range_max}",
-                            step: "0.001",
-                            value: "{shown_playhead}",
-                            disabled: duration <= 0.0 || !capabilities.seek.allowed,
-                            title: "{seek_title}",
-                            "aria-label": "Episode playhead",
-                            "aria-valuetext": "{format_clock(shown_playhead)} of {format_clock(duration)}",
-                            oninput: move |event| {
-                                if let Ok(seconds) = event.value().parse::<f64>() {
-                                    let beginning_scrub = !scrubbing();
-                                    scrubbing.set(true);
-                                    if beginning_scrub && robot_sync_active
-                                        && let Some(episode) = scrub_sync_episode.clone()
-                                    {
-                                        on_action.call(TimelineAction::RobotSyncTransport {
-                                            episode,
-                                            action: TimelineRobotSyncAction::Pause,
-                                        });
+                    }
+
+                    div { class: "timeline-signal-data",
+                        div { class: "timeline-time-axis",
+                            for tick in ticks.iter() {
+                                div {
+                                    key: "tick-{tick.ordinal}",
+                                    class: "timeline-time-tick",
+                                    style: "left: {tick.position:.4}%",
+                                    span { "{tick.label}" }
+                                }
+                            }
+                            input {
+                                r#type: "range",
+                                class: "absolute inset-0 z-20 h-full w-full cursor-ew-resize opacity-0",
+                                min: "0",
+                                max: "{range_max}",
+                                step: "0.001",
+                                value: "{shown_playhead}",
+                                disabled: duration <= 0.0 || !capabilities.seek.allowed,
+                                title: "{seek_title}",
+                                "aria-label": "Episode playhead",
+                                "aria-valuetext": "{format_clock(shown_playhead)} of {format_clock(duration)}",
+                                oninput: move |event| {
+                                    if let Ok(seconds) = event.value().parse::<f64>() {
+                                        let beginning_scrub = !scrubbing();
+                                        scrubbing.set(true);
+                                        if beginning_scrub && robot_sync_active
+                                            && let Some(episode) = scrub_sync_episode.clone()
+                                        {
+                                            on_action.call(TimelineAction::RobotSyncTransport {
+                                                episode,
+                                                action: TimelineRobotSyncAction::Pause,
+                                            });
+                                        }
+                                        let seconds = seconds.clamp(0.0, duration);
+                                        draft_playhead.set(seconds);
+                                        if let Some(target) = input_target.clone() {
+                                            on_action.call(TimelineAction::Seek(TimelineSeekRequest {
+                                                target,
+                                                seconds,
+                                                move_robot: false,
+                                                committed: false,
+                                            }));
+                                        }
                                     }
-                                    let seconds = seconds.clamp(0.0, duration);
-                                    draft_playhead.set(seconds);
-                                    if let Some(target) = input_target.clone() {
+                                },
+                                onchange: move |_| {
+                                    let seconds = draft_playhead().clamp(0.0, duration);
+                                    scrubbing.set(false);
+                                    if recording.is_some() && follow_live && seconds + 0.025 < duration {
+                                        on_action.call(TimelineAction::SetFollowLive(false));
+                                    }
+                                    if let Some(target) = commit_target.clone() {
                                         on_action.call(TimelineAction::Seek(TimelineSeekRequest {
                                             target,
                                             seconds,
-                                            move_robot: false,
-                                            committed: false,
+                                            move_robot: sync_robot,
+                                            committed: true,
                                         }));
                                     }
-                                }
-                            },
-                            onchange: move |_| {
-                                let seconds = draft_playhead().clamp(0.0, duration);
-                                scrubbing.set(false);
-                                if recording.is_some() && follow_live && seconds + 0.025 < duration {
-                                    on_action.call(TimelineAction::SetFollowLive(false));
-                                }
-                                if let Some(target) = commit_target.clone() {
-                                    on_action.call(TimelineAction::Seek(TimelineSeekRequest {
-                                        target,
-                                        seconds,
-                                        move_robot: sync_robot,
-                                        committed: true,
-                                    }));
-                                }
-                            },
-                            onpointercancel: move |_| {
-                                scrubbing.set(false);
-                                draft_playhead.set(external_playhead);
-                            },
-                        }
-                    }
-
-                    for lane in signal_lanes.iter() {
-                        div { key: "lane-{lane.joint}", class: "contents",
-                            div {
-                                class: "flex min-h-9 items-center gap-1 border-b border-r border-line px-2 text-[11px]",
-                                span { class: "h-px w-3 shrink-0", style: "background: {lane.color}" }
-                                span { class: "truncate", "{lane.label}" }
-                            }
-                            SignalLaneTrack {
-                                lane: lane.clone(),
-                                duration,
-                                source: signal_source.clone(),
+                                },
+                                onpointercancel: move |_| {
+                                    scrubbing.set(false);
+                                    draft_playhead.set(external_playhead);
+                                },
                             }
                         }
-                    }
 
-                    div {
-                        class: "pointer-events-none absolute bottom-0 right-0 top-0 z-10",
-                        style: "left: 8.5rem",
+                        div { class: "timeline-signal-chart-stack",
+                            CharmingChart {
+                                id: TIMELINE_CHART_ID.to_owned(),
+                                chart: signal_chart,
+                                class: "timeline-signal-chart".to_owned(),
+                                aria_label: signal_chart_label,
+                            }
+                            div { class: "timeline-signal-lane-overlays",
+                                for lane in signal_lanes.iter() {
+                                    SignalLaneState {
+                                        key: "state-{lane.joint}",
+                                        lane: lane.clone(),
+                                        source: signal_source.clone(),
+                                    }
+                                }
+                            }
+                        }
+
                         div {
-                            class: "absolute bottom-0 top-0 w-px bg-accent",
+                            class: "timeline-playhead",
                             style: "left: {playhead_percent:.6}%",
                             span { class: "absolute -left-1 top-0 h-2 w-2 rounded-full bg-accent" }
                         }
@@ -781,56 +801,35 @@ pub(crate) fn StudioTimeline(
 }
 
 #[component]
-fn SignalLaneTrack(lane: TimelineSignalLane, duration: f64, source: SignalSource) -> Element {
-    let bounds = signal_bounds(&lane.series);
+fn SignalLaneState(lane: TimelineSignalLane, source: SignalSource) -> Element {
     let empty = lane.series.is_empty();
     let loading = empty && source.loading();
     let unavailable = empty && source.unavailable().is_some();
+    let label = if loading {
+        format!("{} samples are loading", lane.label)
+    } else if unavailable {
+        format!("{} samples are unavailable", lane.label)
+    } else if empty {
+        format!("{} had no samples", lane.label)
+    } else {
+        String::new()
+    };
     rsx! {
         div {
-            class: "relative min-h-9 overflow-hidden border-b border-line bg-canvas",
-            role: "img",
+            class: "timeline-signal-lane-state",
+            role: empty.then_some("status"),
             "aria-busy": if loading { "true" } else { "false" },
-            "aria-label": if loading {
-                format!("{} samples are loading", lane.label)
-            } else if unavailable {
-                format!("{} samples are unavailable", lane.label)
-            } else if empty {
-                format!("{} had no samples", lane.label)
-            } else {
-                format!("{} over time for {} arm(s)", lane.label, lane.series.len())
-            },
+            "aria-label": (!label.is_empty()).then_some(label),
+            "aria-hidden": (!empty).then_some("true"),
             if loading {
                 // A resting placeholder, not a shimmer: the reduced-motion block
                 // strips animation anyway, and a lane that pulses while the arm
                 // is live reads as telemetry rather than as absence.
-                span { class: "absolute inset-y-2 left-2 right-2 rounded-sm bg-sunken" }
+                span { class: "timeline-signal-loading" }
             } else if unavailable {
-                span { class: "absolute inset-0 flex items-center px-2 text-[10px] text-caution", "Unavailable" }
+                span { class: "timeline-signal-unavailable", "Unavailable" }
             } else if empty {
-                span { class: "absolute inset-0 flex items-center px-2 text-[10px] text-ink-faint", "No samples" }
-            } else {
-                svg {
-                    class: "absolute inset-0 h-full w-full",
-                    view_box: "0 0 1000 32",
-                    preserve_aspect_ratio: "none",
-                    "aria-hidden": "true",
-                    for (series_index, series) in lane.series.iter().enumerate() {
-                        for (segment_index, geometry) in trace_paths_with_bounds(&series.points, duration, bounds).into_iter().enumerate() {
-                            path {
-                                key: "{series.arm}-{segment_index}",
-                                d: "{geometry}",
-                                fill: "none",
-                                stroke: "{lane.color}",
-                                stroke_width: if series_index == 0 { "1.5" } else { "1.2" },
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                vector_effect: "non-scaling-stroke",
-                                style: if series_index == 0 { "opacity: 0.95" } else { "opacity: 0.52" },
-                            }
-                        }
-                    }
-                }
+                span { class: "timeline-signal-empty", "No samples" }
             }
         }
     }
@@ -892,14 +891,77 @@ fn format_clock(seconds: f64) -> String {
     format!("{minutes}:{remainder:04.1}")
 }
 
-/// Build one SVG path per contiguous run of valid samples. Each run is reduced
-/// by retaining extrema in source order, never averaged, so a brief peak stays
-/// visible when a long episode is fitted into the lane.
-fn trace_paths_with_bounds(
-    points: &[TimelineSignalPoint],
-    duration: f64,
-    bounds: Option<(f64, f64)>,
-) -> Vec<String> {
+fn timeline_signal_chart(lanes: &[TimelineSignalLane; 6], duration: f64) -> Chart {
+    let mut chart = Chart::new()
+        .animation(false)
+        .tooltip(studio_numeric_tooltip(3));
+
+    for (lane_index, lane) in lanes.iter().enumerate() {
+        let grid_index = lane_index as f64;
+        let (low, high) = signal_bounds(&lane.series).unwrap_or((0.0, 1.0));
+        let padding = ((high - low) * 0.08).max(0.5);
+        chart = chart
+            .grid(
+                Grid::new()
+                    .id(format!("timeline-grid-{lane_index}"))
+                    .left(0)
+                    .right(0)
+                    .top(lane_index as f64 * TRACE_LANE_HEIGHT)
+                    .height(TRACE_LANE_HEIGHT),
+            )
+            .x_axis(
+                hidden_timeline_axis(AxisType::Value, grid_index)
+                    .min(0)
+                    .max(duration.max(0.001)),
+            )
+            .y_axis(
+                hidden_timeline_axis(AxisType::Value, grid_index)
+                    .min(low - padding)
+                    .max(high + padding)
+                    .scale(true),
+            );
+
+        for (series_index, series) in lane.series.iter().enumerate() {
+            chart = chart.series(
+                Line::new()
+                    .id(format!("{}-{}-{series_index}", lane.joint, series.arm))
+                    .name(format!("{} · {}", lane.label, series.arm))
+                    .x_axis_index(grid_index)
+                    .y_axis_index(grid_index)
+                    .show_symbol(false)
+                    .symbol(Symbol::None)
+                    .sampling(Sampling::Minmax)
+                    .connect_nulls(false)
+                    .line_style(
+                        LineStyle::new()
+                            .color(lane.color.clone())
+                            .width(if series_index == 0 { 1.5 } else { 1.2 })
+                            .opacity(if series_index == 0 { 0.95 } else { 0.52 }),
+                    )
+                    .emphasis(Emphasis::new().disabled(true))
+                    .data(timeline_series_data(&series.points, TRACE_POINT_BUDGET)),
+            );
+        }
+    }
+
+    chart
+}
+
+fn hidden_timeline_axis(kind: AxisType, grid_index: f64) -> Axis {
+    Axis::new()
+        .type_(kind)
+        .grid_index(grid_index)
+        .show(false)
+        .axis_line(AxisLine::new().show(false))
+        .axis_tick(AxisTick::new().show(false))
+        .axis_label(AxisLabel::new().show(false))
+        .split_line(SplitLine::new().show(false))
+}
+
+/// Convert gaps to ECharts null points and retain extrema before crossing the
+/// Wasm boundary. Pathological intermittent signals keep their longest valid
+/// runs so the payload remains bounded instead of freezing the operator UI.
+fn timeline_series_data(points: &[TimelineSignalPoint], budget: usize) -> DataFrame {
     let mut runs = Vec::<Vec<(f64, f64)>>::new();
     let mut current = Vec::<(f64, f64)>::new();
 
@@ -913,26 +975,44 @@ fn trace_paths_with_bounds(
     if !current.is_empty() {
         runs.push(current);
     }
-
-    let Some((low, high)) = bounds else {
+    if runs.is_empty() {
         return Vec::new();
-    };
-    let span = (high - low).max(1.0);
+    }
 
-    runs.into_iter()
-        .filter_map(|run| {
-            let reduced = reduce_extremes(&run, TRACE_POINT_BUDGET);
-            let mut geometry = String::new();
-            for (index, (seconds, value)) in reduced.into_iter().enumerate() {
-                let x = percent(seconds, duration) / 100.0 * TRACE_WIDTH;
-                let y = TRACE_HEIGHT - ((value - low) / span * (TRACE_HEIGHT - 6.0) + 3.0);
-                let command = if index == 0 { 'M' } else { 'L' };
-                use std::fmt::Write as _;
-                let _ = write!(geometry, "{command}{x:.2},{y:.2}");
-            }
-            (!geometry.is_empty()).then_some(geometry)
-        })
-        .collect()
+    let max_runs = (budget / 4).max(1);
+    if runs.len() > max_runs {
+        let mut selected = (0..runs.len()).collect::<Vec<_>>();
+        selected.sort_by_key(|index| std::cmp::Reverse(runs[*index].len()));
+        selected.truncate(max_runs);
+        selected.sort_unstable();
+        runs = selected
+            .into_iter()
+            .map(|index| std::mem::take(&mut runs[index]))
+            .collect();
+    }
+
+    let total_valid = runs.iter().map(Vec::len).sum::<usize>().max(1);
+    let point_budget = budget.saturating_sub(runs.len().saturating_sub(1));
+    let mut data = DataFrame::new();
+    let mut previous_end = None;
+
+    for run in runs {
+        let share =
+            ((run.len() as f64 / total_valid as f64) * point_budget as f64).round() as usize;
+        let share = share.max(4).min(run.len());
+        let reduced = downsample_extrema(&run, share);
+        if let (Some(end), Some((start, _))) = (previous_end, reduced.first()) {
+            data.push(xy_point((end + start) / 2.0, None));
+        }
+        previous_end = reduced.last().map(|(seconds, _)| *seconds);
+        data.extend(
+            reduced
+                .into_iter()
+                .map(|(seconds, value)| xy_point(seconds, Some(value))),
+        );
+    }
+
+    data
 }
 
 fn signal_bounds(series: &[TimelineSignalSeries]) -> Option<(f64, f64)> {
@@ -947,40 +1027,8 @@ fn signal_bounds(series: &[TimelineSignalSeries]) -> Option<(f64, f64)> {
     (low <= high).then_some((low, high))
 }
 
-fn reduce_extremes(points: &[(f64, f64)], budget: usize) -> Vec<(f64, f64)> {
-    if points.len() <= budget || budget < 4 {
-        return points.to_vec();
-    }
-
-    let bucket_count = (budget / 2).max(1);
-    let bucket_size = points.len().div_ceil(bucket_count);
-    let mut reduced = Vec::with_capacity(budget + 2);
-
-    for bucket in points.chunks(bucket_size) {
-        let min = bucket
-            .iter()
-            .enumerate()
-            .min_by(|(_, left), (_, right)| left.1.total_cmp(&right.1));
-        let max = bucket
-            .iter()
-            .enumerate()
-            .max_by(|(_, left), (_, right)| left.1.total_cmp(&right.1));
-        match (min, max) {
-            (Some((min_index, min)), Some((max_index, max))) if min_index <= max_index => {
-                reduced.push(*min);
-                if min_index != max_index {
-                    reduced.push(*max);
-                }
-            }
-            (Some((_, min)), Some((_, max))) => {
-                reduced.push(*max);
-                reduced.push(*min);
-            }
-            _ => {}
-        }
-    }
-
-    reduced
+fn xy_point(x: f64, y: Option<f64>) -> DataPoint {
+    DataPoint::from(vec![CompositeValue::from(x), CompositeValue::from(y)])
 }
 
 #[cfg(test)]
@@ -1046,14 +1094,24 @@ mod tests {
         points[250].value = Some(90.0);
         points[400].value = None;
 
-        let series = TimelineSignalSeries {
-            arm: "follower".to_owned(),
-            points: points.clone(),
-        };
-        let paths =
-            trace_paths_with_bounds(&points, 30.0, signal_bounds(std::slice::from_ref(&series)));
-        assert_eq!(paths.len(), 2);
-        assert!(paths.iter().any(|path| path.contains("3.00")));
+        let data = timeline_series_data(&points, TRACE_POINT_BUDGET);
+        let data = serde_json::to_value(data).expect("trace data should serialize");
+        let rows = data.as_array().expect("trace data should be an array");
+
+        assert!(rows.iter().any(|row| row[1].is_null()));
+        assert!(rows.iter().any(|row| row[1] == 90.0));
+        assert!(rows.len() <= TRACE_POINT_BUDGET + 4);
+    }
+
+    #[test]
+    fn timeline_chart_uses_one_grid_per_canonical_lane() {
+        let chart = timeline_signal_chart(&signal_lanes_from_store(&SignalStore::default()), 12.0);
+        let option = serde_json::to_value(chart).expect("timeline chart should serialize");
+
+        assert_eq!(option["grid"].as_array().map(Vec::len), Some(6));
+        assert_eq!(option["xAxis"].as_array().map(Vec::len), Some(6));
+        assert_eq!(option["yAxis"].as_array().map(Vec::len), Some(6));
+        assert_eq!(option["animation"], false);
     }
 
     #[test]

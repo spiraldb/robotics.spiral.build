@@ -5,7 +5,9 @@
 //! between Studio activities.
 
 use dioxus::prelude::*;
-use spiral_robotics_core::api::{DEFAULT_ROLLOUT_DURATION_SECONDS, MAX_ROLLOUT_DURATION_SECONDS};
+use spiral_robotics_contracts::api::{
+    DEFAULT_ROLLOUT_DURATION_SECONDS, MAX_ROLLOUT_DURATION_SECONDS,
+};
 
 #[derive(Clone, Copy)]
 pub(crate) struct RolloutController {

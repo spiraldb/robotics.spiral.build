@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_core::api::{
+use spiral_robotics_contracts::api::{
     MAX_ROLLOUT_DURATION_SECONDS, RobotSummary, RolloutPhase, RolloutSnapshot, StartRolloutRequest,
     TrainingRun, TrainingSnapshot,
 };
@@ -485,7 +485,7 @@ fn format_loss(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_core::api::{
+    use spiral_robotics_contracts::api::{
         ConnectionStatus, RobotSummary, TrainingCheckpoint, TrainingRun, TrainingRunPhase,
     };
 

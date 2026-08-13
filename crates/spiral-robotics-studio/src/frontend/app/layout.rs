@@ -8,6 +8,7 @@ use spiral_robotics_panels::{LayoutNode, Panel, PanelId, PanelLayout, SplitAxis}
 
 /// The canonical first-open arrangement. Persistence takes over after this,
 /// while panel `home` ids tell hot-plugged content where it belongs.
+#[cfg(test)]
 pub(crate) fn default_panel_layout(panels: &[Panel]) -> PanelLayout {
     default_panel_layout_with_workbench(panels, 1.0 / 3.0)
 }

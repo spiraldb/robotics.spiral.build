@@ -6,7 +6,7 @@
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_core::api::{StartTrainingRequest, TrainingRun};
+use spiral_robotics_contracts::api::{StartTrainingRequest, TrainingRun};
 
 use crate::frontend::api::http as api;
 use crate::frontend::app::notifications::MessageSource;

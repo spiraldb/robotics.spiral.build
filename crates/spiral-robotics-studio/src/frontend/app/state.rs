@@ -4,11 +4,11 @@ use std::future::Future;
 use std::rc::Rc;
 
 use dioxus::prelude::*;
-use spiral_robotics_core::api::{
+use spiral_robotics_contracts::api::{
     EpisodeSummary, ModeSelection, RecordingProgress, ReplayProgress, RobotSummary, RobotTelemetry,
     RolloutSnapshot, StudioSnapshot, TelemetryFrame, TrainingSnapshot,
 };
-use spiral_robotics_core::urdf::{SO101_URDF, Urdf, UrdfError};
+use spiral_robotics_viewport::{SO101_URDF, Urdf, UrdfError};
 
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
 use crate::frontend::api::http::{self as api, StudioEvent};
@@ -511,7 +511,9 @@ pub(crate) fn studio() -> Studio {
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_core::api::{ConnectionStatus, MotorLimits, MotorSummary, RobotSummary};
+    use spiral_robotics_contracts::api::{
+        ConnectionStatus, MotorLimits, MotorSummary, RobotSummary,
+    };
     use spiral_robotics_core::calibration::Direction;
 
     use super::{Selection, default_joint_selection};

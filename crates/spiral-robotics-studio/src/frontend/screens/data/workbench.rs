@@ -8,10 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_core::api::{
+use spiral_robotics_contracts::api::{
     EpisodeSummary, ImportResponse, PublicationStatus, SpiralQueryResponse,
 };
-use spiral_robotics_core::spiral::{QueryPreset, Table};
+use spiral_robotics_contracts::spiral::{QueryPreset, Table};
 
 use crate::frontend::api::http as api;
 use crate::frontend::app::state::studio;
@@ -73,7 +73,7 @@ pub(crate) fn EpisodesPanel(namespace: String, spiral_available: bool) -> Elemen
     });
 
     let dataset_id = studio.selected_dataset.read().trim().to_owned();
-    let dataset_valid = spiral_robotics_core::spiral::is_dataset_id(&dataset_id);
+    let dataset_valid = spiral_robotics_contracts::spiral::is_dataset_id(&dataset_id);
     let all_episodes = studio.episodes();
     let dataset_ids = all_episodes
         .iter()
@@ -251,7 +251,7 @@ pub(crate) fn EpisodesPanel(namespace: String, spiral_available: bool) -> Elemen
 pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available: bool) -> Element {
     let studio = studio();
     let controller = data_controller();
-    let dataset_valid = spiral_robotics_core::spiral::is_dataset_id(&dataset_id);
+    let dataset_valid = spiral_robotics_contracts::spiral::is_dataset_id(&dataset_id);
     let can_query = query_available && dataset_valid;
     let query_running = controller.query_running();
     let run_query = move || controller.run_query(studio, can_query);
@@ -765,8 +765,8 @@ fn query_tab_state_class(state: &QueryState) -> &'static str {
 
 fn preset_sql(namespace: &str, dataset_id: &str, preset: QueryPreset) -> String {
     let dataset_id = dataset_id.replace('\'', "''");
-    let episodes = spiral_robotics_core::spiral::relation(namespace, Table::Episodes);
-    let relation = spiral_robotics_core::spiral::relation(namespace, preset.table());
+    let episodes = spiral_robotics_contracts::spiral::relation(namespace, Table::Episodes);
+    let relation = spiral_robotics_contracts::spiral::relation(namespace, preset.table());
     match preset {
         QueryPreset::Datasets => preset.sql(namespace),
         QueryPreset::Episodes => format!(

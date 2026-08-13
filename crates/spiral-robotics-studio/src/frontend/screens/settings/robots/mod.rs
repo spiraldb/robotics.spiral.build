@@ -9,7 +9,7 @@
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_core::api::{
+use spiral_robotics_contracts::api::{
     CameraBinding, CameraStatus, CreateRobotRequest, IdentifyPortRequest, IdentifyPortResponse,
     PortSettings, RobotSummary, SerialPortSummary, UpdateRobotRequest,
 };

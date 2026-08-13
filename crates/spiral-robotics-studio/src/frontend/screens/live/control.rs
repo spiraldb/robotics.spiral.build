@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_core::api::{
+use spiral_robotics_contracts::api::{
     GoalRequest, JointTelemetry, MotorCondition, MotorLimits, RobotSummary, RobotTelemetry,
 };
 use spiral_robotics_core::arm::{self, JointAngles};
@@ -49,7 +49,7 @@ pub fn JointPanel(
     let drivable = studio.is_manual_target(&robot.id) && torque && robot.calibrated;
 
     rsx! {
-        div { class: "flex flex-col",
+        div { class: "live-joint-panel flex flex-col",
             if let Some(error) = telemetry.as_ref().and_then(|robot| robot.error.clone()) {
                 p { class: "mx-2 mt-1 rounded bg-danger-soft px-1.5 py-1 text-[11px] text-danger",
                     "{error}"
@@ -106,10 +106,10 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
             .reduce(f64::max)
     });
     let lagging = tracking_error
-        .is_some_and(|error| error >= spiral_robotics_core::api::CAUTION_FOLLOW_ERROR_DEGREES);
+        .is_some_and(|error| error >= spiral_robotics_contracts::api::CAUTION_FOLLOW_ERROR_DEGREES);
 
     rsx! {
-        dl { class: "grid grid-cols-4 gap-1 px-2 py-1",
+        dl { class: "live-summary-readouts grid gap-1.5 px-3 pb-1 pt-2",
             Readout {
                 label: "Reach",
                 value: tip.map(|tip| format!("{:.0}", tip.truncate().length())),
@@ -214,7 +214,7 @@ fn ConditionReadout(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> E
     });
 
     rsx! {
-        dl { class: "grid grid-cols-4 gap-1 px-2 pb-1",
+        dl { class: "live-summary-readouts grid gap-1.5 px-3 pb-2 pt-0.5",
             Readout {
                 label: "Hottest",
                 value: hottest
@@ -313,7 +313,7 @@ fn MotorDetail(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> Elemen
                     }
                 }
             }
-            dl { class: "grid grid-cols-3 gap-1",
+            dl { class: "grid grid-cols-3 gap-1.5",
                 Readout {
                     label: "Temp",
                     value: joint.temperature_celsius.map(|celsius| format!("{celsius:.0}")),

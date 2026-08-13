@@ -9,8 +9,9 @@
 //! twenty draw calls, so nothing here needs instancing or batching to keep up
 //! with the telemetry stream.
 
-use spiral_robotics_core::glam::{Mat4, Vec3};
-use spiral_robotics_core::urdf::Geometry;
+use glam::{Mat4, Vec3};
+
+use crate::urdf::Geometry;
 use wasm_bindgen::JsCast;
 use web_sys::{
     HtmlCanvasElement, WebGl2RenderingContext as Gl, WebGlProgram, WebGlUniformLocation,

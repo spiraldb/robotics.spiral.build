@@ -8,8 +8,15 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::calibration::{Direction, MotorCalibration};
 use crate::spiral::column as spiral_column;
+use spiral_robotics_core::calibration::{Direction, MotorCalibration};
+pub use spiral_robotics_core::operation::{
+    CAUTION_FOLLOW_ERROR_DEGREES, CAUTION_LIMIT_FRACTION, CAUTION_VOLTAGE_MARGIN_VOLTS,
+};
+use spiral_robotics_core::operation::{
+    Lifecycle, MotorHealth, MotorHealthLimits, MotorHealthReadings, RobotCandidate,
+    assess_motor_health, choose_teleoperation_pair, episode_is_usable,
+};
 
 /// Server-owned data destinations. Secret values are intentionally absent:
 /// the browser can replace or clear them but can never read them back.
@@ -199,7 +206,13 @@ impl TrainingRunPhase {
     }
 
     pub const fn active(self) -> bool {
-        matches!(self, Self::Starting | Self::Running | Self::Stopping)
+        match self {
+            Self::Starting => Lifecycle::Pending,
+            Self::Running => Lifecycle::Running,
+            Self::Stopping => Lifecycle::Stopping,
+            Self::Completed | Self::Stopped | Self::Failed => Lifecycle::Finished,
+        }
+        .active()
     }
 }
 
@@ -480,8 +493,9 @@ pub enum TrainingUpdate {
 }
 
 /// Operator-approved launch parameters for one backend-owned policy session.
-pub const DEFAULT_ROLLOUT_DURATION_SECONDS: u32 = 30;
-pub const MAX_ROLLOUT_DURATION_SECONDS: u32 = 600;
+pub use spiral_robotics_core::operation::{
+    DEFAULT_ROLLOUT_DURATION_SECONDS, MAX_ROLLOUT_DURATION_SECONDS, MIN_ROLLOUT_DURATION_SECONDS,
+};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StartRolloutRequest {
@@ -512,10 +526,13 @@ pub enum RolloutPhase {
 
 impl RolloutPhase {
     pub const fn active(self) -> bool {
-        matches!(
-            self,
-            Self::Loading | Self::WarmingUp | Self::Running | Self::Stopping
-        )
+        match self {
+            Self::Loading => Lifecycle::Pending,
+            Self::WarmingUp | Self::Running => Lifecycle::Running,
+            Self::Stopping => Lifecycle::Stopping,
+            Self::Idle | Self::Failed => Lifecycle::Finished,
+        }
+        .active()
     }
 }
 
@@ -680,45 +697,22 @@ pub struct RobotSummary {
 /// Compatibility is checked here so the Record button and the server make the
 /// same decision instead of offering a pair the control thread must reject.
 pub fn default_teleoperation_pair(robots: &[RobotSummary]) -> Option<(String, String)> {
-    let ready = robots
+    let candidates = robots
         .iter()
-        .filter(|robot| robot.connection.connected && robot.calibrated && robot.problem.is_none())
-        .collect::<Vec<_>>();
-
-    ready
-        .iter()
-        .enumerate()
-        .flat_map(|(leader_index, leader)| {
-            ready
+        .map(|robot| RobotCandidate {
+            id: robot.id.clone(),
+            robot_type: robot.robot_type.clone(),
+            connected: robot.connection.connected,
+            calibrated: robot.calibrated,
+            valid: robot.problem.is_none(),
+            joints: robot
+                .motors
                 .iter()
-                .enumerate()
-                .filter(move |(follower_index, follower)| {
-                    leader_index != *follower_index
-                        && leader.motors.iter().any(|leader_motor| {
-                            follower
-                                .motors
-                                .iter()
-                                .any(|follower_motor| follower_motor.name == leader_motor.name)
-                        })
-                })
-                .map(move |(follower_index, follower)| {
-                    let role_penalty = u8::from(!robot_has_role(leader, "leader"))
-                        + u8::from(!robot_has_role(follower, "follower"));
-                    (
-                        (role_penalty, leader_index, follower_index),
-                        (leader.id.clone(), follower.id.clone()),
-                    )
-                })
+                .map(|motor| motor.name.clone())
+                .collect(),
         })
-        .min_by_key(|(rank, _)| *rank)
-        .map(|(_, pair)| pair)
-}
-
-fn robot_has_role(robot: &RobotSummary, role: &str) -> bool {
-    robot
-        .robot_type
-        .as_deref()
-        .is_some_and(|kind| kind.to_ascii_lowercase().contains(role))
+        .collect::<Vec<_>>();
+    choose_teleoperation_pair(&candidates)
 }
 
 /// A motor as configured, with its calibration when one exists.
@@ -726,8 +720,10 @@ fn robot_has_role(robot: &RobotSummary, role: &str) -> bool {
 pub struct MotorSummary {
     pub name: String,
     pub id: u32,
+    #[serde(with = "direction_serde")]
     pub direction: Direction,
     pub model: Option<String>,
+    #[serde(default, with = "motor_calibration_option_serde")]
     pub calibration: Option<MotorCalibration>,
     /// What this motor will fault at, read from its EEPROM when it connected.
     ///
@@ -736,6 +732,81 @@ pub struct MotorSummary {
     /// would be resending a constant.
     #[serde(default)]
     pub limits: MotorLimits,
+}
+
+mod direction_serde {
+    use serde::{Deserialize, Deserializer, Serializer, de};
+    use spiral_robotics_core::calibration::Direction;
+
+    pub(super) fn serialize<S>(direction: &Direction, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(match direction {
+            Direction::Normal => "normal",
+            Direction::Reversed => "reversed",
+        })
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Direction, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            "normal" => Ok(Direction::Normal),
+            "reversed" => Ok(Direction::Reversed),
+            value => Err(de::Error::unknown_variant(value, &["normal", "reversed"])),
+        }
+    }
+}
+
+mod motor_calibration_option_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use spiral_robotics_core::calibration::{Direction, MotorCalibration};
+
+    #[derive(Deserialize, Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct Wire {
+        id: u32,
+        #[serde(with = "super::direction_serde")]
+        direction: Direction,
+        range_min: i64,
+        center: i64,
+        range_max: i64,
+    }
+
+    pub(super) fn serialize<S>(
+        calibration: &Option<MotorCalibration>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        calibration
+            .map(|motor| Wire {
+                id: motor.id,
+                direction: motor.direction,
+                range_min: motor.range_min,
+                center: motor.center,
+                range_max: motor.range_max,
+            })
+            .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Option<MotorCalibration>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(
+            Option::<Wire>::deserialize(deserializer)?.map(|wire| MotorCalibration {
+                id: wire.id,
+                direction: wire.direction,
+                range_min: wire.range_min,
+                center: wire.center,
+                range_max: wire.range_max,
+            }),
+        )
+    }
 }
 
 /// The limits a motor enforces on itself.
@@ -1008,18 +1079,6 @@ pub enum MotorCondition {
     Fault,
 }
 
-/// How close to a motor's own limit is close enough to report, as a fraction.
-///
-/// Lives on the wire contract for the same reason
-/// [`CAUTION_FOLLOW_ERROR_DEGREES`] does: the interface tints a reading with
-/// it, and anything else reading this API has to reach the same verdict about
-/// the same motor. The number is a margin, never a threshold — the threshold
-/// itself comes from the motor's EEPROM.
-pub const CAUTION_LIMIT_FRACTION: f64 = 0.85;
-
-/// How near the edge of its own voltage window a supply may drift quietly.
-pub const CAUTION_VOLTAGE_MARGIN_VOLTS: f64 = 0.3;
-
 impl JointTelemetry {
     /// This motor's condition, judged against the limits it reported itself.
     ///
@@ -1028,35 +1087,23 @@ impl JointTelemetry {
     /// Without limits there is nothing to be near, so only the motor's own
     /// faults can speak.
     pub fn condition(&self, limits: &MotorLimits) -> MotorCondition {
-        if !self.faults.is_empty() {
-            return MotorCondition::Fault;
-        }
-
-        let hot = match (self.temperature_celsius, limits.max_temperature_celsius) {
-            (Some(celsius), Some(limit)) => celsius >= limit * CAUTION_LIMIT_FRACTION,
-            _ => false,
-        };
-        let strained = match (self.load, limits.max_load) {
-            (Some(load), Some(limit)) => load.abs() >= limit * CAUTION_LIMIT_FRACTION,
-            _ => false,
-        };
-        let supply = match self.voltage_volts {
-            Some(volts) => {
-                let low = limits
-                    .min_voltage_volts
-                    .is_some_and(|min| volts <= min + CAUTION_VOLTAGE_MARGIN_VOLTS);
-                let high = limits
-                    .max_voltage_volts
-                    .is_some_and(|max| volts >= max - CAUTION_VOLTAGE_MARGIN_VOLTS);
-                low || high
-            }
-            None => false,
-        };
-
-        if hot || strained || supply {
-            MotorCondition::Caution
-        } else {
-            MotorCondition::Nominal
+        match assess_motor_health(
+            MotorHealthReadings {
+                faulted: !self.faults.is_empty(),
+                temperature_celsius: self.temperature_celsius,
+                voltage_volts: self.voltage_volts,
+                load: self.load,
+            },
+            MotorHealthLimits {
+                max_temperature_celsius: limits.max_temperature_celsius,
+                min_voltage_volts: limits.min_voltage_volts,
+                max_voltage_volts: limits.max_voltage_volts,
+                max_load: limits.max_load,
+            },
+        ) {
+            MotorHealth::Nominal => MotorCondition::Nominal,
+            MotorHealth::Caution => MotorCondition::Caution,
+            MotorHealth::Fault => MotorCondition::Fault,
         }
     }
 }
@@ -1095,15 +1142,6 @@ impl CalibrationJointProgress {
         self.max.saturating_sub(self.min)
     }
 }
-
-/// Degrees of `Follow Δ` at which a joint stops tracking acceptably.
-///
-/// Lives on the wire contract because both ends need the same number: the
-/// control thread uses it to decide when a take has settled and its measurement
-/// can start, and the interface uses it to colour a reading. Two copies of this
-/// constant would let the studio call a take clean that the recorder called
-/// caution.
-pub const CAUTION_FOLLOW_ERROR_DEGREES: f64 = 5.0;
 
 /// One recorded episode, as summarised from its file.
 ///
@@ -1160,7 +1198,7 @@ pub struct EpisodeSummary {
 impl EpisodeSummary {
     /// True when the take is complete enough to replay or export.
     pub fn usable(&self) -> bool {
-        self.problem.is_none() && self.frames > 0
+        episode_is_usable(self.frames, self.problem.is_some())
     }
 
     /// The joints of the arm named, when this take sampled it.
@@ -1179,6 +1217,16 @@ pub struct EpisodeArm {
     pub robot_type: Option<String>,
     /// Joint names, in the order their values appear in every frame.
     pub joints: Vec<String>,
+}
+
+impl spiral_robotics_core::episode::ArmLayout for EpisodeArm {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn joint_count(&self) -> usize {
+        self.joints.len()
+    }
 }
 
 /// A take being captured right now.
@@ -1393,12 +1441,6 @@ pub struct UpdateRobotRequest {
     pub cameras: Option<Vec<CameraBinding>>,
 }
 
-/// Enable or disable holding torque on a robot.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct TorqueRequest {
-    pub enabled: bool,
-}
-
 /// Command joint positions in normalized `[-1.0, 1.0]` space.
 ///
 /// Normalized commands are the only ones the API accepts: they are meaningless
@@ -1469,6 +1511,32 @@ mod tests {
         .expect("duration defaults for an older client");
 
         assert_eq!(request.duration_seconds, DEFAULT_ROLLOUT_DURATION_SECONDS);
+    }
+
+    #[test]
+    fn motor_summary_adapts_domain_calibration_at_the_contract_edge() {
+        let summary = MotorSummary {
+            name: "joint".to_owned(),
+            id: 7,
+            direction: Direction::Reversed,
+            model: Some("sts3215".to_owned()),
+            calibration: Some(MotorCalibration {
+                id: 7,
+                direction: Direction::Reversed,
+                range_min: 100,
+                center: 200,
+                range_max: 300,
+            }),
+            limits: MotorLimits::default(),
+        };
+
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["direction"], "reversed");
+        assert_eq!(json["calibration"]["direction"], "reversed");
+        assert_eq!(
+            serde_json::from_value::<MotorSummary>(json).unwrap(),
+            summary
+        );
     }
 
     fn robot(id: &str, robot_type: Option<&str>) -> RobotSummary {

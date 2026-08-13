@@ -7,8 +7,9 @@
 //! studio draws over the bench — a hover callout, a condition mark — is built
 //! out of those two answers and nothing else.
 
-use spiral_robotics_core::glam::{Mat4, Vec3};
-use spiral_robotics_core::urdf::Geometry;
+use glam::{Mat4, Vec3};
+
+use crate::urdf::Geometry;
 use web_sys::HtmlCanvasElement;
 
 use crate::camera::Camera;

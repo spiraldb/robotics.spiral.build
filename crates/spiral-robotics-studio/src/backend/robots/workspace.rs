@@ -12,12 +12,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde_json::{Map, Value};
+use spiral_robotics::calibration_codec;
 use spiral_robotics::robot_config::{ConfigError, RobotConfig};
-use spiral_robotics_core::api::{
+use spiral_robotics_contracts::api::{
     CameraBinding, ConnectionStatus, MotorLimits, MotorSummary, PortSettings, RobotSummary,
 };
 use spiral_robotics_core::arm;
-use spiral_robotics_core::calibration::{Calibration, MotorSpec, validate_motor_specs};
+use spiral_robotics_core::calibration::{
+    Calibration, MotorSpec, validate_calibration_for_motors, validate_motor_specs,
+};
 
 /// Default robot type given to a newly created instance.
 pub(crate) const DEFAULT_ROBOT_TYPE: &str = "so101_follower";
@@ -150,7 +153,7 @@ impl RobotRecord {
     pub(crate) fn motors(&self) -> Result<BTreeMap<String, MotorSpec>, WorkspaceError> {
         let motors = self
             .config
-            .deserialize_motors::<BTreeMap<String, MotorSpec>>()
+            .motor_specs()
             .map_err(|source| {
                 WorkspaceError::Invalid(format!("robot {:?} has invalid motors: {source}", self.id))
             })?
@@ -165,13 +168,17 @@ impl RobotRecord {
     /// read.
     pub(crate) fn calibration(&self) -> Result<Option<Calibration>, WorkspaceError> {
         self.config
-            .deserialize_calibration::<Calibration>()
-            .map_err(|source| {
-                WorkspaceError::Invalid(format!(
-                    "robot {:?} has invalid calibration: {source}",
-                    self.id
-                ))
+            .calibration()
+            .filter(|value| !value.is_null())
+            .map(|value| {
+                calibration_codec::decode_calibration(value.clone()).map_err(|source| {
+                    WorkspaceError::Invalid(format!(
+                        "robot {:?} has invalid calibration: {source}",
+                        self.id
+                    ))
+                })
             })
+            .transpose()
     }
 
     /// Build the UI-facing summary, folding in live connection state.
@@ -180,30 +187,32 @@ impl RobotRecord {
     /// summary — with `problem` explaining what is wrong, because a card that
     /// renders as an empty robot tells the operator nothing.
     pub(crate) fn summary(&self, connection: ConnectionStatus) -> RobotSummary {
-        let problem = self
-            .motors()
+        let motors_result = self.motors();
+        let calibration_result = self.calibration();
+        let mut problem = motors_result
+            .as_ref()
             .err()
-            .or_else(|| self.calibration().err())
-            .map(|error| error.to_string());
-        let motors = self.motors().unwrap_or_default();
-        let calibration = self.calibration().ok().flatten();
-        let calibrated = calibration.as_ref().is_some_and(|calibration| {
-            !motors.is_empty()
-                && motors
-                    .keys()
-                    .all(|name| calibration.motors.contains_key(name))
-        });
+            .or_else(|| calibration_result.as_ref().err())
+            .map(ToString::to_string);
+        let motors = motors_result.unwrap_or_default();
+        let calibration = calibration_result.ok().flatten();
+        if problem.is_none()
+            && let Some(calibration) = &calibration
+            && let Err(error) = validate_calibration_for_motors(&motors, calibration)
+        {
+            problem = Some(format!(
+                "robot {:?} has calibration that does not match its configured motors: {error}",
+                self.id
+            ));
+        }
+        let calibrated = calibration.is_some() && problem.is_none();
 
         let mut motors = motors
             .into_iter()
             .map(|(name, spec)| MotorSummary {
                 id: spec.id,
                 direction: spec.direction,
-                model: spec
-                    .extra
-                    .get("model")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned),
+                model: spec.model,
                 calibration: calibration
                     .as_ref()
                     .and_then(|calibration| calibration.motors.get(&name).copied()),
@@ -410,7 +419,9 @@ impl RobotWorkspace {
         }
         root.insert(
             "motors".to_owned(),
-            serde_json::to_value(arm::so101_motor_specs()).expect("motor specs serialize"),
+            RobotConfig::default()
+                .encode_motor_specs(&arm::so101_motor_specs())
+                .expect("stock motor specs encode"),
         );
 
         let config = RobotConfig::from_value(Value::Object(root))?;
@@ -430,10 +441,9 @@ impl RobotWorkspace {
     /// requiring it keeps a browser upload independent of the user's local
     /// download name.
     pub(crate) fn import_configuration(&self, bytes: &[u8]) -> Result<RobotRecord, WorkspaceError> {
-        let value: Value = serde_json::from_slice(bytes).map_err(|source| {
+        let config = RobotConfig::from_slice(bytes).map_err(|source| {
             WorkspaceError::Invalid(format!("the configuration is not valid JSON: {source}"))
         })?;
-        let config = RobotConfig::from_value(value)?;
         let id = config
             .root()
             .get("robot_id")
@@ -504,15 +514,18 @@ impl RobotWorkspace {
         motors: &BTreeMap<String, MotorSpec>,
         calibration: &Calibration,
     ) -> Result<RobotRecord, WorkspaceError> {
+        validate_calibration_for_motors(motors, calibration).map_err(|source| {
+            WorkspaceError::Invalid(format!(
+                "robot {id:?} has calibration that does not match its configured motors: {source}"
+            ))
+        })?;
         let record = self.get(id)?;
         let merged = record.config.merged(
             None,
             None,
             None,
-            serde_json::to_value(motors).map_err(|source| {
-                WorkspaceError::Invalid(format!("motors could not be serialized: {source}"))
-            })?,
-            serde_json::to_value(calibration).map_err(|source| {
+            record.config.encode_motor_specs(motors)?,
+            calibration_codec::encode_calibration(calibration).map_err(|source| {
                 WorkspaceError::Invalid(format!("calibration could not be serialized: {source}"))
             })?,
         )?;
@@ -590,20 +603,6 @@ pub(crate) fn validate_robot_id(id: &str) -> Result<(), WorkspaceError> {
         Ok(())
     } else {
         Err(WorkspaceError::InvalidId(id.to_owned()))
-    }
-}
-
-/// Reject camera role names that are not plain identifiers.
-///
-/// A role is a key in the robot file and a label in the UI, so the same
-/// restraint that applies to a robot ID applies here.
-pub(crate) fn validate_camera_role(role: &str) -> Result<(), WorkspaceError> {
-    if is_plain_name(role, MAX_LABEL_LENGTH) {
-        Ok(())
-    } else {
-        Err(WorkspaceError::Invalid(format!(
-            "camera role {role:?} must be 1 to {MAX_LABEL_LENGTH} characters of letters, digits, '-', or '_'"
-        )))
     }
 }
 
@@ -739,16 +738,6 @@ mod tests {
     }
 
     #[test]
-    fn camera_roles_must_be_plain_identifiers() {
-        for role in ["../../etc", "", "with space", "sneaky/slash"] {
-            assert!(validate_camera_role(role).is_err(), "accepted {role:?}");
-        }
-        for role in ["wrist", "top_down", "cam-2"] {
-            assert!(validate_camera_role(role).is_ok(), "rejected {role:?}");
-        }
-    }
-
-    #[test]
     fn robot_ids_that_could_escape_the_directory_are_refused() {
         for id in [
             "",
@@ -797,11 +786,14 @@ mod tests {
     #[test]
     fn importing_a_configuration_preserves_the_complete_document() {
         let (directory, workspace) = workspace();
+        let motors = RobotConfig::default()
+            .encode_motor_specs(&spiral_robotics_core::arm::so101_motor_specs())
+            .unwrap();
         let source = serde_json::json!({
             "schema_version": 1,
             "robot_id": "imported_leader",
             "robot_type": "so101_leader",
-            "motors": spiral_robotics_core::arm::so101_motor_specs(),
+            "motors": motors,
             "extension": { "keep": true }
         });
 
@@ -909,8 +901,17 @@ mod tests {
 
     #[test]
     fn saving_a_calibration_marks_the_robot_calibrated() {
-        let (_directory, workspace) = workspace();
-        let record = workspace.create("arm", None, None, None).expect("create");
+        let (directory, workspace) = workspace();
+        workspace.create("arm", None, None, None).expect("create");
+        let path = directory.path().join("arm.json");
+        let mut raw: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        raw["motors"]["gripper"]["future_adapter"] = serde_json::json!({"registers": [7, 8, 9]});
+        RobotConfig::from_value(raw)
+            .unwrap()
+            .save_atomic(&path)
+            .unwrap();
+        workspace.reload().unwrap();
+        let record = workspace.get("arm").unwrap();
         let motors = record.motors().expect("motors");
         let input = CalibrationInput::Direct {
             motors: motors
@@ -938,6 +939,11 @@ mod tests {
             record.calibration().unwrap().unwrap().motors["gripper"].center,
             2048
         );
+        assert_eq!(
+            record.config.root()["motors"]["gripper"]["future_adapter"]["registers"],
+            serde_json::json!([7, 8, 9]),
+            "a Studio calibration save must preserve unknown per-motor data"
+        );
         // The saved document is what a fresh reader sees.
         workspace.reload().expect("reload");
         assert!(
@@ -946,6 +952,62 @@ mod tests {
                 .unwrap()
                 .summary(ConnectionStatus::default())
                 .calibrated
+        );
+    }
+
+    #[test]
+    fn stale_calibration_is_reported_and_cannot_be_saved() {
+        let (_directory, workspace) = workspace();
+        let motors = arm::so101_motor_specs();
+        let input = CalibrationInput::Direct {
+            motors: motors
+                .keys()
+                .map(|name| {
+                    (
+                        name.clone(),
+                        MotorReading {
+                            center: 2048,
+                            range_min: 1000,
+                            range_max: 3000,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let mut stale = build_calibration(&motors, &input).expect("calibration");
+        stale.motors.get_mut("gripper").unwrap().id = 99;
+        let config = RobotConfig::from_value(serde_json::json!({
+            "schema_version": 1,
+            "robot_id": "stale",
+            "robot_type": "so101_follower",
+        }))
+        .unwrap();
+        let document = config
+            .merged(
+                None,
+                None,
+                None,
+                config.encode_motor_specs(&motors).unwrap(),
+                calibration_codec::encode_calibration(&stale).unwrap(),
+            )
+            .unwrap()
+            .into_value();
+        let record = workspace
+            .import_configuration(&serde_json::to_vec(&document).unwrap())
+            .expect("structurally valid robot is still listed for repair");
+
+        let summary = record.summary(ConnectionStatus::default());
+        assert!(!summary.calibrated);
+        let problem = summary.problem.expect("mismatch is visible");
+        assert!(problem.contains("does not match"), "{problem}");
+        assert!(problem.contains("gripper"), "{problem}");
+
+        assert!(
+            workspace
+                .save_calibration("stale", &record.motors().unwrap(), &stale)
+                .expect_err("stale calibration must not be persisted")
+                .to_string()
+                .contains("does not match")
         );
     }
 

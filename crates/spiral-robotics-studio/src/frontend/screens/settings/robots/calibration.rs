@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use spiral_robotics_core::api::{CalibrationProgress, RobotSummary};
+use spiral_robotics_contracts::api::{CalibrationProgress, RobotSummary};
 use spiral_robotics_core::arm;
 use spiral_robotics_core::calibration::MINIMUM_CALIBRATION_TRAVEL;
 

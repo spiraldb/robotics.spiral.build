@@ -1,7 +1,8 @@
 //! The complete Spiral Robotics Studio application, compiled by DX for the browser and server.
 //!
 //! Studio-specific code is split into `frontend` and server-gated `backend`
-//! trees. Cross-boundary domain and wire contracts live in `spiral-robotics-core`.
+//! trees. Domain policy lives in `spiral-robotics-core`; delivery and persistence
+//! representations live in `spiral-robotics-contracts`.
 
 mod frontend;
 

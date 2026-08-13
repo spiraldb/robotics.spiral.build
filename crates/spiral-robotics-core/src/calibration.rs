@@ -4,15 +4,14 @@
 //! hardware-specific register values. Callers provide either center/min/max
 //! readings or a center reading followed by raw sweep samples. Stored values
 //! remain in the unhomed raw coordinate system in which they were observed.
+//!
+//! Domain values here deliberately have no serialization implementation. Robot
+//! files and delivery contracts translate their wire representations at the
+//! edge, while calibration policy receives and returns plain values.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
-use std::marker::PhantomData;
-
-use serde::de::{self, DeserializeOwned, MapAccess, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
 
 /// The current on-disk calibration format version.
 pub const CALIBRATION_FORMAT_VERSION: u32 = 1;
@@ -24,8 +23,7 @@ pub const CALIBRATION_UNITS: &str = "raw";
 pub const CALIBRATION_COORDINATE_SPACE: &str = "unhomed_raw";
 
 /// Whether increasing raw readings represent the normal or reversed direction.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Direction {
     #[default]
     Normal,
@@ -34,20 +32,35 @@ pub enum Direction {
 
 /// Static configuration for one motor.
 ///
-/// Unknown fields are retained so a future protocol adapter can keep its model,
-/// register, or transport details beside the protocol-neutral fields.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+/// Unknown persisted fields belong to the robot-file adapter, not this domain
+/// value. `model` is explicit because selecting a compatible bus driver is
+/// product policy used by hardware adapters.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MotorSpec {
     pub id: u32,
-    #[serde(default)]
     pub direction: Direction,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    pub model: Option<String>,
+}
+
+impl MotorSpec {
+    /// Construct a motor definition without any adapter-specific details.
+    pub fn new(id: u32, direction: Direction) -> Self {
+        Self {
+            id,
+            direction,
+            model: None,
+        }
+    }
+
+    /// State the motor model used to select a compatible hardware adapter.
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
 }
 
 /// Raw readings for one motor after a completed range sweep.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MotorReading {
     pub center: i64,
     pub range_min: i64,
@@ -57,10 +70,10 @@ pub struct MotorReading {
 /// Input accepted by [`build_calibration`].
 ///
 /// `Direct` accepts readings already reduced to extrema. `Sweep` derives the
-/// extrema from one or more complete snapshots. Both forms reject misspelled
-/// fields, missing motors, unexpected motors, and duplicate motor keys.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(untagged)]
+/// extrema from one or more complete snapshots. Domain validation rejects
+/// missing and unexpected motors; an edge codec is responsible for rejecting
+/// misspelled fields and duplicate wire keys before constructing this value.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CalibrationInput {
     Direct {
         motors: BTreeMap<String, MotorReading>,
@@ -71,46 +84,8 @@ pub enum CalibrationInput {
     },
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DirectInput {
-    motors: UniqueMap<MotorReading>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SweepInput {
-    center: UniqueMap<i64>,
-    samples: Vec<UniqueMap<i64>>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum CalibrationInputWire {
-    Direct(DirectInput),
-    Sweep(SweepInput),
-}
-
-impl<'de> Deserialize<'de> for CalibrationInput {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Ok(match CalibrationInputWire::deserialize(deserializer)? {
-            CalibrationInputWire::Direct(input) => Self::Direct {
-                motors: input.motors.0,
-            },
-            CalibrationInputWire::Sweep(input) => Self::Sweep {
-                center: input.center.0,
-                samples: input.samples.into_iter().map(|sample| sample.0).collect(),
-            },
-        })
-    }
-}
-
 /// Protocol-neutral calibration for one motor.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MotorCalibration {
     pub id: u32,
     pub direction: Direction,
@@ -120,38 +95,12 @@ pub struct MotorCalibration {
 }
 
 /// A validated, deterministic calibration document.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Calibration {
     pub format_version: u32,
     pub units: String,
     pub coordinate_space: String,
     pub motors: BTreeMap<String, MotorCalibration>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CalibrationWire {
-    format_version: u32,
-    units: String,
-    coordinate_space: String,
-    motors: UniqueMap<MotorCalibration>,
-}
-
-impl<'de> Deserialize<'de> for Calibration {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let wire = CalibrationWire::deserialize(deserializer)?;
-        let calibration = Self {
-            format_version: wire.format_version,
-            units: wire.units,
-            coordinate_space: wire.coordinate_space,
-            motors: wire.motors.0,
-        };
-        validate_calibration(&calibration).map_err(de::Error::custom)?;
-        Ok(calibration)
-    }
 }
 
 /// A validation error encountered while reading or building a calibration.
@@ -166,14 +115,17 @@ pub enum CalibrationError {
         first: String,
         second: String,
     },
-    ReservedExtraField {
-        motor: String,
-        field: String,
-    },
     KeyMismatch {
         context: String,
         missing: Vec<String>,
         unexpected: Vec<String>,
+    },
+    MotorSpecMismatch {
+        motor: String,
+        expected_id: u32,
+        calibration_id: u32,
+        expected_direction: Direction,
+        calibration_direction: Direction,
     },
     EmptySamples,
     NoPositions,
@@ -190,6 +142,8 @@ pub enum CalibrationError {
         center: i64,
         range_max: i64,
     },
+    NonFiniteNormalizedCommand,
+    NormalizedCommandOutOfRange,
     UnsupportedFormatVersion(u32),
     UnsupportedUnits(String),
     UnsupportedCoordinateSpace(String),
@@ -206,10 +160,6 @@ impl fmt::Display for CalibrationError {
             Self::DuplicateMotorId { id, first, second } => write!(
                 formatter,
                 "motor ID {id} is assigned to both {first:?} and {second:?}"
-            ),
-            Self::ReservedExtraField { motor, field } => write!(
-                formatter,
-                "motor {motor:?} contains reserved field {field:?} in its flattened extra fields"
             ),
             Self::KeyMismatch {
                 context,
@@ -228,6 +178,16 @@ impl fmt::Display for CalibrationError {
                 }
                 Ok(())
             }
+            Self::MotorSpecMismatch {
+                motor,
+                expected_id,
+                calibration_id,
+                expected_direction,
+                calibration_direction,
+            } => write!(
+                formatter,
+                "calibration for motor {motor:?} does not match its specification: expected ID {expected_id} and direction {expected_direction:?}, got ID {calibration_id} and direction {calibration_direction:?}"
+            ),
             Self::EmptySamples => {
                 formatter.write_str("a calibration sweep must contain at least one sample")
             }
@@ -259,6 +219,12 @@ impl fmt::Display for CalibrationError {
                 formatter,
                 "motor {motor:?} has invalid range: expected range_min < center < range_max, got {range_min} < {center} < {range_max}"
             ),
+            Self::NonFiniteNormalizedCommand => {
+                formatter.write_str("normalized motor command must be finite")
+            }
+            Self::NormalizedCommandOutOfRange => {
+                formatter.write_str("normalized motor command must be within [-1, 1]")
+            }
             Self::UnsupportedFormatVersion(version) => write!(
                 formatter,
                 "unsupported calibration format_version {version}; expected {CALIBRATION_FORMAT_VERSION}"
@@ -272,6 +238,30 @@ impl fmt::Display for CalibrationError {
                 "unsupported calibration coordinate_space {space:?}; expected {CALIBRATION_COORDINATE_SPACE:?}"
             ),
         }
+    }
+}
+
+/// A finite position inside the product's normalized motion range.
+///
+/// Delivery and application layers construct this value before a command can
+/// cross a motor-control port. Hardware adapters still recheck the primitive
+/// value as defense in depth.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct NormalizedPosition(f64);
+
+impl NormalizedPosition {
+    pub fn new(value: f64) -> Result<Self, CalibrationError> {
+        if !value.is_finite() {
+            return Err(CalibrationError::NonFiniteNormalizedCommand);
+        }
+        if !(-1.0..=1.0).contains(&value) {
+            return Err(CalibrationError::NormalizedCommandOutOfRange);
+        }
+        Ok(Self(value))
+    }
+
+    pub const fn get(self) -> f64 {
+        self.0
     }
 }
 
@@ -293,15 +283,6 @@ pub fn validate_motor_specs(specs: &BTreeMap<String, MotorSpec>) -> Result<(), C
                 first: first.to_owned(),
                 second: name.clone(),
             });
-        }
-
-        for reserved in ["id", "direction"] {
-            if spec.extra.contains_key(reserved) {
-                return Err(CalibrationError::ReservedExtraField {
-                    motor: name.clone(),
-                    field: reserved.to_owned(),
-                });
-            }
         }
     }
 
@@ -347,6 +328,38 @@ pub fn validate_calibration(calibration: &Calibration) -> Result<(), Calibration
                 range_max: motor.range_max,
             },
         )?;
+    }
+    Ok(())
+}
+
+/// Validate that a calibration belongs to one exact configured motor set.
+///
+/// A calibration range is meaningful only for the named physical motor it was
+/// measured from. Matching names alone is insufficient: changing a bus ID or
+/// direction while retaining an old range would make normalized commands refer
+/// to different hardware semantics.
+pub fn validate_calibration_for_motors(
+    specs: &BTreeMap<String, MotorSpec>,
+    calibration: &Calibration,
+) -> Result<(), CalibrationError> {
+    validate_motor_specs(specs)?;
+    validate_calibration(calibration)?;
+    validate_keys(specs, &calibration.motors, "calibration")?;
+
+    for (name, spec) in specs {
+        let motor = calibration
+            .motors
+            .get(name)
+            .expect("validated calibration keys must contain every configured motor");
+        if motor.id != spec.id || motor.direction != spec.direction {
+            return Err(CalibrationError::MotorSpecMismatch {
+                motor: name.clone(),
+                expected_id: spec.id,
+                calibration_id: motor.id,
+                expected_direction: spec.direction,
+                calibration_direction: motor.direction,
+            });
+        }
     }
     Ok(())
 }
@@ -475,7 +488,7 @@ pub fn normalize_centered_raw(
 }
 
 /// The travel one motor has shown so far during a live calibration sweep.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LiveRange {
     pub minimum: i64,
     pub position: i64,
@@ -606,8 +619,9 @@ impl RangeTracker {
 /// command is clamped to `[-1.0, 1.0]`, the direction is undone, each side of
 /// the center is scaled by its own half-range, and the result is clamped to the
 /// calibrated range so a caller can never command a joint past a limit it was
-/// calibrated against. A non-finite command resolves to the center rather than
-/// producing an arbitrary position.
+/// calibrated against. Non-finite input is rejected: silently translating a
+/// corrupt command into motion toward center can move a physical arm while
+/// hiding the upstream fault.
 pub fn denormalize_centered_raw(
     calibration: &MotorCalibration,
     normalized: f64,
@@ -621,11 +635,10 @@ pub fn denormalize_centered_raw(
         },
     )?;
 
-    let command = if normalized.is_finite() {
-        normalized
-    } else {
-        0.0
-    };
+    if !normalized.is_finite() {
+        return Err(CalibrationError::NonFiniteNormalizedCommand);
+    }
+    let command = normalized;
     let command = command.clamp(-1.0, 1.0);
     let command = match calibration.direction {
         Direction::Normal => command,
@@ -694,46 +707,6 @@ fn validate_range(name: &str, reading: MotorReading) -> Result<(), CalibrationEr
     }
 }
 
-struct UniqueMap<T>(BTreeMap<String, T>);
-
-impl<'de, T> Deserialize<'de> for UniqueMap<T>
-where
-    T: DeserializeOwned,
-{
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct UniqueMapVisitor<T>(PhantomData<T>);
-
-        impl<'de, T> Visitor<'de> for UniqueMapVisitor<T>
-        where
-            T: DeserializeOwned,
-        {
-            type Value = UniqueMap<T>;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("an object with unique keys")
-            }
-
-            fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let mut values = BTreeMap::new();
-                while let Some((key, value)) = access.next_entry::<String, T>()? {
-                    if values.insert(key.clone(), value).is_some() {
-                        return Err(de::Error::custom(format!("duplicate motor key {key:?}")));
-                    }
-                }
-                Ok(UniqueMap(values))
-            }
-        }
-
-        deserializer.deserialize_map(UniqueMapVisitor(PhantomData))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,7 +715,7 @@ mod tests {
         MotorSpec {
             id,
             direction: Direction::Normal,
-            extra: BTreeMap::new(),
+            model: None,
         }
     }
 
@@ -777,13 +750,11 @@ mod tests {
     }
 
     #[test]
-    fn motor_spec_defaults_and_retains_protocol_fields() {
-        let parsed: MotorSpec =
-            serde_json::from_str(r#"{"id":7,"model":"sts3215","baud_rate":1000000}"#).unwrap();
-        assert_eq!(parsed.direction, Direction::Normal);
-        assert_eq!(parsed.extra["model"], "sts3215");
-        assert_eq!(parsed.extra["baud_rate"], 1_000_000);
-        assert_eq!(serde_json::to_value(parsed).unwrap()["model"], "sts3215");
+    fn motor_spec_has_only_explicit_domain_fields() {
+        let spec = MotorSpec::new(7, Direction::Normal).with_model("sts3215");
+        assert_eq!(spec.id, 7);
+        assert_eq!(spec.direction, Direction::Normal);
+        assert_eq!(spec.model.as_deref(), Some("sts3215"));
     }
 
     #[test]
@@ -797,45 +768,22 @@ mod tests {
         assert_eq!(calibration.motors["shoulder"].range_min, 900);
         assert_eq!(calibration.motors["shoulder"].range_max, 3300);
         assert_eq!(calibration.motors["elbow"].direction, Direction::Reversed);
-        let json = serde_json::to_string(&calibration).unwrap();
-        assert!(!json.contains("homing_offset"));
-        assert!(json.find("elbow").unwrap() < json.find("shoulder").unwrap());
     }
 
     #[test]
     fn sweep_derives_extrema_from_all_samples() {
-        let input: CalibrationInput = serde_json::from_str(
-            r#"{
-                "center":{"shoulder":2000,"elbow":1900},
-                "samples":[
-                    {"shoulder":1500,"elbow":2300},
-                    {"shoulder":2800,"elbow":900}
-                ]
-            }"#,
-        )
-        .unwrap();
+        let input = CalibrationInput::Sweep {
+            center: BTreeMap::from([("shoulder".to_owned(), 2000), ("elbow".to_owned(), 1900)]),
+            samples: vec![
+                BTreeMap::from([("shoulder".to_owned(), 1500), ("elbow".to_owned(), 2300)]),
+                BTreeMap::from([("shoulder".to_owned(), 2800), ("elbow".to_owned(), 900)]),
+            ],
+        };
         let calibration = build_calibration(&two_specs(), &input).unwrap();
         assert_eq!(calibration.motors["shoulder"].range_min, 1500);
         assert_eq!(calibration.motors["shoulder"].range_max, 2800);
         assert_eq!(calibration.motors["elbow"].range_min, 900);
         assert_eq!(calibration.motors["elbow"].range_max, 2300);
-    }
-
-    #[test]
-    fn input_is_strict_and_rejects_duplicate_motor_keys() {
-        assert!(serde_json::from_str::<CalibrationInput>(r#"{"motors":{},"samplez":[]}"#).is_err());
-        assert!(
-            serde_json::from_str::<CalibrationInput>(
-                r#"{"motors":{"joint":{"center":2,"range_min":1,"range_max":3,"typo":4}}}"#
-            )
-            .is_err()
-        );
-        assert!(
-            serde_json::from_str::<CalibrationInput>(
-                r#"{"motors":{"joint":{"center":2,"range_min":1,"range_max":3},"joint":{"center":2,"range_min":1,"range_max":3}}}"#
-            )
-            .is_err()
-        );
     }
 
     #[test]
@@ -858,16 +806,50 @@ mod tests {
             validate_motor_specs(&specs),
             Err(CalibrationError::DuplicateMotorId { .. })
         ));
+    }
 
-        let mut specs = two_specs();
-        specs
-            .get_mut("elbow")
-            .unwrap()
-            .extra
-            .insert("direction".to_owned(), Value::String("normal".to_owned()));
+    #[test]
+    fn calibration_must_match_motor_names_ids_and_directions() {
+        let specs = two_specs();
+        let calibration = build_calibration(&specs, &direct_input()).unwrap();
+        assert_eq!(
+            validate_calibration_for_motors(&specs, &calibration),
+            Ok(())
+        );
+
+        let mut missing = calibration.clone();
+        missing.motors.remove("elbow");
         assert!(matches!(
-            validate_motor_specs(&specs),
-            Err(CalibrationError::ReservedExtraField { .. })
+            validate_calibration_for_motors(&specs, &missing),
+            Err(CalibrationError::KeyMismatch { .. })
+        ));
+
+        let mut wrong_id = calibration.clone();
+        wrong_id.motors.get_mut("elbow").unwrap().id = 99;
+        assert!(matches!(
+            validate_calibration_for_motors(&specs, &wrong_id),
+            Err(CalibrationError::MotorSpecMismatch {
+                motor,
+                expected_id: 2,
+                calibration_id: 99,
+                ..
+            }) if motor == "elbow"
+        ));
+
+        let mut wrong_direction = calibration;
+        wrong_direction
+            .motors
+            .get_mut("shoulder")
+            .unwrap()
+            .direction = Direction::Reversed;
+        assert!(matches!(
+            validate_calibration_for_motors(&specs, &wrong_direction),
+            Err(CalibrationError::MotorSpecMismatch {
+                motor,
+                expected_direction: Direction::Normal,
+                calibration_direction: Direction::Reversed,
+                ..
+            }) if motor == "shoulder"
         ));
     }
 
@@ -926,51 +908,6 @@ mod tests {
                 Err(CalibrationError::InvalidRange { .. })
             ));
         }
-    }
-
-    #[test]
-    fn calibration_deserialization_validates_metadata_and_contents() {
-        let valid = r#"{
-            "format_version":1,
-            "units":"raw",
-            "coordinate_space":"unhomed_raw",
-            "motors":{"joint":{"id":1,"direction":"normal","range_min":1,"center":2,"range_max":3}}
-        }"#;
-        assert!(serde_json::from_str::<Calibration>(valid).is_ok());
-
-        for invalid in [
-            valid.replace("\"format_version\":1", "\"format_version\":2"),
-            valid.replace("\"units\":\"raw\"", "\"units\":\"degrees\""),
-            valid.replace("\"unhomed_raw\"", "\"homed_raw\""),
-            valid.replace(
-                "\"motors\":{\"joint\":{\"id\":1,\"direction\":\"normal\",\"range_min\":1,\"center\":2,\"range_max\":3}}",
-                "\"motors\":{}",
-            ),
-            valid.replace("\"center\":2", "\"center\":1"),
-        ] {
-            assert!(serde_json::from_str::<Calibration>(&invalid).is_err());
-        }
-    }
-
-    #[test]
-    fn calibration_deserialization_rejects_duplicate_ids_and_keys() {
-        let duplicate_ids = r#"{
-            "format_version":1,"units":"raw","coordinate_space":"unhomed_raw",
-            "motors":{
-                "one":{"id":1,"direction":"normal","range_min":1,"center":2,"range_max":3},
-                "two":{"id":1,"direction":"normal","range_min":4,"center":5,"range_max":6}
-            }
-        }"#;
-        assert!(serde_json::from_str::<Calibration>(duplicate_ids).is_err());
-
-        let duplicate_keys = r#"{
-            "format_version":1,"units":"raw","coordinate_space":"unhomed_raw",
-            "motors":{
-                "one":{"id":1,"direction":"normal","range_min":1,"center":2,"range_max":3},
-                "one":{"id":2,"direction":"normal","range_min":4,"center":5,"range_max":6}
-            }
-        }"#;
-        assert!(serde_json::from_str::<Calibration>(duplicate_keys).is_err());
     }
 
     #[test]
@@ -1134,8 +1071,12 @@ mod tests {
         assert_eq!(denormalize_centered_raw(&calibration, -5.0).unwrap(), 900);
         assert_eq!(denormalize_centered_raw(&calibration, 5.0).unwrap(), 3300);
         assert_eq!(
-            denormalize_centered_raw(&calibration, f64::NAN).unwrap(),
-            2048
+            denormalize_centered_raw(&calibration, f64::NAN),
+            Err(CalibrationError::NonFiniteNormalizedCommand)
+        );
+        assert_eq!(
+            denormalize_centered_raw(&calibration, f64::INFINITY),
+            Err(CalibrationError::NonFiniteNormalizedCommand)
         );
 
         let reversed = MotorCalibration {
@@ -1144,6 +1085,27 @@ mod tests {
         };
         assert_eq!(denormalize_centered_raw(&reversed, 1.0).unwrap(), 900);
         assert_eq!(denormalize_centered_raw(&reversed, -1.0).unwrap(), 3300);
+    }
+
+    #[test]
+    fn normalized_positions_accept_exact_limits_and_reject_the_next_float_outside() {
+        assert_eq!(NormalizedPosition::new(-1.0).unwrap().get(), -1.0);
+        assert_eq!(NormalizedPosition::new(1.0).unwrap().get(), 1.0);
+
+        let above_one = f64::from_bits(1.0_f64.to_bits() + 1);
+        let below_negative_one = f64::from_bits((-1.0_f64).to_bits() + 1);
+        for value in [above_one, below_negative_one] {
+            assert_eq!(
+                NormalizedPosition::new(value),
+                Err(CalibrationError::NormalizedCommandOutOfRange)
+            );
+        }
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                NormalizedPosition::new(value),
+                Err(CalibrationError::NonFiniteNormalizedCommand)
+            );
+        }
     }
 
     #[test]

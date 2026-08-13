@@ -1,7 +1,7 @@
 //! URL routes and the low-frequency Studio shell shared by every screen.
 
 use dioxus::prelude::*;
-use spiral_robotics_core::api::DataSettings;
+use spiral_robotics_contracts::api::DataSettings;
 
 use crate::frontend::api::http as api;
 use crate::frontend::app::activity::Activity;
@@ -14,6 +14,7 @@ use crate::frontend::screens::settings::panel::SettingsPanel;
 use crate::frontend::screens::training::state::use_training_controller;
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
+const ECHARTS_RUNTIME: &str = "https://cdn.jsdelivr.net/npm/echarts@6.1.0/dist/echarts.min.js";
 const FAVICON: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2337352f'/%3E%3Cpath d='M9 23V13l7-5 7 5v10' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E";
 
 #[derive(Clone, Routable, Debug, PartialEq)]
@@ -142,6 +143,7 @@ fn StudioShell() -> Element {
 
     rsx! {
         document::Stylesheet { href: TAILWIND }
+        document::Script { src: ECHARTS_RUNTIME }
         document::Title { "Spiral Robotics Studio · {activity.label()}" }
         document::Link { rel: "icon", href: FAVICON }
         document::Meta { name: "color-scheme", content: "light" }

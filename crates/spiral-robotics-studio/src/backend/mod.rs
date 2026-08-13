@@ -1,5 +1,7 @@
 //! Server-only Studio runtime, grouped by domain boundary.
 
+mod adapters;
+mod application;
 mod http;
 mod recording;
 mod robotics;

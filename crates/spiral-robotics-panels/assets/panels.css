@@ -72,6 +72,21 @@
   background: var(--rp-surface);
 }
 
+.rp-splitter::before {
+  content: "";
+  position: absolute;
+}
+
+.rp-split-horizontal > .rp-splitter::before {
+  inset-block: 0;
+  inset-inline: -3px;
+}
+
+.rp-split-vertical > .rp-splitter::before {
+  inset-block: -3px;
+  inset-inline: 0;
+}
+
 .rp-split-horizontal > .rp-splitter {
   cursor: col-resize;
 }
@@ -101,7 +116,7 @@
 
 .rp-splitter:hover::after,
 .rp-splitter:focus-visible::after,
-.rp-workspace[data-resizing="true"] .rp-splitter::after {
+.rp-splitter-active::after {
   background: var(--rp-accent);
 }
 

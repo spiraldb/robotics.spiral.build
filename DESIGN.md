@@ -837,9 +837,11 @@ This is the signature component system.
   historical surface. Scrubbing updates camera, scene, and signals; with robot
   sync enabled, physical motion commits only on release.
 - **Lanes:** Joint signals share the episode scale and make recording gaps
-  explicit instead of compressing them away. Camera pixels and media state
-  belong exclusively to Camera panels; the Timeline does not embed a camera
-  row or thumbnail.
+  explicit instead of compressing them away. One Charming/ECharts canvas owns
+  the six aligned grids so their scales, tooltip, and resize lifecycle stay in
+  sync; extrema-preserving downsampling bounds the data crossing the Wasm
+  bridge. Camera pixels and media state belong exclusively to Camera panels;
+  the Timeline does not embed a camera row or thumbnail.
 - **Episode items:** Equal 72×36px items favor scanability. Duration and state
   are text/tint, never proportional card geometry.
 - **Empty state:** “Record in Live or select an episode in Data.” It names the
@@ -881,9 +883,12 @@ Opening history never replaces or rewrites the new-run draft.
 - **Flat lanes:** Data-path stages and throughput series are content within
   ordinary panels, separated by rhythm and hairlines. They do not introduce
   nested cards, decorative containers, or resting elevation.
-- **Charts:** Grids, polylines, baselines, and markers are code-native SVG with
-  semantic text summaries and tabular readouts around them. Series colours use
-  the centralized training roles; colour is never the only legend.
+- **Charts:** Charming builds typed ECharts options for the logarithmic loss
+  curve and compact throughput lanes. One local tree-shaken Canvas runtime
+  registers only the line, grid, tooltip, and Canvas renderer features these
+  surfaces use. Authored chart labels, semantic text summaries, and tabular
+  readouts remain around the canvas; series colours use centralized roles, and
+  colour is never the only legend.
 - **Truthful state:** With no run, panels explain how real data appears. After a
   run starts but before its first metric, they say they are waiting for the
   first optimizer step. They never draw synthetic telemetry. Unavailable or
@@ -1068,7 +1073,8 @@ deadline belongs to the notice value, not the component that draws it.
   recording or episode identity in every time or transport action.
 - **Do** keep Training curve-first and align learning, resources, and run events
   to the shared optimizer-step axis.
-- **Do** author training plots as code-native SVG with semantic text readouts
+- **Do** author Training and Timeline plots through the shared Charming
+  renderer with bounded extrema-preserving payloads, semantic text readouts,
   and centralized series roles.
 - **Do** show truthful Training empty, waiting, unavailable, and locked states;
   never substitute synthetic telemetry for backend evidence.

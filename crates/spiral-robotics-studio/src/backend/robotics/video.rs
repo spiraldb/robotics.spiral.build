@@ -1,5 +1,6 @@
 //! Server-side camera recording into browser-playable MP4 assets.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -107,10 +108,22 @@ pub(crate) fn save_assets(
         .collect::<Result<Vec<_>, String>>()?;
     let bytes = serde_json::to_vec_pretty(&portable)
         .map_err(|error| format!("could not encode episode video manifest: {error}"))?;
-    std::fs::write(&temporary, bytes)
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&temporary)
+        .map_err(|error| format!("could not open {}: {error}", temporary.display()))?;
+    use std::io::Write as _;
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
         .map_err(|error| format!("could not write {}: {error}", temporary.display()))?;
+    drop(file);
     std::fs::rename(&temporary, &path)
-        .map_err(|error| format!("could not publish {}: {error}", path.display()))
+        .map_err(|error| format!("could not publish {}: {error}", path.display()))?;
+    std::fs::File::open(&directory)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("could not sync {}: {error}", directory.display()))
 }
 
 pub(crate) fn load_assets(root: &Path, episode_id: &str) -> Result<Vec<VideoAsset>, String> {
@@ -185,6 +198,12 @@ struct VideoCaptureRun {
     tasks: Vec<tokio::task::JoinHandle<Result<VideoAsset, String>>>,
 }
 
+struct PreparedCameraSegment {
+    spec: CameraCaptureSpec,
+    frames: watch::Receiver<Option<Arc<Frame>>>,
+    segment: CameraSegment,
+}
+
 /// Immutable configuration for one encoded interval of one camera stream.
 struct CameraSegment {
     ffmpeg: String,
@@ -218,7 +237,13 @@ impl VideoCapture {
         if specs.is_empty() {
             return Ok(None);
         }
+        if !safe_path_component(episode_id) {
+            return Err(format!(
+                "episode id {episode_id:?} cannot be used as a video directory"
+            ));
+        }
         let directory = root.join("videos").join(episode_id);
+        let directory_existed = directory.exists();
         tokio::fs::create_dir_all(&directory)
             .await
             .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
@@ -233,7 +258,12 @@ impl VideoCapture {
             active: None,
             completed: Vec::new(),
         };
-        capture.start_segment(0.0)?;
+        if let Err(error) = capture.start_segment(0.0) {
+            if !directory_existed {
+                let _ = std::fs::remove_dir(&directory);
+            }
+            return Err(error);
+        }
         Ok(Some(capture))
     }
 
@@ -242,30 +272,105 @@ impl VideoCapture {
     }
 
     fn start_segment(&mut self, timeline_offset_seconds: f64) -> Result<(), String> {
+        let cameras = self.cameras.clone();
+        self.start_segment_with(timeline_offset_seconds, move |camera_id| {
+            cameras.subscribe(camera_id)
+        })
+    }
+
+    fn start_segment_with(
+        &mut self,
+        timeline_offset_seconds: f64,
+        mut subscribe: impl FnMut(&str) -> Result<watch::Receiver<Option<Arc<Frame>>>, String>,
+    ) -> Result<(), String> {
         if self.active.is_some() {
             return Ok(());
         }
+        if !timeline_offset_seconds.is_finite() || timeline_offset_seconds < 0.0 {
+            return Err("video segment timeline offset must be finite and non-negative".to_owned());
+        }
+        if self.ffmpeg.trim().is_empty() {
+            return Err("video encoder executable cannot be empty".to_owned());
+        }
+        if self.codec.trim().is_empty() {
+            return Err("video encoder codec cannot be empty".to_owned());
+        }
         let index = self.next_segment;
         let directory = self.root.join("videos").join(&self.episode_id);
-        let (control, _) = watch::channel(CaptureState::Recording);
-        let mut tasks = Vec::with_capacity(self.specs.len());
+        let mut outputs = BTreeSet::new();
+        let mut pending = Vec::with_capacity(self.specs.len());
         for spec in self.specs.iter().cloned() {
-            let frames = self.cameras.subscribe(&spec.camera_id)?;
+            if spec.stream_id.trim().is_empty() {
+                return Err("video camera stream id cannot be empty".to_owned());
+            }
+            if spec.camera_id.trim().is_empty() {
+                return Err(format!(
+                    "video stream {:?} has an empty camera id",
+                    spec.stream_id
+                ));
+            }
+            if spec.width == 0 || spec.height == 0 || spec.fps == 0 {
+                return Err(format!(
+                    "video stream {:?} must have non-zero width, height, and fps",
+                    spec.stream_id
+                ));
+            }
             let output = directory.join(format!(
                 "{}.segment-{index:03}.mp4",
                 safe_file_stem(&spec.stream_id)
             ));
-            tasks.push(tokio::spawn(record_camera(
+            if !outputs.insert(output.clone()) {
+                return Err(format!(
+                    "video stream {:?} maps to the same output path as another camera",
+                    spec.stream_id
+                ));
+            }
+            match std::fs::symlink_metadata(&output) {
+                Ok(_) => {
+                    return Err(format!(
+                        "video segment output {} already exists",
+                        output.display()
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "could not validate video output {}: {error}",
+                        output.display()
+                    ));
+                }
+            }
+            pending.push((spec, output));
+        }
+
+        // Subscriptions may fail independently (for example, a camera can be
+        // unplugged between discovery and recording). Acquire every receiver
+        // before the first encoder task starts so a later camera failure can
+        // never leave an earlier FFmpeg child or partial MP4 behind.
+        let mut prepared = Vec::with_capacity(pending.len());
+        for (spec, output) in pending {
+            let frames = subscribe(&spec.camera_id)?;
+            prepared.push(PreparedCameraSegment {
                 spec,
                 frames,
-                control.subscribe(),
-                CameraSegment {
+                segment: CameraSegment {
                     ffmpeg: self.ffmpeg.clone(),
                     codec: self.codec.clone(),
                     output,
                     index,
                     timeline_offset_seconds,
                 },
+            });
+        }
+
+        let (control, _) = watch::channel(CaptureState::Recording);
+        let mut tasks = Vec::with_capacity(prepared.len());
+        for prepared in prepared {
+            tasks.push(tokio::spawn(record_camera(
+                prepared.spec,
+                prepared.frames,
+                control.subscribe(),
+                prepared.segment,
             )));
         }
         self.next_segment += 1;
@@ -462,6 +567,14 @@ fn safe_file_stem(value: &str) -> String {
     }
 }
 
+fn safe_path_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,6 +582,114 @@ mod tests {
     #[test]
     fn stream_names_cannot_escape_the_video_directory() {
         assert_eq!(safe_file_stem("arm/wrist ../"), "arm_wrist____");
+    }
+
+    #[test]
+    fn second_camera_subscription_failure_starts_no_encoder_or_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let episode_id = "episode_000001";
+        let video_directory = directory.path().join("videos").join(episode_id);
+        std::fs::create_dir_all(&video_directory).unwrap();
+        let mut capture = VideoCapture {
+            episode_id: episode_id.to_owned(),
+            cameras: Arc::new(CameraManager::new()),
+            root: directory.path().to_path_buf(),
+            specs: vec![
+                CameraCaptureSpec {
+                    stream_id: "first".to_owned(),
+                    camera_id: "camera-1".to_owned(),
+                    width: 640,
+                    height: 480,
+                    fps: 30,
+                },
+                CameraCaptureSpec {
+                    stream_id: "second".to_owned(),
+                    camera_id: "camera-2".to_owned(),
+                    width: 640,
+                    height: 480,
+                    fps: 30,
+                },
+            ],
+            ffmpeg: "ffmpeg".to_owned(),
+            codec: "libx264".to_owned(),
+            next_segment: 0,
+            active: None,
+            completed: Vec::new(),
+        };
+        let (frames, receiver) = watch::channel(None::<Arc<Frame>>);
+        let mut subscriptions = 0;
+
+        let error = capture
+            .start_segment_with(0.0, |_camera_id| {
+                subscriptions += 1;
+                if subscriptions == 1 {
+                    Ok(receiver.clone())
+                } else {
+                    Err("second camera disappeared".to_owned())
+                }
+            })
+            .expect_err("second subscription fails");
+        drop(frames);
+
+        assert!(error.contains("second camera disappeared"));
+        assert_eq!(subscriptions, 2);
+        assert!(
+            capture.active.is_none(),
+            "no encoder task set was published"
+        );
+        assert_eq!(capture.next_segment, 0, "the failed segment is retryable");
+        assert!(
+            std::fs::read_dir(&video_directory)
+                .unwrap()
+                .next()
+                .is_none(),
+            "no first-camera partial output was created"
+        );
+    }
+
+    #[test]
+    fn sanitized_stream_name_collisions_are_rejected_before_subscription() {
+        let directory = tempfile::tempdir().unwrap();
+        let episode_id = "episode_000001";
+        std::fs::create_dir_all(directory.path().join("videos").join(episode_id)).unwrap();
+        let mut capture = VideoCapture {
+            episode_id: episode_id.to_owned(),
+            cameras: Arc::new(CameraManager::new()),
+            root: directory.path().to_path_buf(),
+            specs: vec![
+                CameraCaptureSpec {
+                    stream_id: "arm/wrist".to_owned(),
+                    camera_id: "camera-1".to_owned(),
+                    width: 640,
+                    height: 480,
+                    fps: 30,
+                },
+                CameraCaptureSpec {
+                    stream_id: "arm_wrist".to_owned(),
+                    camera_id: "camera-2".to_owned(),
+                    width: 640,
+                    height: 480,
+                    fps: 30,
+                },
+            ],
+            ffmpeg: "ffmpeg".to_owned(),
+            codec: "libx264".to_owned(),
+            next_segment: 0,
+            active: None,
+            completed: Vec::new(),
+        };
+        let mut subscriptions = 0;
+
+        let error = capture
+            .start_segment_with(0.0, |_camera_id| {
+                subscriptions += 1;
+                let (_, receiver) = watch::channel(None::<Arc<Frame>>);
+                Ok(receiver)
+            })
+            .expect_err("colliding outputs fail");
+
+        assert!(error.contains("same output path"));
+        assert_eq!(subscriptions, 0, "paths are validated before cameras open");
     }
 
     #[test]

@@ -1,0 +1,366 @@
+//! One browser lifecycle for every Charming / ECharts visualization.
+//!
+//! Charming owns the typed option model and initial render. This component
+//! keeps that renderer out of domain panels, coalesces later updates, follows
+//! docked-panel resizes, and disposes the canvas when a run tab closes.
+
+use charming::Chart;
+use charming::element::{
+    AxisPointer, AxisPointerType, JsFunction, LineStyle, Padding, Tooltip, Trigger,
+};
+use dioxus::prelude::*;
+
+pub(crate) const COLOR_LINE: &str = "#e8e8e6";
+pub(crate) const COLOR_INK_FAINT: &str = "#71706c";
+pub(crate) const COLOR_SURFACE: &str = "#ffffff";
+pub(crate) const COLOR_TOOLTIP_BORDER: &str = "#d9d9d6";
+pub(crate) const COLOR_TRAIN: &str = "#2a78d6";
+pub(crate) const COLOR_VALIDATION: &str = "#d9572b";
+pub(crate) const COLOR_THROUGHPUT: &str = "#448361";
+pub(crate) const COLOR_TRANSFER: &str = "#7560b8";
+
+pub(crate) const MONO_FONT: &str = "ui-monospace, SF Mono, JetBrains Mono, Menlo, monospace";
+
+#[derive(Clone, Copy)]
+pub(crate) enum TooltipRateUnit {
+    SamplesPerSecond,
+    BytesPerSecond,
+}
+
+pub(crate) fn studio_numeric_tooltip(maximum_fraction_digits: u8) -> Tooltip {
+    let maximum_fraction_digits = maximum_fraction_digits.min(6);
+    let formatter = JsFunction::new_with_args(
+        "value",
+        &format!(
+            r#"
+const raw = Array.isArray(value) ? value[value.length - 1] : value;
+if (raw === null || raw === undefined || raw === '') return '—';
+const numeric = Number(raw);
+if (!Number.isFinite(numeric)) return '—';
+const magnitude = Math.abs(numeric);
+const options = magnitude > 0 && magnitude < 0.001
+  ? {{ maximumSignificantDigits: 3 }}
+  : {{ maximumFractionDigits: {maximum_fraction_digits} }};
+return numeric.toLocaleString(undefined, options);
+"#
+        ),
+    );
+    studio_tooltip(formatter)
+}
+
+pub(crate) fn studio_rate_tooltip(unit: TooltipRateUnit) -> Tooltip {
+    let body = match unit {
+        TooltipRateUnit::SamplesPerSecond => {
+            r#"
+const raw = Array.isArray(value) ? value[value.length - 1] : value;
+const numeric = Number(raw);
+if (!Number.isFinite(numeric)) return '—';
+return numeric.toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' samples/s';
+"#
+        }
+        TooltipRateUnit::BytesPerSecond => {
+            r#"
+const raw = Array.isArray(value) ? value[value.length - 1] : value;
+const numeric = Number(raw);
+if (!Number.isFinite(numeric)) return '—';
+const gib = 1073741824;
+const mib = 1048576;
+const large = Math.abs(numeric) >= gib;
+const scaled = numeric / (large ? gib : mib);
+return scaled.toLocaleString(undefined, { maximumFractionDigits: 2 }) + (large ? ' GiB/s' : ' MiB/s');
+"#
+        }
+    };
+    studio_tooltip(JsFunction::new_with_args("value", body))
+}
+
+fn studio_tooltip(value_formatter: JsFunction) -> Tooltip {
+    Tooltip::new()
+        .trigger(Trigger::Axis)
+        .axis_pointer(
+            AxisPointer::new()
+                .type_(AxisPointerType::Line)
+                .snap(false)
+                .animation(false)
+                .line_style(
+                    LineStyle::new()
+                        .color(COLOR_INK_FAINT)
+                        .width(1)
+                        .opacity(0.45),
+                ),
+        )
+        .background_color(COLOR_SURFACE)
+        .border_color(COLOR_TOOLTIP_BORDER)
+        .border_width(1)
+        .padding(Padding::Double(6.0, 8.0))
+        .value_formatter(value_formatter)
+}
+
+/// Preserve short-lived peaks while bounding the Rust-to-JavaScript payload.
+/// The first and last samples stay fixed; each interior bucket contributes its
+/// extrema in source order so the reduced line never invents a reversal.
+pub(crate) fn downsample_extrema(points: &[(f64, f64)], budget: usize) -> Vec<(f64, f64)> {
+    if points.len() <= budget || budget < 4 {
+        return points.to_vec();
+    }
+
+    let interior = &points[1..points.len() - 1];
+    let bucket_count = ((budget - 2) / 2).max(1);
+    let bucket_size = interior.len().div_ceil(bucket_count);
+    let mut reduced = Vec::with_capacity(budget + 2);
+    reduced.push(points[0]);
+
+    for bucket in interior.chunks(bucket_size) {
+        let min = bucket
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| left.1.total_cmp(&right.1));
+        let max = bucket
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.1.total_cmp(&right.1));
+        match (min, max) {
+            (Some((min_index, min)), Some((max_index, max))) if min_index <= max_index => {
+                reduced.push(*min);
+                if min_index != max_index {
+                    reduced.push(*max);
+                }
+            }
+            (Some((_, min)), Some((_, max))) => {
+                reduced.push(*max);
+                reduced.push(*min);
+            }
+            _ => {}
+        }
+    }
+
+    reduced.push(points[points.len() - 1]);
+    reduced
+}
+
+#[component]
+pub(crate) fn CharmingChart(
+    id: String,
+    chart: Chart,
+    class: String,
+    aria_label: String,
+) -> Element {
+    let runtime_failed = use_signal(|| false);
+
+    #[cfg(feature = "web")]
+    {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use charming::Echarts;
+
+        let instance = use_hook(|| Rc::new(RefCell::new(None::<Echarts>)));
+        let observer = use_hook(|| Rc::new(RefCell::new(None::<ChartResizeObserver>)));
+
+        let update_instance = Rc::clone(&instance);
+        let update_observer = Rc::clone(&observer);
+        let mut runtime_status = runtime_failed;
+        use_effect(use_reactive((&id, &chart), move |(id, chart)| {
+            let instance = Rc::clone(&update_instance);
+            let observer = Rc::clone(&update_observer);
+            spawn(async move {
+                for _ in 0..100 {
+                    if runtime_ready() {
+                        match render_or_update(&id, &chart, &instance, &observer) {
+                            Ok(()) => runtime_status.set(false),
+                            Err(()) => runtime_status.set(true),
+                        }
+                        return;
+                    }
+                    gloo_timers::future::TimeoutFuture::new(20).await;
+                }
+                runtime_status.set(true);
+            });
+        }));
+
+        let cleanup_id = id.clone();
+        let cleanup_instance = Rc::clone(&instance);
+        let cleanup_observer = Rc::clone(&observer);
+        use_drop(move || {
+            cleanup_observer.borrow_mut().take();
+            if let Some(chart) = cleanup_instance.borrow_mut().take() {
+                dispose_chart(&chart);
+            } else if runtime_ready()
+                && let Some(chart) = existing_chart(&cleanup_id)
+            {
+                dispose_chart(&chart);
+            }
+        });
+    }
+
+    rsx! {
+        div {
+            id,
+            class: "charming-chart {class}",
+            role: "img",
+            "aria-label": aria_label,
+            if runtime_failed() {
+                span { class: "charming-chart-error", role: "alert", "Chart unavailable." }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "web")]
+fn runtime_ready() -> bool {
+    use wasm_bindgen::JsValue;
+
+    js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("echarts"))
+        .ok()
+        .is_some_and(|runtime| !runtime.is_null() && !runtime.is_undefined())
+}
+
+#[cfg(feature = "web")]
+fn render_or_update(
+    id: &str,
+    chart: &Chart,
+    instance: &std::rc::Rc<std::cell::RefCell<Option<charming::Echarts>>>,
+    observer: &std::rc::Rc<std::cell::RefCell<Option<ChartResizeObserver>>>,
+) -> Result<(), ()> {
+    if let Some(existing) = instance.borrow().as_ref() {
+        update_chart(existing, chart);
+        return Ok(());
+    }
+
+    let rendered = charming::WasmRenderer::new_opt(None, None)
+        .render(id, chart)
+        .map_err(|_| ())?;
+    observer
+        .borrow_mut()
+        .replace(ChartResizeObserver::new(id, std::rc::Rc::clone(instance))?);
+    instance.borrow_mut().replace(rendered);
+    Ok(())
+}
+
+#[cfg(feature = "web")]
+fn existing_chart(id: &str) -> Option<charming::Echarts> {
+    use wasm_bindgen::JsCast as _;
+    use wasm_bindgen::JsValue;
+
+    let element = web_sys::window()?.document()?.get_element_by_id(id)?;
+    let runtime = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("echarts")).ok()?;
+    let getter = js_sys::Reflect::get(&runtime, &JsValue::from_str("getInstanceByDom"))
+        .ok()?
+        .dyn_into::<js_sys::Function>()
+        .ok()?;
+    getter
+        .call1(&runtime, element.as_ref())
+        .ok()?
+        .dyn_into()
+        .ok()
+}
+
+#[cfg(feature = "web")]
+fn update_chart(chart: &charming::Echarts, option: &Chart) {
+    use wasm_bindgen::JsValue;
+
+    let settings = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&settings, &JsValue::from_str("notMerge"), &JsValue::TRUE);
+    let _ = js_sys::Reflect::set(&settings, &JsValue::from_str("lazyUpdate"), &JsValue::TRUE);
+    let _ = js_sys::Reflect::set(&settings, &JsValue::from_str("silent"), &JsValue::TRUE);
+    if let Ok(option) = serde_wasm_bindgen::to_value(option) {
+        let _ = call_chart_method(chart, "setOption", &[option, settings.into()]);
+    }
+}
+
+#[cfg(feature = "web")]
+fn dispose_chart(chart: &charming::Echarts) {
+    let _ = call_chart_method(chart, "dispose", &[]);
+}
+
+#[cfg(feature = "web")]
+fn call_chart_method(
+    chart: &charming::Echarts,
+    method: &str,
+    arguments: &[wasm_bindgen::JsValue],
+) -> Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue> {
+    use wasm_bindgen::JsCast as _;
+    use wasm_bindgen::JsValue;
+
+    let this: &JsValue = chart.as_ref();
+    let function =
+        js_sys::Reflect::get(this, &JsValue::from_str(method))?.dyn_into::<js_sys::Function>()?;
+    let arguments = arguments.iter().collect::<js_sys::Array>();
+    function.apply(this, &arguments)
+}
+
+#[cfg(feature = "web")]
+struct ChartResizeObserver {
+    observer: web_sys::ResizeObserver,
+    _callback: wasm_bindgen::closure::Closure<dyn FnMut(js_sys::Array, web_sys::ResizeObserver)>,
+}
+
+#[cfg(feature = "web")]
+impl ChartResizeObserver {
+    fn new(
+        id: &str,
+        instance: std::rc::Rc<std::cell::RefCell<Option<charming::Echarts>>>,
+    ) -> Result<Self, ()> {
+        use wasm_bindgen::JsCast as _;
+
+        let element = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id(id))
+            .ok_or(())?;
+        let resize_element = element.clone();
+        let callback = wasm_bindgen::closure::Closure::wrap(Box::new(
+            move |_entries: js_sys::Array, _observer: web_sys::ResizeObserver| {
+                let rect = resize_element.get_bounding_client_rect();
+                let width = rect.width().round().max(0.0) as u32;
+                let height = rect.height().round().max(0.0) as u32;
+                if width == 0 || height == 0 {
+                    return;
+                }
+                if let Some(chart) = instance.borrow().as_ref() {
+                    charming::WasmRenderer::resize_chart(
+                        chart,
+                        charming::ChartResize::new(width, height, true, None),
+                    );
+                }
+            },
+        )
+            as Box<dyn FnMut(js_sys::Array, web_sys::ResizeObserver)>);
+        let observer =
+            web_sys::ResizeObserver::new(callback.as_ref().unchecked_ref()).map_err(|_| ())?;
+        observer.observe(&element);
+        Ok(Self {
+            observer,
+            _callback: callback,
+        })
+    }
+}
+
+#[cfg(feature = "web")]
+impl Drop for ChartResizeObserver {
+    fn drop(&mut self) {
+        self.observer.disconnect();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tooltip_formatters_bound_precision_and_name_rate_units() {
+        let numeric = serde_json::to_value(studio_numeric_tooltip(3))
+            .expect("numeric tooltip should serialize");
+        let numeric_formatter = numeric["valueFormatter"]
+            .as_str()
+            .expect("numeric tooltip should contain a formatter");
+        assert!(numeric_formatter.contains("maximumFractionDigits: 3"));
+
+        let byte_rate = serde_json::to_value(studio_rate_tooltip(TooltipRateUnit::BytesPerSecond))
+            .expect("rate tooltip should serialize");
+        let byte_formatter = byte_rate["valueFormatter"]
+            .as_str()
+            .expect("rate tooltip should contain a formatter");
+        assert!(byte_formatter.contains("GiB/s"));
+        assert!(byte_formatter.contains("MiB/s"));
+    }
+}

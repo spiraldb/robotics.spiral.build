@@ -8,6 +8,8 @@ use crate::{Error, Result};
 
 pub const CONFIG_FILE: &str = "config.json";
 pub const WEIGHTS_FILE: &str = "model.safetensors";
+pub const MAX_MODEL_CONFIG_BYTES: usize = 1024 * 1024;
+pub const MAX_MODEL_WEIGHTS_BYTES: usize = 512 * 1024 * 1024;
 
 /// Content-addressed identity of the exact bytes admitted to the runtime.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -98,8 +100,8 @@ impl ModelFiles {
         let path = path.as_ref();
         let config = path.join(CONFIG_FILE);
         let weights = path.join(WEIGHTS_FILE);
-        require_file(&config)?;
-        require_file(&weights)?;
+        require_file(&config, MAX_MODEL_CONFIG_BYTES, "model config")?;
+        require_file(&weights, MAX_MODEL_WEIGHTS_BYTES, "model weights")?;
         Ok(Self {
             config,
             weights,
@@ -124,8 +126,8 @@ impl ModelFiles {
     /// Copy both files into process-owned memory, verify any expected hashes,
     /// and bind the identity to the bytes that will actually be parsed.
     pub fn load(&self) -> Result<ModelArtifact> {
-        let config = std::fs::read(&self.config).at(&self.config)?;
-        let weights = std::fs::read(&self.weights).at(&self.weights)?;
+        let config = read_bounded_file(&self.config, MAX_MODEL_CONFIG_BYTES, "model config")?;
+        let weights = read_bounded_file(&self.weights, MAX_MODEL_WEIGHTS_BYTES, "model weights")?;
         ModelArtifact::from_bytes_with_identity_and_label(
             config,
             weights,
@@ -194,6 +196,8 @@ impl ModelArtifact {
         mut identity: ModelIdentity,
         weights_label: String,
     ) -> Result<Self> {
+        require_byte_len(config.len(), MAX_MODEL_CONFIG_BYTES, "model config")?;
+        require_byte_len(weights.len(), MAX_MODEL_WEIGHTS_BYTES, "model weights")?;
         let config_sha256 = sha256_bytes(&config);
         let weights_sha256 = sha256_bytes(&weights);
         verify_digest("config", identity.config_sha256.as_deref(), &config_sha256)?;
@@ -221,7 +225,7 @@ impl ModelArtifact {
     }
 }
 
-fn require_file(path: &Path) -> Result<()> {
+fn require_file(path: &Path, max_bytes: usize, label: &str) -> Result<()> {
     let metadata = std::fs::metadata(path).at(path)?;
     if !metadata.is_file() {
         return Err(Error::Artifact(format!(
@@ -229,7 +233,54 @@ fn require_file(path: &Path) -> Result<()> {
             path.display()
         )));
     }
+    let byte_len = usize::try_from(metadata.len()).map_err(|_| {
+        Error::Artifact(format!(
+            "{label} size does not fit this process address space"
+        ))
+    })?;
+    require_byte_len(byte_len, max_bytes, label)?;
     Ok(())
+}
+
+fn require_byte_len(byte_len: usize, max_bytes: usize, label: &str) -> Result<()> {
+    if byte_len > max_bytes {
+        return Err(Error::Artifact(format!(
+            "{label} is {byte_len} bytes, exceeding the {max_bytes}-byte limit"
+        )));
+    }
+    Ok(())
+}
+
+fn read_bounded_file(path: &Path, max_bytes: usize, label: &str) -> Result<Vec<u8>> {
+    use std::io::Read as _;
+
+    let file = std::fs::File::open(path).at(path)?;
+    let metadata = file.metadata().at(path)?;
+    if !metadata.is_file() {
+        return Err(Error::Artifact(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
+    let expected = usize::try_from(metadata.len()).map_err(|_| {
+        Error::Artifact(format!(
+            "{label} size does not fit this process address space"
+        ))
+    })?;
+    require_byte_len(expected, max_bytes, label)?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(expected).map_err(|error| {
+        Error::Artifact(format!("could not reserve memory for {label}: {error}"))
+    })?;
+    file.take(
+        u64::try_from(max_bytes)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1),
+    )
+    .read_to_end(&mut bytes)
+    .at(path)?;
+    require_byte_len(bytes.len(), max_bytes, label)?;
+    Ok(bytes)
 }
 
 fn sha256_bytes(bytes: &[u8]) -> String {
@@ -369,6 +420,15 @@ pub fn download_remote_model_to(
     model: &RemoteModel,
     cache_root: impl AsRef<Path>,
 ) -> Result<ModelFiles> {
+    let (Some(config_sha256), Some(weights_sha256)) = (
+        model.identity.config_sha256.as_deref(),
+        model.identity.weights_sha256.as_deref(),
+    ) else {
+        return Err(Error::Artifact(
+            "remote models require both config and weights SHA-256 checksums before download"
+                .to_owned(),
+        ));
+    };
     let cache_key = sha256_bytes(
         format!(
             "{}\n{}\n{}\n{}",
@@ -394,13 +454,15 @@ pub fn download_remote_model_to(
         &client,
         &model.config_url,
         &config,
-        model.identity.config_sha256.as_deref(),
+        Some(config_sha256),
+        MAX_MODEL_CONFIG_BYTES,
     )?;
     download_file(
         &client,
         &model.weights_url,
         &weights,
-        model.identity.weights_sha256.as_deref(),
+        Some(weights_sha256),
+        MAX_MODEL_WEIGHTS_BYTES,
     )?;
     let files = ModelFiles {
         config,
@@ -417,17 +479,22 @@ fn download_file(
     url: &str,
     destination: &Path,
     expected_sha256: Option<&str>,
+    max_bytes: usize,
 ) -> Result<()> {
     use std::io::Write as _;
 
-    if destination.is_file()
-        && expected_sha256
-            .map(|expected| {
-                sha256_file(destination).is_ok_and(|actual| actual.eq_ignore_ascii_case(expected))
-            })
-            .unwrap_or(true)
-    {
-        return Ok(());
+    if destination.is_file() {
+        let expected = expected_sha256.ok_or_else(|| {
+            Error::Artifact(format!(
+                "refusing to reuse checksum-less cached artifact {}",
+                destination.display()
+            ))
+        })?;
+        if require_file(destination, max_bytes, "cached model artifact").is_ok()
+            && sha256_file(destination).is_ok_and(|actual| actual.eq_ignore_ascii_case(expected))
+        {
+            return Ok(());
+        }
     }
 
     let mut response = client
@@ -442,7 +509,15 @@ fn download_file(
         .parent()
         .ok_or_else(|| Error::Artifact("download destination has no parent".to_owned()))?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent).at(parent)?;
-    std::io::copy(&mut response, temporary.as_file_mut()).at(destination)?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > u64::try_from(max_bytes).unwrap_or(u64::MAX))
+    {
+        return Err(Error::Artifact(format!(
+            "download from {url} exceeds the {max_bytes}-byte artifact limit"
+        )));
+    }
+    copy_with_limit(&mut response, temporary.as_file_mut(), max_bytes).at(destination)?;
     temporary.flush().at(destination)?;
     if let Some(expected) = expected_sha256 {
         let actual = sha256_file(temporary.path())?;
@@ -453,6 +528,24 @@ fn download_file(
         source: error.error,
     })?;
     Ok(())
+}
+
+#[cfg(feature = "download")]
+fn copy_with_limit(
+    reader: &mut impl std::io::Read,
+    writer: &mut impl std::io::Write,
+    max_bytes: usize,
+) -> std::io::Result<u64> {
+    let limit = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+    let mut limited = std::io::Read::take(reader, limit.saturating_add(1));
+    let copied = std::io::copy(&mut limited, writer)?;
+    if copied > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("artifact exceeds the {max_bytes}-byte limit"),
+        ));
+    }
+    Ok(copied)
 }
 
 #[cfg(feature = "download")]
@@ -470,12 +563,21 @@ pub(crate) fn download_verified_file(url: &str, destination: &Path, sha256: &str
             url: "HTTP client".to_owned(),
             source,
         })?;
-    download_file(&client, url, destination, Some(sha256))
+    download_file(
+        &client,
+        url,
+        destination,
+        Some(sha256),
+        MAX_MODEL_WEIGHTS_BYTES,
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{require_hex, verify_digest};
+    use super::{
+        MAX_MODEL_CONFIG_BYTES, MAX_MODEL_WEIGHTS_BYTES, require_byte_len, require_hex,
+        verify_digest,
+    };
 
     #[test]
     fn immutable_identifiers_have_exact_lengths() {
@@ -498,6 +600,48 @@ mod tests {
         assert_eq!(artifact.identity().weights_sha256().unwrap().len(), 64);
     }
 
+    #[test]
+    fn model_byte_limits_are_inclusive() {
+        assert!(
+            require_byte_len(
+                MAX_MODEL_CONFIG_BYTES,
+                MAX_MODEL_CONFIG_BYTES,
+                "model config"
+            )
+            .is_ok()
+        );
+        assert!(
+            require_byte_len(
+                MAX_MODEL_CONFIG_BYTES + 1,
+                MAX_MODEL_CONFIG_BYTES,
+                "model config"
+            )
+            .is_err()
+        );
+        assert!(
+            require_byte_len(
+                MAX_MODEL_WEIGHTS_BYTES,
+                MAX_MODEL_WEIGHTS_BYTES,
+                "model weights"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn oversized_local_files_are_rejected_before_reading() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join(super::CONFIG_FILE);
+        let weights = directory.path().join(super::WEIGHTS_FILE);
+        std::fs::File::create(&config)
+            .unwrap()
+            .set_len((MAX_MODEL_CONFIG_BYTES + 1) as u64)
+            .unwrap();
+        std::fs::write(weights, b"weights").unwrap();
+        let error = super::ModelFiles::from_directory(directory.path()).unwrap_err();
+        assert!(error.to_string().contains("model config"));
+    }
+
     #[cfg(feature = "download")]
     #[test]
     fn remote_models_require_pinned_revisions_and_https_urls() {
@@ -518,6 +662,61 @@ mod tests {
                 "https://example.com/model.safetensors",
             )
             .is_err()
+        );
+    }
+
+    #[cfg(feature = "download")]
+    #[test]
+    fn checksum_less_cache_entries_are_never_trusted() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        std::fs::write(&path, b"substituted").unwrap();
+        let client = reqwest::blocking::Client::new();
+        let error = super::download_file(
+            &client,
+            "https://example.invalid/config.json",
+            &path,
+            None,
+            MAX_MODEL_CONFIG_BYTES,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("checksum-less cached artifact"));
+    }
+
+    #[cfg(feature = "download")]
+    #[test]
+    fn streaming_download_limit_stops_at_one_byte_over_the_boundary() {
+        let mut exact = std::io::Cursor::new(vec![0_u8; 16]);
+        let mut output = Vec::new();
+        assert_eq!(
+            super::copy_with_limit(&mut exact, &mut output, 16).unwrap(),
+            16
+        );
+
+        let mut oversized = std::io::Cursor::new(vec![0_u8; 17]);
+        let mut output = Vec::new();
+        assert!(super::copy_with_limit(&mut oversized, &mut output, 16).is_err());
+        assert_eq!(output.len(), 17);
+    }
+
+    #[cfg(feature = "download")]
+    #[test]
+    fn remote_download_requires_the_checksum_pair_before_network_or_cache_io() {
+        let model = super::RemoteModel::pinned(
+            "model source",
+            "a".repeat(40),
+            "https://example.invalid/config.json",
+            "https://example.invalid/model.safetensors",
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let error = super::download_remote_model_to(&model, directory.path()).unwrap_err();
+        assert!(error.to_string().contains("both config and weights"));
+        assert!(
+            std::fs::read_dir(directory.path())
+                .unwrap()
+                .next()
+                .is_none()
         );
     }
 }

@@ -2,7 +2,7 @@
 
 use dioxus::prelude::WritableExt;
 use gloo_net::http::Method;
-use spiral_robotics_core::api::{ModeSelection, TorqueRequest};
+use spiral_robotics_contracts::api::ModeSelection;
 
 use crate::frontend::api::http as api;
 use crate::frontend::app::state::{Selection, Studio};
@@ -30,27 +30,13 @@ pub(crate) fn dispatch_live_action(mut studio: Studio, action: LiveAction) {
 
 fn hold_robot(studio: Studio, id: String) {
     studio.run("", async move {
-        let mode = ModeSelection::Manual { robot: id.clone() };
-        api::send(Method::POST, "/api/mode", Some(&mode)).await?;
-        api::send(
-            Method::POST,
-            &format!("/api/robots/{id}/torque"),
-            Some(&TorqueRequest { enabled: true }),
-        )
-        .await
+        api::post(&format!("/api/robots/{id}/hold")).await
     });
 }
 
 fn release_robot(studio: Studio, id: String) {
     studio.run_safety("Motors released.", async move {
-        let idle = api::send(Method::POST, "/api/mode", Some(&ModeSelection::Idle)).await;
-        api::send(
-            Method::POST,
-            &format!("/api/robots/{id}/torque"),
-            Some(&TorqueRequest { enabled: false }),
-        )
-        .await?;
-        idle
+        api::post(&format!("/api/robots/{id}/release")).await
     });
 }
 

@@ -15,6 +15,7 @@ use spiral_robotics::calibration::{
     Calibration, CalibrationInput, Direction, MotorSpec, RangeTracker, build_calibration,
     validate_motor_specs,
 };
+use spiral_robotics::calibration_codec;
 use spiral_robotics::feetech::FeetechBus;
 use spiral_robotics::robot_config::RobotConfig;
 
@@ -188,8 +189,8 @@ fn run(args: Args) -> Result<()> {
         args.robot_id.as_deref(),
         args.robot_type.as_deref(),
         port_update,
-        serde_json::to_value(&motors)?,
-        serde_json::to_value(&calibration)?,
+        document.encode_motor_specs(&motors)?,
+        calibration_codec::encode_calibration(&calibration)?,
     )?;
 
     if args.dry_run {
@@ -277,7 +278,7 @@ fn resolve_motors(
     let mut motors = match document.motors() {
         None | Some(Value::Null) => BTreeMap::new(),
         Some(_) => document
-            .deserialize_motors::<BTreeMap<String, MotorSpec>>()?
+            .motor_specs()?
             .expect("a present non-null motors value must deserialize to Some"),
     };
     let mut updated_names = BTreeSet::new();
@@ -294,11 +295,7 @@ fn resolve_motors(
         } else {
             motors.insert(
                 argument.name,
-                MotorSpec {
-                    id: argument.id,
-                    direction: argument.direction.unwrap_or_default(),
-                    extra: BTreeMap::new(),
-                },
+                MotorSpec::new(argument.id, argument.direction.unwrap_or_default()),
             );
         }
     }
@@ -383,7 +380,7 @@ fn parse_calibration_input(contents: &str, origin: &str) -> Result<CalibrationIn
     if contents.trim().is_empty() {
         return Err(format!("calibration input from {origin} is empty").into());
     }
-    serde_json::from_str(contents).map_err(|error| {
+    calibration_codec::decode_input(contents).map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("invalid calibration JSON from {origin}: {error}"),
@@ -627,9 +624,9 @@ mod tests {
         assert_eq!(merged.len(), 3);
         assert_eq!(merged["shoulder"].id, 7);
         assert_eq!(merged["shoulder"].direction, Direction::Reversed);
-        assert_eq!(merged["shoulder"].extra["model"], "sts3215");
+        assert_eq!(merged["shoulder"].model.as_deref(), Some("sts3215"));
         assert_eq!(merged["elbow"].id, 2);
-        assert_eq!(merged["elbow"].extra["model"], "sts3215");
+        assert_eq!(merged["elbow"].model.as_deref(), Some("sts3215"));
         assert_eq!(merged["wrist"].direction, Direction::Normal);
     }
 
@@ -647,7 +644,7 @@ mod tests {
 
         assert_eq!(merged["joint"].id, 4);
         assert_eq!(merged["joint"].direction, Direction::Normal);
-        assert_eq!(merged["joint"].extra["model"], "custom");
+        assert_eq!(merged["joint"].model.as_deref(), Some("custom"));
     }
 
     #[test]
@@ -668,7 +665,7 @@ mod tests {
             MotorSpec {
                 id: 7,
                 direction: Direction::Normal,
-                extra: BTreeMap::new(),
+                model: None,
             },
         )]);
         let ordered = motors.iter().collect::<Vec<_>>();

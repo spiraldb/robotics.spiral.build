@@ -253,6 +253,9 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
         storage,
         training: training.clone(),
         rollout: rollout.clone(),
+        catalog_lease: Arc::new(
+            crate::backend::application::catalog_lease::CatalogMutationLease::default(),
+        ),
         recording_video: Arc::new(tokio::sync::Mutex::new(None)),
         video_encoder: VideoEncoderSettings {
             executable: args.ffmpeg.clone(),
@@ -305,7 +308,9 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
     let cleanup = async {
         training.shutdown().await;
         rollout.shutdown().await;
-        hardware.shutdown().await;
+        if let Err(error) = hardware.shutdown().await {
+            tracing::error!("hardware shutdown did not verify every motor release: {error}");
+        }
         routes::finish_stale_video_capture(&cleanup_state).await;
         let camera_result = tokio::task::spawn_blocking({
             let cameras = cameras.clone();

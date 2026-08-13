@@ -10,15 +10,98 @@ use std::error::Error;
 use std::fmt;
 
 use crate::calibration::MotorSpec;
-use crate::feetech::{
-    FeetechBus, FeetechError, MAX_GOAL_POSITION, MotorFaults, MotorLimits, MotorSample,
-};
+
+/// A fault reported by a motor controller.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MotorFault {
+    Voltage,
+    Overheat,
+    Overload,
+}
+
+impl fmt::Display for MotorFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Voltage => "supply voltage",
+            Self::Overheat => "overheating",
+            Self::Overload => "overloaded",
+        })
+    }
+}
+
+/// Raw motor fault flags, decoded as far as the shared bus contract can name.
+///
+/// The raw byte remains available so an adapter never turns an unfamiliar
+/// hardware fault into a healthy reading.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MotorFaults {
+    pub raw: u8,
+}
+
+impl MotorFaults {
+    pub(crate) const VOLTAGE: u8 = 0x01;
+    pub(crate) const OVERHEAT: u8 = 0x04;
+    pub(crate) const OVERLOAD: u8 = 0x20;
+
+    /// True when the motor is reporting anything at all.
+    pub fn any(self) -> bool {
+        self.raw != 0
+    }
+
+    /// The faults this program can name, in the order it names them.
+    pub fn named(self) -> Vec<MotorFault> {
+        let mut faults = Vec::new();
+        if self.raw & Self::OVERHEAT != 0 {
+            faults.push(MotorFault::Overheat);
+        }
+        if self.raw & Self::OVERLOAD != 0 {
+            faults.push(MotorFault::Overload);
+        }
+        if self.raw & Self::VOLTAGE != 0 {
+            faults.push(MotorFault::Voltage);
+        }
+        faults
+    }
+
+    /// Bits that are set but not named above.
+    pub fn unnamed(self) -> u8 {
+        self.raw & !(Self::VOLTAGE | Self::OVERHEAT | Self::OVERLOAD)
+    }
+}
+
+/// Everything one motor reports in a single bus sample.
+///
+/// Values use physical units. Every field but position is optional so an
+/// adapter can faithfully represent hardware that supplies fewer readings.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MotorSample {
+    pub position: i64,
+    /// Shaft speed in degrees per second, signed.
+    pub speed_degrees_per_second: Option<f64>,
+    /// Load as a signed fraction of the motor's rated torque.
+    pub load: Option<f64>,
+    pub voltage_volts: Option<f64>,
+    pub temperature_celsius: Option<f64>,
+    pub current_amps: Option<f64>,
+    pub moving: Option<bool>,
+    pub faults: MotorFaults,
+}
+
+/// Limits a motor controller enforces on itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MotorLimits {
+    pub max_temperature_celsius: Option<f64>,
+    pub min_voltage_volts: Option<f64>,
+    pub max_voltage_volts: Option<f64>,
+    /// Configured torque ceiling as a fraction of the motor's rated torque.
+    pub max_load: Option<f64>,
+}
 
 /// Something went wrong talking to a motor bus.
 #[derive(Debug)]
 pub enum BusError {
-    /// A real Feetech bus reported a protocol or transport failure.
-    Feetech(FeetechError),
+    /// A concrete driver reported a protocol or transport failure.
+    Driver(Box<dyn Error + Send + Sync>),
     /// A command named a motor the bus does not have.
     UnknownMotor { motor: String },
 }
@@ -26,7 +109,7 @@ pub enum BusError {
 impl fmt::Display for BusError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Feetech(source) => source.fmt(formatter),
+            Self::Driver(source) => source.fmt(formatter),
             Self::UnknownMotor { motor } => {
                 write!(formatter, "motor {motor:?} is not configured on this bus")
             }
@@ -37,15 +120,17 @@ impl fmt::Display for BusError {
 impl Error for BusError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Feetech(source) => Some(source),
+            Self::Driver(source) => Some(source.as_ref()),
             Self::UnknownMotor { .. } => None,
         }
     }
 }
 
-impl From<FeetechError> for BusError {
-    fn from(source: FeetechError) -> Self {
-        Self::Feetech(source)
+impl BusError {
+    /// Preserve a driver's concrete error as a source without exposing its
+    /// type in the policy-facing boundary.
+    pub fn driver(source: impl Error + Send + Sync + 'static) -> Self {
+        Self::Driver(Box::new(source))
     }
 }
 
@@ -87,40 +172,17 @@ pub trait MotorBus: Send {
     fn set_torque(&mut self, enabled: bool) -> Result<(), BusError>;
 }
 
-impl MotorBus for FeetechBus {
-    fn motor_names(&self) -> Vec<String> {
-        Self::motor_names(self)
-    }
-
-    fn read_positions(&mut self) -> Result<BTreeMap<String, i64>, BusError> {
-        Ok(Self::read_positions(self)?)
-    }
-
-    fn read_samples(&mut self) -> Result<BTreeMap<String, MotorSample>, BusError> {
-        Ok(Self::read_samples(self)?)
-    }
-
-    fn read_limits(&mut self) -> BTreeMap<String, MotorLimits> {
-        Self::read_limits(self)
-    }
-
-    fn write_goal_positions(&mut self, goals: &BTreeMap<String, i64>) -> Result<(), BusError> {
-        Ok(Self::write_goal_positions(self, goals)?)
-    }
-
-    fn set_torque(&mut self, enabled: bool) -> Result<(), BusError> {
-        Ok(Self::set_torque(self, enabled)?)
-    }
-}
-
 /// Encoder counts a simulated motor travels between two reads while driven.
 ///
 /// At the studio's control rate this is roughly a quarter turn per second,
 /// slow enough to watch and fast enough to feel responsive.
 const SIMULATED_STEP: i64 = 24;
 
+/// The simulated motor's physical 12-bit encoder span.
+const SIMULATED_MAX_POSITION: i64 = 4095;
+
 /// Center of a simulated motor's travel, matching a 12-bit encoder.
-const SIMULATED_CENTER: i64 = (MAX_GOAL_POSITION + 1) / 2;
+const SIMULATED_CENTER: i64 = (SIMULATED_MAX_POSITION + 1) / 2;
 
 /// How far an idle simulated motor sweeps either side of center.
 const SIMULATED_DRIFT_AMPLITUDE: f64 = 800.0;
@@ -337,7 +399,7 @@ impl MotorBus for SimulatedBus {
                 .motors
                 .get_mut(name)
                 .expect("every goal name was just checked");
-            motor.goal = (*goal).clamp(0, MAX_GOAL_POSITION);
+            motor.goal = (*goal).clamp(0, SIMULATED_MAX_POSITION);
         }
         Ok(())
     }
@@ -355,8 +417,6 @@ impl MotorBus for SimulatedBus {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
     use super::*;
     use crate::calibration::Direction;
 
@@ -372,7 +432,7 @@ mod tests {
         MotorSpec {
             id,
             direction: Direction::Normal,
-            extra: BTreeMap::from([("model".to_owned(), json!("sts3215"))]),
+            model: Some("sts3215".to_owned()),
         }
     }
 
@@ -420,7 +480,7 @@ mod tests {
         }
         let positions = bus.read_positions().unwrap();
         assert_eq!(positions["shoulder_pan"], 0);
-        assert_eq!(positions["elbow_flex"], MAX_GOAL_POSITION);
+        assert_eq!(positions["elbow_flex"], SIMULATED_MAX_POSITION);
     }
 
     #[test]
@@ -529,6 +589,22 @@ mod tests {
             maximum - minimum > SIMULATED_DRIFT_AMPLITUDE as i64,
             "a full sweep should cover both sides of center"
         );
-        assert!(minimum >= 0 && maximum <= MAX_GOAL_POSITION);
+        assert!(minimum >= 0 && maximum <= SIMULATED_MAX_POSITION);
+    }
+
+    #[test]
+    fn motor_bus_signature_contains_only_neutral_boundary_types() {
+        let source = include_str!("bus.rs");
+        let (_, after_declaration) = source
+            .split_once("pub trait MotorBus")
+            .expect("MotorBus declaration");
+        let (signature, _) = after_declaration
+            .split_once("\n}")
+            .expect("MotorBus declaration end");
+
+        assert!(
+            !signature.to_ascii_lowercase().contains("feetech"),
+            "the policy-facing MotorBus signature must not expose a concrete driver"
+        );
     }
 }

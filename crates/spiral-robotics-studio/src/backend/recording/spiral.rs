@@ -13,11 +13,11 @@ use arrow_array::{
     UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use spiral_robotics_core::spiral::{SCHEMA_VERSION, column as db};
+use spiral_robotics_contracts::spiral::{SCHEMA_VERSION, column as db};
 
 use crate::backend::recording::episodes::{EpisodeCompletion, EpisodeError, EpisodeStart, Sample};
 
-/// Schema for [`spiral_robotics_core::spiral::Table::Datasets`].
+/// Schema for [`spiral_robotics_contracts::spiral::Table::Datasets`].
 pub(crate) fn datasets_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new(db::DATASET_ID, DataType::Utf8, false),
@@ -40,7 +40,7 @@ pub(crate) fn dataset_batch(start: &EpisodeStart) -> Result<RecordBatch, Episode
         .map_err(|error| invalid(format!("building Spiral dataset batch: {error}")))
 }
 
-/// One row destined for [`spiral_robotics_core::spiral::Table::JointSamples`].
+/// One row destined for [`spiral_robotics_contracts::spiral::Table::JointSamples`].
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct JointSampleRow {
     pub episode_id: String,
@@ -143,7 +143,7 @@ impl SpiralEpisodeEncoder {
 }
 
 /// Schema for the completion row inserted last into
-/// [`spiral_robotics_core::spiral::Table::Episodes`].
+/// [`spiral_robotics_contracts::spiral::Table::Episodes`].
 pub(crate) fn episodes_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new(db::EPISODE_ID, DataType::Utf8, false),
@@ -186,7 +186,7 @@ pub(crate) fn episode_completion_batch(
         .map_err(|error| invalid(format!("building Spiral episode batch: {error}")))
 }
 
-/// Schema for [`spiral_robotics_core::spiral::Table::EpisodeStreams`].
+/// Schema for [`spiral_robotics_contracts::spiral::Table::EpisodeStreams`].
 pub(crate) fn episode_streams_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new(db::EPISODE_ID, DataType::Utf8, false),
@@ -278,7 +278,7 @@ pub(crate) fn video_streams_batch(rows: &[VideoStreamRow]) -> Result<RecordBatch
         .map_err(|error| invalid(format!("building Spiral video stream batch: {error}")))
 }
 
-/// Schema for [`spiral_robotics_core::spiral::Table::JointSamples`].
+/// Schema for [`spiral_robotics_contracts::spiral::Table::JointSamples`].
 pub(crate) fn joint_samples_schema() -> SchemaRef {
     let nullable_f64_list =
         || DataType::List(Arc::new(Field::new("item", DataType::Float64, true)));
@@ -482,10 +482,10 @@ fn invalid(message: impl Into<String>) -> EpisodeError {
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_core::spiral::Table;
+    use spiral_robotics_contracts::spiral::Table;
 
     use arrow_array::{Array as _, Float64Array, ListArray, StringArray, UInt64Array};
-    use spiral_robotics_core::api::EpisodeArm;
+    use spiral_robotics_contracts::api::EpisodeArm;
 
     use super::*;
 

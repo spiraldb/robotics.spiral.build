@@ -290,7 +290,7 @@ pub(crate) fn attach_historical_traces(
 mod tests {
     use super::*;
     use crate::frontend::api::http::{EpisodeTimelineResponse, TimelineMetadata, TimelineSample};
-    use spiral_robotics_core::api::EpisodeSummary;
+    use spiral_robotics_contracts::api::EpisodeSummary;
 
     fn preview_with_trace_error(reason: &str) -> HistoricalPreview {
         HistoricalPreview {

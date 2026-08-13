@@ -1,7 +1,7 @@
 //! Reactive assembly of the persisted frontend panel workspace.
 
 use dioxus::prelude::*;
-use spiral_robotics_core::api::{ModeSelection, ReplayPhase, ReplayPurpose};
+use spiral_robotics_contracts::api::{ModeSelection, ReplayPhase, ReplayPurpose};
 use spiral_robotics_panels::{DockZone, Panel, PanelId, PanelLayout, PanelWorkspace};
 #[cfg(test)]
 use spiral_robotics_panels::{LayoutNode, SplitAxis};
@@ -757,7 +757,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                                 studio,
                                 &recording.episode,
                                 true,
-                                EventHandler::new(move |summary: spiral_robotics_core::api::EpisodeSummary| {
+                                EventHandler::new(move |summary: spiral_robotics_contracts::api::EpisodeSummary| {
                                     let next_revision = historical_revision.peek().wrapping_add(1);
                                     historical_revision.set(next_revision);
                                     historical_state.set(None);
@@ -841,13 +841,13 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
 
 /// Physical seeks are consequences of the Timeline playhead, not transport
 /// that may replace or reposition it while the arm is travelling to a pose.
-fn replay_owns_timeline_transport(replay: &spiral_robotics_core::api::ReplayProgress) -> bool {
+fn replay_owns_timeline_transport(replay: &spiral_robotics_contracts::api::ReplayProgress) -> bool {
     replay.purpose == ReplayPurpose::Timeline
 }
 
 fn replay_matches_timeline_subject(
     subject_episode: Option<&str>,
-    replay: &spiral_robotics_core::api::ReplayProgress,
+    replay: &spiral_robotics_contracts::api::ReplayProgress,
 ) -> bool {
     subject_episode == Some(replay.episode.as_str())
 }
@@ -868,7 +868,7 @@ fn visible_timeline_episode(
 }
 
 #[cfg(test)]
-fn replay_drives_recorded_media(replay: &spiral_robotics_core::api::ReplayProgress) -> bool {
+fn replay_drives_recorded_media(replay: &spiral_robotics_contracts::api::ReplayProgress) -> bool {
     replay_owns_timeline_transport(replay) && replay.phase == ReplayPhase::Playing && !replay.paused
 }
 
@@ -1007,7 +1007,7 @@ mod tests {
     use crate::frontend::api::http::{
         EpisodeTimelineResponse, TimelineMetadata, TimelineSample, VideoAssetMetadata,
     };
-    use spiral_robotics_core::api::EpisodeSummary;
+    use spiral_robotics_contracts::api::EpisodeSummary;
 
     fn preview(at: f64, videos: Vec<VideoAssetMetadata>) -> HistoricalPreview {
         HistoricalPreview {
@@ -1226,7 +1226,7 @@ mod tests {
 
     #[test]
     fn physical_seek_never_takes_ownership_of_timeline_transport() {
-        let mut replay = spiral_robotics_core::api::ReplayProgress {
+        let mut replay = spiral_robotics_contracts::api::ReplayProgress {
             episode: "take-1".to_owned(),
             robot: "follower".to_owned(),
             frame: 0,

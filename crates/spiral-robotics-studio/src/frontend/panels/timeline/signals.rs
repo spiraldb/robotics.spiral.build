@@ -7,7 +7,7 @@
 //! actually operate.
 
 #[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
-use spiral_robotics_core::api::TelemetryFrame;
+use spiral_robotics_contracts::api::TelemetryFrame;
 use spiral_robotics_core::arm;
 
 /// Thirty minutes at the studio's 20 Hz telemetry publish rate.
@@ -188,7 +188,7 @@ impl SignalStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_core::api::{JointTelemetry, RecordingProgress, RobotTelemetry};
+    use spiral_robotics_contracts::api::{JointTelemetry, RecordingProgress, RobotTelemetry};
 
     fn joint(name: &str, degrees: Option<f64>) -> JointTelemetry {
         JointTelemetry {

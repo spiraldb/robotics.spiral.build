@@ -7,8 +7,9 @@
 //! or cameras — and so without the application's model of those things leaking
 //! into the renderer one field at a time.
 
-use spiral_robotics_core::glam::{Mat4, Vec3};
-use spiral_robotics_core::urdf::Geometry;
+use glam::{Mat4, Vec3};
+
+use crate::urdf::Geometry;
 
 /// A caller-assigned handle for one addressable thing in the scene.
 ///

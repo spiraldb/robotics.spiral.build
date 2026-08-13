@@ -19,10 +19,10 @@ use std::rc::Rc;
 use dioxus::prelude::*;
 use dioxus_elements::geometry::WheelDelta;
 use dioxus_elements::input_data::MouseButton;
-use spiral_robotics_core::api::{MotorCondition, RobotSummary};
+use spiral_robotics_contracts::api::{MotorCondition, RobotSummary};
 use spiral_robotics_core::arm::{JointAngles, counts_to_degrees};
 use spiral_robotics_core::calibration::{Direction, denormalize_centered_raw};
-use spiral_robotics_core::glam::Vec3;
+use spiral_robotics_viewport::glam::Vec3;
 use spiral_robotics_viewport::robot::BENCH_SPACING;
 use spiral_robotics_viewport::{
     ArmPlacement, Camera, CameraMount, Condition, Drag, Gesture, Interaction, Pinch, RobotEntity,
@@ -555,7 +555,7 @@ fn matches_selection(selection: Option<&Selection>, entity: &RobotEntity) -> boo
 /// about itself. Neither is stored in the scene, because both change far more
 /// often than the geometry does.
 fn compose(
-    urdf: &spiral_robotics_core::urdf::Urdf,
+    urdf: &spiral_robotics_viewport::Urdf,
     studio: &crate::frontend::app::state::Studio,
     grid: bool,
     source: &SceneSource,
@@ -791,7 +791,7 @@ fn format_history_time(seconds: f64) -> String {
 }
 
 /// Where a bound camera sits, for the ones whose file says.
-fn mount_of(binding: &spiral_robotics_core::api::CameraBinding) -> Option<CameraMount> {
+fn mount_of(binding: &spiral_robotics_contracts::api::CameraBinding) -> Option<CameraMount> {
     let mount = binding.mount.as_ref()?;
     Some(CameraMount {
         role: binding.name.clone(),
@@ -986,7 +986,7 @@ impl Drop for WindowListener {
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_core::api::{ConnectionStatus, MotorLimits, MotorSummary};
+    use spiral_robotics_contracts::api::{ConnectionStatus, MotorLimits, MotorSummary};
     use spiral_robotics_core::calibration::MotorCalibration;
 
     use super::*;

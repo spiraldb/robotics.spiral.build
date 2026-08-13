@@ -12,3 +12,4 @@ crates/spiral-robotics-studio/episodes
 /.agents
 /.impeccable
 __pycache__/
+node_modules/

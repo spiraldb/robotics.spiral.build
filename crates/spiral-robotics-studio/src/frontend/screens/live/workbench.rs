@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use dioxus::prelude::*;
-use spiral_robotics_core::api::{ModeSelection, default_teleoperation_pair};
+use spiral_robotics_contracts::api::{ModeSelection, default_teleoperation_pair};
 
 use crate::frontend::app::state::{Selection, studio};
 use crate::frontend::screens::live::actions::LiveAction;
@@ -86,7 +86,7 @@ fn CaptureSection() -> Element {
 
 #[component]
 fn RobotRoster(
-    robots: Vec<spiral_robotics_core::api::RobotSummary>,
+    robots: Vec<spiral_robotics_contracts::api::RobotSummary>,
     on_select: EventHandler<Option<Selection>>,
 ) -> Element {
     let studio = studio();

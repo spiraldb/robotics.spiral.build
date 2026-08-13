@@ -4,9 +4,9 @@
 //! makes dragging feel like turning the robot around instead of steering past
 //! it. Nothing here knows what is being looked at.
 
-use spiral_robotics_core::glam::camera::rh::proj::opengl;
-use spiral_robotics_core::glam::camera::rh::view::look_at_mat4;
-use spiral_robotics_core::glam::{Mat4, Vec3};
+use glam::camera::rh::proj::opengl;
+use glam::camera::rh::view::look_at_mat4;
+use glam::{Mat4, Vec3};
 
 /// Where the viewer is looking from.
 ///

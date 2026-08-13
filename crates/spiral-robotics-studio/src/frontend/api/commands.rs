@@ -6,7 +6,7 @@
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_core::api::{
+use spiral_robotics_contracts::api::{
     EpisodeSummary, ModeSelection, SetRecordingPausedRequest, SetReplayPausedRequest,
     StartRecordingRequest, StartReplayRequest, StopRecordingRequest, default_teleoperation_pair,
 };
@@ -15,7 +15,7 @@ use crate::frontend::api::http as api;
 use crate::frontend::app::state::Studio;
 
 pub(crate) fn recording_blocker(studio: Studio) -> Option<String> {
-    if !spiral_robotics_core::spiral::is_dataset_id(studio.selected_dataset.read().trim()) {
+    if !spiral_robotics_contracts::spiral::is_dataset_id(studio.selected_dataset.read().trim()) {
         Some("Choose a dataset ID using letters, numbers, '.', '_' or '-'.".to_owned())
     } else if matches!(studio.mode(), ModeSelection::Replay { .. }) {
         Some("Stop replay before recording.".to_owned())

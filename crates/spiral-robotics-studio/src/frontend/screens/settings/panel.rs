@@ -2,7 +2,9 @@
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_core::api::{ConnectionTestResponse, DataSettings, UpdateDataSettingsRequest};
+use spiral_robotics_contracts::api::{
+    ConnectionTestResponse, DataSettings, UpdateDataSettingsRequest,
+};
 
 use crate::frontend::api::http as api;
 use crate::frontend::app::notifications::MessageSource;

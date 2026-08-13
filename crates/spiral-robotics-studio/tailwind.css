@@ -119,21 +119,108 @@
     border-top: 0;
   }
 
+  .timeline-signal-grid {
+    @apply relative grid min-w-[42rem];
+    grid-template-columns: 8.5rem minmax(30rem, 1fr);
+  }
+
+  .timeline-signal-labels {
+    @apply min-w-0;
+  }
+
+  .timeline-time-label {
+    @apply flex h-8 items-center border-b border-r border-line bg-sunken px-2 text-[10px] text-ink-faint;
+  }
+
+  .timeline-signal-label {
+    @apply flex h-7 min-w-0 items-center gap-1 border-b border-r border-line px-2 text-[11px];
+  }
+
+  .timeline-signal-swatch {
+    @apply h-px w-3 shrink-0;
+  }
+
+  .timeline-signal-data {
+    @apply relative min-w-0;
+  }
+
+  .timeline-time-axis {
+    @apply relative h-8 border-b border-line bg-sunken;
+  }
+
+  .timeline-time-tick {
+    @apply absolute inset-y-0 border-l border-line;
+  }
+
+  .timeline-time-tick span {
+    @apply absolute left-1 top-1 whitespace-nowrap font-mono text-[10px] tabular-nums text-ink-faint;
+  }
+
+  .timeline-signal-chart-stack {
+    @apply relative h-[10.5rem] overflow-hidden bg-canvas;
+  }
+
+  .timeline-signal-chart {
+    @apply absolute inset-0 h-full w-full;
+  }
+
+  .timeline-signal-lane-overlays {
+    @apply pointer-events-none absolute inset-0 z-10 grid;
+    grid-template-rows: repeat(6, 1.75rem);
+  }
+
+  .timeline-signal-lane-state {
+    @apply relative min-h-7 overflow-hidden border-b border-line;
+  }
+
+  .timeline-signal-loading {
+    @apply absolute inset-x-2 inset-y-2 rounded-sm bg-sunken;
+  }
+
+  .timeline-signal-unavailable,
+  .timeline-signal-empty {
+    @apply absolute inset-0 flex items-center bg-canvas px-2 text-[10px];
+  }
+
+  .timeline-signal-unavailable {
+    @apply text-caution;
+  }
+
+  .timeline-signal-empty {
+    @apply text-ink-faint;
+  }
+
+  .timeline-playhead {
+    @apply pointer-events-none absolute bottom-0 top-0 z-20 w-px bg-accent;
+  }
+
   .studio-workbench-scroll {
     @apply h-full min-h-0 overflow-y-auto bg-surface;
+  }
+
+  .live-workbench {
+    container-name: live-workbench;
+    container-type: inline-size;
+  }
+
+  .live-summary-readouts {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  @container live-workbench (max-width: 20rem) {
+    .live-summary-readouts {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
   }
 
   .live-robot-roster {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
-    gap: 1px;
-    padding: 1px;
-    border-bottom: 1px solid var(--tone-line);
-    background: var(--tone-line);
+    @apply gap-1.5 border-b border-line bg-surface px-3 py-2;
   }
 
   .live-robot-row {
-    @apply flex min-h-8 min-w-0 cursor-pointer items-center gap-2 bg-surface px-2.5 text-left transition-colors hover:bg-hover;
+    @apply flex min-h-9 min-w-0 cursor-pointer items-center gap-2 rounded bg-surface px-2.5 text-left transition-colors hover:bg-hover;
   }
 
   .live-robot-row-selected {
@@ -845,11 +932,15 @@
   }
 
   .training-chart-empty {
-    @apply flex h-full flex-col items-center justify-center gap-1 px-4 text-center;
+    @apply pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center gap-1 bg-surface px-4 text-center text-[11px] text-ink-faint;
   }
 
-  .training-chart-empty {
-    @apply text-[11px] text-ink-faint;
+  .charming-chart {
+    @apply relative min-h-0 min-w-0;
+  }
+
+  .charming-chart-error {
+    @apply absolute inset-0 z-20 flex items-center justify-center bg-surface px-2 text-center text-[10px] text-danger;
   }
 
   .training-learning,
@@ -887,41 +978,11 @@
   }
 
   .training-chart-wrap {
-    @apply relative min-h-48 flex-1 overflow-hidden px-8 pb-7 pt-3;
+    @apply relative min-h-48 flex-1 overflow-hidden;
   }
 
   .training-loss-chart {
-    @apply h-full min-h-40 w-full overflow-visible;
-  }
-
-  .training-grid-line {
-    stroke: var(--tone-line);
-    stroke-width: 1;
-    vector-effect: non-scaling-stroke;
-  }
-
-  .training-line {
-    fill: none;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-    stroke-width: 2;
-    vector-effect: non-scaling-stroke;
-  }
-
-  .training-line-train {
-    stroke: var(--tone-series-train);
-  }
-
-  .training-line-validation {
-    stroke: var(--tone-series-validation);
-  }
-
-  .training-chart-y-labels {
-    @apply pointer-events-none absolute bottom-7 left-1 top-3 flex flex-col justify-between font-mono text-[10px] tabular-nums text-ink-faint;
-  }
-
-  .training-chart-x-labels {
-    @apply pointer-events-none absolute bottom-1 left-8 right-8 flex justify-between font-mono text-[10px] tabular-nums text-ink-faint;
+    @apply h-full min-h-40 w-full;
   }
 
   .training-event-strip {
@@ -1030,23 +1091,8 @@
     @apply shrink-0 font-mono text-[11px] font-medium tabular-nums;
   }
 
-  .training-resource-lane svg {
+  .training-resource-chart {
     @apply mt-2 min-h-12 flex-1 w-full;
-  }
-
-  .training-resource-baseline {
-    stroke: var(--tone-line);
-    stroke-width: 1;
-    vector-effect: non-scaling-stroke;
-  }
-
-  .training-resource-line {
-    fill: none;
-    stroke: currentColor;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-    stroke-width: 1.5;
-    vector-effect: non-scaling-stroke;
   }
 
   .resource-throughput {
@@ -2132,6 +2178,10 @@
     @apply flex min-w-0 flex-col rounded bg-sunken px-1.5 py-0.5;
   }
 
+  .live-workbench .readout {
+    @apply px-2 py-1;
+  }
+
   .readout-caution {
     @apply bg-caution-soft;
   }
@@ -2176,7 +2226,7 @@
      returns when that individual cell has spare width. Active sliders ask for
      more room and keep their own wider rule. */
   .joint-list {
-    @apply grid gap-x-1 px-2 pb-1.5;
+    @apply grid gap-x-2 gap-y-1 px-3 pb-2;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 8rem), 1fr));
   }
 
@@ -2189,7 +2239,7 @@
   }
 
   .joint-row {
-    @apply -mx-1 flex min-h-6 items-center gap-1 rounded px-1 transition-colors;
+    @apply -mx-1.5 flex min-h-7 items-center gap-1.5 rounded px-1.5 transition-colors;
     container-type: inline-size;
   }
 
@@ -2223,7 +2273,7 @@
   }
 
   .joint-label {
-    @apply inline-flex min-h-6 w-[4.75rem] shrink-0 cursor-pointer items-center truncate text-left text-[11px] text-ink-soft;
+    @apply inline-flex min-h-7 w-[4.75rem] shrink-0 cursor-pointer items-center truncate text-left text-[11px] text-ink-soft;
   }
 
   /* The measured angle beside its slider: mono so the sign and the digits stay
@@ -2282,11 +2332,11 @@
      camera property card already uses, for the same reason — a card on the
      inspector is white with a hairline. */
   .motor-detail {
-    @apply mx-2 mb-1 flex flex-col gap-1 rounded border border-line bg-surface px-1.5 py-1;
+    @apply mx-3 mb-2 flex flex-col gap-1.5 rounded border border-line bg-surface px-2 py-1.5;
   }
 
   .motor-detail-head {
-    @apply flex min-h-6 items-baseline gap-1.5;
+    @apply flex min-h-7 items-baseline gap-1.5;
   }
 
   .motor-detail-name {

@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_core::api::RobotSummary;
+use spiral_robotics_contracts::api::RobotSummary;
 
 use crate::frontend::api::http as api;
 use crate::frontend::app::state::studio;

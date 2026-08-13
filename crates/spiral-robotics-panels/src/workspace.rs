@@ -86,6 +86,7 @@ struct RenderContext {
     panels: Vec<Panel>,
     placements: Vec<PanelPlacement>,
     layout: Signal<PanelLayout>,
+    reset_layout: PanelLayout,
     mobile_panel: Signal<Option<PanelId>>,
     dragging: Signal<Option<PanelId>>,
     drop_preview: Signal<Option<DropPreview>>,
@@ -197,6 +198,7 @@ pub fn PanelWorkspace(
         panels,
         placements,
         layout,
+        reset_layout: initial_layout,
         mobile_panel,
         dragging,
         drop_preview,
@@ -336,6 +338,15 @@ fn render_node(node: LayoutNode, context: RenderContext) -> Element {
             let pointer_split = id.clone();
             let keyboard_split = id.clone();
             let reset_split = id.clone();
+            let reset_ratio = context.reset_layout.split_ratio(&id).unwrap_or(0.5);
+            let splitter_class = if (context.resizing)()
+                .as_ref()
+                .is_some_and(|active| active.split == id)
+            {
+                "rp-splitter rp-splitter-active"
+            } else {
+                "rp-splitter"
+            };
 
             rsx! {
                 div { id: "{split_dom_id}", class: "{split_class}",
@@ -343,7 +354,7 @@ fn render_node(node: LayoutNode, context: RenderContext) -> Element {
                         {render_node(*first, first_context)}
                     }
                     div {
-                        class: "rp-splitter",
+                        class: "{splitter_class}",
                         role: "separator",
                         tabindex: "0",
                         "aria-label": "Resize panel groups",
@@ -354,6 +365,7 @@ fn render_node(node: LayoutNode, context: RenderContext) -> Element {
                         title: "Drag to resize. Arrow keys resize; Shift moves farther; double-click resets.",
                         onpointerdown: move |event| {
                             let Some(span) = element_span(&split_dom_id, axis) else { return };
+                            event.prevent_default();
                             capture(&event);
                             let pointer = match axis {
                                 SplitAxis::Horizontal => event.data().client_coordinates().x,
@@ -369,7 +381,7 @@ fn render_node(node: LayoutNode, context: RenderContext) -> Element {
                         },
                         ondoubleclick: move |_| {
                             mutate_layout(reset_context.clone(), |layout| {
-                                layout.set_split_ratio(&reset_split, 0.5)
+                                layout.set_split_ratio(&reset_split, reset_ratio)
                             });
                         },
                         onkeydown: move |event| {

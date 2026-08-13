@@ -1,17 +1,12 @@
-//! Backend-only SQL construction and authorization for SpiralDB.
+//! Backend-only SQL construction and policy adaptation for SpiralDB.
 //!
-//! Owned relation and column names come from `spiral_robotics_core::spiral`. Keeping
+//! Owned relation and column names come from `spiral_robotics_contracts::spiral`. Keeping
 //! string literals and dynamic-resource naming here makes every generated
-//! statement auditable while leaving raw user queries behind one read-only
-//! gate.
+//! statement auditable. Raw user queries delegate to the framework-free core
+//! authorization policy before a database driver sees them.
 
-use spiral_robotics_core::spiral::{self, Table, column};
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ReadOnlyMode {
-    Preview,
-    Training,
-}
+use spiral_robotics_contracts::spiral::{self, Table, column};
+pub(crate) use spiral_robotics_core::query::ReadOnlyMode;
 
 pub(crate) fn relation(dataset: &str, table: Table) -> String {
     spiral::relation(dataset, table)
@@ -202,50 +197,7 @@ pub(crate) fn refresh_dataset(dataset: &str) -> String {
 }
 
 pub(crate) fn ensure_read_only(sql: &str, mode: ReadOnlyMode) -> Result<(), String> {
-    let sql = sql.trim();
-    let label = match mode {
-        ReadOnlyMode::Preview => "Spiral preview",
-        ReadOnlyMode::Training => "Training SQL",
-    };
-    if sql.is_empty() {
-        return Err(format!("{label} cannot be empty"));
-    }
-    if sql.len() > 64 * 1024 {
-        return Err(format!("{label} must be under 64 KiB"));
-    }
-    let (tokens, semicolons) = sql_tokens(sql)?;
-    if semicolons > 1 {
-        return Err(format!("{label} must contain exactly one read-only query"));
-    }
-    let first = tokens.first().map(String::as_str).unwrap_or_default();
-    let allowed = match mode {
-        ReadOnlyMode::Preview => matches!(first, "SELECT" | "WITH" | "EXPLAIN"),
-        ReadOnlyMode::Training => matches!(first, "SELECT" | "WITH"),
-    };
-    if !allowed {
-        return Err(match mode {
-            ReadOnlyMode::Preview => {
-                "Spiral preview accepts SELECT, WITH, or EXPLAIN queries only".to_owned()
-            }
-            ReadOnlyMode::Training => {
-                "Training SQL must be a read-only SELECT or WITH query".to_owned()
-            }
-        });
-    }
-    const MUTATING_KEYWORDS: &[&str] = &[
-        "ALTER", "ATTACH", "CALL", "COPY", "CREATE", "DELETE", "DETACH", "DROP", "EXECUTE",
-        "GRANT", "INSERT", "MERGE", "REFRESH", "REPLACE", "REVOKE", "TRUNCATE", "UPDATE",
-    ];
-    if let Some(keyword) = tokens
-        .iter()
-        .find(|token| MUTATING_KEYWORDS.contains(&token.as_str()))
-    {
-        return Err(format!(
-            "{label} is read-only; {:?} is not allowed",
-            keyword.to_ascii_lowercase()
-        ));
-    }
-    Ok(())
+    spiral_robotics_core::query::ensure_read_only(sql, mode).map_err(|error| error.to_string())
 }
 
 /// Escape a value for the SQL string-literal grammar. ADBC parameters are not
@@ -253,105 +205,6 @@ pub(crate) fn ensure_read_only(sql: &str, mode: ReadOnlyMode) -> Result<(), Stri
 /// generated statements isolate this compatibility fallback in one function.
 fn string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
-}
-
-/// Extract unquoted SQL words while rejecting extra statements. The driver's
-/// parser remains authoritative; this is a conservative authorization gate.
-fn sql_tokens(sql: &str) -> Result<(Vec<String>, usize), String> {
-    #[derive(Clone, Copy, Eq, PartialEq)]
-    enum State {
-        Normal,
-        SingleQuote,
-        DoubleQuote,
-        LineComment,
-        BlockComment,
-    }
-
-    let bytes = sql.as_bytes();
-    let mut state = State::Normal;
-    let mut tokens = Vec::new();
-    let mut token = String::new();
-    let mut semicolons = 0;
-    let mut statement_token_count = None;
-    let mut index = 0;
-    let flush = |token: &mut String, tokens: &mut Vec<String>| {
-        if !token.is_empty() {
-            tokens.push(std::mem::take(token).to_ascii_uppercase());
-        }
-    };
-    while index < bytes.len() {
-        let byte = bytes[index];
-        let next = bytes.get(index + 1).copied();
-        match state {
-            State::Normal => match (byte, next) {
-                (b'-', Some(b'-')) => {
-                    flush(&mut token, &mut tokens);
-                    state = State::LineComment;
-                    index += 1;
-                }
-                (b'/', Some(b'*')) => {
-                    flush(&mut token, &mut tokens);
-                    state = State::BlockComment;
-                    index += 1;
-                }
-                (b'\'', _) => {
-                    flush(&mut token, &mut tokens);
-                    state = State::SingleQuote;
-                }
-                (b'"', _) => {
-                    flush(&mut token, &mut tokens);
-                    state = State::DoubleQuote;
-                }
-                (b';', _) => {
-                    flush(&mut token, &mut tokens);
-                    semicolons += 1;
-                    statement_token_count.get_or_insert(tokens.len());
-                }
-                _ if byte.is_ascii_alphanumeric() || byte == b'_' => {
-                    token.push(char::from(byte));
-                }
-                _ => flush(&mut token, &mut tokens),
-            },
-            State::SingleQuote => {
-                if byte == b'\'' {
-                    if next == Some(b'\'') {
-                        index += 1;
-                    } else {
-                        state = State::Normal;
-                    }
-                }
-            }
-            State::DoubleQuote => {
-                if byte == b'"' {
-                    if next == Some(b'"') {
-                        index += 1;
-                    } else {
-                        state = State::Normal;
-                    }
-                }
-            }
-            State::LineComment => {
-                if matches!(byte, b'\n' | b'\r') {
-                    state = State::Normal;
-                }
-            }
-            State::BlockComment => {
-                if byte == b'*' && next == Some(b'/') {
-                    state = State::Normal;
-                    index += 1;
-                }
-            }
-        }
-        index += 1;
-    }
-    flush(&mut token, &mut tokens);
-    if !matches!(state, State::Normal | State::LineComment) {
-        return Err("Spiral SQL contains an unterminated quote or comment".to_owned());
-    }
-    if statement_token_count.is_some_and(|count| tokens.len() != count) {
-        return Err("Spiral SQL must contain exactly one read-only query".to_owned());
-    }
-    Ok((tokens, semicolons))
 }
 
 #[cfg(test)]

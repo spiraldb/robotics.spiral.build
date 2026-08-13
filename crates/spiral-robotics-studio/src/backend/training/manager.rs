@@ -1,37 +1,58 @@
 //! Rust-owned supervision for Spiral ADBC and Burn-native vision ACT.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::collections::BTreeMap;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use adbc_driver_manager::ManagedConnection;
-use spiral_robotics_core::api::{
+use spiral_robotics_contracts::api::{
     ConnectionTestResponse, MAX_TRAINING_HISTORY_RUNS, StartTrainingRequest, TrainingCheckpoint,
     TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase, TrainingSnapshot,
     TrainingSource, TrainingUpdate,
 };
-use spiral_robotics_core::spiral;
+use spiral_robotics_contracts::spiral;
 use spiral_robotics_inference::act::{
     NativeActTrainer, VisionActCheckpoint, VisionActTrainingConfig,
 };
 use tokio::sync::{broadcast, mpsc};
 
-use crate::backend::storage::manager::{StorageManager, TrainingCheckpointWrite};
+use crate::backend::adapters::clock::SystemClock;
+use crate::backend::application::checkpoints::{
+    CheckpointPublication, CheckpointRepository, CheckpointSource,
+    validate_checkpoint_artifact_size,
+};
+use crate::backend::application::clock::{Clock, StableIdSequence};
+use crate::backend::application::error::ApplicationError;
+use crate::backend::application::policy_runtime::{
+    ACT_ARTIFACT_FORMAT, ACT_TENSOR_NAMESPACE, ArtifactIdentity, validate_artifact_identity,
+};
+use crate::backend::application::training::{
+    ActTrainingSettings as ApplicationActTrainingSettings,
+    StartTrainingCommand as ApplicationStartTrainingCommand,
+    TrainingCheckpoint as ApplicationTrainingCheckpoint,
+    TrainingMetric as ApplicationTrainingMetric, TrainingPolicy as ApplicationTrainingPolicy,
+    TrainingReadiness as ApplicationTrainingReadiness, TrainingRun as ApplicationTrainingRun,
+    TrainingRunPhase as ApplicationTrainingRunPhase, TrainingSource as ApplicationTrainingSource,
+};
+use crate::backend::application::training_execution::{
+    self, ResolvedTrainingSource, RunStateChange, RuntimeEventWindow, TrainingCoordinatorPort,
+    TrainingLaunch, TrainingRunIdentity, TrainingRunPort, TrainingRuntimeEvent,
+    TrainingRuntimeOutcome, TrainingRuntimePort, TrainingRuntimeSession,
+};
+use crate::backend::application::training_runs::{
+    RunPhase as ApplicationRunPhase, RunRecord, TrainingRunRegistry,
+};
+use crate::backend::storage::manager::StorageManager;
 use crate::backend::storage::settings::StoredSpiralSettings;
-use crate::backend::storage::sql::{self, ReadOnlyMode};
 use crate::backend::training::data::SpiralActLoader;
-use crate::backend::training::{ACT_ARTIFACT_FORMAT, ACT_TENSOR_NAMESPACE};
 
 const HISTORY_FILE: &str = "runs.json";
 const STOP_GRACE: Duration = Duration::from_secs(30);
-// The current checkpoint relation stores one artifact per Binary cell. Stay
-// below Spiral's default 256 MiB table-operation limit with headroom for the
-// other columns in the ingest batch.
-const MAX_CHECKPOINT_BYTES: u64 = 240 * 1024 * 1024;
-static RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static RUN_IDS: StableIdSequence = StableIdSequence::new("train", 0);
 
 #[derive(Clone)]
 pub(crate) struct TrainingManager {
@@ -41,6 +62,7 @@ pub(crate) struct TrainingManager {
 struct TrainingManagerInner {
     root: PathBuf,
     storage: Arc<StorageManager>,
+    clock: Arc<dyn Clock>,
     snapshot: Mutex<TrainingSnapshot>,
     updates: broadcast::Sender<TrainingUpdate>,
     controls: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
@@ -50,43 +72,74 @@ enum NativeEvent {
     Configured(Box<StartTrainingRequest>),
     Started(String),
     Metric(TrainingMetricPoint),
-    Checkpoint {
-        step: u64,
-        created_ms: i64,
-        validation_loss: Option<f64>,
-        manifest: serde_json::Value,
-        payload: Vec<u8>,
-        acknowledged: std::sync::mpsc::SyncSender<Result<(), String>>,
-    },
+    Checkpoint(NativeCheckpoint),
     Log(String),
+}
+
+pub(crate) struct NativeCheckpoint {
+    step: u64,
+    created_ms: i64,
+    validation_loss: Option<f64>,
+    manifest: serde_json::Value,
+    payload: Vec<u8>,
+    acknowledged: std::sync::mpsc::SyncSender<Result<(), String>>,
 }
 
 impl TrainingManager {
     pub(crate) async fn open(root: PathBuf, storage: Arc<StorageManager>) -> Result<Self, String> {
+        Self::open_with_clock(root, storage, Arc::new(SystemClock)).await
+    }
+
+    pub(crate) async fn open_with_clock(
+        root: PathBuf,
+        storage: Arc<StorageManager>,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, String> {
         fs::create_dir_all(&root)
             .map_err(|error| format!("could not create {}: {error}", root.display()))?;
         let root = fs::canonicalize(&root)
             .map_err(|error| format!("could not resolve {}: {error}", root.display()))?;
-        let mut snapshot = load_snapshot(&root).unwrap_or_default();
-        for run in &mut snapshot.runs {
-            if run.phase.active() {
-                run.phase = TrainingRunPhase::Failed;
-                run.finished_ms = Some(now_ms());
-                run.message = Some("The backend restarted while this run was active.".to_owned());
+        let mut snapshot = load_snapshot(&root)?;
+        let mut run_registry = registry(&snapshot)?;
+        let recovered = run_registry.recover_after_restart();
+        let retained = run_registry
+            .retained_ids()
+            .map(str::to_owned)
+            .collect::<std::collections::BTreeSet<_>>();
+        snapshot.runs.retain(|run| retained.contains(&run.id));
+        for transition in recovered {
+            let run = snapshot
+                .runs
+                .iter_mut()
+                .find(|run| run.id == transition.id)
+                .expect("the registry was built from this snapshot");
+            run.phase = TrainingRunPhase::Failed;
+            run.finished_ms = Some(clock.now_ms());
+            run.message = Some("The backend restarted while this run was active.".to_owned());
+        }
+        for run in &snapshot.runs {
+            // Older history entries predate immutable training sources and are
+            // intentionally not rollout-ready. New entries restore their exact
+            // project and namespace before RolloutManager is constructed.
+            if run.source != TrainingSource::default() {
+                storage
+                    .register_run_source(&run.id, checkpoint_source(&run.source))
+                    .map_err(|error| format!("restoring training run {:?}: {error}", run.id))?;
             }
         }
         snapshot.readiness = readiness(&storage).await;
+        persist_snapshot(&root, &snapshot)?;
         let (updates, _) = broadcast::channel(512);
         let manager = Self {
             inner: Arc::new(TrainingManagerInner {
                 root,
                 storage,
+                clock,
                 snapshot: Mutex::new(snapshot),
                 updates,
                 controls: Mutex::new(BTreeMap::new()),
             }),
         };
-        manager.persist();
         Ok(manager)
     }
 
@@ -106,91 +159,26 @@ impl TrainingManager {
     pub(crate) async fn refresh_readiness(&self) -> TrainingReadiness {
         let next = readiness(&self.inner.storage).await;
         if lock(&self.inner.snapshot).readiness != next {
-            self.publish(
+            let _ = self.publish(
                 TrainingUpdate::Readiness {
                     readiness: next.clone(),
                 },
-                true,
+                false,
             );
         }
         next
     }
 
     pub(crate) async fn start(&self, request: StartTrainingRequest) -> Result<TrainingRun, String> {
-        validate_request(&request)?;
-        let readiness = self.refresh_readiness().await;
-        if !readiness.ready {
-            return Err(readiness.summary);
-        }
-        let (settings, source) = self.inner.storage.training_source(&request.dataset_id)?;
-        self.inner
-            .storage
-            .validate_training_query(
-                settings.clone(),
-                &request.sql,
-                &request.state_column,
-                &request.action_column,
-            )
-            .await?;
-        let sequence = RUN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let id = format!("train-{}-{sequence}", now_ms());
-        let run = TrainingRun {
-            id: id.clone(),
-            config: request.clone(),
-            source: source.clone(),
-            phase: TrainingRunPhase::Starting,
-            current_step: 0,
-            started_ms: now_ms(),
-            finished_ms: None,
-            message: Some("Opening the Spiral ADBC stream and Burn runtime…".to_owned()),
-            metrics: Vec::new(),
-            checkpoints: Vec::new(),
-            logs: Vec::new(),
-        };
-
-        // The invariant and insertion share one lock. Two simultaneous POSTs
-        // cannot both pass the active-run check.
-        {
-            let mut snapshot = lock(&self.inner.snapshot);
-            if snapshot.runs.iter().any(|run| run.phase.active()) {
-                return Err("Stop the active training run before starting another.".to_owned());
-            }
-            let update = TrainingUpdate::RunAdded {
-                run: Box::new(run.clone()),
-            };
-            snapshot.apply(update.clone());
-            snapshot.runs.truncate(MAX_TRAINING_HISTORY_RUNS);
-            let _ = self.inner.updates.send(update);
-        }
-        self.persist();
-
-        let cancel = Arc::new(AtomicBool::new(false));
-        lock(&self.inner.controls).insert(id.clone(), cancel.clone());
-        let manager = self.clone();
-        tokio::spawn(async move {
-            manager
-                .run_native(id, request, settings, source, cancel)
-                .await;
-        });
-        Ok(run)
+        training_execution::coordinate_training_start(self, application_training_command(request))
+            .await
+            .map(contract_training_run)
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn stop(&self, run_id: &str) -> Result<(), String> {
-        let cancel = lock(&self.inner.controls).get(run_id).cloned();
-        let Some(cancel) = cancel else {
-            return Err(format!("training run {run_id:?} is not active"));
-        };
-        self.set_phase(
-            run_id,
-            TrainingRunPhase::Stopping,
-            None,
-            Some(
-                "Finishing the current Arrow read or optimizer step and publishing a final checkpoint…"
-                    .to_owned(),
-            ),
-        );
-        cancel.store(true, Ordering::Release);
-        Ok(())
+        training_execution::coordinate_training_stop(self, run_id)
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -208,21 +196,28 @@ impl TrainingManager {
 
     async fn run_native(
         &self,
-        run_id: String,
-        request: StartTrainingRequest,
-        settings: StoredSpiralSettings,
-        source: TrainingSource,
+        launch: TrainingLaunch<StoredSpiralSettings>,
         cancel: Arc<AtomicBool>,
     ) {
+        let run_id = launch.run_id;
+        let request = contract_training_request(launch.command.clone());
+        let source = contract_training_source(launch.source.clone());
+        let settings = launch.source_handle;
+        let mut session =
+            TrainingRuntimeSession::new(run_id.clone(), launch.command, launch.source);
         let pretrained = if request.act.pretrained_backbone {
             match tokio::task::spawn_blocking(load_pretrained_backbone).await {
                 Ok(Ok(bytes)) => Some(bytes),
                 Ok(Err(error)) => {
-                    self.fail(&run_id, error);
+                    training_execution::complete_runtime(self, session, Err(error));
                     return;
                 }
                 Err(error) => {
-                    self.fail(&run_id, format!("pretrained backbone task failed: {error}"));
+                    training_execution::complete_runtime(
+                        self,
+                        session,
+                        Err(format!("pretrained backbone task failed: {error}")),
+                    );
                     return;
                 }
             }
@@ -235,6 +230,7 @@ impl TrainingManager {
         let training_source = source.clone();
         let training_run_id = run_id.clone();
         let training_cancel = cancel.clone();
+        let training_clock = self.inner.clock.clone();
         let storage = self.inner.storage.clone();
         let training_settings = settings.clone();
         let mut training = Box::pin(storage.run_training_adbc(
@@ -246,14 +242,13 @@ impl TrainingManager {
                     &training_request,
                     &training_settings,
                     &training_source,
+                    training_clock,
                     training_cancel,
                     pretrained.as_deref(),
                     events_tx,
                 )
             },
         ));
-        let mut publication_error = None;
-        let mut resolved_request = request.clone();
         let mut events_open = true;
         let terminal = loop {
             tokio::select! {
@@ -261,132 +256,26 @@ impl TrainingManager {
                 event = events_rx.recv(), if events_open => {
                     match event {
                         None => events_open = false,
-                        Some(event) => match event {
-                        NativeEvent::Configured(config) => {
-                            resolved_request = (*config).clone();
-                            self.publish(
-                                TrainingUpdate::RunConfigured {
-                                    run_id: run_id.clone(),
-                                    config,
-                                },
-                                true,
-                            );
-                        }
-                        NativeEvent::Started(message) => {
-                            if self.phase(&run_id) == Some(TrainingRunPhase::Starting) {
-                                self.set_phase(&run_id, TrainingRunPhase::Running, None, Some(message));
-                            }
-                        }
-                        NativeEvent::Metric(point) => self.publish(
-                            TrainingUpdate::Metric {
-                                run_id: run_id.clone(),
-                                point: Box::new(point),
-                            },
-                            false,
-                        ),
-                        NativeEvent::Log(message) => self.push_log(&run_id, message),
-                        NativeEvent::Checkpoint {
-                            step,
-                            created_ms,
-                            validation_loss,
-                            manifest,
-                            payload,
-                            acknowledged,
-                        } => {
-                            let result = if publication_error.is_none() {
-                                self
-                                    .publish_checkpoint_bytes(
-                                        &run_id,
-                                        &resolved_request,
-                                        &settings,
-                                        &source,
-                                        step,
-                                        created_ms,
-                                        validation_loss,
-                                        &manifest,
-                                        payload,
-                                    )
-                                    .await
-                            } else {
-                                Err(publication_error.clone().expect("publication error"))
-                            };
-                            let _ = acknowledged.send(result.clone());
-                            if let Err(error) = result {
-                                cancel.store(true, Ordering::Release);
-                                publication_error = Some(error);
-                            }
-                        }
-                        },
+                        Some(event) => training_execution::accept_runtime_event(
+                            self,
+                            &mut session,
+                            application_runtime_event(event),
+                            RuntimeEventWindow::Live,
+                        ).await,
                     }
                 }
             }
         };
         while let Ok(event) = events_rx.try_recv() {
-            match event {
-                NativeEvent::Configured(config) => {
-                    self.publish(
-                        TrainingUpdate::RunConfigured {
-                            run_id: run_id.clone(),
-                            config,
-                        },
-                        true,
-                    );
-                }
-                NativeEvent::Started(message) => {
-                    if self.phase(&run_id) == Some(TrainingRunPhase::Starting) {
-                        self.set_phase(&run_id, TrainingRunPhase::Running, None, Some(message));
-                    }
-                }
-                NativeEvent::Metric(point) => self.publish(
-                    TrainingUpdate::Metric {
-                        run_id: run_id.clone(),
-                        point: Box::new(point),
-                    },
-                    false,
-                ),
-                NativeEvent::Log(message) => self.push_log(&run_id, message),
-                NativeEvent::Checkpoint { acknowledged, .. } => {
-                    let error = "trainer completed before checkpoint publication".to_owned();
-                    let _ = acknowledged.send(Err(error.clone()));
-                    publication_error.get_or_insert(error);
-                }
-            }
+            training_execution::accept_runtime_event(
+                self,
+                &mut session,
+                application_runtime_event(event),
+                RuntimeEventWindow::Draining,
+            )
+            .await;
         }
-        lock(&self.inner.controls).remove(&run_id);
-        if let Some(error) = publication_error {
-            self.fail(&run_id, error);
-            return;
-        }
-        match terminal {
-            Err(error) => self.fail(&run_id, error),
-            Ok(outcome) if outcome.stopped && outcome.steps == 0 => self.set_phase(
-                &run_id,
-                TrainingRunPhase::Stopped,
-                Some(now_ms()),
-                Some(
-                    "Stopped before the first optimizer step; no checkpoint was produced."
-                        .to_owned(),
-                ),
-            ),
-            Ok(outcome) if outcome.stopped => self.set_phase(
-                &run_id,
-                TrainingRunPhase::Stopped,
-                Some(now_ms()),
-                Some(format!(
-                    "Stopped after step {}; the final checkpoint was published to Spiral.",
-                    outcome.steps
-                )),
-            ),
-            Ok(outcome) => self.set_phase(
-                &run_id,
-                TrainingRunPhase::Completed,
-                Some(now_ms()),
-                Some(format!(
-                    "Completed {} steps; the final checkpoint was published to Spiral.",
-                    outcome.steps
-                )),
-            ),
-        }
+        training_execution::complete_runtime(self, session, terminal);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -394,7 +283,6 @@ impl TrainingManager {
         &self,
         run_id: &str,
         request: &StartTrainingRequest,
-        settings: &StoredSpiralSettings,
         source: &TrainingSource,
         step: u64,
         created_ms: i64,
@@ -410,35 +298,32 @@ impl TrainingManager {
         if validation_loss.is_some_and(|loss| !loss.is_finite()) {
             return Err("trainer returned a non-finite validation loss".to_owned());
         }
-        let byte_size = payload.len() as u64;
-        if byte_size > MAX_CHECKPOINT_BYTES {
-            return Err(
-                "checkpoint exceeds the 240 MiB single-artifact publication limit".to_owned(),
-            );
-        }
+        let byte_size = u64::try_from(payload.len())
+            .map_err(|_| "checkpoint byte size does not fit u64".to_owned())?;
         let file_name = format!("checkpoint-{step}.safetensors");
         let config_json =
             validate_checkpoint_artifact(&file_name, &payload, manifest, run_id, step, request)?;
+        validate_checkpoint_artifact_size(config_json.len(), payload.len())?;
         let policy = serde_json::to_value(request.policy)
-            .ok()
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .unwrap_or_else(|| "act".to_owned());
+            .map_err(|error| format!("could not encode checkpoint policy: {error}"))?;
+        let policy = policy
+            .as_str()
+            .ok_or_else(|| "checkpoint policy did not encode as a name".to_owned())?
+            .to_owned();
+        let sample_hz = checkpoint_sample_hz(manifest)?;
         self.inner
             .storage
-            .publish_training_checkpoint(
-                settings.clone(),
-                source.checkpoint_table.clone(),
-                TrainingCheckpointWrite {
-                    run_id: run_id.to_owned(),
-                    run_name: request.run_name.clone(),
-                    policy,
-                    step,
-                    created_ms,
-                    validation_loss,
-                    config_json,
-                    payload,
-                },
-            )
+            .publish_checkpoint(CheckpointPublication {
+                source: checkpoint_source(source),
+                run_id: run_id.to_owned(),
+                run_name: request.run_name.clone(),
+                policy,
+                step,
+                created_ms,
+                validation_loss,
+                config_json,
+                payload,
+            })
             .await?;
         self.publish(
             TrainingUpdate::Checkpoint {
@@ -451,14 +336,11 @@ impl TrainingManager {
                     byte_size,
                     inference_ready: true,
                     recommended_action_steps: request.chunk_size,
-                    sample_hz: manifest
-                        .pointer("/data_contract/sample_hz")
-                        .and_then(serde_json::Value::as_f64)
-                        .unwrap_or_default(),
+                    sample_hz,
                 },
             },
             true,
-        );
+        )?;
         Ok(())
     }
 
@@ -476,36 +358,51 @@ impl TrainingManager {
         phase: TrainingRunPhase,
         finished_ms: Option<i64>,
         message: Option<String>,
-    ) {
-        let current_step = lock(&self.inner.snapshot)
+    ) -> Result<(), String> {
+        let mut snapshot = lock(&self.inner.snapshot);
+        let current_step = snapshot
             .runs
             .iter()
             .find(|run| run.id == run_id)
             .map_or(0, |run| run.current_step);
-        self.publish(
-            TrainingUpdate::RunState {
-                run_id: run_id.to_owned(),
-                phase,
-                current_step,
-                finished_ms,
-                message,
-            },
-            true,
-        );
+        let mut registry = registry(&snapshot)?;
+        registry.transition(run_id, application_phase(phase))?;
+        let update = TrainingUpdate::RunState {
+            run_id: run_id.to_owned(),
+            phase,
+            current_step,
+            finished_ms,
+            message,
+        };
+        let mut candidate = snapshot.clone();
+        candidate.apply(update.clone());
+        persist_snapshot(&self.inner.root, &candidate)?;
+        *snapshot = candidate;
+        let _ = self.inner.updates.send(update);
+        Ok(())
     }
 
-    fn fail(&self, run_id: &str, message: String) {
-        self.set_phase(
-            run_id,
-            TrainingRunPhase::Failed,
-            Some(now_ms()),
-            Some(message),
-        );
-        lock(&self.inner.controls).remove(run_id);
+    fn mark_persistence_failure(&self, run_id: &str, error: &str) {
+        if let Some(cancel) = lock(&self.inner.controls).get(run_id).cloned() {
+            cancel.store(true, Ordering::Release);
+        }
+        let mut snapshot = lock(&self.inner.snapshot);
+        let Ok((log_update, state_update)) =
+            persistence_failure_updates(&snapshot, run_id, self.inner.clock.now_ms(), error)
+        else {
+            return;
+        };
+        // The persistence boundary itself is unavailable, so this terminal
+        // evidence can only be kept in memory and broadcast. Retrying the same
+        // failed write here would hide the failure behind recursion.
+        snapshot.apply(log_update.clone());
+        snapshot.apply(state_update.clone());
+        let _ = self.inner.updates.send(log_update);
+        let _ = self.inner.updates.send(state_update);
     }
 
     fn push_log(&self, run_id: &str, line: String) {
-        self.publish(
+        let _ = self.publish(
             TrainingUpdate::Log {
                 run_id: run_id.to_owned(),
                 line,
@@ -514,32 +411,224 @@ impl TrainingManager {
         );
     }
 
-    fn publish(&self, update: TrainingUpdate, persist: bool) {
-        {
-            let mut snapshot = lock(&self.inner.snapshot);
-            snapshot.apply(update.clone());
-            let _ = self.inner.updates.send(update);
-        }
+    fn publish(&self, update: TrainingUpdate, persist: bool) -> Result<(), String> {
+        let mut snapshot = lock(&self.inner.snapshot);
+        let mut candidate = snapshot.clone();
+        candidate.apply(update.clone());
         if persist {
-            self.persist();
+            persist_snapshot(&self.inner.root, &candidate)?;
         }
-    }
-
-    fn persist(&self) {
-        let snapshot = lock(&self.inner.snapshot).clone();
-        if let Ok(bytes) = serde_json::to_vec_pretty(&snapshot) {
-            let path = self.inner.root.join(HISTORY_FILE);
-            let temporary = self.inner.root.join("runs.json.tmp");
-            if fs::write(&temporary, bytes).is_ok() {
-                let _ = fs::rename(temporary, path);
-            }
-        }
+        *snapshot = candidate;
+        let _ = self.inner.updates.send(update);
+        Ok(())
     }
 }
 
-struct NativeOutcome {
-    steps: u64,
-    stopped: bool,
+impl TrainingRunPort for TrainingManager {
+    fn runtime_is_active(&self, run_id: &str) -> bool {
+        lock(&self.inner.controls).contains_key(run_id)
+    }
+
+    fn transition_run(&self, run_id: &str, change: RunStateChange) -> Result<(), String> {
+        self.set_phase(
+            run_id,
+            contract_training_phase(change.phase),
+            change.finished_ms,
+            change.message,
+        )
+    }
+
+    fn signal_runtime_stop(&self, run_id: &str) {
+        if let Some(cancel) = lock(&self.inner.controls).get(run_id).cloned() {
+            cancel.store(true, Ordering::Release);
+        }
+    }
+
+    fn mark_persistence_failure(&self, run_id: &str, error: &str) {
+        TrainingManager::mark_persistence_failure(self, run_id, error);
+    }
+
+    fn cleanup_runtime(&self, run_id: &str) {
+        lock(&self.inner.controls).remove(run_id);
+    }
+
+    fn now_ms(&self) -> i64 {
+        self.inner.clock.now_ms()
+    }
+}
+
+impl TrainingCoordinatorPort for TrainingManager {
+    type SourceHandle = StoredSpiralSettings;
+
+    async fn refresh_training_readiness(&self) -> ApplicationTrainingReadiness {
+        application_training_readiness(self.refresh_readiness().await)
+    }
+
+    fn resolve_training_source(
+        &self,
+        dataset_id: &str,
+    ) -> Result<ResolvedTrainingSource<Self::SourceHandle>, ApplicationError> {
+        let (handle, source) = self
+            .inner
+            .storage
+            .training_source(dataset_id)
+            .map_err(ApplicationError::conflict)?;
+        Ok(ResolvedTrainingSource {
+            source: application_training_source(source),
+            handle,
+        })
+    }
+
+    async fn validate_training_query(
+        &self,
+        handle: &Self::SourceHandle,
+        command: &ApplicationStartTrainingCommand,
+    ) -> Result<(), ApplicationError> {
+        self.inner
+            .storage
+            .validate_training_query(
+                handle.clone(),
+                &command.query,
+                &command.state_column,
+                &command.action_column,
+            )
+            .await
+            .map_err(ApplicationError::conflict)
+    }
+
+    fn next_training_identity(&self) -> TrainingRunIdentity {
+        let identity = RUN_IDS.next(self.inner.clock.as_ref());
+        TrainingRunIdentity {
+            id: identity.value,
+            created_ms: identity.created_ms,
+        }
+    }
+
+    fn register_training_source(
+        &self,
+        run_id: &str,
+        source: &ApplicationTrainingSource,
+    ) -> Result<(), ApplicationError> {
+        self.inner
+            .storage
+            .register_run_source(
+                run_id,
+                checkpoint_source(&contract_training_source(source.clone())),
+            )
+            .map_err(ApplicationError::conflict)
+    }
+
+    fn unregister_training_source(&self, run_id: &str, source: &ApplicationTrainingSource) {
+        self.inner.storage.unregister_run_source(
+            run_id,
+            &checkpoint_source(&contract_training_source(source.clone())),
+        );
+    }
+
+    fn admit_training_run(&self, run: ApplicationTrainingRun) -> Result<(), ApplicationError> {
+        // Registry admission, durable snapshot replacement, and publication
+        // share one lock, so concurrent starts cannot both become active.
+        let mut snapshot = lock(&self.inner.snapshot);
+        let (candidate, update) =
+            admitted_snapshot(&self.inner.root, &snapshot, contract_training_run(run))
+                .map_err(ApplicationError::conflict)?;
+        *snapshot = candidate;
+        let _ = self.inner.updates.send(update);
+        Ok(())
+    }
+
+    fn launch_training_runtime(
+        &self,
+        launch: TrainingLaunch<Self::SourceHandle>,
+    ) -> Result<(), ApplicationError> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        {
+            let mut controls = lock(&self.inner.controls);
+            if controls.contains_key(&launch.run_id) {
+                return Err(ApplicationError::Internal(format!(
+                    "training runtime {:?} was already launched",
+                    launch.run_id
+                )));
+            }
+            controls.insert(launch.run_id.clone(), cancel.clone());
+        }
+        let manager = self.clone();
+        tokio::spawn(async move {
+            manager.run_native(launch, cancel).await;
+        });
+        Ok(())
+    }
+}
+
+impl TrainingRuntimePort for TrainingManager {
+    type CheckpointEnvelope = NativeCheckpoint;
+
+    fn run_phase(&self, run_id: &str) -> Option<ApplicationTrainingRunPhase> {
+        self.phase(run_id).map(application_training_phase)
+    }
+
+    fn persist_resolved_configuration(
+        &self,
+        run_id: &str,
+        command: &ApplicationStartTrainingCommand,
+    ) -> Result<(), String> {
+        self.publish(
+            TrainingUpdate::RunConfigured {
+                run_id: run_id.to_owned(),
+                config: Box::new(contract_training_request(command.clone())),
+            },
+            true,
+        )
+    }
+
+    fn record_metric(&self, run_id: &str, metric: ApplicationTrainingMetric) {
+        let _ = self.publish(
+            TrainingUpdate::Metric {
+                run_id: run_id.to_owned(),
+                point: Box::new(contract_training_metric(metric)),
+            },
+            false,
+        );
+    }
+
+    fn record_log(&self, run_id: &str, message: String) {
+        self.push_log(run_id, message);
+    }
+
+    async fn publish_runtime_checkpoint(
+        &self,
+        run_id: &str,
+        command: &ApplicationStartTrainingCommand,
+        source: &ApplicationTrainingSource,
+        checkpoint: Self::CheckpointEnvelope,
+    ) -> Result<(), String> {
+        let NativeCheckpoint {
+            step,
+            created_ms,
+            validation_loss,
+            manifest,
+            payload,
+            acknowledged,
+        } = checkpoint;
+        let result = self
+            .publish_checkpoint_bytes(
+                run_id,
+                &contract_training_request(command.clone()),
+                &contract_training_source(source.clone()),
+                step,
+                created_ms,
+                validation_loss,
+                &manifest,
+                payload,
+            )
+            .await;
+        let _ = acknowledged.send(result.clone());
+        result
+    }
+
+    fn reject_runtime_checkpoint(&self, checkpoint: Self::CheckpointEnvelope, error: String) {
+        let _ = checkpoint.acknowledged.send(Err(error));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -549,10 +638,11 @@ fn train_blocking(
     request: &StartTrainingRequest,
     settings: &StoredSpiralSettings,
     source: &TrainingSource,
+    clock: Arc<dyn Clock>,
     cancel: Arc<AtomicBool>,
     pretrained: Option<&[u8]>,
     events: mpsc::UnboundedSender<NativeEvent>,
-) -> Result<NativeOutcome, String> {
+) -> Result<TrainingRuntimeOutcome, String> {
     let _ = events.send(NativeEvent::Log(
         "Opening the dedicated Spiral ADBC connection and indexing eligible ACT anchors…"
             .to_owned(),
@@ -664,6 +754,7 @@ fn train_blocking(
                 &trainer,
                 step,
                 last_validation,
+                clock.as_ref(),
             )?;
             last_checkpoint = step;
         }
@@ -678,9 +769,10 @@ fn train_blocking(
             &trainer,
             completed_steps,
             last_validation,
+            clock.as_ref(),
         )?;
     }
-    Ok(NativeOutcome {
+    Ok(TrainingRuntimeOutcome {
         steps: completed_steps,
         stopped: cancel.load(Ordering::Acquire),
     })
@@ -696,6 +788,7 @@ fn send_checkpoint(
     trainer: &NativeActTrainer,
     step: u64,
     validation_loss: Option<f64>,
+    clock: &dyn Clock,
 ) -> Result<(), String> {
     let manifest = checkpoint_manifest(run_id, request, source, loader, step);
     let manifest_json = serde_json::to_string(&manifest)
@@ -711,14 +804,14 @@ fn send_checkpoint(
         .map_err(|error| error.to_string())?;
     let (acknowledged, result) = std::sync::mpsc::sync_channel(1);
     events
-        .send(NativeEvent::Checkpoint {
+        .send(NativeEvent::Checkpoint(NativeCheckpoint {
             step,
-            created_ms: now_ms(),
+            created_ms: clock.now_ms(),
             validation_loss,
             manifest,
             payload,
             acknowledged,
-        })
+        }))
         .map_err(|_| "training event channel closed before checkpoint publication".to_owned())?;
     result
         .recv()
@@ -807,6 +900,14 @@ fn checkpoint_manifest(
     })
 }
 
+fn checkpoint_sample_hz(manifest: &serde_json::Value) -> Result<f64, String> {
+    manifest
+        .pointer("/data_contract/sample_hz")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|sample_hz| sample_hz.is_finite() && *sample_hz > 0.0)
+        .ok_or_else(|| "checkpoint manifest has no finite positive data sample rate".to_owned())
+}
+
 fn load_pretrained_backbone() -> Result<Vec<u8>, String> {
     spiral_robotics_inference::act::imagenet_resnet18_weights()
         .map_err(|error| format!("loading torchvision ResNet18 IMAGENET1K_V1: {error}"))
@@ -822,6 +923,14 @@ fn runtime_description() -> String {
     #[cfg(not(target_os = "macos"))]
     let acceleration = "CPU";
     format!("Burn 0.21 · {acceleration} · ADBC Arrow tensors verified at run start")
+}
+
+fn checkpoint_source(source: &TrainingSource) -> CheckpointSource {
+    CheckpointSource {
+        project: source.project.clone(),
+        namespace: source.dataset.clone(),
+        dataset_id: source.dataset_id.clone(),
+    }
 }
 
 async fn readiness(storage: &StorageManager) -> TrainingReadiness {
@@ -899,15 +1008,37 @@ fn validate_checkpoint_artifact(
             "checkpoint {file_name} metadata does not match the trainer event"
         ));
     }
-    if manifest.get("format").and_then(serde_json::Value::as_str) != Some(ACT_ARTIFACT_FORMAT)
-        || manifest.get("artifact").and_then(serde_json::Value::as_str) != Some("inference")
-        || manifest.get("run_id").and_then(serde_json::Value::as_str) != Some(run_id)
-        || manifest.get("step").and_then(serde_json::Value::as_u64) != Some(step)
-    {
-        return Err(format!(
-            "checkpoint {file_name} has the wrong format, purpose, run, or step"
-        ));
-    }
+    validate_artifact_identity(
+        &ArtifactIdentity {
+            format: manifest
+                .get("format")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            purpose: manifest
+                .get("artifact")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            run_id: manifest
+                .get("run_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            step: manifest
+                .get("step")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default(),
+            tensor_namespace: manifest
+                .get("tensor_namespace")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        },
+        run_id,
+        step,
+    )
+    .map_err(|error| format!("checkpoint {file_name}: {error}"))?;
     let request_json = serde_json::to_value(request)
         .map_err(|error| format!("could not validate checkpoint configuration: {error}"))?;
     if manifest.get("request") != Some(&request_json) {
@@ -918,140 +1049,348 @@ fn validate_checkpoint_artifact(
     let model_config = manifest
         .get("model_config")
         .ok_or_else(|| format!("checkpoint {file_name} has no native model configuration"))?;
-    if manifest
-        .get("tensor_namespace")
-        .and_then(serde_json::Value::as_str)
-        != Some(ACT_TENSOR_NAMESPACE)
-    {
-        return Err(format!(
-            "checkpoint {file_name} does not use the native ACT tensor namespace"
-        ));
-    }
     serde_json::to_string(model_config)
         .map_err(|error| format!("could not encode native model configuration: {error}"))
 }
 
-fn validate_request(request: &StartTrainingRequest) -> Result<(), String> {
-    let name = request.run_name.trim();
-    if name.is_empty()
-        || name.len() > 80
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-    {
-        return Err(
-            "Run name must use 1–80 letters, numbers, '.', '_' or '-' characters.".to_owned(),
-        );
+fn application_training_command(request: StartTrainingRequest) -> ApplicationStartTrainingCommand {
+    ApplicationStartTrainingCommand {
+        run_name: request.run_name,
+        dataset_id: request.dataset_id,
+        policy: match request.policy {
+            spiral_robotics_contracts::api::TrainingPolicy::Act => ApplicationTrainingPolicy::Act,
+        },
+        query: request.sql,
+        state_column: request.state_column,
+        action_column: request.action_column,
+        device: request.device,
+        steps: request.steps,
+        batch_size: request.batch_size,
+        learning_rate: request.learning_rate,
+        checkpoint_every: request.checkpoint_every,
+        chunk_size: request.chunk_size,
+        seed: request.seed,
+        act: ApplicationActTrainingSettings {
+            camera_streams: request.act.camera_streams,
+            image_width: request.act.image_width,
+            image_height: request.act.image_height,
+            video_decoder: request.act.video_decoder,
+            pretrained_backbone: request.act.pretrained_backbone,
+            hidden_dim: request.act.hidden_dim,
+            latent_dim: request.act.latent_dim,
+            encoder_layers: request.act.encoder_layers,
+            vae_encoder_layers: request.act.vae_encoder_layers,
+            decoder_layers: request.act.decoder_layers,
+            attention_heads: request.act.attention_heads,
+            feedforward_dim: request.act.feedforward_dim,
+            kl_weight: request.act.kl_weight,
+        },
     }
-    if !spiral::is_dataset_id(request.dataset_id.trim()) {
-        return Err(
-            "Dataset ID must use 1–96 letters, numbers, '.', '_' or '-' characters.".to_owned(),
-        );
-    }
-    sql::ensure_read_only(&request.sql, ReadOnlyMode::Training)?;
-    for (label, column) in [
-        ("State column", request.state_column.trim()),
-        ("Action column", request.action_column.trim()),
-    ] {
-        if !spiral::is_identifier(column) {
-            return Err(format!("{label} must be a SQL identifier."));
-        }
-    }
-    if !(1..=10_000_000).contains(&request.steps) {
-        return Err("Training steps must be between 1 and 10,000,000.".to_owned());
-    }
-    if !(1..=512).contains(&request.batch_size) {
-        return Err("Batch size must be between 1 and 512.".to_owned());
-    }
-    if !(1..=256).contains(&request.chunk_size) {
-        return Err("Action chunk size must be between 1 and 256.".to_owned());
-    }
-    if request
-        .batch_size
-        .checked_mul(request.chunk_size)
-        .is_none_or(|rows| rows > 8_192)
-    {
-        return Err(
-            "Batch size × action chunk size may not exceed 8,192 manifest rows.".to_owned(),
-        );
-    }
-    if request.checkpoint_every == 0 || request.checkpoint_every > request.steps {
-        return Err("Checkpoint cadence must be between 1 and the run step count.".to_owned());
-    }
-    if !request.learning_rate.is_finite() || request.learning_rate <= 0.0 {
-        return Err("Learning rate must be a finite positive number.".to_owned());
-    }
-    if request.act.camera_streams.len() > 8 {
-        return Err("ACT supports at most eight camera streams.".to_owned());
-    }
-    let mut camera_streams = BTreeSet::new();
-    for stream in &request.act.camera_streams {
-        if stream.is_empty()
-            || !stream
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-        {
-            return Err(format!("Invalid ACT camera stream {stream:?}."));
-        }
-        if !camera_streams.insert(stream) {
-            return Err(format!("ACT camera stream {stream:?} is repeated."));
-        }
-    }
-    let native_images = request.act.image_width == 0 && request.act.image_height == 0;
-    if !native_images
-        && (!(32..=1_024).contains(&request.act.image_width)
-            || !(32..=1_024).contains(&request.act.image_height))
-    {
-        return Err(
-            "ACT image width and height must both be zero (native) or between 32 and 1,024."
-                .to_owned(),
-        );
-    }
-    if !matches!(
-        request.act.video_decoder.as_str(),
-        "auto" | "ffmpeg" | "videotoolbox" | "nvdec"
-    ) {
-        return Err("ACT video decoder must be auto, ffmpeg, videotoolbox, or nvdec.".to_owned());
-    }
-    if !(1..=16).contains(&request.act.attention_heads) {
-        return Err("ACT attention heads must be between 1 and 16.".to_owned());
-    }
-    if !(64..=1_024).contains(&request.act.hidden_dim)
-        || !request.act.hidden_dim.is_multiple_of(4)
-        || !request
-            .act
-            .hidden_dim
-            .is_multiple_of(request.act.attention_heads)
-    {
-        return Err(
-            "ACT hidden size must be 64–1,024 and divisible by four and the attention-head count."
-                .to_owned(),
-        );
-    }
-    if !(1..=12).contains(&request.act.encoder_layers)
-        || !(1..=12).contains(&request.act.decoder_layers)
-        || !(1..=512).contains(&request.act.latent_dim)
-        || request.act.feedforward_dim < request.act.hidden_dim
-        || request.act.feedforward_dim > 16_384
-    {
-        return Err("ACT transformer configuration is outside the supported range.".to_owned());
-    }
-    if !request.act.kl_weight.is_finite() || request.act.kl_weight < 0.0 {
-        return Err("ACT KL weight must be finite and non-negative.".to_owned());
-    }
-    Ok(())
 }
 
-fn load_snapshot(root: &Path) -> Option<TrainingSnapshot> {
-    serde_json::from_slice(&fs::read(root.join(HISTORY_FILE)).ok()?).ok()
+fn contract_training_request(command: ApplicationStartTrainingCommand) -> StartTrainingRequest {
+    StartTrainingRequest {
+        run_name: command.run_name,
+        dataset_id: command.dataset_id,
+        policy: match command.policy {
+            ApplicationTrainingPolicy::Act => spiral_robotics_contracts::api::TrainingPolicy::Act,
+        },
+        sql: command.query,
+        state_column: command.state_column,
+        action_column: command.action_column,
+        device: command.device,
+        steps: command.steps,
+        batch_size: command.batch_size,
+        learning_rate: command.learning_rate,
+        checkpoint_every: command.checkpoint_every,
+        chunk_size: command.chunk_size,
+        seed: command.seed,
+        act: spiral_robotics_contracts::api::ActTrainingConfig {
+            camera_streams: command.act.camera_streams,
+            image_width: command.act.image_width,
+            image_height: command.act.image_height,
+            video_decoder: command.act.video_decoder,
+            pretrained_backbone: command.act.pretrained_backbone,
+            hidden_dim: command.act.hidden_dim,
+            latent_dim: command.act.latent_dim,
+            encoder_layers: command.act.encoder_layers,
+            vae_encoder_layers: command.act.vae_encoder_layers,
+            decoder_layers: command.act.decoder_layers,
+            attention_heads: command.act.attention_heads,
+            feedforward_dim: command.act.feedforward_dim,
+            kl_weight: command.act.kl_weight,
+        },
+    }
 }
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(i64::MAX as u128) as i64
+fn application_training_source(source: TrainingSource) -> ApplicationTrainingSource {
+    ApplicationTrainingSource {
+        project: source.project,
+        dataset: source.dataset,
+        dataset_id: source.dataset_id,
+    }
+}
+
+fn contract_training_source(source: ApplicationTrainingSource) -> TrainingSource {
+    let checkpoint_table = spiral::relation(&source.dataset, spiral::Table::TrainingCheckpoints);
+    TrainingSource {
+        project: source.project,
+        dataset: source.dataset,
+        dataset_id: source.dataset_id,
+        checkpoint_table,
+    }
+}
+
+fn application_training_phase(phase: TrainingRunPhase) -> ApplicationTrainingRunPhase {
+    match phase {
+        TrainingRunPhase::Starting => ApplicationTrainingRunPhase::Starting,
+        TrainingRunPhase::Running => ApplicationTrainingRunPhase::Running,
+        TrainingRunPhase::Stopping => ApplicationTrainingRunPhase::Stopping,
+        TrainingRunPhase::Completed => ApplicationTrainingRunPhase::Completed,
+        TrainingRunPhase::Stopped => ApplicationTrainingRunPhase::Stopped,
+        TrainingRunPhase::Failed => ApplicationTrainingRunPhase::Failed,
+    }
+}
+
+fn contract_training_phase(phase: ApplicationTrainingRunPhase) -> TrainingRunPhase {
+    match phase {
+        ApplicationTrainingRunPhase::Starting => TrainingRunPhase::Starting,
+        ApplicationTrainingRunPhase::Running => TrainingRunPhase::Running,
+        ApplicationTrainingRunPhase::Stopping => TrainingRunPhase::Stopping,
+        ApplicationTrainingRunPhase::Completed => TrainingRunPhase::Completed,
+        ApplicationTrainingRunPhase::Stopped => TrainingRunPhase::Stopped,
+        ApplicationTrainingRunPhase::Failed => TrainingRunPhase::Failed,
+    }
+}
+
+fn application_training_readiness(readiness: TrainingReadiness) -> ApplicationTrainingReadiness {
+    ApplicationTrainingReadiness {
+        ready: readiness.ready,
+        spiral_ready: readiness.spiral_ready,
+        summary: readiness.summary,
+    }
+}
+
+fn application_training_metric(metric: TrainingMetricPoint) -> ApplicationTrainingMetric {
+    ApplicationTrainingMetric {
+        step: metric.step,
+        train_loss: metric.train_loss,
+        validation_loss: metric.validation_loss,
+        learning_rate: metric.learning_rate,
+        transfer_bytes_per_second: metric.transfer_bytes_per_second,
+        examples_per_second: metric.examples_per_second,
+        elapsed_seconds: metric.elapsed_seconds,
+        event: metric.event,
+    }
+}
+
+fn contract_training_metric(metric: ApplicationTrainingMetric) -> TrainingMetricPoint {
+    TrainingMetricPoint {
+        step: metric.step,
+        train_loss: metric.train_loss,
+        validation_loss: metric.validation_loss,
+        learning_rate: metric.learning_rate,
+        transfer_bytes_per_second: metric.transfer_bytes_per_second,
+        examples_per_second: metric.examples_per_second,
+        elapsed_seconds: metric.elapsed_seconds,
+        event: metric.event,
+    }
+}
+
+fn contract_training_checkpoint(
+    checkpoint: ApplicationTrainingCheckpoint,
+    spiral_table: &str,
+) -> TrainingCheckpoint {
+    TrainingCheckpoint {
+        step: checkpoint.step,
+        created_ms: checkpoint.created_ms,
+        validation_loss: checkpoint.validation_loss,
+        spiral_table: spiral_table.to_owned(),
+        byte_size: checkpoint.byte_size,
+        inference_ready: checkpoint.inference_ready,
+        recommended_action_steps: checkpoint.recommended_action_steps,
+        sample_hz: checkpoint.sample_hz,
+    }
+}
+
+fn contract_training_run(run: ApplicationTrainingRun) -> TrainingRun {
+    let checkpoint_table =
+        spiral::relation(&run.source.dataset, spiral::Table::TrainingCheckpoints);
+    TrainingRun {
+        id: run.id,
+        config: contract_training_request(run.config),
+        source: contract_training_source(run.source),
+        phase: contract_training_phase(run.phase),
+        current_step: run.current_step,
+        started_ms: run.started_ms,
+        finished_ms: run.finished_ms,
+        message: run.message,
+        metrics: run
+            .metrics
+            .into_iter()
+            .map(contract_training_metric)
+            .collect(),
+        checkpoints: run
+            .checkpoints
+            .into_iter()
+            .map(|checkpoint| contract_training_checkpoint(checkpoint, &checkpoint_table))
+            .collect(),
+        logs: run.logs,
+    }
+}
+
+fn application_runtime_event(event: NativeEvent) -> TrainingRuntimeEvent<NativeCheckpoint> {
+    match event {
+        NativeEvent::Configured(command) => {
+            TrainingRuntimeEvent::Configured(Box::new(application_training_command(*command)))
+        }
+        NativeEvent::Started(message) => TrainingRuntimeEvent::Started(message),
+        NativeEvent::Metric(metric) => {
+            TrainingRuntimeEvent::Metric(application_training_metric(metric))
+        }
+        NativeEvent::Checkpoint(checkpoint) => TrainingRuntimeEvent::Checkpoint(checkpoint),
+        NativeEvent::Log(message) => TrainingRuntimeEvent::Log(message),
+    }
+}
+
+fn application_phase(phase: TrainingRunPhase) -> ApplicationRunPhase {
+    match phase {
+        TrainingRunPhase::Starting => ApplicationRunPhase::Starting,
+        TrainingRunPhase::Running => ApplicationRunPhase::Running,
+        TrainingRunPhase::Stopping => ApplicationRunPhase::Stopping,
+        TrainingRunPhase::Completed => ApplicationRunPhase::Completed,
+        TrainingRunPhase::Stopped => ApplicationRunPhase::Stopped,
+        TrainingRunPhase::Failed => ApplicationRunPhase::Failed,
+    }
+}
+
+fn registry(snapshot: &TrainingSnapshot) -> Result<TrainingRunRegistry, String> {
+    TrainingRunRegistry::new(
+        MAX_TRAINING_HISTORY_RUNS,
+        snapshot.runs.iter().map(|run| RunRecord {
+            id: run.id.clone(),
+            phase: application_phase(run.phase),
+        }),
+    )
+}
+
+fn load_snapshot(root: &Path) -> Result<TrainingSnapshot, String> {
+    let path = root.join(HISTORY_FILE);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(TrainingSnapshot::default());
+        }
+        Err(error) => {
+            return Err(format!(
+                "could not read training history {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "training history {} is malformed and was left untouched: {error}",
+            path.display()
+        )
+    })
+}
+
+fn persist_snapshot(root: &Path, snapshot: &TrainingSnapshot) -> Result<(), String> {
+    let path = root.join(HISTORY_FILE);
+    let temporary = root.join("runs.json.tmp");
+    let mut bytes = serde_json::to_vec_pretty(snapshot)
+        .map_err(|error| format!("could not encode training history: {error}"))?;
+    bytes.push(b'\n');
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(|error| {
+            format!(
+                "could not create temporary training history {}: {error}",
+                temporary.display()
+            )
+        })?;
+    file.write_all(&bytes).map_err(|error| {
+        format!(
+            "could not write temporary training history {}: {error}",
+            temporary.display()
+        )
+    })?;
+    file.sync_all().map_err(|error| {
+        format!(
+            "could not sync temporary training history {}: {error}",
+            temporary.display()
+        )
+    })?;
+    drop(file);
+    fs::rename(&temporary, &path).map_err(|error| {
+        format!(
+            "could not publish training history {}: {error}",
+            path.display()
+        )
+    })?;
+    File::open(root)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            format!(
+                "could not sync training history directory {}: {error}",
+                root.display()
+            )
+        })
+}
+
+fn admitted_snapshot(
+    root: &Path,
+    snapshot: &TrainingSnapshot,
+    run: TrainingRun,
+) -> Result<(TrainingSnapshot, TrainingUpdate), String> {
+    let mut registry = registry(snapshot)?;
+    registry.admit(RunRecord {
+        id: run.id.clone(),
+        phase: application_phase(run.phase),
+    })?;
+    let retained = registry
+        .retained_ids()
+        .map(str::to_owned)
+        .collect::<std::collections::BTreeSet<_>>();
+    let update = TrainingUpdate::RunAdded { run: Box::new(run) };
+    let mut candidate = snapshot.clone();
+    candidate.apply(update.clone());
+    candidate.runs.retain(|run| retained.contains(&run.id));
+    persist_snapshot(root, &candidate)?;
+    Ok((candidate, update))
+}
+
+fn persistence_failure_updates(
+    snapshot: &TrainingSnapshot,
+    run_id: &str,
+    finished_ms: i64,
+    error: &str,
+) -> Result<(TrainingUpdate, TrainingUpdate), String> {
+    let run = snapshot
+        .runs
+        .iter()
+        .find(|run| run.id == run_id)
+        .ok_or_else(|| format!("training run {run_id:?} is not in history"))?;
+    let message =
+        format!("Training history could not be persisted, so execution was stopped: {error}");
+    Ok((
+        TrainingUpdate::Log {
+            run_id: run_id.to_owned(),
+            line: message.clone(),
+        },
+        TrainingUpdate::RunState {
+            run_id: run_id.to_owned(),
+            phase: TrainingRunPhase::Failed,
+            current_step: run.current_step,
+            finished_ms: Some(finished_ms),
+            message: Some(message),
+        },
+    ))
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1064,57 +1403,116 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn default_vision_act_request_discovers_dataset_camera_streams() {
-        let request = StartTrainingRequest {
-            sql: "SELECT 1".to_owned(),
-            ..StartTrainingRequest::default()
-        };
-
-        validate_request(&request).unwrap();
-        assert!(request.act.camera_streams.is_empty());
+    fn run(id: &str) -> TrainingRun {
+        TrainingRun {
+            id: id.to_owned(),
+            config: StartTrainingRequest::default(),
+            source: TrainingSource::default(),
+            phase: TrainingRunPhase::Starting,
+            current_step: 0,
+            started_ms: 1,
+            finished_ms: None,
+            message: None,
+            metrics: Vec::new(),
+            checkpoints: Vec::new(),
+            logs: Vec::new(),
+        }
     }
 
     #[test]
-    fn training_request_rejects_mutating_sql() {
-        let request = StartTrainingRequest {
-            sql: "DELETE FROM spiral_robotics.joint_samples".to_owned(),
-            ..StartTrainingRequest::default()
+    fn missing_history_is_empty_but_malformed_history_is_preserved_and_reported() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            load_snapshot(directory.path()).unwrap(),
+            TrainingSnapshot::default()
+        );
+
+        let path = directory.path().join(HISTORY_FILE);
+        let malformed = b"{ definitely not a training snapshot";
+        fs::write(&path, malformed).unwrap();
+        let error = load_snapshot(directory.path()).unwrap_err();
+        assert!(error.contains("malformed"), "{error}");
+        assert_eq!(fs::read(path).unwrap(), malformed);
+    }
+
+    #[test]
+    fn history_publication_is_atomic_and_syncs_through_a_same_directory_temporary() {
+        let directory = tempfile::tempdir().unwrap();
+        let snapshot = TrainingSnapshot {
+            runs: vec![run("persisted")],
+            ..TrainingSnapshot::default()
         };
-        assert!(
-            validate_request(&request)
-                .unwrap_err()
-                .contains("read-only")
+
+        persist_snapshot(directory.path(), &snapshot).unwrap();
+
+        assert_eq!(load_snapshot(directory.path()).unwrap(), snapshot);
+        assert!(!directory.path().join("runs.json.tmp").exists());
+    }
+
+    #[test]
+    fn failed_history_write_preserves_the_previous_file_and_does_not_admit_the_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let original = TrainingSnapshot::default();
+        persist_snapshot(directory.path(), &original).unwrap();
+        let original_bytes = fs::read(directory.path().join(HISTORY_FILE)).unwrap();
+        fs::create_dir(directory.path().join("runs.json.tmp")).unwrap();
+
+        let error = admitted_snapshot(directory.path(), &original, run("not-admitted"))
+            .expect_err("a blocked temporary path must fail publication");
+
+        assert!(error.contains("temporary training history"), "{error}");
+        assert_eq!(original, TrainingSnapshot::default());
+        assert_eq!(
+            fs::read(directory.path().join(HISTORY_FILE)).unwrap(),
+            original_bytes
         );
     }
 
     #[test]
-    fn training_request_requires_a_single_query() {
-        let request = StartTrainingRequest {
-            sql: "SELECT state, action FROM spiral_robotics.training_samples; DROP TABLE episodes"
-                .to_owned(),
-            ..StartTrainingRequest::default()
+    fn runtime_persistence_failure_becomes_a_visible_failed_run_and_log() {
+        let mut active = run("active");
+        active.phase = TrainingRunPhase::Running;
+        active.current_step = 12;
+        let mut snapshot = TrainingSnapshot {
+            runs: vec![active],
+            ..TrainingSnapshot::default()
         };
+
+        let (log, state) =
+            persistence_failure_updates(&snapshot, "active", 99, "disk full").unwrap();
+        snapshot.apply(log);
+        snapshot.apply(state);
+
+        let failed = &snapshot.runs[0];
+        assert_eq!(failed.phase, TrainingRunPhase::Failed);
+        assert_eq!(failed.current_step, 12);
+        assert_eq!(failed.finished_ms, Some(99));
+        assert!(failed.message.as_deref().unwrap().contains("disk full"));
         assert!(
-            validate_request(&request)
-                .unwrap_err()
-                .contains("exactly one")
+            failed
+                .logs
+                .last()
+                .unwrap()
+                .contains("execution was stopped")
         );
     }
 
     #[test]
-    fn training_columns_must_start_like_sql_identifiers() {
-        let request = StartTrainingRequest {
-            state_column: "1state".to_owned(),
-            sql: "SELECT 1".to_owned(),
-            ..StartTrainingRequest::default()
-        };
-
-        assert!(
-            validate_request(&request)
-                .unwrap_err()
-                .contains("identifier")
+    fn checkpoint_sample_rate_never_defaults_invalid_metadata_to_zero() {
+        assert_eq!(
+            checkpoint_sample_hz(&serde_json::json!({
+                "data_contract": {"sample_hz": 60.0}
+            }))
+            .unwrap(),
+            60.0
         );
+        for invalid in [
+            serde_json::json!({}),
+            serde_json::json!({"data_contract": {"sample_hz": 0.0}}),
+            serde_json::json!({"data_contract": {"sample_hz": -1.0}}),
+        ] {
+            assert!(checkpoint_sample_hz(&invalid).is_err());
+        }
     }
 
     #[test]

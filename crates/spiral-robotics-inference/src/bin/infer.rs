@@ -107,10 +107,12 @@ fn download(model: &ModelArguments) -> spiral_robotics_inference::Result<ModelFi
             &model.config_url,
             &model.weights_url,
         )?;
-        match (&model.config_sha256, &model.weights_sha256) {
-            (Some(config), Some(weights)) => remote.with_checksums(config, weights)?,
-            _ => remote,
-        }
+        let (Some(config), Some(weights)) = (&model.config_sha256, &model.weights_sha256) else {
+            return Err(spiral_robotics_inference::Error::Artifact(
+                "custom remote models require both config and weights SHA-256 checksums".to_owned(),
+            ));
+        };
+        remote.with_checksums(config, weights)?
     };
     download_remote_model(&model)
 }

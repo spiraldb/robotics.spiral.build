@@ -4,8 +4,10 @@ use dioxus::prelude::*;
 use spiral_robotics_panels::{Panel, PanelLayout};
 
 use crate::frontend::app::activity::{Activity, PanelRole};
-use crate::frontend::app::layout::default_panel_layout;
+use crate::frontend::app::layout::default_panel_layout_with_workbench;
 use crate::frontend::app::workspace::{EpisodeWorkspace, ScreenWorkspaceDefinition};
+
+const LIVE_WORKBENCH_FRACTION: f64 = 0.29;
 
 #[component]
 pub(crate) fn LiveScreen() -> Element {
@@ -25,6 +27,7 @@ pub(crate) fn compose(
         .iter()
         .map(|(panel, _)| panel.clone())
         .collect::<Vec<_>>();
-    let layout: PanelLayout = default_panel_layout(&layout_panels);
-    ScreenWorkspaceDefinition::new(panels, layout, "spiral_robotics.panel-layout.v6.live")
+    let layout: PanelLayout =
+        default_panel_layout_with_workbench(&layout_panels, LIVE_WORKBENCH_FRACTION);
+    ScreenWorkspaceDefinition::new(panels, layout, "spiral_robotics.panel-layout.v7.live")
 }

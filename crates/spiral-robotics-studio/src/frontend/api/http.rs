@@ -14,9 +14,9 @@ use js_sys::Uint8Array;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use spiral_robotics_core::api::{ApiError, EpisodeSummary};
+use spiral_robotics_contracts::api::{ApiError, EpisodeSummary};
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
-use spiral_robotics_core::api::{
+use spiral_robotics_contracts::api::{
     RolloutSnapshot, StudioSnapshot, TelemetryFrame, TrainingSnapshot, TrainingUpdate,
 };
 

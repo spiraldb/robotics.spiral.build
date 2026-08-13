@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
-use spiral_robotics_core::api::{
+use spiral_robotics_contracts::api::{
     DataSettings, SpiralSettings, UpdateDataSettingsRequest, VideoSettings,
 };
-use spiral_robotics_core::spiral;
+use spiral_robotics_contracts::spiral;
 
 const SETTINGS_FILE: &str = ".spiral-robotics-data-settings.json";
 
@@ -198,6 +198,12 @@ fn write_private_json(path: &Path, value: &StoredDataSettings) -> Result<(), Str
         .map_err(|error| format!("could not write {}: {error}", temp.display()))?;
     fs::rename(&temp, path)
         .map_err(|error| format!("could not publish {}: {error}", path.display()))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("settings path {} has no parent directory", path.display()))?;
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("could not sync {}: {error}", parent.display()))?;
     Ok(())
 }
 

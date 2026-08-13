@@ -10,10 +10,10 @@
 //! exported take carries them.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
+use std::fs::{self, File};
 #[cfg(test)]
 use std::io::Cursor;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Component, Path};
 use std::sync::Arc;
 
@@ -29,7 +29,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use serde_json::{Value, json};
-use spiral_robotics_core::api::{EpisodeArm, ImportResponse};
+use spiral_robotics_contracts::api::EpisodeArm;
 use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
 
@@ -86,6 +86,8 @@ pub(crate) struct DatasetArchiveSummary {
 
 #[derive(Debug)]
 struct ExportEpisode {
+    id: String,
+    frames: u64,
     joints: Vec<String>,
     positions: Vec<Vec<f32>>,
     actions: Vec<Vec<f32>>,
@@ -94,6 +96,50 @@ struct ExportEpisode {
     velocity: Option<Vec<Vec<f32>>>,
     effort: Option<Vec<Vec<f32>>>,
     sample_hz: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DatasetExportInspection {
+    pub id: String,
+    pub frames: u64,
+    pub joints: Vec<String>,
+    pub sample_hz: f64,
+    pub complete_observations: bool,
+    pub complete_actions: bool,
+    pub complete_velocity: bool,
+    pub complete_effort: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedDatasetExport {
+    episodes: Vec<ExportEpisode>,
+    inspections: Vec<DatasetExportInspection>,
+}
+
+impl PreparedDatasetExport {
+    pub(crate) fn inspections(&self) -> &[DatasetExportInspection] {
+        &self.inspections
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DatasetImportSummary {
+    pub episodes: u64,
+    pub frames: u64,
+    pub first_episode: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct StagedDatasetImport {
+    staging: tempfile::TempDir,
+    staged_files: Vec<String>,
+    summary: DatasetImportSummary,
+}
+
+impl StagedDatasetImport {
+    pub(crate) fn summary(&self) -> &DatasetImportSummary {
+        &self.summary
+    }
 }
 
 #[derive(Debug)]
@@ -126,6 +172,7 @@ pub(crate) fn export_lerobot_archive_for_dataset(
 
 /// Write a LeRobot ZIP directly to a file so the HTTP layer can stream it
 /// without retaining a second archive-sized allocation in server memory.
+#[cfg(test)]
 pub(crate) fn export_lerobot_archive_to_file_for_dataset(
     store: &EpisodeStore,
     dataset_id: Option<&str>,
@@ -139,6 +186,44 @@ pub(crate) fn export_lerobot_archive_to_file_for_dataset(
     Ok(summary)
 }
 
+/// Read exactly the application-selected takes into an opaque export staging
+/// value and report the facts needed for compatibility admission.
+pub(crate) fn prepare_lerobot_export(
+    store: &EpisodeStore,
+    episode_ids: &[String],
+) -> Result<PreparedDatasetExport, EpisodeError> {
+    let mut episodes = Vec::with_capacity(episode_ids.len());
+    let mut inspections = Vec::with_capacity(episode_ids.len());
+    for id in episode_ids {
+        let summary = store.get(id)?;
+        let episode = read_export_episode(store, &summary)?;
+        inspections.push(DatasetExportInspection {
+            id: episode.id.clone(),
+            frames: episode.frames,
+            joints: episode.joints.clone(),
+            sample_hz: episode.sample_hz,
+            complete_observations: episode.positions.len() as u64 == episode.frames
+                && episode.positions.iter().all(|frame| !frame.is_empty()),
+            complete_actions: episode.actions.len() as u64 == episode.frames
+                && episode.actions.iter().all(|frame| !frame.is_empty()),
+            complete_velocity: episode
+                .velocity
+                .as_ref()
+                .is_some_and(|frames| frames.len() as u64 == episode.frames),
+            complete_effort: episode
+                .effort
+                .as_ref()
+                .is_some_and(|frames| frames.len() as u64 == episode.frames),
+        });
+        episodes.push(episode);
+    }
+    Ok(PreparedDatasetExport {
+        episodes,
+        inspections,
+    })
+}
+
+#[cfg(test)]
 fn export_lerobot_archive_to<W: Write + std::io::Seek>(
     store: &EpisodeStore,
     dataset_id: Option<&str>,
@@ -160,9 +245,35 @@ fn export_lerobot_archive_to<W: Write + std::io::Seek>(
     let mut skipped = listed.len().saturating_sub(candidates.len()) as u64;
     let mut episodes = Vec::new();
     for summary in candidates {
-        match read_export_episode(store, summary) {
-            Ok(episode) if !episode.positions.is_empty() => episodes.push(episode),
-            Ok(_) | Err(_) => skipped += 1,
+        let episode = read_export_episode(store, summary)?;
+        let inspection = DatasetExportInspection {
+            id: episode.id.clone(),
+            frames: episode.frames,
+            joints: episode.joints.clone(),
+            sample_hz: episode.sample_hz,
+            complete_observations: episode.positions.len() as u64 == episode.frames
+                && episode.positions.iter().all(|frame| !frame.is_empty()),
+            complete_actions: episode.actions.len() as u64 == episode.frames
+                && episode.actions.iter().all(|frame| !frame.is_empty()),
+            complete_velocity: episode.velocity.is_some(),
+            complete_effort: episode.effort.is_some(),
+        };
+        if !inspection.complete_observations {
+            return Err(invalid(format!(
+                "{} has no complete follower observation; refusing to shorten the exported take",
+                inspection.id
+            )));
+        }
+        if !inspection.complete_actions {
+            return Err(invalid(format!(
+                "{} has no recorded follower action; refusing to fabricate a training label",
+                inspection.id
+            )));
+        }
+        if episode.positions.is_empty() {
+            skipped += 1;
+        } else {
+            episodes.push(episode);
         }
     }
     if episodes.is_empty() {
@@ -187,6 +298,70 @@ fn export_lerobot_archive_to<W: Write + std::io::Seek>(
         ));
     }
 
+    let without_proprioception = episodes
+        .iter()
+        .filter(|episode| episode.velocity.is_none() || episode.effort.is_none())
+        .count() as u64;
+    write_lerobot_archive_to(
+        episodes,
+        destination,
+        fps,
+        skipped,
+        without_proprioception == 0,
+        without_proprioception,
+    )
+}
+
+/// Encode a previously inspected selection after application policy has
+/// authorized its exact feature plan.
+pub(crate) fn export_prepared_lerobot_to_file(
+    prepared: PreparedDatasetExport,
+    file: File,
+    fps: u32,
+    include_proprioception: bool,
+) -> Result<(), EpisodeError> {
+    if prepared.episodes.is_empty()
+        || prepared
+            .inspections
+            .iter()
+            .any(|episode| !episode.complete_observations || !episode.complete_actions)
+    {
+        return Err(invalid(
+            "the prepared export is empty or requires fabricated training values",
+        ));
+    }
+    let without_proprioception = prepared
+        .episodes
+        .iter()
+        .filter(|episode| episode.velocity.is_none() || episode.effort.is_none())
+        .count() as u64;
+    if include_proprioception != (without_proprioception == 0) {
+        return Err(invalid(
+            "the authorized feature plan does not match the prepared episodes",
+        ));
+    }
+    let (file, _) = write_lerobot_archive_to(
+        prepared.episodes,
+        file,
+        i64::from(fps),
+        0,
+        include_proprioception,
+        without_proprioception,
+    )?;
+    file.sync_all().map_err(|source| EpisodeError::Io {
+        path: Path::new("temporary LeRobot export").to_owned(),
+        source,
+    })
+}
+
+fn write_lerobot_archive_to<W: Write + std::io::Seek>(
+    episodes: Vec<ExportEpisode>,
+    destination: W,
+    fps: i64,
+    skipped: u64,
+    proprioception: bool,
+    without_proprioception: u64,
+) -> Result<(W, DatasetArchiveSummary), EpisodeError> {
     let episode_count = episodes.len();
     if episode_count > MAX_DATASET_EPISODES {
         return Err(invalid(format!(
@@ -203,17 +378,13 @@ fn export_lerobot_archive_to<W: Write + std::io::Seek>(
                 ))
             })
     })?;
+    let joints = episodes[0].joints.clone();
     let dimension = joints.len();
     // Every take or none: LeRobot declares one feature set for the whole
     // dataset, so one take recorded on a bus that publishes neither velocity
     // nor effort costs every take the columns. The alternative — filling the
     // gap with zeroes — would put fabricated effort into a training set, which
     // is the one outcome here worth refusing outright.
-    let without_proprioception = episodes
-        .iter()
-        .filter(|episode| episode.velocity.is_none() || episode.effort.is_none())
-        .count() as u64;
-    let proprioception = without_proprioception == 0;
     let mut velocities = Vec::with_capacity(total_frames * dimension);
     let mut efforts = Vec::with_capacity(total_frames * dimension);
     let mut states = Vec::with_capacity(total_frames * dimension);
@@ -263,6 +434,17 @@ fn export_lerobot_archive_to<W: Write + std::io::Seek>(
         episode_offsets.push((from, cursor, episode.positions.len() as i64));
     }
 
+    let stats = stats_document(
+        dimension,
+        &states,
+        &actions,
+        proprioception.then_some(velocities.as_slice()),
+        proprioception.then_some(efforts.as_slice()),
+        &timestamps,
+        &frame_indices,
+        &episode_indices,
+        &indices,
+    );
     let data = data_parquet(
         dimension,
         states,
@@ -312,17 +494,6 @@ fn export_lerobot_archive_to<W: Write + std::io::Seek>(
         "features": features,
         "data_files_size_in_mb": 100,
     });
-    let stats = stats_document(
-        dimension,
-        &actions,
-        proprioception.then_some(velocities.as_slice()),
-        proprioception.then_some(efforts.as_slice()),
-        &timestamps,
-        &frame_indices,
-        &episode_indices,
-        &indices,
-    );
-
     let mut archive = ZipWriter::new(destination);
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     write_zip_entry(
@@ -376,7 +547,7 @@ fn export_lerobot_archive_to<W: Write + std::io::Seek>(
 pub(crate) fn import_lerobot_archive(
     store: &EpisodeStore,
     bytes: &[u8],
-) -> Result<ImportResponse, EpisodeError> {
+) -> Result<DatasetImportSummary, EpisodeError> {
     import_lerobot_archive_into_dataset(store, bytes, "default")
 }
 
@@ -385,22 +556,35 @@ pub(crate) fn import_lerobot_archive_into_dataset(
     store: &EpisodeStore,
     bytes: &[u8],
     dataset_id: &str,
-) -> Result<ImportResponse, EpisodeError> {
-    import_lerobot_archive_reader_into_dataset(
+) -> Result<DatasetImportSummary, EpisodeError> {
+    let staged = stage_lerobot_archive_reader_into_dataset(
         store,
         Cursor::new(bytes),
         bytes.len() as u64,
         dataset_id,
-    )
+    )?;
+    commit_staged_lerobot_import(store, staged)
 }
 
 /// Import from a spool file so request bytes never need to coexist in the
 /// Axum body buffer, a ZIP allocation, and browser WASM memory.
+#[cfg(test)]
 pub(crate) fn import_lerobot_archive_file_into_dataset(
     store: &EpisodeStore,
     file: File,
     dataset_id: &str,
-) -> Result<ImportResponse, EpisodeError> {
+) -> Result<DatasetImportSummary, EpisodeError> {
+    let staged = stage_lerobot_archive_file_into_dataset(store, file, dataset_id)?;
+    commit_staged_lerobot_import(store, staged)
+}
+
+/// Decode and validate an uploaded archive without making any imported take
+/// visible in the destination catalog.
+pub(crate) fn stage_lerobot_archive_file_into_dataset(
+    store: &EpisodeStore,
+    file: File,
+    dataset_id: &str,
+) -> Result<StagedDatasetImport, EpisodeError> {
     let length = file
         .metadata()
         .map_err(|source| EpisodeError::Io {
@@ -408,16 +592,16 @@ pub(crate) fn import_lerobot_archive_file_into_dataset(
             source,
         })?
         .len();
-    import_lerobot_archive_reader_into_dataset(store, file, length, dataset_id)
+    stage_lerobot_archive_reader_into_dataset(store, file, length, dataset_id)
 }
 
-fn import_lerobot_archive_reader_into_dataset<R: Read + std::io::Seek>(
+fn stage_lerobot_archive_reader_into_dataset<R: Read + std::io::Seek>(
     store: &EpisodeStore,
     source: R,
     compressed_bytes: u64,
     dataset_id: &str,
-) -> Result<ImportResponse, EpisodeError> {
-    if !spiral_robotics_core::spiral::is_dataset_id(dataset_id) {
+) -> Result<StagedDatasetImport, EpisodeError> {
+    if !spiral_robotics_contracts::spiral::is_dataset_id(dataset_id) {
         return Err(invalid(format!(
             "{dataset_id:?} is not a valid destination dataset id"
         )));
@@ -565,9 +749,46 @@ fn import_lerobot_archive_reader_into_dataset<R: Read + std::io::Seek>(
         .ok_or_else(|| invalid("the LeRobot dataset has no action samples to import"))?;
     let joints = normalized_joint_names(declared_names, dimension, robot_type)?;
 
+    // Decode and write every take in an isolated same-filesystem store first.
+    // Invalid values, writer failures, or a later bad episode therefore cannot
+    // leave earlier episodes visible in the destination after an error.
+    let staging = tempfile::Builder::new()
+        .prefix(".lerobot-import-")
+        .tempdir_in(store.directory())
+        .map_err(|source| EpisodeError::Io {
+            path: store.directory().to_owned(),
+            source,
+        })?;
+    for entry in fs::read_dir(store.directory()).map_err(|source| EpisodeError::Io {
+        path: store.directory().to_owned(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| EpisodeError::Io {
+            path: store.directory().to_owned(),
+            source,
+        })?;
+        let path = entry.path();
+        if !path.is_file()
+            || !matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("jsonl" | "part")
+            )
+        {
+            continue;
+        }
+        fs::hard_link(&path, staging.path().join(entry.file_name())).map_err(|source| {
+            EpisodeError::Io {
+                path: path.clone(),
+                source,
+            }
+        })?;
+    }
+    let staging_store = EpisodeStore::open(staging.path().to_path_buf())?;
+
     let mut first_episode = None;
     let mut imported_episodes = 0_u64;
     let mut imported_frames = 0_u64;
+    let mut staged_files = Vec::new();
     for frames in grouped.values_mut() {
         frames.sort_by_key(|frame| frame.frame);
         if frames.is_empty() {
@@ -586,7 +807,7 @@ fn import_lerobot_archive_reader_into_dataset<R: Read + std::io::Seek>(
                 "a LeRobot episode's timestamps run backward after frame ordering",
             ));
         }
-        let writer = store.begin_in_dataset(
+        let writer = staging_store.begin_in_dataset(
             dataset_id.to_owned(),
             "Imported — LeRobot dataset".to_owned(),
             Some("Imported from a LeRobot ZIP".to_owned()),
@@ -642,43 +863,84 @@ fn import_lerobot_archive_reader_into_dataset<R: Read + std::io::Seek>(
         first_episode.get_or_insert(summary.id);
         imported_episodes += 1;
         imported_frames += summary.frames;
+        staged_files.push(summary.file);
     }
-    store.reload()?;
 
-    Ok(ImportResponse {
-        episodes: imported_episodes,
-        frames: imported_frames,
-        first_episode,
+    Ok(StagedDatasetImport {
+        staging,
+        staged_files,
+        summary: DatasetImportSummary {
+            episodes: imported_episodes,
+            frames: imported_frames,
+            first_episode,
+        },
     })
+}
+
+/// Publish every staged take as one catalog transaction.
+pub(crate) fn commit_staged_lerobot_import(
+    store: &EpisodeStore,
+    staged: StagedDatasetImport,
+) -> Result<DatasetImportSummary, EpisodeError> {
+    let StagedDatasetImport {
+        staging,
+        staged_files,
+        summary,
+    } = staged;
+    // Hard links publish without overwriting any externally-created file. If
+    // any link or durability step fails, remove only links created by this
+    // transaction; the staged originals remain available until cleanup.
+    let mut published = Vec::with_capacity(staged_files.len());
+    for file in &staged_files {
+        let source = staging.path().join(file);
+        let destination = store.directory().join(file);
+        if let Err(source_error) = fs::hard_link(&source, &destination) {
+            for published in &published {
+                let _ = fs::remove_file(published);
+            }
+            return Err(EpisodeError::Io {
+                path: destination,
+                source: source_error,
+            });
+        }
+        published.push(destination);
+    }
+    let durability = File::open(store.directory()).and_then(|directory| directory.sync_all());
+    if let Err(source) = durability {
+        for published in &published {
+            let _ = fs::remove_file(published);
+        }
+        return Err(EpisodeError::Io {
+            path: store.directory().to_owned(),
+            source,
+        });
+    }
+    if let Err(source) = staging.close() {
+        for published in &published {
+            let _ = fs::remove_file(published);
+        }
+        return Err(EpisodeError::Io {
+            path: store.directory().to_owned(),
+            source,
+        });
+    }
+    if let Err(error) = store.reload() {
+        for published in &published {
+            let _ = fs::remove_file(published);
+        }
+        let _ = store.reload();
+        return Err(error);
+    }
+
+    Ok(summary)
 }
 
 fn read_export_episode(
     store: &EpisodeStore,
-    summary: &spiral_robotics_core::api::EpisodeSummary,
+    summary: &spiral_robotics_contracts::api::EpisodeSummary,
 ) -> Result<ExportEpisode, EpisodeError> {
-    let path = store.directory().join(&summary.file);
-    let file = File::open(&path).map_err(|source| EpisodeError::Io {
-        path: path.clone(),
-        source,
-    })?;
-    let mut lines = BufReader::new(file).lines();
-    let header = lines
-        .next()
-        .transpose()
-        .map_err(|source| EpisodeError::Io {
-            path: path.clone(),
-            source,
-        })?
-        .ok_or_else(|| invalid(format!("{} has no episode header", summary.id)))?;
-    let header: Value = serde_json::from_str(&header)
-        .map_err(|error| invalid(format!("could not read {}: {error}", summary.id)))?;
-    let arms: Vec<EpisodeArm> = serde_json::from_value(
-        header
-            .get("arms")
-            .cloned()
-            .ok_or_else(|| invalid(format!("{} names no recorded arms", summary.id)))?,
-    )
-    .map_err(|error| invalid(format!("could not read {}: {error}", summary.id)))?;
+    let completed = store.completed(&summary.id)?;
+    let arms = &completed.start.arms;
     let arm_index = arms
         .iter()
         .position(|arm| arm.id.to_ascii_lowercase().contains("follower"))
@@ -693,65 +955,49 @@ fn read_export_episode(
     // One missing frame disqualifies the whole take rather than the frame: a
     // column that is present for the first half of an episode and absent for
     // the second is worse than no column at all.
-    let mut proprioception = true;
-    let mut samples_seen = 0_u64;
-    for line in lines {
-        let line = line.map_err(|source| EpisodeError::Io {
-            path: path.clone(),
-            source,
-        })?;
-        let Ok(frame) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        if frame.get("t").is_none() {
-            continue;
-        }
-        samples_seen += 1;
-        if samples_seen > MAX_EPISODE_FRAMES {
-            return Err(invalid(format!(
-                "{} contains more than the supported {MAX_EPISODE_FRAMES} frames",
-                summary.id
-            )));
-        }
-        let arm_values = |key: &str| -> Option<Vec<f32>> {
-            let values = frame
-                .get(key)?
-                .as_array()?
+    let mut complete_velocity = true;
+    let mut complete_effort = true;
+    for sample in &completed.samples {
+        let arm_values = |values: &Vec<Vec<Option<f64>>>| -> Option<Vec<f32>> {
+            values
                 .get(arm_index)?
-                .as_array()?
                 .iter()
-                .map(Value::as_f64)
-                .collect::<Option<Vec<_>>>()?;
-            (values.len() == joints.len())
-                .then(|| values.into_iter().map(|value| value as f32).collect())
+                .copied()
+                .collect::<Option<Vec<_>>>()
+                .map(|values| values.into_iter().map(|value| value as f32).collect())
         };
-        let Some(pose) = arm_values("n") else {
-            continue;
-        };
-        // Files recorded before actions were added replay measured follower
-        // position, which preserves their established meaning. New files use
-        // the actual command and never substitute a free leader observation.
-        let action = arm_values("a").unwrap_or_else(|| pose.clone());
-        positions.push(pose);
-        actions.push(action);
-        match (arm_values("v"), arm_values("f")) {
-            (Some(frame_velocity), Some(frame_effort)) => {
-                velocity.push(frame_velocity);
-                effort.push(frame_effort);
-            }
-            _ => proprioception = false,
+        if let Some(pose) = arm_values(&sample.normalized) {
+            positions.push(pose);
         }
-    }
-    if samples_seen != summary.frames {
-        return Err(invalid(format!(
-            "{} declares {} frames but contains {samples_seen} readable samples",
-            summary.id, summary.frames
-        )));
+        // An action is the command the policy should learn, not an observation.
+        // Legacy takes that did not record commands remain viewable/replayable,
+        // but cannot truthfully become supervised training data.
+        if let Some(action) = sample
+            .action
+            .get(arm_index)
+            .and_then(Option::as_ref)
+            .and_then(|values| values.iter().copied().collect::<Option<Vec<_>>>())
+            .map(|values| values.into_iter().map(|value| value as f32).collect())
+        {
+            actions.push(action);
+        }
+        if let Some(frame_velocity) = sample.velocity.as_ref().and_then(arm_values) {
+            velocity.push(frame_velocity);
+        } else {
+            complete_velocity = false;
+        }
+        if let Some(frame_effort) = sample.effort.as_ref().and_then(arm_values) {
+            effort.push(frame_effort);
+        } else {
+            complete_effort = false;
+        }
     }
     Ok(ExportEpisode {
+        id: summary.id.clone(),
+        frames: completed.samples.len() as u64,
         joints,
-        velocity: proprioception.then_some(velocity),
-        effort: proprioception.then_some(effort),
+        velocity: complete_velocity.then_some(velocity),
+        effort: complete_effort.then_some(effort),
         positions,
         actions,
         sample_hz: summary.sample_hz,
@@ -945,6 +1191,7 @@ fn scalar_feature(dtype: &str) -> Value {
 #[allow(clippy::too_many_arguments)]
 fn stats_document(
     dimension: usize,
+    states: &[f32],
     actions: &[f32],
     velocities: Option<&[f32]>,
     efforts: Option<&[f32]>,
@@ -953,9 +1200,8 @@ fn stats_document(
     episodes: &[i64],
     indices: &[i64],
 ) -> Value {
-    let vector = vector_stats(actions, dimension);
     let mut stats = json!({
-        "observation.state": vector,
+        "observation.state": vector_stats(states, dimension),
         "action": vector_stats(actions, dimension),
         "timestamp": scalar_stats(timestamps.iter().map(|value| *value as f64)),
         "frame_index": scalar_stats(frames.iter().map(|value| *value as f64)),
@@ -1351,6 +1597,10 @@ mod tests {
 
     /// Write one four-frame take, with or without the motors' own readings.
     fn record_take(store: &EpisodeStore, proprioception: bool) {
+        record_take_with_actions(store, proprioception, true);
+    }
+
+    fn record_take_with_actions(store: &EpisodeStore, proprioception: bool, actions: bool) {
         let writer = store
             .begin(
                 "Teleoperation".to_owned(),
@@ -1379,10 +1629,14 @@ mod tests {
                 // Keep the commanded action visibly different from measured
                 // state so this fixture catches accidental state-as-action
                 // exports.
-                action: vec![Some(vec![
-                    Some(frame as f64 / 10.0 + 0.5);
-                    SO101_JOINTS.len()
-                ])],
+                action: if actions {
+                    vec![Some(vec![
+                        Some(frame as f64 / 10.0 + 0.5);
+                        SO101_JOINTS.len()
+                    ])]
+                } else {
+                    Vec::new()
+                },
             });
         }
         writer
@@ -1480,6 +1734,70 @@ mod tests {
         archive.finish().unwrap().into_inner()
     }
 
+    fn two_episode_archive_with_invalid_second() -> Vec<u8> {
+        let item = Arc::new(Field::new("item", DataType::Float32, false));
+        let vector = || DataType::FixedSizeList(item.clone(), SO101_JOINTS.len() as i32);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("observation.state", vector(), false),
+            Field::new("action", vector(), false),
+            Field::new("timestamp", DataType::Float32, false),
+            Field::new("frame_index", DataType::Int64, false),
+            Field::new("episode_index", DataType::Int64, false),
+        ]));
+        let lists = |values: Vec<f32>| {
+            Arc::new(
+                FixedSizeListArray::try_new(
+                    item.clone(),
+                    SO101_JOINTS.len() as i32,
+                    Arc::new(Float32Array::from(values)),
+                    None,
+                )
+                .unwrap(),
+            ) as ArrayRef
+        };
+        let mut actions = vec![0.0; SO101_JOINTS.len() * 2];
+        actions[SO101_JOINTS.len()] = 1_000.0;
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                lists(vec![0.0; SO101_JOINTS.len() * 2]),
+                lists(actions),
+                Arc::new(Float32Array::from(vec![0.0, 0.0])),
+                Arc::new(Int64Array::from(vec![0, 0])),
+                Arc::new(Int64Array::from(vec![0, 1])),
+            ],
+        )
+        .unwrap();
+        let parquet = parquet_bytes(schema, batch).unwrap();
+        let info = json!({
+            "codebase_version": "v3.0",
+            "robot_type": "so101_follower",
+            "fps": 30,
+            "features": {
+                "observation.state": vector_feature(&SO101_JOINTS.iter().map(|joint| (*joint).to_owned()).collect::<Vec<_>>()),
+                "action": vector_feature(&SO101_JOINTS.iter().map(|joint| (*joint).to_owned()).collect::<Vec<_>>())
+            }
+        });
+        let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        write_zip_entry(
+            &mut archive,
+            options,
+            "meta/info.json",
+            pretty_json(&info).unwrap().as_bytes(),
+        )
+        .unwrap();
+        write_zip_entry(
+            &mut archive,
+            options,
+            "data/chunk-000/file-000.parquet",
+            &parquet,
+        )
+        .unwrap();
+        archive.finish().unwrap().into_inner()
+    }
+
     #[test]
     fn a_session_that_recorded_the_motors_exports_velocity_and_effort() {
         let (_directory, store) = recorded_store();
@@ -1541,6 +1859,40 @@ mod tests {
             card.contains("1 of the exported takes"),
             "the dataset card says how many takes were the reason: {card}"
         );
+    }
+
+    #[test]
+    fn legacy_take_without_actions_is_not_exported_with_fabricated_labels() {
+        let directory = TempDir::new().unwrap();
+        let store = EpisodeStore::open(directory.path().join("episodes")).unwrap();
+        record_take_with_actions(&store, true, false);
+        store.reload().unwrap();
+
+        let error = match export_lerobot_archive(&store) {
+            Ok(_) => panic!("observation.state must never be substituted for a missing action"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("no recorded follower action"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn state_and_action_statistics_describe_their_own_values() {
+        let stats = stats_document(
+            1,
+            &[1.0, 3.0],
+            &[10.0, 30.0],
+            None,
+            None,
+            &[0.0, 1.0],
+            &[0, 1],
+            &[0, 0],
+            &[0, 1],
+        );
+        assert_eq!(stats["observation.state"]["mean"][0], 2.0);
+        assert_eq!(stats["action"]["mean"][0], 20.0);
     }
 
     #[test]
@@ -1622,6 +1974,28 @@ mod tests {
     }
 
     #[test]
+    fn application_authorized_prepared_export_encodes_the_inspected_selection() {
+        let (_source_directory, source) = recorded_store();
+        let selected = source
+            .list()
+            .into_iter()
+            .map(|episode| episode.id)
+            .collect::<Vec<_>>();
+        let prepared = prepare_lerobot_export(&source, &selected).unwrap();
+        assert_eq!(prepared.inspections().len(), 1);
+        assert!(prepared.inspections()[0].complete_observations);
+        assert!(prepared.inspections()[0].complete_actions);
+
+        let archive_file = tempfile::NamedTempFile::new().unwrap();
+        export_prepared_lerobot_to_file(prepared, archive_file.reopen().unwrap(), 60, true)
+            .unwrap();
+        let (info, _) = archive_metadata(&std::fs::read(archive_file.path()).unwrap());
+        assert_eq!(info["total_episodes"], 1);
+        assert_eq!(info["total_frames"], 4);
+        assert_eq!(info["fps"], 60);
+    }
+
+    #[test]
     fn import_refuses_action_only_data_instead_of_fabricating_observations() {
         let directory = TempDir::new().unwrap();
         let store = EpisodeStore::open(directory.path().join("episodes")).unwrap();
@@ -1629,6 +2003,55 @@ mod tests {
             .expect_err("action-only datasets are not truthful local episodes");
         assert!(error.to_string().contains("observation.state"), "{error}");
         assert!(store.list().is_empty());
+    }
+
+    #[test]
+    fn invalid_later_episode_does_not_partially_publish_earlier_imports() {
+        let directory = TempDir::new().unwrap();
+        let store = EpisodeStore::open(directory.path().join("episodes")).unwrap();
+        let error = import_lerobot_archive(&store, &two_episode_archive_with_invalid_second())
+            .expect_err("the second episode is outside the SO-101 action range");
+        assert!(error.to_string().contains("outside LeRobot"), "{error}");
+        store.reload().unwrap();
+        assert!(store.list().is_empty());
+    }
+
+    #[test]
+    fn staged_import_is_invisible_and_a_late_publish_collision_rolls_back_every_link() {
+        let source_directory = TempDir::new().unwrap();
+        let source = EpisodeStore::open(source_directory.path().join("episodes")).unwrap();
+        record_take(&source, true);
+        record_take(&source, true);
+        source.reload().unwrap();
+        let archive = export_lerobot_archive(&source).unwrap();
+
+        let target_directory = TempDir::new().unwrap();
+        let target = EpisodeStore::open(target_directory.path().join("episodes")).unwrap();
+        let staged = stage_lerobot_archive_reader_into_dataset(
+            &target,
+            Cursor::new(archive.bytes),
+            0,
+            "default",
+        )
+        .unwrap();
+        assert_eq!(staged.summary.episodes, 2);
+        target.reload().unwrap();
+        assert!(
+            target.list().is_empty(),
+            "staging must not publish even the first decoded take"
+        );
+
+        let collision = target.directory().join(&staged.staged_files[1]);
+        std::fs::write(&collision, "external writer won this identity\n").unwrap();
+        let error = commit_staged_lerobot_import(&target, staged)
+            .expect_err("the second destination identity already exists");
+        assert!(matches!(error, EpisodeError::Io { .. }));
+        std::fs::remove_file(collision).unwrap();
+        target.reload().unwrap();
+        assert!(
+            target.list().is_empty(),
+            "the first published link must be removed when a later link fails"
+        );
     }
 
     #[test]

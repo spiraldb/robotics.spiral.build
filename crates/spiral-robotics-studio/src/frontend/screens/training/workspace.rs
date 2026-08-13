@@ -2,20 +2,31 @@
 
 use std::collections::BTreeSet;
 
+use charming::Chart;
+use charming::component::{Axis, Grid};
+use charming::datatype::{CompositeValue, DataFrame, DataPoint};
+use charming::element::{
+    AreaStyle, AxisLabel, AxisLine, AxisTick, AxisType, Emphasis, LineStyle, Sampling, SplitLine,
+    Symbol,
+};
+use charming::series::Line;
 use dioxus::prelude::*;
-use spiral_robotics_core::api::{
+use spiral_robotics_contracts::api::{
     TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase,
 };
-use spiral_robotics_core::spiral;
+use spiral_robotics_contracts::spiral;
 use spiral_robotics_panels::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
 
 use crate::frontend::app::state::studio;
+use crate::frontend::components::charts::{
+    COLOR_INK_FAINT, COLOR_LINE, COLOR_THROUGHPUT, COLOR_TRAIN, COLOR_TRANSFER, COLOR_VALIDATION,
+    CharmingChart, MONO_FONT, TooltipRateUnit, downsample_extrema, studio_numeric_tooltip,
+    studio_rate_tooltip,
+};
 use crate::frontend::screens::training::state::training_controller;
 
-const CHART_WIDTH: f64 = 1_000.0;
-const CHART_TOP: f64 = 18.0;
-const CHART_BOTTOM: f64 = 242.0;
 const EMPTY_RUN_PANEL_ID: &str = "training-run-empty";
+const TRAINING_CHART_POINT_BUDGET: usize = 1_200;
 
 #[component]
 pub(crate) fn TrainingWorkspace() -> Element {
@@ -306,7 +317,6 @@ fn TrainingRunControl(
                                 controller.edit_request(move |request| request.device = value);
                             },
                             option { value: "auto", "Auto" }
-                            option { value: "cuda", "CUDA" }
                             option { value: "mps", "Apple MPS" }
                             option { value: "cpu", "CPU" }
                         }
@@ -580,7 +590,6 @@ fn training_readiness_guidance(readiness: &TrainingReadiness) -> (String, String
 
 #[component]
 fn TrainingLearning(run: TrainingRun) -> Element {
-    let (train_points, validation_points, loss_top, loss_bottom) = loss_points(&run);
     let last = run.metrics.last();
     let latest_train = last.map(|point| format_loss(point.train_loss));
     let latest_validation = run
@@ -593,6 +602,8 @@ fn TrainingLearning(run: TrainingRun) -> Element {
     let latest_train = latest_train.unwrap_or_else(|| "—".to_owned());
     let latest_validation = latest_validation.unwrap_or_else(|| "—".to_owned());
     let lr = lr.unwrap_or_else(|| "—".to_owned());
+    let chart_id = chart_dom_id("training-loss", &run.id);
+    let loss_chart = training_loss_chart(&run);
 
     rsx! {
         section { class: "training-learning",
@@ -624,32 +635,11 @@ fn TrainingLearning(run: TrainingRun) -> Element {
                         }
                     }
                 }
-                svg {
-                    class: "training-loss-chart",
-                    view_box: "0 0 1000 260",
-                    preserve_aspect_ratio: "none",
-                    "aria-label": "Training and validation loss by optimizer step",
-                    for y in [18, 74, 130, 186, 242] {
-                        line { x1: "0", x2: "1000", y1: "{y}", y2: "{y}", class: "training-grid-line" }
-                    }
-                    for x in [0, 250, 500, 750, 1000] {
-                        line { x1: "{x}", x2: "{x}", y1: "18", y2: "242", class: "training-grid-line" }
-                    }
-                    if !train_points.is_empty() {
-                        polyline { points: train_points, class: "training-line training-line-train" }
-                    }
-                    if !validation_points.is_empty() {
-                        polyline { points: validation_points, class: "training-line training-line-validation" }
-                    }
-                }
-                div { class: "training-chart-y-labels",
-                    span { "{loss_top}" }
-                    span { "{loss_bottom}" }
-                }
-                div { class: "training-chart-x-labels",
-                    span { "0" }
-                    span { "{run.config.steps / 2}" }
-                    span { "{run.config.steps}" }
+                CharmingChart {
+                    id: chart_id,
+                    chart: loss_chart,
+                    class: "training-loss-chart".to_owned(),
+                    aria_label: "Training and validation loss by optimizer step".to_owned(),
                 }
             }
             div { class: "training-event-strip",
@@ -722,12 +712,15 @@ fn TrainingPerformance(run: TrainingRun) -> Element {
     let transfer = last
         .map(|point| format_rate(point.transfer_bytes_per_second))
         .unwrap_or_else(|| "—".to_owned());
+    let throughput_chart =
+        training_resource_chart(metrics, total_steps, ResourceSeries::Throughput);
+    let transfer_chart = training_resource_chart(metrics, total_steps, ResourceSeries::Transfer);
 
     rsx! {
         section { class: "training-resources",
             div { class: "training-resource-grid",
-                ResourceLane { label: "Training rate", value: throughput, points: resource_points(metrics, total_steps, ResourceSeries::Throughput), class: "resource-throughput", description: "Samples completed per second." }
-                ResourceLane { label: "Input rate", value: transfer, points: resource_points(metrics, total_steps, ResourceSeries::Transfer), class: "resource-transfer", description: "Prepared camera data per second." }
+                ResourceLane { id: chart_dom_id("training-rate", &run.id), label: "Training rate", value: throughput, chart: throughput_chart, class: "resource-throughput", description: "Samples completed per second." }
+                ResourceLane { id: chart_dom_id("input-rate", &run.id), label: "Input rate", value: transfer, chart: transfer_chart, class: "resource-transfer", description: "Prepared camera data per second." }
             }
         }
     }
@@ -735,20 +728,21 @@ fn TrainingPerformance(run: TrainingRun) -> Element {
 
 #[component]
 fn ResourceLane(
+    id: String,
     label: &'static str,
     value: String,
-    points: String,
+    chart: Chart,
     class: &'static str,
     description: &'static str,
 ) -> Element {
     rsx! {
         div { class: "training-resource-lane {class}", title: "{description}",
             div { span { "{label}" } strong { "{value}" } }
-            svg { view_box: "0 0 1000 80", preserve_aspect_ratio: "none", "aria-hidden": "true",
-                line { x1: "0", x2: "1000", y1: "68", y2: "68", class: "training-resource-baseline" }
-                if !points.is_empty() {
-                    polyline { points, class: "training-resource-line" }
-                }
+            CharmingChart {
+                id,
+                chart,
+                class: "training-resource-chart".to_owned(),
+                aria_label: format!("{label} by optimizer step. {description}"),
             }
         }
     }
@@ -775,98 +769,150 @@ fn phase_class(phase: TrainingRunPhase) -> &'static str {
     }
 }
 
-fn loss_points(run: &TrainingRun) -> (String, String, String, String) {
-    let values = run
-        .metrics
-        .iter()
-        .flat_map(|point| [Some(point.train_loss), point.validation_loss])
-        .flatten()
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .collect::<Vec<_>>();
-    if values.is_empty() {
-        return (String::new(), String::new(), "—".to_owned(), "—".to_owned());
-    }
-    let log_min = values
-        .iter()
-        .copied()
-        .map(f64::ln)
-        .fold(f64::INFINITY, f64::min);
-    let log_max = values
-        .iter()
-        .copied()
-        .map(f64::ln)
-        .fold(f64::NEG_INFINITY, f64::max);
-    let padding = ((log_max - log_min) * 0.08).max(0.08);
-    let floor = log_min - padding;
-    let ceiling = log_max + padding;
-    let train = metric_points(&run.metrics, run.config.steps, floor, ceiling, |point| {
-        Some(point.train_loss)
-    });
-    let validation = metric_points(&run.metrics, run.config.steps, floor, ceiling, |point| {
-        point.validation_loss
-    });
-    (
-        train,
-        validation,
-        format_loss(ceiling.exp()),
-        format_loss(floor.exp()),
-    )
+fn training_loss_chart(run: &TrainingRun) -> Chart {
+    let train = metric_series_data(&run.metrics, |point| Some(point.train_loss), true);
+    let validation = metric_series_data(&run.metrics, |point| point.validation_loss, true);
+
+    Chart::new()
+        .animation(false)
+        .color(vec![COLOR_TRAIN, COLOR_VALIDATION])
+        .tooltip(studio_numeric_tooltip(4))
+        .grid(
+            Grid::new()
+                .left(48)
+                .right(12)
+                .top(12)
+                .bottom(26)
+                .contain_label(false),
+        )
+        .x_axis(
+            chart_axis(AxisType::Value, true)
+                .min(0)
+                .max(run.config.steps.max(1) as f64)
+                .split_number(4),
+        )
+        .y_axis(chart_axis(AxisType::Log, true).log_base(10).split_number(4))
+        .series(metric_line("train-loss", "Train", COLOR_TRAIN, train, 2.0))
+        .series(metric_line(
+            "validation-loss",
+            "Validation",
+            COLOR_VALIDATION,
+            validation,
+            1.8,
+        ))
 }
 
-fn metric_points(
-    metrics: &[TrainingMetricPoint],
-    total_steps: u64,
-    floor: f64,
-    ceiling: f64,
-    value: impl Fn(&TrainingMetricPoint) -> Option<f64>,
-) -> String {
-    let span = (ceiling - floor).max(f64::EPSILON);
-    metrics
-        .iter()
-        .filter_map(|point| {
-            let reading = value(point)?;
-            (reading.is_finite() && reading > 0.0).then(|| {
-                let x = point.step as f64 / total_steps.max(1) as f64 * CHART_WIDTH;
-                let normalized = ((reading.ln() - floor) / span).clamp(0.0, 1.0);
-                let y = CHART_BOTTOM - normalized * (CHART_BOTTOM - CHART_TOP);
-                format!("{x:.2},{y:.2}")
-            })
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn resource_points(
+fn training_resource_chart(
     metrics: &[TrainingMetricPoint],
     total_steps: u64,
     series: ResourceSeries,
-) -> String {
-    let readings = metrics
-        .iter()
-        .map(|point| match series {
-            ResourceSeries::Throughput => point.examples_per_second,
-            ResourceSeries::Transfer => point.transfer_bytes_per_second,
-        })
-        .filter(|value| value.is_finite() && *value >= 0.0)
-        .collect::<Vec<_>>();
-    let maximum = match series {
-        ResourceSeries::Throughput | ResourceSeries::Transfer => {
-            readings.iter().copied().fold(0.0, f64::max).max(1.0)
-        }
+) -> Chart {
+    let (id, name, color) = match series {
+        ResourceSeries::Throughput => ("training-rate", "Training rate", COLOR_THROUGHPUT),
+        ResourceSeries::Transfer => ("input-rate", "Input rate", COLOR_TRANSFER),
     };
-    metrics
-        .iter()
-        .map(|point| {
-            let value = match series {
+    let data = metric_series_data(
+        metrics,
+        |point| {
+            Some(match series {
                 ResourceSeries::Throughput => point.examples_per_second,
                 ResourceSeries::Transfer => point.transfer_bytes_per_second,
-            };
-            let x = point.step as f64 / total_steps.max(1) as f64 * CHART_WIDTH;
-            let y = 68.0 - (value / maximum).clamp(0.0, 1.0) * 56.0;
-            format!("{x:.2},{y:.2}")
+            })
+        },
+        false,
+    );
+    let tooltip = match series {
+        ResourceSeries::Throughput => studio_rate_tooltip(TooltipRateUnit::SamplesPerSecond),
+        ResourceSeries::Transfer => studio_rate_tooltip(TooltipRateUnit::BytesPerSecond),
+    };
+
+    Chart::new()
+        .animation(false)
+        .color(vec![color])
+        .tooltip(tooltip)
+        .grid(Grid::new().left(0).right(0).top(6).bottom(2))
+        .x_axis(
+            chart_axis(AxisType::Value, false)
+                .min(0)
+                .max(total_steps.max(1) as f64),
+        )
+        .y_axis(chart_axis(AxisType::Value, false).min(0).scale(true))
+        .series(
+            metric_line(id, name, color, data, 1.5)
+                .area_style(AreaStyle::new().color(color).opacity(0.09)),
+        )
+}
+
+fn metric_series_data(
+    metrics: &[TrainingMetricPoint],
+    value: impl Fn(&TrainingMetricPoint) -> Option<f64>,
+    positive_only: bool,
+) -> DataFrame {
+    let points = metrics
+        .iter()
+        .filter_map(|point| {
+            let value = value(point)?;
+            (value.is_finite()
+                && (!positive_only || value > 0.0)
+                && (positive_only || value >= 0.0))
+                .then_some((point.step as f64, value))
         })
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect::<Vec<_>>();
+    downsample_extrema(&points, TRAINING_CHART_POINT_BUDGET)
+        .into_iter()
+        .map(|(step, value)| xy_point(step, Some(value)))
+        .collect()
+}
+
+fn metric_line(id: &str, name: &str, color: &str, data: DataFrame, width: f64) -> Line {
+    Line::new()
+        .id(id)
+        .name(name)
+        .show_symbol(false)
+        .symbol(Symbol::None)
+        .sampling(Sampling::Minmax)
+        .connect_nulls(false)
+        .line_style(LineStyle::new().color(color).width(width))
+        .emphasis(Emphasis::new().disabled(true))
+        .data(data)
+}
+
+fn chart_axis(kind: AxisType, visible: bool) -> Axis {
+    Axis::new()
+        .type_(kind)
+        .show(true)
+        .axis_line(AxisLine::new().show(false))
+        .axis_tick(AxisTick::new().show(false))
+        .axis_label(
+            AxisLabel::new()
+                .show(visible)
+                .font_family(MONO_FONT)
+                .font_size(10)
+                .color(COLOR_INK_FAINT),
+        )
+        .split_line(
+            SplitLine::new()
+                .show(visible)
+                .line_style(LineStyle::new().color(COLOR_LINE).width(1)),
+        )
+}
+
+fn xy_point(x: f64, y: Option<f64>) -> DataPoint {
+    DataPoint::from(vec![CompositeValue::from(x), CompositeValue::from(y)])
+}
+
+fn chart_dom_id(prefix: &str, key: &str) -> String {
+    let safe = key
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    format!("{prefix}-{safe}")
 }
 
 fn step_percent(step: u64, total_steps: u64) -> f64 {
@@ -901,7 +947,7 @@ fn format_rate(bytes_per_second: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_core::spiral::Table;
+    use spiral_robotics_contracts::spiral::Table;
 
     use super::*;
 
@@ -926,7 +972,30 @@ mod tests {
             examples_per_second: 25.0,
             ..TrainingMetricPoint::default()
         }];
-        assert!(resource_points(&metrics, 100, ResourceSeries::Throughput).starts_with("500.00,"));
+        let chart = training_resource_chart(&metrics, 100, ResourceSeries::Throughput);
+        let option = serde_json::to_value(chart).expect("chart should serialize");
+        assert_eq!(option["xAxis"]["max"], 100.0);
+        assert_eq!(option["series"][0]["data"][0][0], 50.0);
         assert_eq!(step_percent(50, 100), 50.0);
+    }
+
+    #[test]
+    fn loss_chart_uses_a_log_axis_and_keeps_both_series_stable() {
+        let run = TrainingRun {
+            metrics: vec![TrainingMetricPoint {
+                step: 1,
+                train_loss: 0.25,
+                validation_loss: Some(0.3),
+                ..TrainingMetricPoint::default()
+            }],
+            ..TrainingRun::default()
+        };
+        let option =
+            serde_json::to_value(training_loss_chart(&run)).expect("chart should serialize");
+
+        assert_eq!(option["yAxis"]["type"], "log");
+        assert_eq!(option["series"].as_array().map(Vec::len), Some(2));
+        assert_eq!(option["series"][0]["id"], "train-loss");
+        assert_eq!(option["series"][1]["id"], "validation-loss");
     }
 }

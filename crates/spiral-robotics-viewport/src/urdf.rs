@@ -10,6 +10,12 @@
 //! visuals, and joint limits. Inertias, collision volumes, transmissions, and
 //! Gazebo extensions are skipped rather than rejected, so a full-fidelity URDF
 //! written for a simulator still loads and still draws.
+//!
+//! This is deliberately a tolerant visualization model, not a source of motor
+//! limits or motion authorization. Missing joint positions rest at zero and
+//! unusable visual dimensions collapse to zero so incomplete telemetry or
+//! decoration cannot take down the scene; hardware policy must use validated
+//! motor configuration and calibration instead.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -119,7 +125,8 @@ pub struct Joint {
     /// Placement of the child's frame in the parent's, before any motion.
     pub origin: Pose,
     pub axis: Vec3,
-    /// Travel limits in radians or metres, when the description states them.
+    /// Viewer travel limits in radians or metres, when the description states them.
+    /// These are drawing bounds, never hardware command limits.
     pub limit: Option<(f32, f32)>,
 }
 
@@ -195,7 +202,7 @@ impl Urdf {
     /// The result is indexed like [`Urdf::links`]. Joints missing from
     /// `positions` stay at zero, so a description with more joints than the
     /// caller knows about still poses — the unknown ones simply do not move.
-    /// Positions outside a joint's stated limits are clamped, because a
+    /// Positions outside a joint's stated viewer limits are clamped, because a
     /// mismeasured angle should bend the drawing no further than the hardware
     /// could bend.
     pub fn pose(&self, positions: &BTreeMap<String, f32>) -> Vec<Mat4> {
@@ -383,6 +390,8 @@ fn parse(text: &str) -> Result<Urdf, UrdfError> {
             Some(node) => vec3(node, "xyz")?.normalize_or(Vec3::X),
             None => Vec3::X,
         };
+        // Missing endpoints collapse this viewer-only joint to rest. Hardware
+        // command limits come from validated motor configuration, not URDF.
         let limit = children(node, "limit")
             .next()
             .map(|node| Ok::<_, UrdfError>((number(node, "lower")?, number(node, "upper")?)))
@@ -501,6 +510,8 @@ fn parse_visual(
 const DEFAULT_COLOR: [f32; 4] = [0.7, 0.72, 0.75, 1.0];
 
 fn parse_geometry(node: Node<'_, '_>, link: &str) -> Result<Geometry, UrdfError> {
+    // A missing visual dimension becomes zero so optional decoration cannot
+    // break the scene. This tolerance is intentionally not configuration policy.
     for shape in node.children().filter(Node::is_element) {
         return match shape.tag_name().name() {
             "box" => Ok(Geometry::Box {
@@ -627,6 +638,8 @@ fn numbers(text: &str) -> Option<Vec<f32>> {
 
 #[cfg(test)]
 mod tests {
+    use spiral_robotics_core::arm::SO101_JOINTS;
+
     use super::*;
 
     type ErrorCase = (&'static str, fn(&UrdfError) -> bool);
@@ -937,7 +950,7 @@ mod tests {
 
         // Every motor the studio knows about has to be a joint here, by name,
         // or a measured angle would have nothing to move.
-        for joint in crate::arm::SO101_JOINTS {
+        for joint in SO101_JOINTS {
             let found = urdf
                 .joint(joint.name)
                 .unwrap_or_else(|| panic!("{} is missing from the description", joint.name));
@@ -948,10 +961,7 @@ mod tests {
                 joint.name
             );
         }
-        assert_eq!(
-            urdf.movable_joints().count(),
-            crate::arm::SO101_JOINTS.len()
-        );
+        assert_eq!(urdf.movable_joints().count(), SO101_JOINTS.len());
         assert_eq!(urdf.links[urdf.root()].name, "base_link");
 
         // Nothing references a mesh, so the description draws with no assets.

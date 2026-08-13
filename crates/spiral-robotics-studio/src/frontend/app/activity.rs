@@ -5,7 +5,7 @@
 //! [`ActivityProjection`]; renderers consume that projection without guessing
 //! whether absent data means Live, loading, or failure.
 
-use spiral_robotics_core::api::{EpisodeSummary, RecordingProgress};
+use spiral_robotics_contracts::api::{EpisodeSummary, RecordingProgress};
 
 /// The Studio's four primary activities.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

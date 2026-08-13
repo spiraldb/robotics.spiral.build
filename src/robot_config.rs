@@ -11,8 +11,10 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Write};
 use std::path::{Path, PathBuf};
 
-use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use serde::de::{self, DeserializeOwned, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
+use spiral_robotics_core::calibration::{Direction, MotorSpec};
 use tempfile::NamedTempFile;
 
 /// The newest robot-configuration schema understood by this crate.
@@ -58,6 +60,8 @@ pub enum ConfigError {
     },
     /// A port supplied to [`RobotConfig::merged`] was not an object.
     PortMustBeObject,
+    /// A typed motor map could not be merged into the existing raw document.
+    MotorsMustBeObject,
 }
 
 impl fmt::Display for ConfigError {
@@ -105,6 +109,9 @@ impl fmt::Display for ConfigError {
             Self::PortMustBeObject => {
                 formatter.write_str("robot configuration port must be a JSON object")
             }
+            Self::MotorsMustBeObject => {
+                formatter.write_str("robot configuration motors must be a JSON object")
+            }
         }
     }
 }
@@ -119,7 +126,8 @@ impl Error for ConfigError {
             | Self::InvalidSchemaVersion(_)
             | Self::UnsafeTarget { .. }
             | Self::ConcurrentModification { .. }
-            | Self::PortMustBeObject => None,
+            | Self::PortMustBeObject
+            | Self::MotorsMustBeObject => None,
         }
     }
 }
@@ -147,12 +155,23 @@ impl RobotConfig {
         let Some(file) = open_regular_config(path)? else {
             return Ok(Self::default());
         };
-        let value =
+        let StrictValue(value) =
             serde_json::from_reader(BufReader::new(file)).map_err(|source| ConfigError::Json {
                 context: format!("in '{}'", path.display()),
                 source,
             })?;
 
+        Self::from_value(value)
+    }
+
+    /// Parse an in-memory document while rejecting duplicate object keys at any
+    /// depth before a generic JSON value could silently overwrite one.
+    pub fn from_slice(bytes: &[u8]) -> Result<Self, ConfigError> {
+        let StrictValue(value) =
+            serde_json::from_slice(bytes).map_err(|source| ConfigError::Json {
+                context: "in imported robot configuration".to_owned(),
+                source,
+            })?;
         Self::from_value(value)
     }
 
@@ -205,6 +224,113 @@ impl RobotConfig {
         T: DeserializeOwned,
     {
         deserialize_optional(self.motors(), "in motors")
+    }
+
+    /// Decode domain motor specifications while keeping raw unknown fields in
+    /// this document for the next read-modify-write.
+    pub fn motor_specs(
+        &self,
+    ) -> Result<Option<std::collections::BTreeMap<String, MotorSpec>>, ConfigError> {
+        let Some(value) = self.motors().filter(|value| !value.is_null()) else {
+            return Ok(None);
+        };
+        let object = value.as_object().ok_or(ConfigError::MotorsMustBeObject)?;
+        object
+            .iter()
+            .map(|(name, value)| {
+                let context = format!("for motor {name:?}");
+                let fields = value.as_object().ok_or_else(|| ConfigError::Json {
+                    context: context.clone(),
+                    source: json_error("motor specification must be an object"),
+                })?;
+                let id = fields
+                    .get("id")
+                    .and_then(Value::as_u64)
+                    .and_then(|id| u32::try_from(id).ok())
+                    .ok_or_else(|| ConfigError::Json {
+                        context: context.clone(),
+                        source: json_error("motor id must be a non-negative 32-bit integer"),
+                    })?;
+                let direction = match fields.get("direction") {
+                    None => Direction::Normal,
+                    Some(Value::String(direction)) if direction == "normal" => Direction::Normal,
+                    Some(Value::String(direction)) if direction == "reversed" => {
+                        Direction::Reversed
+                    }
+                    Some(_) => {
+                        return Err(ConfigError::Json {
+                            context,
+                            source: json_error("motor direction must be 'normal' or 'reversed'"),
+                        });
+                    }
+                };
+                let model = match fields.get("model") {
+                    None => None,
+                    Some(Value::String(model)) => Some(model.clone()),
+                    Some(_) => {
+                        return Err(ConfigError::Json {
+                            context,
+                            source: json_error("motor model must be a string"),
+                        });
+                    }
+                };
+                Ok((
+                    name.clone(),
+                    MotorSpec {
+                        id,
+                        direction,
+                        model,
+                    },
+                ))
+            })
+            .collect::<Result<_, _>>()
+            .map(Some)
+    }
+
+    /// Merge domain motor specifications into the raw robot-file representation.
+    ///
+    /// Fields unknown to this build survive for existing motors. Removed motors
+    /// are removed, and new motors receive only the explicit domain fields.
+    pub fn encode_motor_specs(
+        &self,
+        specs: &std::collections::BTreeMap<String, MotorSpec>,
+    ) -> Result<Value, ConfigError> {
+        let existing = match self.motors() {
+            None | Some(Value::Null) => Map::new(),
+            Some(Value::Object(motors)) => motors.clone(),
+            Some(_) => return Err(ConfigError::MotorsMustBeObject),
+        };
+        let motors = specs
+            .iter()
+            .map(|(name, spec)| {
+                let mut fields = existing
+                    .get(name)
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                fields.insert("id".to_owned(), Value::from(spec.id));
+                fields.insert(
+                    "direction".to_owned(),
+                    Value::String(
+                        match spec.direction {
+                            Direction::Normal => "normal",
+                            Direction::Reversed => "reversed",
+                        }
+                        .to_owned(),
+                    ),
+                );
+                match &spec.model {
+                    Some(model) => {
+                        fields.insert("model".to_owned(), Value::String(model.clone()));
+                    }
+                    None => {
+                        fields.remove("model");
+                    }
+                }
+                (name.clone(), Value::Object(fields))
+            })
+            .collect();
+        Ok(Value::Object(motors))
     }
 
     /// Return an updated clone while preserving every unrelated field.
@@ -511,6 +637,103 @@ where
         .transpose()
 }
 
+fn json_error(message: &str) -> serde_json::Error {
+    <serde_json::Error as serde::de::Error>::custom(message)
+}
+
+/// A JSON value decoder that refuses duplicate keys recursively.
+struct StrictValue(Value);
+
+impl<'de> Deserialize<'de> for StrictValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct StrictValueVisitor;
+
+        impl<'de> Visitor<'de> for StrictValueVisitor {
+            type Value = StrictValue;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JSON value without duplicate object keys")
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(StrictValue(Value::Bool(value)))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(StrictValue(Value::Number(value.into())))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(StrictValue(Value::Number(value.into())))
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Number::from_f64(value)
+                    .map(Value::Number)
+                    .map(StrictValue)
+                    .ok_or_else(|| E::custom("JSON numbers must be finite"))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(StrictValue(Value::String(value.to_owned())))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+                Ok(StrictValue(Value::String(value)))
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(StrictValue(Value::Null))
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(StrictValue(Value::Null))
+            }
+
+            fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                StrictValue::deserialize(deserializer)
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut values = Vec::new();
+                while let Some(StrictValue(value)) = sequence.next_element()? {
+                    values.push(value);
+                }
+                Ok(StrictValue(Value::Array(values)))
+            }
+
+            fn visit_map<A>(self, mut object: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut values = Map::new();
+                while let Some((key, StrictValue(value))) =
+                    object.next_entry::<String, StrictValue>()?
+                {
+                    if values.insert(key.clone(), value).is_some() {
+                        return Err(de::Error::custom(format!("duplicate object key {key:?}")));
+                    }
+                }
+                Ok(StrictValue(Value::Object(values)))
+            }
+        }
+
+        deserializer.deserialize_any(StrictValueVisitor)
+    }
+}
+
 fn canonicalize(value: Value) -> Value {
     match value {
         Value::Object(object) => {
@@ -680,6 +903,63 @@ mod tests {
 
         assert_eq!(motors["shoulder"], 1);
         assert_eq!(calibration, [10, 20, 30]);
+    }
+
+    #[test]
+    fn motor_codec_preserves_unknown_raw_fields_during_domain_updates() {
+        let config = RobotConfig::from_value(json!({
+            "motors": {
+                "joint": {
+                    "id": 1,
+                    "direction": "reversed",
+                    "model": "sts3215",
+                    "future": {"registers": [7, 8, 9]}
+                }
+            }
+        }))
+        .unwrap();
+        let mut motors = config.motor_specs().unwrap().unwrap();
+        motors.get_mut("joint").unwrap().id = 4;
+
+        let encoded = config.encode_motor_specs(&motors).unwrap();
+        assert_eq!(encoded["joint"]["id"], 4);
+        assert_eq!(encoded["joint"]["direction"], "reversed");
+        assert_eq!(encoded["joint"]["model"], "sts3215");
+        assert_eq!(encoded["joint"]["future"]["registers"], json!([7, 8, 9]));
+    }
+
+    #[test]
+    fn motor_codec_is_strict_about_domain_fields_but_accepts_unknown_extensions() {
+        for invalid in [
+            json!({"motors": {"joint": {"id": -1}}}),
+            json!({"motors": {"joint": {"id": 1, "direction": "sideways"}}}),
+            json!({"motors": {"joint": {"id": 1, "model": null}}}),
+            json!({"motors": {"joint": {"id": 1, "model": 3215}}}),
+        ] {
+            assert!(
+                RobotConfig::from_value(invalid)
+                    .unwrap()
+                    .motor_specs()
+                    .is_err()
+            );
+        }
+
+        let extended = RobotConfig::from_value(json!({
+            "motors": {"joint": {"id": 1, "future": {"anything": true}}}
+        }))
+        .unwrap();
+        assert!(extended.motor_specs().unwrap().is_some());
+    }
+
+    #[test]
+    fn raw_parser_rejects_duplicate_keys_before_values_can_overwrite_them() {
+        for invalid in [
+            br#"{"schema_version":1,"schema_version":1}"#.as_slice(),
+            br#"{"motors":{"joint":{"id":1,"id":2}}}"#.as_slice(),
+            br#"{"calibration":{"motors":{"joint":{"id":1},"joint":{"id":2}}}}"#.as_slice(),
+        ] {
+            assert!(RobotConfig::from_slice(invalid).is_err());
+        }
     }
 
     #[test]

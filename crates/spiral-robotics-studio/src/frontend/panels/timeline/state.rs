@@ -146,7 +146,7 @@ pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: T
                         &episode,
                         keep,
                         EventHandler::new(
-                            move |summary: spiral_robotics_core::api::EpisodeSummary| {
+                            move |summary: spiral_robotics_contracts::api::EpisodeSummary| {
                                 let next_revision = historical_revision.peek().wrapping_add(1);
                                 historical_revision.set(next_revision);
                                 historical_state.set(None);

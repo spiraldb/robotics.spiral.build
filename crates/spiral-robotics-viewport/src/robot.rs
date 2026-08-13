@@ -1,22 +1,73 @@
 //! Arms, joints, and cameras, turned into a scene.
 //!
 //! This is the only module here that knows what any of those words mean, and it
-//! knows them through `spiral-robotics-core` — the robot description, the joint model —
-//! rather than through the studio. What comes back is a [`Scene`] the layers
+//! knows the neutral joint values through `spiral-robotics-core` and owns the
+//! renderer-facing robot description itself. What comes back is a [`Scene`] the layers
 //! below can draw without learning any of it, plus the table that says which
 //! [`EntityKey`] was which thing.
 //!
 //! Everything drawn comes from the robot description. Link lengths, joint axes,
 //! and reach exist in the URDF file and nowhere else, including not here.
 
-use spiral_robotics_core::arm::{self, JointAngles};
-use spiral_robotics_core::glam::{Mat4, Quat, Vec3};
-use spiral_robotics_core::urdf::{Geometry, Urdf};
+use std::collections::BTreeMap;
+
+use glam::{EulerRot, Mat4, Quat, Vec3};
+use spiral_robotics_core::arm::JointAngles;
 
 use crate::scene::{Condition, Entity, EntityKey, Interaction, Scene};
+use crate::urdf::{Geometry, Urdf};
 
 /// How far apart two arms stand on the bench, in metres.
 pub const BENCH_SPACING: f32 = 0.34;
+
+/// The link angles that make a centered calibration recognizable on screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RestPose {
+    lift_deg: f64,
+    elbow_deg: f64,
+    wrist_flex_deg: f64,
+}
+
+const SO101_REST_POSE: RestPose = RestPose {
+    lift_deg: 30.0,
+    elbow_deg: 60.0,
+    wrist_flex_deg: 30.0,
+};
+
+/// Place a description's joints from measured SO-101 angles.
+///
+/// The description's own zero is the mechanical one — every joint centered,
+/// arm straight up — while a calibration's zero is the middle of whatever
+/// travel the operator happened to sweep. This presentation mapping bridges
+/// those coordinate systems without making the domain depend on the renderer.
+pub fn so101_joint_positions(urdf: &Urdf, angles: &JointAngles) -> BTreeMap<String, f32> {
+    let rest = SO101_REST_POSE;
+    let open = urdf
+        .joint("gripper")
+        .and_then(|joint| joint.limit)
+        .map_or(0.0, |(_, upper)| upper);
+
+    [
+        ("shoulder_pan", angles.pan_deg.to_radians() as f32),
+        (
+            "shoulder_lift",
+            (rest.lift_deg + angles.lift_deg).to_radians() as f32,
+        ),
+        (
+            "elbow_flex",
+            (rest.elbow_deg + angles.elbow_deg).to_radians() as f32,
+        ),
+        (
+            "wrist_flex",
+            (rest.wrist_flex_deg + angles.wrist_flex_deg).to_radians() as f32,
+        ),
+        ("wrist_roll", angles.wrist_roll_deg.to_radians() as f32),
+        ("gripper", angles.gripper.clamp(0.0, 1.0) as f32 * open),
+    ]
+    .into_iter()
+    .map(|(name, position)| (name.to_owned(), position))
+    .collect()
+}
 
 /// One addressable physical thing on the bench.
 ///
@@ -131,7 +182,7 @@ pub fn build(
 
     for placement in placements {
         let base = placement.base();
-        let positions = arm::so101_joint_positions(urdf, &placement.angles);
+        let positions = so101_joint_positions(urdf, &placement.angles);
         let transforms = urdf.pose(&positions);
 
         for (link_index, link) in urdf.links.iter().enumerate() {
@@ -234,12 +285,7 @@ fn mount_transform(urdf: &Urdf, transforms: &[Mat4], mount: &CameraMount) -> Opt
     Some(
         frame
             * Mat4::from_rotation_translation(
-                Quat::from_euler(
-                    spiral_robotics_core::glam::EulerRot::XYZ,
-                    mount.rpy[0],
-                    mount.rpy[1],
-                    mount.rpy[2],
-                ),
+                Quat::from_euler(EulerRot::XYZ, mount.rpy[0], mount.rpy[1], mount.rpy[2]),
                 Vec3::from_array(mount.xyz),
             ),
     )
@@ -276,13 +322,16 @@ fn faded(color: [f32; 4]) -> [f32; 4] {
 /// here has to agree with one written there.
 pub fn tool_position(urdf: &Urdf, angles: &JointAngles) -> Option<Vec3> {
     let index = urdf.link_index("tool_link")?;
-    let transforms = urdf.pose(&arm::so101_joint_positions(urdf, angles));
+    let transforms = urdf.pose(&so101_joint_positions(urdf, angles));
     Some(transforms.get(index)?.transform_point3(Vec3::ZERO) * 1000.0)
 }
 
 #[cfg(test)]
 mod tests {
+    use spiral_robotics_core::arm::SO101_JOINTS;
+
     use super::*;
+    use crate::urdf::SO101_URDF;
 
     #[test]
     fn every_shell_of_one_joint_shares_its_key() {
@@ -323,5 +372,129 @@ mod tests {
             "a pair straddles the origin"
         );
         assert!((right.y - left.y - BENCH_SPACING).abs() < 1e-6);
+    }
+
+    /// Where each pivot of the shipped description lands for `angles`.
+    fn pivots(angles: &JointAngles) -> BTreeMap<&'static str, Vec3> {
+        let urdf = Urdf::parse(SO101_URDF).unwrap();
+        let transforms = urdf.pose(&so101_joint_positions(&urdf, angles));
+        [
+            "upper_arm_link",
+            "forearm_link",
+            "wrist_link",
+            "gripper_link",
+        ]
+        .into_iter()
+        .map(|name| {
+            let index = urdf.link_index(name).unwrap();
+            (name, transforms[index].transform_point3(Vec3::ZERO))
+        })
+        .collect()
+    }
+
+    #[test]
+    fn a_centered_arm_rests_in_a_reaching_pose() {
+        let at = pivots(&JointAngles::default());
+
+        assert!((at["wrist_link"].z - at["forearm_link"].z).abs() < 1e-6);
+        assert!(at["forearm_link"].x > at["upper_arm_link"].x);
+        assert!(at["gripper_link"].x > at["wrist_link"].x);
+        assert!(at["gripper_link"].z < at["wrist_link"].z);
+    }
+
+    #[test]
+    fn lifting_the_shoulder_raises_the_tool() {
+        let lowered = pivots(&JointAngles {
+            lift_deg: 20.0,
+            ..JointAngles::default()
+        });
+        let raised = pivots(&JointAngles {
+            lift_deg: -20.0,
+            ..JointAngles::default()
+        });
+
+        assert!(raised["forearm_link"].z > lowered["forearm_link"].z);
+    }
+
+    #[test]
+    fn panning_swings_the_arm_about_the_vertical_axis() {
+        let ahead = pivots(&JointAngles::default());
+        let turned = pivots(&JointAngles {
+            pan_deg: 90.0,
+            ..JointAngles::default()
+        });
+
+        assert!(turned["gripper_link"].x.abs() < 1e-6);
+        assert!((turned["gripper_link"].y - ahead["gripper_link"].x).abs() < 1e-6);
+        assert!((turned["gripper_link"].z - ahead["gripper_link"].z).abs() < 1e-6);
+    }
+
+    #[test]
+    fn link_lengths_come_from_the_description_for_every_pose() {
+        let urdf = Urdf::parse(SO101_URDF).unwrap();
+        let reference = pivots(&JointAngles::default());
+        let bent = pivots(&JointAngles {
+            pan_deg: 45.0,
+            lift_deg: -35.0,
+            elbow_deg: 80.0,
+            wrist_flex_deg: -70.0,
+            wrist_roll_deg: 10.0,
+            gripper: 0.25,
+        });
+
+        for (child, parent) in [
+            ("forearm_link", "upper_arm_link"),
+            ("wrist_link", "forearm_link"),
+            ("gripper_link", "wrist_link"),
+        ] {
+            let stated = urdf
+                .joint_between(parent, child)
+                .unwrap()
+                .origin
+                .translation
+                .length();
+            for placed in [&reference, &bent] {
+                assert!(
+                    ((placed[child] - placed[parent]).length() - stated).abs() < 1e-6,
+                    "{parent} to {child} should stay {stated} m apart"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_gripper_fraction_opens_the_described_jaw() {
+        let urdf = Urdf::parse(SO101_URDF).unwrap();
+        let (_, open) = urdf.joint("gripper").unwrap().limit.unwrap();
+        let jaw = |gripper| {
+            so101_joint_positions(
+                &urdf,
+                &JointAngles {
+                    gripper,
+                    ..JointAngles::default()
+                },
+            )["gripper"]
+        };
+
+        assert_eq!(jaw(0.0), 0.0);
+        assert_eq!(jaw(1.0), open);
+        assert!((jaw(0.5) - open / 2.0).abs() < 1e-6);
+        assert_eq!(jaw(4.0), open);
+        assert_eq!(jaw(-1.0), 0.0);
+    }
+
+    #[test]
+    fn every_motor_places_a_joint_of_the_description() {
+        let urdf = Urdf::parse(SO101_URDF).unwrap();
+        let positions = so101_joint_positions(&urdf, &JointAngles::default());
+
+        for joint in SO101_JOINTS {
+            assert!(
+                positions.contains_key(joint.name),
+                "{} places nothing",
+                joint.name
+            );
+        }
+        assert_eq!(positions.len(), SO101_JOINTS.len());
     }
 }
