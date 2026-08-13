@@ -1,8 +1,8 @@
-//! Platform entrypoint for the single-crate Dioxus fullstack Studio.
+//! Platform entrypoint for the Dioxus fullstack Studio.
 
 #[cfg(feature = "server")]
 fn main() -> std::process::ExitCode {
-    spiral_robotics_studio::backend::run()
+    spiral_robotics_studio_backend::run(spiral_robotics_studio::App)
 }
 
 #[cfg(all(not(feature = "server"), feature = "web"))]

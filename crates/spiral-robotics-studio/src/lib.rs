@@ -1,12 +1,8 @@
-//! The complete Spiral Robotics Studio application, compiled by DX for the browser and server.
+//! The Spiral Robotics Studio interface, compiled by DX for the browser and SSR.
 //!
-//! Studio-specific code is split into `frontend` and server-gated `backend`
-//! trees. Domain policy lives in `spiral-robotics-core`; delivery and persistence
-//! representations live in `spiral-robotics-contracts`.
+//! The native runtime lives in `spiral-robotics-studio-backend`, keeping UI
+//! edits from invalidating robotics, storage, training, and inference code.
 
 mod frontend;
 
 pub use frontend::App;
-
-#[cfg(feature = "server")]
-pub mod backend;

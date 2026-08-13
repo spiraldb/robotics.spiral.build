@@ -1,5 +1,6 @@
 //! Backend-owned native policy lifecycle and deadline-aware motor loop.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -8,11 +9,11 @@ use image::imageops::FilterType;
 use safetensors::SafeTensors;
 use serde::Deserialize;
 use spiral_robotics_contracts::api::{
-    ModeSelection, ModeStatus, RolloutMetrics as ContractRolloutMetrics,
+    ModeSelection, ModeStatus, RobotTelemetry, RolloutMetrics as ContractRolloutMetrics,
     RolloutPhase as ContractRolloutPhase, RolloutSnapshot as ContractRolloutSnapshot,
     StartRolloutRequest,
 };
-use spiral_robotics_inference::{ImageView, InferenceInput, ModelArtifact, Policy};
+use spiral_robotics_inference::{ActionChunk, ImageView, InferenceInput, ModelArtifact, Policy};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
@@ -38,6 +39,12 @@ use crate::backend::robots::workspace::RobotWorkspace;
 
 const INPUT_STALE_AFTER: Duration = Duration::from_millis(350);
 const INITIAL_CAMERA_TIMEOUT: Duration = Duration::from_secs(5);
+/// LeRobot's asynchronous ACT client blends an existing prediction with a
+/// newer prediction for the same absolute timestep instead of replacing the
+/// action queue. Its default weighted-average strategy keeps 30% of the old
+/// prediction and accepts 70% of the new one.
+const ACTION_BLEND_OLD_WEIGHT: f32 = 0.3;
+const ACTION_BLEND_NEW_WEIGHT: f32 = 0.7;
 static SESSION_IDS: StableIdSequence = StableIdSequence::new("rollout", 1);
 
 #[derive(Debug, Deserialize)]
@@ -108,11 +115,161 @@ struct CameraInput {
     receiver: watch::Receiver<Option<Arc<Frame>>>,
 }
 
+struct CapturedImage {
+    name: String,
+    width: usize,
+    height: usize,
+    frame: Arc<Frame>,
+}
+
+struct InferenceObservation {
+    state: Vec<f32>,
+    images: Vec<CapturedImage>,
+    /// Absolute policy timestep whose corresponding action is chunk index zero.
+    requested_timestep: u64,
+    /// Oldest concrete sensor input, used for end-to-end latency metrics.
+    oldest_input_at: Instant,
+}
+
 struct DecodedImage {
     name: String,
     width: usize,
     height: usize,
     pixels: Vec<u8>,
+}
+
+struct CompletedInference {
+    chunk: ActionChunk,
+    requested_timestep: u64,
+    oldest_input_at: Instant,
+}
+
+struct InferenceTaskOutput {
+    policy: Box<dyn Policy>,
+    result: Result<CompletedInference, String>,
+}
+
+type InferenceTask = JoinHandle<InferenceTaskOutput>;
+
+/// A contiguous queue of actions keyed by the rollout's absolute policy clock.
+///
+/// This is the local equivalent of LeRobot's async `TimedAction` queue. A
+/// completed chunk is aligned by its observation timestep, its already elapsed
+/// prefix is discarded, and every still-future overlap is blended. Keeping the
+/// full model horizon gives the actor enough reserve to continue at 30 Hz while
+/// the next image decode and forward pass run in the background.
+#[derive(Debug)]
+struct TimedActionQueue {
+    next_timestep: u64,
+    action_dimensions: usize,
+    actions: VecDeque<Vec<f32>>,
+}
+
+impl TimedActionQueue {
+    fn from_initial_chunk(chunk: &ActionChunk) -> Result<Self, String> {
+        let action_dimensions = chunk.action_dimensions();
+        let actions = chunk_actions(chunk)?;
+        if actions.is_empty() {
+            return Err("policy returned an empty initial action chunk".to_owned());
+        }
+        Ok(Self {
+            next_timestep: 0,
+            action_dimensions,
+            actions: actions.into(),
+        })
+    }
+
+    fn next_timestep(&self) -> u64 {
+        self.next_timestep
+    }
+
+    fn remaining(&self) -> usize {
+        self.actions.len()
+    }
+
+    fn merge(&mut self, requested_timestep: u64, chunk: &ActionChunk) -> Result<(), String> {
+        if chunk.action_dimensions() != self.action_dimensions {
+            return Err(format!(
+                "policy action width changed from {} to {} during rollout",
+                self.action_dimensions,
+                chunk.action_dimensions()
+            ));
+        }
+        if requested_timestep > self.next_timestep {
+            return Err(format!(
+                "policy returned actions for future timestep {requested_timestep} while timestep {} is due",
+                self.next_timestep
+            ));
+        }
+        let incoming = chunk_actions(chunk)?;
+        let elapsed = self
+            .next_timestep
+            .saturating_sub(requested_timestep)
+            .try_into()
+            .map_err(|_| "policy inference delay exceeds the action index range".to_owned())?;
+        let future = incoming.get(elapsed..).ok_or_else(|| {
+            format!(
+                "asynchronous inference returned no future actions after {elapsed} elapsed policy steps"
+            )
+        })?;
+        if future.is_empty() {
+            return Err(format!(
+                "asynchronous inference exhausted its {}-step action horizon before completion",
+                incoming.len()
+            ));
+        }
+
+        let current = &self.actions;
+        self.actions = future
+            .iter()
+            .enumerate()
+            .map(|(offset, incoming)| {
+                current.get(offset).map_or_else(
+                    || incoming.clone(),
+                    |existing| blend_actions(existing, incoming),
+                )
+            })
+            .collect();
+        Ok(())
+    }
+
+    fn pop(&mut self) -> Result<Vec<f32>, String> {
+        let action = self.actions.pop_front().ok_or_else(|| {
+            "asynchronous inference did not replenish the action queue before it was exhausted"
+                .to_owned()
+        })?;
+        self.next_timestep = self.next_timestep.saturating_add(1);
+        Ok(action)
+    }
+}
+
+fn chunk_actions(chunk: &ActionChunk) -> Result<Vec<Vec<f32>>, String> {
+    (0..chunk.steps())
+        .map(|step| {
+            chunk
+                .action(step)
+                .map(<[f32]>::to_vec)
+                .ok_or_else(|| "policy returned an incomplete action sequence".to_owned())
+        })
+        .collect()
+}
+
+fn blend_actions(existing: &[f32], incoming: &[f32]) -> Vec<f32> {
+    debug_assert_eq!(existing.len(), incoming.len());
+    existing
+        .iter()
+        .zip(incoming)
+        .map(|(old, new)| ACTION_BLEND_OLD_WEIGHT * old + ACTION_BLEND_NEW_WEIGHT * new)
+        .collect()
+}
+
+fn action_refill_threshold(chunk_steps: usize, recommended_action_steps: usize) -> usize {
+    let half_horizon = (chunk_steps / 2).max(1);
+    let reobservation_stride = recommended_action_steps.min(half_horizon);
+    chunk_steps
+        .saturating_sub(reobservation_stride)
+        .max(1)
+        .min(chunk_steps)
 }
 
 pub(crate) struct RolloutManager {
@@ -286,7 +443,7 @@ impl RolloutManager {
         validate_manifest(&manifest, request, &artifact.config_json)?;
         let model_artifact = ModelArtifact::from_bytes(artifact.config_json, artifact.payload)
             .map_err(|error| format!("checkpoint identity is invalid: {error}"))?;
-        let (mut policy, _backend): (Box<dyn Policy>, &'static str) =
+        let (policy, _backend): (Box<dyn Policy>, &'static str) =
             tokio::task::spawn_blocking(move || load_native_policy(model_artifact))
                 .await
                 .map_err(|error| format!("policy loader stopped unexpectedly: {error}"))?
@@ -364,8 +521,14 @@ impl RolloutManager {
         if !lock(&self.coordinator).warming_up(session)? {
             return lock(&self.coordinator).stopped_outcome(session);
         }
-        let warmup = tokio::task::block_in_place(|| policy.warm_up())
-            .map_err(|error| format!("policy setup failed: {error}"))?;
+        let (policy, warmup) = tokio::task::spawn_blocking(move || {
+            let mut policy = policy;
+            let warmup = policy.warm_up();
+            (policy, warmup)
+        })
+        .await
+        .map_err(|error| format!("policy warm-up stopped unexpectedly: {error}"))?;
+        let warmup = warmup.map_err(|error| format!("policy setup failed: {error}"))?;
         lock(&self.coordinator).record_warmup(
             session,
             duration_ms(warmup.total),
@@ -404,12 +567,52 @@ impl RolloutManager {
             return lock(&self.coordinator).stopped_outcome(session);
         }
 
+        // The first chunk is prepared after policy admission but before the
+        // rollout clock starts. The follower holds its admitted pose during
+        // this one-time fill; once actions start, every later inference runs
+        // concurrently with dispatch from the current action queue.
+        let initial_hardware = self.hardware.state();
+        if let Some(outcome) = self.classify_control(session, &initial_hardware.mode)? {
+            return Ok(outcome);
+        }
+        let initial_robot = policy_robot(&initial_hardware, &request.robot)?;
+        require_healthy_policy_robot(initial_robot)?;
+        require_fresh_cameras(&cameras)?;
+        let initial_state = policy_observation_state(&joint_names, initial_robot)?;
+        let initial_observation = capture_inference_observation(
+            initial_state,
+            &cameras,
+            &specification.image_inputs,
+            0,
+            Instant::now(),
+        )?;
+        let mut initial_task = spawn_inference(policy, initial_observation);
+        let initial_output = loop {
+            tokio::select! {
+                changed = stop.changed() => {
+                    if changed.is_err() || *stop.borrow() {
+                        return lock(&self.coordinator).stopped_outcome(session);
+                    }
+                }
+                output = &mut initial_task => break output,
+            }
+        };
+        let (initial_policy, initial) = resolve_inference(initial_output)?;
+        let initial_latency = completed_inference_age(&initial);
+        lock(&self.coordinator).record_inference(
+            session,
+            duration_ms(initial_latency),
+            duration_ms(initial.chunk.stats.model),
+        )?;
+
+        let mut policy = Some(initial_policy);
+        let mut actions = TimedActionQueue::from_initial_chunk(&initial.chunk)?;
+        let refill_threshold = action_refill_threshold(initial.chunk.steps(), action_steps);
+        let mut inference = None::<InferenceTask>;
         let deadline =
             TokioInstant::now() + Duration::from_secs(u64::from(request.duration_seconds));
         let mut ticker = tokio::time::interval(period);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        let mut chunk = None;
-        let mut action_index = 0_usize;
         let mut last_hardware_sequence = 0_u64;
         let mut hardware_changed_at = Instant::now();
 
@@ -438,98 +641,51 @@ impl RolloutManager {
             if let Some(outcome) = self.classify_control(session, &hardware.mode)? {
                 return Ok(outcome);
             }
-            let robot = hardware
-                .telemetry
-                .robots
-                .iter()
-                .find(|robot| robot.id == request.robot)
-                .ok_or_else(|| "stopped policy: follower telemetry disappeared".to_owned())?;
-            if let Some(error) = &robot.error {
-                return Err(format!("stopped policy: follower reported {error}"));
-            }
-            if let Some(joint) = robot.joints.iter().find(|joint| !joint.faults.is_empty()) {
-                return Err(format!(
-                    "stopped policy: joint {:?} reported a motor fault",
-                    joint.name
-                ));
-            }
+            let robot = policy_robot(&hardware, &request.robot)?;
+            require_healthy_policy_robot(robot)?;
             require_fresh_cameras(&cameras)?;
-            let state = prepare_observation_state(
-                &joint_names,
-                &robot
-                    .joints
-                    .iter()
-                    .map(|joint| JointObservation {
-                        joint: joint.name.clone(),
-                        normalized: joint.normalized,
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .map_err(|error| format!("stopped policy: {error}"))?;
 
-            if chunk.is_none() || action_index >= action_steps {
-                let decoded = decode_images(&cameras, &specification.image_inputs)?;
-                let views = decoded
-                    .iter()
-                    .map(|image| {
-                        ImageView::packed_rgb8(
-                            &image.name,
-                            image.width,
-                            image.height,
-                            &image.pixels,
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|error| format!("preparing camera input: {error}"))?;
-                let inference = tokio::task::block_in_place(|| {
-                    policy.infer(InferenceInput {
-                        state: &state,
-                        images: &views,
-                    })
-                })
-                .map_err(|error| format!("policy inference failed: {error}"))?;
-                if inference.stats.total > INPUT_STALE_AFTER {
-                    return Err(format!(
-                        "stopped policy: {:.1} ms inference latency exceeded the {:.0} ms observation safety window",
-                        duration_ms(inference.stats.total),
-                        duration_ms(INPUT_STALE_AFTER)
-                    ));
-                }
-                let refreshed = self.hardware.state();
-                if let Some(outcome) = self.classify_control(session, &refreshed.mode)? {
-                    return Ok(outcome);
-                }
-                let refreshed_robot = refreshed
-                    .telemetry
-                    .robots
-                    .iter()
-                    .find(|robot| robot.id == request.robot)
-                    .ok_or_else(|| {
-                        "stopped policy: follower telemetry disappeared during inference".to_owned()
-                    })?;
-                if refreshed_robot.error.is_some()
-                    || refreshed_robot
-                        .joints
-                        .iter()
-                        .any(|joint| !joint.faults.is_empty())
-                {
-                    return Err("stopped policy: follower faulted during inference".to_owned());
-                }
-                require_fresh_cameras(&cameras)?;
-                let latency = duration_ms(inference.stats.total);
+            // Polling an already-finished blocking task is immediate. While it
+            // is still running, this branch does nothing and the buffered queue
+            // continues to feed one action on every policy-clock tick.
+            if inference.as_ref().is_some_and(JoinHandle::is_finished) {
+                let output = inference
+                    .take()
+                    .expect("a finished inference task is present")
+                    .await;
+                let (returned_policy, completed) = resolve_inference(output)?;
+                let latency = completed_inference_age(&completed);
                 lock(&self.coordinator).record_inference(
                     session,
-                    latency,
-                    duration_ms(inference.stats.model),
+                    duration_ms(latency),
+                    duration_ms(completed.chunk.stats.model),
                 )?;
-                chunk = Some(inference);
-                action_index = 0;
+                actions.merge(completed.requested_timestep, &completed.chunk)?;
+                policy = Some(returned_policy);
             }
-            let action = chunk
-                .as_ref()
-                .and_then(|chunk| chunk.action(action_index))
-                .ok_or_else(|| "policy returned an incomplete action sequence".to_owned())?;
-            let prepared = prepare_action_goals(&joint_names, action)
+
+            // LeRobot requests a new chunk when the queue falls below a
+            // configurable threshold. Here the checkpoint's n_action_steps is
+            // the re-observation stride: a 100-action chunk with 20 recommended
+            // steps requests a refill with 80 future actions still buffered.
+            // This retains the entire learned trajectory instead of discarding
+            // actions 20..99, while leaving ample inference-latency headroom.
+            if policy.is_some() && actions.remaining() <= refill_threshold {
+                let state = policy_observation_state(&joint_names, robot)?;
+                let observation = capture_inference_observation(
+                    state,
+                    &cameras,
+                    &specification.image_inputs,
+                    actions.next_timestep(),
+                    cycle_started,
+                )?;
+                let next_policy = policy.take().expect("an idle policy is available");
+                debug_assert!(inference.is_none());
+                inference = Some(spawn_inference(next_policy, observation));
+            }
+
+            let action = actions.pop()?;
+            let prepared = prepare_action_goals(&joint_names, &action)
                 .map_err(|error| format!("stopped policy: {error}"))?;
             if let Some(clamp) = prepared.clamps.first() {
                 let additional = prepared.clamps.len().saturating_sub(1);
@@ -556,10 +712,10 @@ impl RolloutManager {
                     );
                 }
             }
+
             self.hardware
                 .set_policy_goals(&request.robot, session, prepared.goals)
                 .await?;
-            action_index += 1;
             lock(&self.coordinator).record_command(session, cycle_started.elapsed() > period)?;
         }
     }
@@ -785,39 +941,169 @@ async fn wait_for_camera_frames(
     }
 }
 
-fn decode_images(
+fn policy_robot<'a>(
+    hardware: &'a HardwareState,
+    robot: &str,
+) -> Result<&'a RobotTelemetry, String> {
+    hardware
+        .telemetry
+        .robots
+        .iter()
+        .find(|candidate| candidate.id == robot)
+        .ok_or_else(|| "stopped policy: follower telemetry disappeared".to_owned())
+}
+
+fn require_healthy_policy_robot(robot: &RobotTelemetry) -> Result<(), String> {
+    if let Some(error) = &robot.error {
+        return Err(format!("stopped policy: follower reported {error}"));
+    }
+    if let Some(joint) = robot.joints.iter().find(|joint| !joint.faults.is_empty()) {
+        return Err(format!(
+            "stopped policy: joint {:?} reported a motor fault",
+            joint.name
+        ));
+    }
+    Ok(())
+}
+
+fn policy_observation_state(
+    joint_names: &[String],
+    robot: &RobotTelemetry,
+) -> Result<Vec<f32>, String> {
+    prepare_observation_state(
+        joint_names,
+        &robot
+            .joints
+            .iter()
+            .map(|joint| JointObservation {
+                joint: joint.name.clone(),
+                normalized: joint.normalized,
+            })
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| format!("stopped policy: {error}"))
+}
+
+fn capture_inference_observation(
+    state: Vec<f32>,
     cameras: &[CameraInput],
     specifications: &[spiral_robotics_inference::ImageInputSpecification],
-) -> Result<Vec<DecodedImage>, String> {
-    cameras
+    requested_timestep: u64,
+    requested_at: Instant,
+) -> Result<InferenceObservation, String> {
+    if cameras.len() != specifications.len() {
+        return Err(format!(
+            "policy camera contract changed from {} inputs to {} specifications",
+            cameras.len(),
+            specifications.len()
+        ));
+    }
+    let now = Instant::now();
+    let mut oldest_input_at = requested_at;
+    let images = cameras
         .iter()
         .zip(specifications)
         .map(|(camera, specification)| {
+            if camera.name != specification.name {
+                return Err(format!(
+                    "policy camera order changed from {:?} to {:?}",
+                    camera.name, specification.name
+                ));
+            }
             let frame = camera
                 .receiver
                 .borrow()
                 .clone()
                 .ok_or_else(|| format!("camera {:?} has no frame", camera.name))?;
-            if frame.captured_at.elapsed() > INPUT_STALE_AFTER {
+            if now.saturating_duration_since(frame.captured_at) > INPUT_STALE_AFTER {
                 return Err(format!("camera {:?} became stale", camera.name));
             }
-            let image = image::load_from_memory(&frame.bytes)
-                .map_err(|error| format!("decoding camera {:?}: {error}", camera.name))?
-                .to_rgb8();
-            let image = image::imageops::resize(
-                &image,
-                specification.width as u32,
-                specification.height as u32,
-                FilterType::Triangle,
-            );
-            Ok(DecodedImage {
+            oldest_input_at = oldest_input_at.min(frame.captured_at);
+            Ok(CapturedImage {
                 name: camera.name.clone(),
                 width: specification.width,
                 height: specification.height,
+                frame,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(InferenceObservation {
+        state,
+        images,
+        requested_timestep,
+        oldest_input_at,
+    })
+}
+
+fn spawn_inference(policy: Box<dyn Policy>, observation: InferenceObservation) -> InferenceTask {
+    tokio::task::spawn_blocking(move || {
+        let mut policy = policy;
+        let result = infer_observation(policy.as_mut(), observation);
+        InferenceTaskOutput { policy, result }
+    })
+}
+
+fn infer_observation(
+    policy: &mut dyn Policy,
+    observation: InferenceObservation,
+) -> Result<CompletedInference, String> {
+    let InferenceObservation {
+        state,
+        images,
+        requested_timestep,
+        oldest_input_at,
+    } = observation;
+    let decoded = decode_images(images)?;
+    let views = decoded
+        .iter()
+        .map(|image| ImageView::packed_rgb8(&image.name, image.width, image.height, &image.pixels))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("preparing camera input: {error}"))?;
+    let chunk = policy
+        .infer(InferenceInput {
+            state: &state,
+            images: &views,
+        })
+        .map_err(|error| format!("policy inference failed: {error}"))?;
+    Ok(CompletedInference {
+        chunk,
+        requested_timestep,
+        oldest_input_at,
+    })
+}
+
+fn decode_images(images: Vec<CapturedImage>) -> Result<Vec<DecodedImage>, String> {
+    images
+        .into_iter()
+        .map(|captured| {
+            let image = image::load_from_memory(&captured.frame.bytes)
+                .map_err(|error| format!("decoding camera {:?}: {error}", captured.name))?
+                .to_rgb8();
+            let image = image::imageops::resize(
+                &image,
+                captured.width as u32,
+                captured.height as u32,
+                FilterType::Triangle,
+            );
+            Ok(DecodedImage {
+                name: captured.name,
+                width: captured.width,
+                height: captured.height,
                 pixels: image.into_raw(),
             })
         })
         .collect()
+}
+
+fn resolve_inference(
+    output: Result<InferenceTaskOutput, tokio::task::JoinError>,
+) -> Result<(Box<dyn Policy>, CompletedInference), String> {
+    let output = output.map_err(|error| format!("policy inference worker stopped: {error}"))?;
+    output.result.map(|inference| (output.policy, inference))
+}
+
+fn completed_inference_age(inference: &CompletedInference) -> Duration {
+    Instant::now().saturating_duration_since(inference.oldest_input_at)
 }
 
 fn require_fresh_cameras(cameras: &[CameraInput]) -> Result<(), String> {
@@ -884,9 +1170,11 @@ fn load_native_policy(
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactDataContract, ArtifactManifest, CameraInput, INPUT_STALE_AFTER, PolicyAdmission,
-        load_selected_checkpoint, publish_active_rollout, require_fresh_cameras,
-        stop_and_join_active, take_active_rollout, validate_manifest, wait_for_policy_admission,
+        ArtifactDataContract, ArtifactManifest, CameraInput, CompletedInference, INPUT_STALE_AFTER,
+        InferenceObservation, PolicyAdmission, TimedActionQueue, action_refill_threshold,
+        completed_inference_age, load_selected_checkpoint, publish_active_rollout,
+        require_fresh_cameras, resolve_inference, spawn_inference, stop_and_join_active,
+        take_active_rollout, validate_manifest, wait_for_policy_admission,
     };
     use crate::backend::application::checkpoints::{
         CheckpointArtifact, CheckpointFuture, CheckpointKey, CheckpointPublication,
@@ -899,12 +1187,173 @@ mod tests {
     use crate::backend::robotics::hardware::HardwareState;
     use bytes::Bytes;
     use spiral_robotics_contracts::api::{ModeSelection, ModeStatus, StartRolloutRequest};
+    use spiral_robotics_inference::{
+        ActionChunk, InferenceInput, InferenceStats, ModelIdentity, Policy, PolicyKind,
+        PolicySpecification,
+    };
     use std::sync::{Arc, Mutex, mpsc};
     use std::time::{Duration, Instant};
 
     struct FakeCheckpointRepository {
         loads: Mutex<Vec<CheckpointKey>>,
         artifact: CheckpointArtifact,
+    }
+
+    struct SlowPolicy {
+        identity: ModelIdentity,
+        specification: PolicySpecification,
+        latency: Duration,
+    }
+
+    impl SlowPolicy {
+        fn new(latency: Duration) -> Self {
+            Self {
+                identity: ModelIdentity::local(),
+                specification: PolicySpecification {
+                    kind: PolicyKind::Act,
+                    state_dimensions: 1,
+                    image_inputs: Vec::new(),
+                    action_dimensions: 1,
+                    action_chunk_size: 100,
+                    recommended_action_steps: 20,
+                },
+                latency,
+            }
+        }
+    }
+
+    impl Policy for SlowPolicy {
+        fn identity(&self) -> &ModelIdentity {
+            &self.identity
+        }
+
+        fn specification(&self) -> &PolicySpecification {
+            &self.specification
+        }
+
+        fn warm_up(&mut self) -> spiral_robotics_inference::Result<InferenceStats> {
+            Ok(InferenceStats::default())
+        }
+
+        fn infer(
+            &mut self,
+            _input: InferenceInput<'_>,
+        ) -> spiral_robotics_inference::Result<ActionChunk> {
+            std::thread::sleep(self.latency);
+            ActionChunk::try_new(
+                vec![0.0; self.specification.action_chunk_size],
+                self.specification.action_chunk_size,
+                self.specification.action_dimensions,
+                InferenceStats {
+                    model: self.latency,
+                    total: self.latency,
+                    ..InferenceStats::default()
+                },
+            )
+        }
+    }
+
+    #[test]
+    fn async_action_queue_discards_stale_prefix_and_blends_overlap() {
+        let initial = ActionChunk::try_new(
+            (0..100).map(|step| step as f32).collect(),
+            100,
+            1,
+            InferenceStats::default(),
+        )
+        .unwrap();
+        let mut queue = TimedActionQueue::from_initial_chunk(&initial).unwrap();
+        for expected in 0..35 {
+            assert_eq!(queue.pop().unwrap(), vec![expected as f32]);
+        }
+
+        // This observation was captured at timestep 20 and completed at 35,
+        // so predictions 0..14 are stale. Timestep 35 overlaps the original
+        // plan and is blended; the tail beyond timestep 99 is appended.
+        let incoming = ActionChunk::try_new(
+            (0..100).map(|step| 2_000.0 + step as f32).collect(),
+            100,
+            1,
+            InferenceStats::default(),
+        )
+        .unwrap();
+        queue.merge(20, &incoming).unwrap();
+        assert_eq!(queue.next_timestep(), 35);
+        assert_eq!(queue.remaining(), 85);
+        assert_eq!(queue.pop().unwrap(), vec![0.3 * 35.0 + 0.7 * 2_015.0]);
+        for _ in 36..100 {
+            queue.pop().unwrap();
+        }
+        assert_eq!(queue.pop().unwrap(), vec![2_080.0]);
+    }
+
+    #[test]
+    fn async_action_queue_rejects_a_chunk_with_no_future_actions() {
+        let chunk =
+            ActionChunk::try_new(vec![0.0; 100], 100, 1, InferenceStats::default()).unwrap();
+        let mut queue = TimedActionQueue::from_initial_chunk(&chunk).unwrap();
+        for _ in 0..100 {
+            queue.pop().unwrap();
+        }
+        assert!(queue.merge(0, &chunk).unwrap_err().contains("exhausted"));
+    }
+
+    #[test]
+    fn action_queue_refills_at_the_checkpoint_stride_with_half_horizon_fallback() {
+        assert_eq!(action_refill_threshold(100, 20), 80);
+        assert_eq!(action_refill_threshold(100, 100), 50);
+        assert_eq!(action_refill_threshold(10, 10), 5);
+    }
+
+    #[test]
+    fn latency_metrics_include_sensor_age_before_model_execution() {
+        let now = Instant::now();
+        let inference = CompletedInference {
+            chunk: ActionChunk::try_new(vec![0.0; 100], 100, 1, InferenceStats::default()).unwrap(),
+            requested_timestep: 0,
+            oldest_input_at: now - INPUT_STALE_AFTER - Duration::from_nanos(1),
+        };
+
+        assert!(completed_inference_age(&inference) > INPUT_STALE_AFTER);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_inference_does_not_pause_policy_action_ticks() {
+        let latency = Duration::from_millis(120);
+        let now = Instant::now();
+        let observation = InferenceObservation {
+            state: vec![0.0],
+            images: Vec::new(),
+            requested_timestep: 0,
+            oldest_input_at: now,
+        };
+        let mut inference = spawn_inference(Box::new(SlowPolicy::new(latency)), observation);
+        let mut ticker = tokio::time::interval(Duration::from_millis(10));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let initial =
+            ActionChunk::try_new(vec![0.0; 100], 100, 1, InferenceStats::default()).unwrap();
+        let mut actions = TimedActionQueue::from_initial_chunk(&initial).unwrap();
+        let mut commands = Vec::new();
+
+        let output = loop {
+            tokio::select! {
+                output = &mut inference => break output,
+                _ = ticker.tick() => {
+                    actions.pop().expect("the current chunk keeps feeding actions");
+                    commands.push(Instant::now());
+                }
+            }
+        };
+        resolve_inference(output).expect("slow inference completes on its worker");
+
+        assert!(
+            commands.len() >= 8,
+            "a 120 ms inference should leave room for many 10 ms action ticks, found {}",
+            commands.len()
+        );
+        assert!(commands.windows(2).all(|window| {
+            window[1].saturating_duration_since(window[0]) < Duration::from_millis(60)
+        }));
     }
 
     #[test]

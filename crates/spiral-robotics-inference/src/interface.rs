@@ -91,7 +91,12 @@ pub struct ActionChunk {
 }
 
 impl ActionChunk {
-    pub(crate) fn try_new(
+    /// Build a row-major action chunk returned by a custom [`Policy`].
+    ///
+    /// Keeping this constructor fallible lets runtime integrations implement
+    /// the public policy interface without being able to publish a chunk whose
+    /// storage disagrees with its declared shape.
+    pub fn try_new(
         values: Vec<f32>,
         steps: usize,
         action_dimensions: usize,

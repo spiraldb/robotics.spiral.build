@@ -242,12 +242,21 @@ fn workspace_crate_dependencies_point_toward_policy() {
             "spiral-robotics-studio",
             "crates/spiral-robotics-studio/Cargo.toml",
             &[
+                "spiral-robotics-contracts",
+                "spiral-robotics-core",
+                "spiral-robotics-panels",
+                "spiral-robotics-studio-backend",
+                "spiral-robotics-viewport",
+            ][..],
+        ),
+        (
+            "spiral-robotics-studio-backend",
+            "crates/spiral-robotics-studio-backend/Cargo.toml",
+            &[
                 "spiral-robotics",
                 "spiral-robotics-contracts",
                 "spiral-robotics-core",
                 "spiral-robotics-inference",
-                "spiral-robotics-panels",
-                "spiral-robotics-viewport",
             ][..],
         ),
     ];
@@ -266,4 +275,33 @@ fn workspace_crate_dependencies_point_toward_policy() {
             );
         }
     }
+}
+
+#[test]
+fn rollout_action_scheduler_contains_no_inline_inference_work() {
+    let source = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/backend/rollout/manager.rs"),
+    )
+    .expect("rollout manager source");
+    let scheduler = source
+        .split_once("async fn run_session(")
+        .and_then(|(_, body)| body.split_once("    fn classify_control("))
+        .map(|(body, _)| body)
+        .expect("rollout session scheduler boundaries");
+
+    assert!(
+        scheduler.contains("spawn_inference(next_policy, observation)"),
+        "the running action scheduler must hand inference to its worker"
+    );
+    assert!(
+        scheduler.contains("actions.merge(completed.requested_timestep, &completed.chunk)")
+            && scheduler.contains("let action = actions.pop()?"),
+        "async rollout must merge timed chunks into the non-blocking action queue"
+    );
+    assert!(
+        !scheduler.contains("policy.infer(")
+            && !scheduler.contains("decode_images(")
+            && !scheduler.contains("block_in_place"),
+        "camera decoding and model execution must never run inline with physical action dispatch"
+    );
 }

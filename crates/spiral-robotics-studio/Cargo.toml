@@ -7,41 +7,20 @@ publish = false
 
 [features]
 default = []
-web = ["dioxus/web", "spiral-robotics-panels/web"]
+web = ["charming/wasm", "dioxus/web", "spiral-robotics-panels/web"]
 server = [
     "dioxus/cli-config",
     "dioxus/server",
-    "dep:spiral-robotics",
-    "dep:clap",
-    "dep:axum",
-    "dep:bytes",
-    "dep:tokio",
-    "dep:tokio-stream",
-    "dep:tower-http",
-    "dep:tracing",
-    "dep:tracing-subscriber",
-    "dep:async-stream",
-    "dep:arrow-array",
-    "dep:arrow-schema",
-    "dep:parquet",
-    "dep:zip",
-    "dep:arrow-json",
-    "dep:adbc_core",
-    "dep:adbc_driver_manager",
-    "dep:safetensors",
-    "dep:spiral-robotics-inference",
-    "dep:image",
-    "dep:tempfile",
+    "dep:spiral-robotics-studio-backend",
 ]
 
 [dependencies]
-charming = { version = "0.6.0", default-features = false, features = ["wasm"] }
-spiral-robotics = { workspace = true, optional = true }
+charming = { version = "0.6.0", default-features = false }
 spiral-robotics-contracts.workspace = true
 spiral-robotics-core.workspace = true
 spiral-robotics-panels.workspace = true
+spiral-robotics-studio-backend = { workspace = true, optional = true }
 spiral-robotics-viewport.workspace = true
-clap = { workspace = true, optional = true }
 dioxus = { workspace = true, features = [
     "asset",
     "document",
@@ -57,8 +36,6 @@ dioxus = { workspace = true, features = [
 serde.workspace = true
 serde_json.workspace = true
 serde-wasm-bindgen = "0.6"
-axum = { version = "0.8", features = ["macros"], optional = true }
-bytes = { version = "1", optional = true }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 gloo-net = { version = "0.7", default-features = false, features = ["eventsource", "http", "json"] }
 gloo-timers = { version = "0.3", features = ["futures"] }
@@ -86,32 +63,6 @@ web-sys = { version = "0.3", features = [
     "WebGlVertexArrayObject",
     "Window",
 ] }
-tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "sync", "signal", "time"], optional = true }
-tokio-stream = { version = "0.1", features = ["sync"], optional = true }
-tower-http = { version = "0.7", features = ["set-header", "trace"], optional = true }
-tracing = { version = "0.1", optional = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
-async-stream = { version = "0.3", optional = true }
-arrow-array = { version = "58.4.0", optional = true }
-arrow-schema = { version = "58.4.0", optional = true }
-parquet = { version = "58.4.0", default-features = false, features = ["arrow", "snap"], optional = true }
-zip = { version = "2.4.2", default-features = false, features = ["deflate"], optional = true }
-arrow-json = { version = "58.4.0", optional = true }
-adbc_core = { version = "0.24.0", optional = true }
-adbc_driver_manager = { version = "0.24.0", optional = true }
-safetensors = { version = "0.7", optional = true }
-image = { workspace = true, optional = true }
-tempfile = { workspace = true, optional = true }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-spiral-robotics-inference = { workspace = true, features = ["metal", "accelerate", "download"], optional = true }
-mach2 = "0.5"
-
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-spiral-robotics-inference = { workspace = true, features = ["download"], optional = true }
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true

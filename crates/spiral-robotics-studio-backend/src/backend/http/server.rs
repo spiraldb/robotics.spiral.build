@@ -84,7 +84,7 @@ struct Args {
     teleop_max_step: i64,
 }
 
-pub fn run() -> ExitCode {
+pub fn run(app: fn() -> dioxus::prelude::Element) -> ExitCode {
     // Camera probing re-executes this binary as an isolated worker, so this
     // must come before argument parsing.
     match cameras::worker_mode() {
@@ -150,7 +150,7 @@ pub fn run() -> ExitCode {
         }
     };
 
-    match runtime.block_on(serve(args, camera_access.err())) {
+    match runtime.block_on(serve(args, camera_access.err(), app)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
@@ -159,7 +159,11 @@ pub fn run() -> ExitCode {
     }
 }
 
-async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
+async fn serve(
+    args: Args,
+    camera_access_error: Option<String>,
+    app: fn() -> dioxus::prelude::Element,
+) -> Result<()> {
     // `dx serve` publishes its chosen address through the standard fullstack
     // environment. An explicit CLI value still wins for standalone launches.
     let bind = args
@@ -267,7 +271,7 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
     let video_monitor = tokio::spawn(routes::monitor_video_recording(state.clone()));
     let spiral_sync = tokio::spawn(routes::auto_sync_episodes(state.storage.clone()));
     let cleanup_state = state.clone();
-    let app = dioxus::server::router(crate::App)
+    let app = dioxus::server::router(app)
         .nest("/api", routes::api_router(state))
         .layer(tower_http::trace::TraceLayer::new_for_http());
 

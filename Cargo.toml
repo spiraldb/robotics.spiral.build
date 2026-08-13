@@ -5,6 +5,7 @@ members = [
     "crates/spiral-robotics-inference",
     "crates/spiral-robotics-panels",
     "crates/spiral-robotics-studio",
+    "crates/spiral-robotics-studio-backend",
     "crates/spiral-robotics-viewport",
 ]
 exclude = ["patches/block"]
@@ -20,6 +21,7 @@ spiral-robotics-contracts = { path = "crates/spiral-robotics-contracts" }
 spiral-robotics-core = { path = "crates/spiral-robotics-core" }
 spiral-robotics-inference = { path = "crates/spiral-robotics-inference", default-features = false }
 spiral-robotics-panels = { path = "crates/spiral-robotics-panels" }
+spiral-robotics-studio-backend = { path = "crates/spiral-robotics-studio-backend" }
 spiral-robotics-viewport = { path = "crates/spiral-robotics-viewport" }
 clap = { version = "4.5", features = ["derive"] }
 dioxus = { version = "0.7.10", default-features = false }

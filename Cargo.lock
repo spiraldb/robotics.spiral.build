@@ -6543,6 +6543,29 @@ dependencies = [
 name = "spiral-robotics-studio"
 version = "0.1.0"
 dependencies = [
+ "charming",
+ "dioxus",
+ "futures-util",
+ "gloo-net 0.7.0",
+ "gloo-timers",
+ "js-sys",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "spiral-robotics-contracts",
+ "spiral-robotics-core",
+ "spiral-robotics-panels",
+ "spiral-robotics-studio-backend",
+ "spiral-robotics-viewport",
+ "tempfile",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
+name = "spiral-robotics-studio-backend"
+version = "0.1.0"
+dependencies = [
  "adbc_core",
  "adbc_driver_manager",
  "arrow-array",
@@ -6551,35 +6574,26 @@ dependencies = [
  "async-stream",
  "axum",
  "bytes",
- "charming",
  "clap",
  "dioxus",
  "futures-util",
- "gloo-net 0.7.0",
- "gloo-timers",
  "image",
- "js-sys",
  "libc",
  "mach2 0.5.0",
  "parquet",
  "safetensors",
  "serde",
- "serde-wasm-bindgen",
  "serde_json",
  "spiral-robotics",
  "spiral-robotics-contracts",
  "spiral-robotics-core",
  "spiral-robotics-inference",
- "spiral-robotics-panels",
- "spiral-robotics-viewport",
  "tempfile",
  "tokio",
  "tokio-stream",
  "tower-http 0.7.0",
  "tracing",
  "tracing-subscriber",
- "wasm-bindgen",
- "web-sys",
  "zip 2.4.2",
 ]
 
