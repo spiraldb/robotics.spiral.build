@@ -811,16 +811,11 @@ fn assigned_cameras(activity: Activity) -> Vec<(String, String, String)> {
     let Some(focused) = robot else {
         return Vec::new();
     };
-    let cameras = focused
+    focused
         .cameras
         .iter()
         .map(|binding| (focused.id.clone(), binding.name.clone(), binding.id.clone()))
-        .collect::<Vec<_>>();
-    if activity == Activity::Rollout {
-        cameras.into_iter().take(1).collect()
-    } else {
-        cameras
-    }
+        .collect()
 }
 
 fn camera_panel_id(camera: &(String, String, String)) -> String {

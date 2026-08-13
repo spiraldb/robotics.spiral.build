@@ -61,25 +61,40 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 [patch.crates-io]
 block = { path = "patches/block" }
 
+[profile.dev]
+# The Studio's native half is large enough that full DWARF dominates compile,
+# link, and artifact I/O during edit/serve cycles. Browser artifacts already
+# omit DWARF below; keep both halves aligned for the latency-focused dev build.
+debug = 0
+
 [profile.wasm-dev]
 inherits = "dev"
 # Dioxus 0.7 asks wasm-bindgen and Binaryen to preserve debug information even
 # when Binaryen cannot parse the DWARF emitted by newer Rust toolchains. Do not
-# emit DWARF for browser artifacts; the native server keeps normal dev symbols.
+# emit DWARF for browser artifacts either.
 debug = 0
 
 [profile.wasm-release]
 inherits = "release"
 # DX uses this profile only for the downloaded WebAssembly half of the studio.
 opt-level = "s"
-lto = true
-codegen-units = 1
+# `dx serve --release` is still optimized, but favor parallel and incremental
+# code generation over whole-program optimization for edit/serve latency.
+lto = false
+codegen-units = 256
+incremental = true
 panic = "abort"
 debug = 0
 strip = "debuginfo"
 
 [profile.server-release]
 inherits = "release"
+# Dioxus reserves this profile for the native fullstack server. Preserve
+# release optimization while making warm release rebuilds incremental. Keep
+# the release default unit count: the server's broad dependency graph already
+# supplies cold-build parallelism, and 256 units only adds link/I/O pressure.
+codegen-units = 16
+incremental = true
 
 [[bin]]
 name = "spiral-robotics-find-port"

@@ -3,8 +3,8 @@
 use dioxus::prelude::*;
 use gloo_net::http::Method;
 use spiral_robotics_contracts::api::{
-    MAX_ROLLOUT_DURATION_SECONDS, RobotSummary, RolloutPhase, RolloutSnapshot, StartRolloutRequest,
-    TrainingRun, TrainingSnapshot,
+    CameraStatus, MAX_ROLLOUT_DURATION_SECONDS, RobotSummary, RolloutPhase, RolloutSnapshot,
+    StartRolloutRequest, TrainingRun, TrainingSnapshot,
 };
 
 use crate::frontend::api::http as api;
@@ -22,6 +22,12 @@ struct CheckpointChoice {
     validation_loss: Option<f64>,
     action_steps: usize,
     sample_hz: f64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RolloutCameraSummary {
+    ready: bool,
+    detail: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,17 +70,8 @@ pub(crate) fn RolloutWorkbench() -> Element {
     let arm_ready = follower.as_ref().is_some_and(|robot| {
         robot.connection.connected && robot.calibrated && robot.problem.is_none()
     });
-    let camera = follower
-        .as_ref()
-        .and_then(|robot| robot.cameras.first())
-        .cloned();
-    let camera_ready = camera.as_ref().is_some_and(|binding| {
-        snapshot
-            .cameras
-            .iter()
-            .any(|status| status.id == binding.id && status.error.is_none())
-    });
-    let follower_ready = arm_ready && camera_ready;
+    let camera_summary = rollout_camera_summary(follower.as_ref(), &snapshot.cameras);
+    let follower_ready = arm_ready && camera_summary.ready;
     let follower_detail = follower.as_ref().map(|robot| {
         let connection = if robot.connection.connected {
             "connected"
@@ -86,17 +83,12 @@ pub(crate) fn RolloutWorkbench() -> Element {
         } else {
             "needs calibration"
         };
-        let camera = match camera.as_ref() {
-            Some(binding) if camera_ready => format!("{} available", binding.name),
-            Some(binding) => format!("{} unavailable", binding.name),
-            None => "no camera".to_owned(),
-        };
-        format!("{connection} · {calibration} · {camera}")
+        format!("{connection} · {calibration} · {}", camera_summary.detail)
     });
     let precondition_blocker = rollout_precondition_blocker(
         selected,
         follower.as_ref(),
-        camera_ready,
+        camera_summary.ready,
         studio.controls_available(),
     );
     let active = rollout.phase.active();
@@ -324,6 +316,43 @@ pub(crate) fn RolloutWorkbench() -> Element {
     }
 }
 
+fn rollout_camera_summary(
+    follower: Option<&RobotSummary>,
+    camera_statuses: &[CameraStatus],
+) -> RolloutCameraSummary {
+    let Some(follower) = follower else {
+        return RolloutCameraSummary {
+            ready: false,
+            detail: "no cameras".to_owned(),
+        };
+    };
+    let total = follower.cameras.len();
+    if total == 0 {
+        return RolloutCameraSummary {
+            ready: false,
+            detail: "no cameras".to_owned(),
+        };
+    }
+
+    let available = follower
+        .cameras
+        .iter()
+        .filter(|binding| {
+            camera_statuses
+                .iter()
+                .any(|status| status.id == binding.id && status.error.is_none())
+        })
+        .count();
+    let ready = available == total;
+    let detail = match (total, available) {
+        (1, 1) => format!("{} available", follower.cameras[0].name),
+        (1, _) => format!("{} unavailable", follower.cameras[0].name),
+        (_, available) if ready => format!("{available} cameras available"),
+        _ => format!("{available} of {total} cameras available"),
+    };
+    RolloutCameraSummary { ready, detail }
+}
+
 #[component]
 pub(crate) fn InferencePanel() -> Element {
     let studio = studio();
@@ -401,7 +430,7 @@ fn checkpoints_for_run(run: &TrainingRun) -> impl Iterator<Item = CheckpointChoi
 fn rollout_precondition_blocker(
     checkpoint: Option<&CheckpointChoice>,
     follower: Option<&RobotSummary>,
-    camera_ready: bool,
+    cameras_ready: bool,
     controls_available: bool,
 ) -> Option<String> {
     let Some(checkpoint) = checkpoint else {
@@ -422,8 +451,8 @@ fn rollout_precondition_blocker(
     if !follower.calibrated {
         return Some("Calibrate the follower.".to_owned());
     }
-    if !camera_ready {
-        return Some("Start the follower camera.".to_owned());
+    if !cameras_ready {
+        return Some("Start every follower camera.".to_owned());
     }
     if !controls_available {
         return Some("Waiting for fresh telemetry.".to_owned());
@@ -486,10 +515,14 @@ fn format_loss(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use spiral_robotics_contracts::api::{
-        ConnectionStatus, RobotSummary, TrainingCheckpoint, TrainingRun, TrainingRunPhase,
+        CameraBinding, CameraStatus, ConnectionStatus, RobotSummary, TrainingCheckpoint,
+        TrainingRun, TrainingRunPhase,
     };
 
-    use super::{checkpoints_for_run, follower, rollout_precondition_blocker};
+    use super::{
+        RolloutCameraSummary, checkpoints_for_run, follower, rollout_camera_summary,
+        rollout_precondition_blocker,
+    };
 
     fn robot(id: &str, role: &str) -> RobotSummary {
         RobotSummary {
@@ -517,6 +550,57 @@ mod tests {
         assert_eq!(
             follower(&robots).map(|robot| robot.id),
             Some("follower".to_owned())
+        );
+    }
+
+    #[test]
+    fn rollout_requires_every_assigned_camera() {
+        let mut follower = robot("follower", "so101_follower");
+        follower.cameras = vec![
+            CameraBinding {
+                name: "gripper".to_owned(),
+                id: "camera-1".to_owned(),
+                mount: None,
+            },
+            CameraBinding {
+                name: "top".to_owned(),
+                id: "camera-2".to_owned(),
+                mount: None,
+            },
+        ];
+        let camera = |id: &str, error: Option<&str>| CameraStatus {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            width: 640,
+            height: 360,
+            fps: 30,
+            streaming: true,
+            frames: 1,
+            error: error.map(str::to_owned),
+        };
+
+        assert_eq!(
+            rollout_camera_summary(
+                Some(&follower),
+                &[camera("camera-1", None), camera("camera-2", None)],
+            ),
+            RolloutCameraSummary {
+                ready: true,
+                detail: "2 cameras available".to_owned(),
+            }
+        );
+        assert_eq!(
+            rollout_camera_summary(
+                Some(&follower),
+                &[
+                    camera("camera-1", None),
+                    camera("camera-2", Some("offline")),
+                ],
+            ),
+            RolloutCameraSummary {
+                ready: false,
+                detail: "1 of 2 cameras available".to_owned(),
+            }
         );
     }
 

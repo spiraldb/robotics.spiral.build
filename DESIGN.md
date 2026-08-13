@@ -447,8 +447,8 @@ the whole activity persists through the same tab-and-tile workspace mechanics
 as Live and Data.
 
 Rollout is a compact physical-policy bench, not an ML dashboard. Its first-open
-desktop composition uses a 27% workbench beside a dominant live Scene, the
-first assigned follower camera, and one low Inference evidence lane. The
+desktop composition uses a 27% workbench beside a dominant live Scene, every
+assigned follower camera recorded for the policy, and one low Inference evidence lane. The
 workbench contains only checkpoint selection, fixed-follower readiness, simple
 execution inputs, and the primary Run policy action; on a tall workbench, that
 action area anchors to the bottom. Follower connection, calibration, and camera
@@ -595,9 +595,9 @@ camera panels derive from the selected episode's stream identities. Activating
 a camera panel emits that typed live-camera or recorded-stream identity; domain
 meaning is never recovered by parsing a panel ID string.
 
-Rollout's Scene and camera are explicit live sources scoped to the configured
-follower: the Scene may show both arms for physical context, while the one
-camera panel comes from the follower's first assigned camera. Inference
+Rollout's Scene and cameras are explicit live sources scoped to the configured
+follower: the Scene may show both arms for physical context, while the camera
+panels mirror the follower cameras recorded for the policy. Inference
 evidence is a separate measured source and stays empty until the backend has
 completed a native inference.
 
@@ -1078,8 +1078,8 @@ deadline belongs to the notice value, not the component that draws it.
   and centralized series roles.
 - **Do** show truthful Training empty, waiting, unavailable, and locked states;
   never substitute synthetic telemetry for backend evidence.
-- **Do** keep Rollout fixed to the configured follower, with one live follower
-  camera and a specific disabled-action reason beside Run policy.
+- **Do** keep Rollout fixed to the configured follower, with one live panel per
+  recorded follower camera and a specific disabled-action reason beside Run policy.
 - **Do** keep Rollout metrics empty until native measurements arrive, keep
   loading/stopping/error states authoritative, and name the exact recovery for
   every blocked or stopped session.

@@ -134,9 +134,9 @@ selects and monitors a rollout but never becomes the motor-control runtime.
     Spiral ADBC/Arrow path, local Burn vision ACT configuration, learning and
     throughput telemetry, graceful cancellation, and Spiral checkpoints.
   - **Rollout** owns checkpoint selection, fixed-follower readiness, simple
-    action-chunk and control-rate settings, the live 3D scene, one follower
-    camera, authoritative start/stop lifecycle, and measured native inference
-    evidence.
+    action-chunk and control-rate settings, the live 3D scene, every follower
+    camera recorded for the policy, authoritative start/stop lifecycle, and
+    measured native inference evidence.
   - **Settings** owns robot setup (ports, camera assignment, calibration,
     add/import/delete) and backend data destinations. Setup is not mixed into
     the live operating flow.
