@@ -265,6 +265,7 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
     };
     tokio::spawn(routes::auto_connect_saved_robots(state.clone()));
     let video_monitor = tokio::spawn(routes::monitor_video_recording(state.clone()));
+    let spiral_sync = tokio::spawn(routes::auto_sync_episodes(state.storage.clone()));
     let cleanup_state = state.clone();
     let app = dioxus::server::router(crate::App)
         .nest("/api", routes::api_router(state))
@@ -328,6 +329,7 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
         tracing::warn!("resource cleanup timed out; the operating system will release devices");
     }
     video_monitor.abort();
+    spiral_sync.abort();
     signal_task.abort();
     if let Some(result) = server_result {
         result?;

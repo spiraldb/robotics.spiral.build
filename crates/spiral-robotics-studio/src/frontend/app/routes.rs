@@ -125,7 +125,6 @@ fn StudioShell() -> Element {
     );
     use_rollout_controller();
     let timeline = use_timeline_controller();
-    let mut live_review_episode = timeline.live_review_episode;
     let settings_open = shell.settings_open();
     let mut settings_was_open = use_signal(|| false);
     use_effect(use_reactive((&settings_open,), move |(settings_open,)| {
@@ -178,9 +177,6 @@ fn StudioShell() -> Element {
                         activity,
                         on_activity: move |next| {
                             timeline.stop_preview();
-                            if next == Activity::Live && studio.recording().is_none() {
-                                live_review_episode.set(None);
-                            }
                             studio.notifications.write().close();
                             navigator.push(StudioRoute::for_activity(next));
                         },

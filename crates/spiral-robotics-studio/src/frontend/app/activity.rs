@@ -180,28 +180,16 @@ impl ActivityProjection {
     pub(crate) fn derive(
         activity: Activity,
         recording: Option<RecordingProgress>,
-        live_review: Option<EpisodeSummary>,
         data_episode_context: Option<EpisodeSummary>,
     ) -> Self {
         match activity {
             Activity::Live => {
                 let timeline = recording
                     .map(TimelineSubject::Recording)
-                    .or_else(|| {
-                        live_review
-                            .clone()
-                            .map(|episode| TimelineSubject::Episode { activity, episode })
-                    })
                     .unwrap_or_else(|| TimelineSubject::empty(activity));
-                let primary = match live_review {
-                    Some(episode) if timeline.recorded_episode().is_some() => {
-                        PrimaryVisualization::RecordedScene(Box::new(episode))
-                    }
-                    _ => PrimaryVisualization::LiveScene,
-                };
                 Self {
                     activity,
-                    primary,
+                    primary: PrimaryVisualization::LiveScene,
                     cameras: CameraRegistrySource::LiveAssignments,
                     timeline,
                 }
@@ -355,8 +343,7 @@ mod tests {
     #[test]
     fn an_episode_selection_derives_scene_cameras_and_timeline_together() {
         let selected = episode("episode-42");
-        let projection =
-            ActivityProjection::derive(Activity::Data, None, None, Some(selected.clone()));
+        let projection = ActivityProjection::derive(Activity::Data, None, Some(selected.clone()));
 
         assert_eq!(
             projection.primary,
@@ -372,8 +359,7 @@ mod tests {
     #[test]
     fn query_state_does_not_replace_episode_context() {
         let selected = episode("episode-7");
-        let projection =
-            ActivityProjection::derive(Activity::Data, None, None, Some(selected.clone()));
+        let projection = ActivityProjection::derive(Activity::Data, None, Some(selected.clone()));
 
         assert_eq!(
             projection.primary,
@@ -388,7 +374,7 @@ mod tests {
 
     #[test]
     fn an_empty_data_activity_has_one_explicit_empty_timeline_subject() {
-        let projection = ActivityProjection::derive(Activity::Data, None, None, None);
+        let projection = ActivityProjection::derive(Activity::Data, None, None);
         assert!(matches!(
             projection.timeline,
             TimelineSubject::Empty {
@@ -401,7 +387,7 @@ mod tests {
 
     #[test]
     fn rollout_projects_live_scene_and_follower_camera_context() {
-        let projection = ActivityProjection::derive(Activity::Rollout, None, None, None);
+        let projection = ActivityProjection::derive(Activity::Rollout, None, None);
         assert_eq!(projection.primary, PrimaryVisualization::LiveScene);
         assert_eq!(projection.cameras, CameraRegistrySource::LiveAssignments);
         assert!(matches!(

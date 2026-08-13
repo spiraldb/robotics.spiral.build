@@ -36,7 +36,8 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
         &self,
         command: UpdateDataSettingsCommand,
     ) -> Result<DataSettingsView, ApplicationError> {
-        self.state
+        let settings = self
+            .state
             .data_settings
             .update(UpdateDataSettingsRequest {
                 spiral: ContractSpiralSettings {
@@ -49,8 +50,9 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
                     enabled: command.video_enabled,
                 },
             })
-            .map(application_data_settings)
-            .map_err(ApplicationError::InvalidInput)
+            .map_err(ApplicationError::InvalidInput)?;
+        self.state.storage.sync_pending();
+        Ok(application_data_settings(settings))
     }
 
     async fn refresh_training_readiness(&self) {
@@ -123,6 +125,7 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
 
 pub(super) fn application_data_settings(settings: DataSettings) -> DataSettingsView {
     DataSettingsView {
+        spiral_configured: settings.spiral.enabled,
         spiral: SpiralDestinationSettings {
             uri: settings.spiral.uri,
             project_id: settings.spiral.project_id,
@@ -135,7 +138,7 @@ pub(super) fn application_data_settings(settings: DataSettings) -> DataSettingsV
 pub(super) fn contract_data_settings(settings: DataSettingsView) -> DataSettings {
     DataSettings {
         spiral: ContractSpiralSettings {
-            enabled: false,
+            enabled: settings.spiral_configured,
             uri: settings.spiral.uri,
             project_id: settings.spiral.project_id,
             dataset: settings.spiral.namespace,

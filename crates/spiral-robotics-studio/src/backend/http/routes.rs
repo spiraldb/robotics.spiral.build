@@ -137,6 +137,7 @@ const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(400);
 /// automatic stop before the next telemetry snapshot is published.
 const VIDEO_RECORDING_MONITOR_INTERVAL: Duration = Duration::from_millis(200);
 const VIDEO_RECORDING_STOP_TICKS: u8 = 5;
+const SPIRAL_AUTO_SYNC_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Everything a request handler can reach.
 #[derive(Clone)]
@@ -201,6 +202,21 @@ pub(crate) async fn monitor_video_recording(state: AppState) {
 
 pub(crate) async fn auto_connect_saved_robots(state: AppState) {
     devices::auto_connect_saved_robots(state).await;
+}
+
+/// Keep local recovery episodes flowing to Spiral without depending on a
+/// browser session or an operator opening Data. The first interval tick is
+/// immediate; later ticks recover imports, external files, and transient
+/// publication failures.
+pub(crate) async fn auto_sync_episodes(storage: Arc<StorageManager>) {
+    let mut ticker = tokio::time::interval(SPIRAL_AUTO_SYNC_INTERVAL);
+    loop {
+        ticker.tick().await;
+        let queued = storage.sync_pending();
+        if queued > 0 {
+            tracing::info!(episodes = queued, "queued automatic Spiral publications");
+        }
+    }
 }
 
 /// Close and stage any capture whose corresponding control-loop recording has

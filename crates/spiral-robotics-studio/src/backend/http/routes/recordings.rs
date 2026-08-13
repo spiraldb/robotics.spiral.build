@@ -1905,6 +1905,7 @@ async fn import_episodes(
         },
     )
     .await?;
+    state.storage.sync_pending();
     Ok(Json(ImportResponse {
         episodes: summary.episodes,
         frames: summary.frames,

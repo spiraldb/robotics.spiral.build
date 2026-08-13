@@ -108,6 +108,15 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
     let latest = center.latest_prominent(now).cloned();
     let message_count = center.messages().count();
     let center_open = center.open();
+    let saved_to_data = center.messages().rev().find_map(|message| {
+        if message.read {
+            return None;
+        }
+        match message.action.as_ref() {
+            Some(MessageAction::OpenEpisode(episode)) => Some((message.id, episode.clone())),
+            None => None,
+        }
+    });
     let mut center_was_open = use_signal(|| false);
     use_effect(use_reactive((&center_open,), move |(center_open,)| {
         let was_open = center_was_open();
@@ -128,6 +137,12 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
     }));
 
     rsx! {
+        if let Some((message_id, episode)) = saved_to_data {
+            SavedToDataCue {
+                key: "saved-{message_id}",
+                episode,
+            }
+        }
         if center_open {
             aside {
                 id: "notification-center",
@@ -259,6 +274,27 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                     span { class: "status-bar-item", "{robot_problems_label}" }
                     NotificationTrigger { unread, open: center_open }
                 }
+            }
+        }
+    }
+}
+
+#[component]
+fn SavedToDataCue(episode: String) -> Element {
+    rsx! {
+        div {
+            class: "live-save-confirmation",
+            role: "status",
+            "aria-live": "polite",
+            svg {
+                view_box: "0 0 16 16",
+                "aria-hidden": "true",
+                circle { cx: "8", cy: "8", r: "7" }
+                path { d: "m4.5 8 2.2 2.2 4.8-5" }
+            }
+            span {
+                strong { "Saved to Data" }
+                small { "Episode {crate::frontend::screens::data::workbench::short_id(&episode)}" }
             }
         }
     }

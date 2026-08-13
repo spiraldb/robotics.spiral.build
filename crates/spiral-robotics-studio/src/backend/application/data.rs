@@ -24,6 +24,7 @@ pub(crate) struct UpdateDataSettingsCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DataSettingsView {
     pub spiral: SpiralDestinationSettings,
+    pub spiral_configured: bool,
     pub video_enabled: bool,
 }
 
@@ -440,6 +441,7 @@ mod tests {
                 project_id: project.to_owned(),
                 namespace: "dataset".to_owned(),
             },
+            spiral_configured: true,
             video_enabled: true,
         }
     }

@@ -45,7 +45,6 @@ pub(crate) struct TimelineController {
     pub preview: Signal<PreviewTransport>,
     pub follow_live: Signal<bool>,
     pub robot_sync_target: Signal<Option<TimelineTarget>>,
-    pub live_review_episode: Signal<Option<String>>,
     #[cfg(feature = "web")]
     pub preview_tick_seconds: Signal<Option<f64>>,
 }
@@ -56,7 +55,6 @@ pub(crate) fn use_timeline_controller() -> TimelineController {
         preview: use_signal(PreviewTransport::default),
         follow_live: use_signal(|| true),
         robot_sync_target: use_signal(|| None),
-        live_review_episode: use_signal(|| None),
         #[cfg(feature = "web")]
         preview_tick_seconds: use_signal(|| None),
     };
@@ -121,7 +119,6 @@ pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: T
     let mut playhead = controller.playhead;
     let mut follow_live = controller.follow_live;
     let mut robot_sync_target = controller.robot_sync_target;
-    let mut live_review_episode = controller.live_review_episode;
 
     match action {
         TimelineAction::Capture { episode, action } => match action {
@@ -146,25 +143,12 @@ pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: T
                         &episode,
                         keep,
                         EventHandler::new(
-                            move |summary: spiral_robotics_contracts::api::EpisodeSummary| {
+                            move |_: spiral_robotics_contracts::api::EpisodeSummary| {
                                 let next_revision = historical_revision.peek().wrapping_add(1);
                                 historical_revision.set(next_revision);
                                 historical_state.set(None);
                                 automatic_preview_target.set(None);
                                 interactive_preview_target.set(None);
-                                if keep {
-                                    let episode = summary.id;
-                                    live_review_episode.set(Some(episode.clone()));
-                                    request_historical_preview(
-                                        studio,
-                                        episode,
-                                        0.0,
-                                        historical_state,
-                                        historical_revision,
-                                    );
-                                } else {
-                                    live_review_episode.set(None);
-                                }
                             },
                         ),
                     );

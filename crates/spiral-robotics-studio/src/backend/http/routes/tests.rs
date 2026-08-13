@@ -293,7 +293,7 @@ fn workspace_errors_map_to_the_right_status_codes() {
 fn data_presenters_round_trip_transport_values_without_leaking_them_to_policy() {
     let settings = DataSettings {
         spiral: ContractSpiralSettings {
-            enabled: false,
+            enabled: true,
             uri: "spiral:memory:".to_owned(),
             project_id: "project".to_owned(),
             dataset: "dataset".to_owned(),

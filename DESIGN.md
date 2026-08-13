@@ -425,9 +425,9 @@ owns panel titles, content, safety, and domain state.
 
 The Timeline is always registered in both activities, including empty state.
 Its default lower position gives the system a consistent clock, but the user may
-move it like any other panel. Live review and Data selection are separate state:
-recording updates Live’s inspectable take, while Data owns its selected episode
-and query result.
+move it like any other panel. A paused recording remains inspectable in Live;
+stopping returns Live to current hardware and confirms that the episode moved to
+Data. Data owns completed-episode selection and query results.
 
 Live begins with Control; recording identity, status, and capture transport stay
 in the Timeline and global status bar. Robot identity appears once in a compact
@@ -983,10 +983,10 @@ ambient browser selection—decides whether execution may begin.
   never creates a second grouping or navigation mode. Every row states its
   SpiralDB status as Local, Queued, Pushing, Synced, or Failed beside the
   recording state.
-- **Push semantics:** Local rows expose Push, failed SpiralDB attempts expose
-  Retry, and Synced rows need no redundant action. Push/Retry targets only the
-  configured SpiralDB destination. Removing a Synced row deletes only its local
-  copy and leaves the persisted SpiralDB episode intact.
+- **Publication semantics:** Complete episodes enter the configured SpiralDB
+  queue automatically without a browser session. Failed attempts expose Retry;
+  Synced rows need no redundant action. Removing a Synced row deletes only its
+  local copy and leaves the persisted SpiralDB episode intact.
 - **Form decision:** This is an incumbent-surface extension, exempt from a
   concept roll because the operator explicitly retained the existing ordered
   episode list and rejected location grouping or a new transfer composition.

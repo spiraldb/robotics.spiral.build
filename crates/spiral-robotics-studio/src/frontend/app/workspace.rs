@@ -68,7 +68,7 @@ impl ScreenWorkspaceDefinition {
 /// owns only the cross-panel synchronization contract.
 #[component]
 pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
-    let mut studio = crate::frontend::app::state::studio();
+    let studio = crate::frontend::app::state::studio();
     let configuration = studio_configuration();
     let dataset = configuration.dataset;
     let selected_dataset = studio.selected_dataset.read().clone();
@@ -84,39 +84,9 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
     let mut historical_state = use_signal(|| None::<RecordedSource<HistoricalPreview>>);
     let mut historical_revision = use_signal(|| 0_u64);
     let mut sampled_replay_slot = use_signal(|| None::<(String, u64)>);
-    let mut live_review_episode = timeline.live_review_episode;
     let mut automatic_preview_target = use_signal(|| None::<(String, u64)>);
     let mut interactive_preview_target = use_signal(|| None::<(String, u64)>);
     let mut split_resize_revision = use_signal(|| 0_u64);
-
-    // Arriving in Data straight from a take used to mean finding your own
-    // recording in a list by eye, because Live review and Data selection are
-    // deliberately separate state. Restore the take only while it still
-    // belongs to the active dataset. External deletion must clear the stale
-    // review identity instead of fighting the Episodes panel's reconciliation.
-    use_effect(move || {
-        if activity != Activity::Data {
-            return;
-        }
-        if studio.selected_episode.read().is_some() {
-            return;
-        }
-        let Some(recent) = live_review_episode() else {
-            return;
-        };
-        let dataset_id = studio.selected_dataset.read();
-        let available = studio.episodes().into_iter().any(|episode| {
-            episode.id == recent
-                && episode.dataset_id == *dataset_id
-                && episode.usable()
-                && !episode.discarded
-        });
-        if available {
-            studio.selected_episode.set(Some(recent));
-        } else if live_review_episode.peek().as_deref() == Some(recent.as_str()) {
-            live_review_episode.set(None);
-        }
-    });
 
     // Visual preview is a controller-owned clock. It advances the one playhead
     // and samples every recorded renderer from the same episode/time identity.
@@ -160,18 +130,6 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
         }
     });
 
-    // Live and Data deliberately own different episode selections. Recording
-    // updates the Live review target, while the Episodes panel owns
-    // `studio.selected_episode`. Sharing one signal here was the reason a Data
-    // episode stayed on screen after the operator returned to Live.
-    use_effect(move || {
-        if let Some(recording) = studio.recording()
-            && live_review_episode.peek().as_deref() != Some(recording.episode.as_str())
-        {
-            live_review_episode.set(Some(recording.episode));
-        }
-    });
-
     // Replay telemetry may arrive at the controller rate. Historical scene
     // samples are bounded to a smooth visual cadence so the canvas receives
     // enough distinct poses without issuing duplicate requests for the same
@@ -184,7 +142,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             sampled_replay_slot.set(None);
             return;
         };
-        let subject_episode = visible_timeline_episode(studio, activity, live_review_episode());
+        let subject_episode = visible_timeline_episode(studio, activity);
         if !replay_matches_timeline_subject(subject_episode.as_deref(), &replay) {
             sampled_replay_slot.set(None);
             return;
@@ -215,7 +173,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                 timeline.stop_preview();
             }
         } else if let Some(replay) = studio.replay().filter(replay_owns_timeline_transport) {
-            let subject_episode = visible_timeline_episode(studio, activity, live_review_episode());
+            let subject_episode = visible_timeline_episode(studio, activity);
             if replay_matches_timeline_subject(subject_episode.as_deref(), &replay) {
                 playhead.set(replay.elapsed_seconds);
                 timeline.stop_preview();
@@ -237,13 +195,11 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
         }
     });
 
-    // Re-selecting the Live route explicitly returns to current hardware even
-    // when the route itself does not remount. The shell clears the review
-    // identity; this route-local cache follows that authoritative change.
+    // With no active recording, Live always presents current hardware rather
+    // than retaining a historical frame from a completed take.
     use_effect(move || {
         if activity == Activity::Live
             && studio.recording().is_none()
-            && live_review_episode.read().is_none()
             && historical_state.peek().is_some()
         {
             historical_state.set(None);
@@ -252,10 +208,8 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
         }
     });
 
-    // A paused or just-stopped Live take remains inspectable in Live. Do not
-    // treat a generic idle startup as a stopped recording: doing that loaded
-    // Data's newest episode into Live and hid the healthy live camera behind a
-    // historical "no video" state.
+    // A paused take remains inspectable in Live. Completed recordings return
+    // to the live source and stay available from Data instead.
     use_effect(move || {
         let (episode, seconds) = match studio.recording() {
             Some(recording) if recording.paused => (recording.episode, recording.elapsed_seconds),
@@ -265,10 +219,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                 }
                 return;
             }
-            None => match live_review_episode() {
-                Some(episode) if activity == Activity::Live => (episode, 0.0),
-                _ => return,
-            },
+            None => return,
         };
         let target = (episode.clone(), (seconds.max(0.0) * 1_000.0).round() as u64);
         if automatic_preview_target.peek().as_ref() == Some(&target) {
@@ -291,19 +242,8 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
         );
     });
 
-    let live_review = live_review_episode().and_then(|id| {
-        studio
-            .episodes()
-            .into_iter()
-            .find(|episode| episode.id == id && episode.usable() && !episode.discarded)
-    });
     let data_episode_context = studio.focused_episode();
-    let projection = ActivityProjection::derive(
-        activity,
-        studio.recording(),
-        live_review,
-        data_episode_context,
-    );
+    let projection = ActivityProjection::derive(activity, studio.recording(), data_episode_context);
     let projected_recorded_identity = match &projection.timeline {
         TimelineSubject::Recording(recording) if recording.paused => Some((
             recording.episode.clone(),
@@ -757,21 +697,12 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                                 studio,
                                 &recording.episode,
                                 true,
-                                EventHandler::new(move |summary: spiral_robotics_contracts::api::EpisodeSummary| {
+                                EventHandler::new(move |_: spiral_robotics_contracts::api::EpisodeSummary| {
                                     let next_revision = historical_revision.peek().wrapping_add(1);
                                     historical_revision.set(next_revision);
                                     historical_state.set(None);
                                     automatic_preview_target.set(None);
                                     interactive_preview_target.set(None);
-                                    let episode = summary.id;
-                                    live_review_episode.set(Some(episode.clone()));
-                                    request_historical_preview(
-                                        studio,
-                                        episode,
-                                        0.0,
-                                        historical_state,
-                                        historical_revision,
-                                    );
                                 }),
                             ),
                             None if activity == Activity::Live => commands::start_recording(studio),
@@ -804,7 +735,6 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                                     historical_state.set(None);
                                     automatic_preview_target.set(None);
                                     interactive_preview_target.set(None);
-                                    live_review_episode.set(None);
                                 }),
                             );
                         }
@@ -852,16 +782,9 @@ fn replay_matches_timeline_subject(
     subject_episode == Some(replay.episode.as_str())
 }
 
-fn visible_timeline_episode(
-    studio: Studio,
-    activity: Activity,
-    live_review_episode: Option<String>,
-) -> Option<String> {
+fn visible_timeline_episode(studio: Studio, activity: Activity) -> Option<String> {
     match activity {
-        Activity::Live => studio
-            .recording()
-            .map(|recording| recording.episode)
-            .or(live_review_episode),
+        Activity::Live => studio.recording().map(|recording| recording.episode),
         Activity::Data => studio.selected_episode.peek().clone(),
         Activity::Training | Activity::Rollout => None,
     }

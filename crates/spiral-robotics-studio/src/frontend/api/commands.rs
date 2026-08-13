@@ -99,7 +99,7 @@ pub(crate) fn stop_recording(
         if keep {
             studio.report_episode_success(
                 format!(
-                    "Episode {} saved to {} — {}, {} frames.",
+                    "Episode {} saved to Data · {} — {}, {} frames.",
                     crate::frontend::screens::data::workbench::short_id(&summary.id),
                     summary.dataset_id,
                     format_take_duration(summary.duration_seconds),

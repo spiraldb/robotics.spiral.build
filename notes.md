@@ -10,7 +10,7 @@
 ## Main GUI app
 
 - use dioxus for the main web ui, backend connect to the robot.
-- in the web ui, we should be able to init a robot instance, assign the port, cameras, and do the calibration. Everything about this setup (robot) will be save in a single json file. Each arm is considered as a single robot instance. 
+- in the web ui, we should be able to init a robot instance, assign the port, cameras, and do the calibration. Its durable configuration lives in SpiralDB; the complete JSON format is only for import/export. Each arm is considered as a single robot instance.
 - We should be able to preview the camera feed in the web ui.
 - We should be able to control the arms, joints.
 - We should be able to choose different modes, like teleoperation, etc.
@@ -35,12 +35,21 @@
 ### Record and replay and export
 
 - User often need to record many episodes. They may delete episodes, delete button should appear on the episode item.
+- Stopping a kept recording returns to the live view and briefly confirms that the episode was saved to Data; it must not open the completed recording automatically.
 - They should be able to replay the selected episodes on follower.
 - They can export the recorded episodes download as a single (zip or whatever way to package it) file, ideally it should be in lerobot format.
 - They should be able to import a lerobot format dataset, and replay any episode on the follower.
 
 
 ### SpiralDB
+
+SpiralDB is the only durable persistence layer for application data.
+- Publish every completed, kept episode to SpiralDB automatically. Do not expose a manual Push action; show Retry only when automatic publication fails.
+- Structure the domain relationally: projects own robots, datasets, episodes, and training/rollout records; robot configuration, camera bindings, and calibration are stored in tables.
+- Do not use an ORM. Provide a small Rust persistence abstraction for SQL execution, typed Arrow mapping, and table migrations.
+- Migrations are ordered, checksummed, and recorded in a `schema_migrations` table. Use schema introspection and expand/backfill/verify/cutover for changes; durable tables use `ENGINE 'arbor'`.
+- Record directly to SpiralDB without a local spool or additional application-level buffer. Validate imports before writing; do not add a legacy quarantine table.
+- Browser panel layouts and the pretrained-model cache may remain local because they are disposable, non-authoritative state.
 
 The table definition looks like this:
 

@@ -164,7 +164,7 @@ impl DataController {
             match api::post(&path).await {
                 Ok(()) => studio.report_success_from(
                     MessageSource::Data,
-                    format!("Pushing {episode_id} to SpiralDB."),
+                    format!("Retrying the SpiralDB sync for {episode_id}."),
                 ),
                 Err(error) => {
                     self.upsert_publication(PublicationStatus {

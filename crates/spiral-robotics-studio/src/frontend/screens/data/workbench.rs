@@ -395,17 +395,19 @@ fn EpisodeRow(
     };
     let storage_state = episode_storage_state(storage_status.as_ref());
     let storage_class = storage_state.class_name();
-    let storage_title = episode_storage_title(storage_status.as_ref());
-    let can_push = episode.usable() && !episode.discarded;
-    let push_disabled = !spiral_available || !can_push;
-    let push_title = if !spiral_available {
-        "Configure SpiralDB in Settings before pushing this episode"
-    } else if !can_push {
-        "Only complete, kept episodes can be pushed to SpiralDB"
-    } else if storage_state == EpisodeStorageState::Failed {
-        "Retry pushing this episode to SpiralDB"
+    let storage_title = if storage_state == EpisodeStorageState::Local && spiral_available {
+        "Waiting for automatic SpiralDB sync".to_owned()
     } else {
-        "Push this local episode to SpiralDB"
+        episode_storage_title(storage_status.as_ref())
+    };
+    let can_retry = episode.usable() && !episode.discarded;
+    let retry_disabled = !spiral_available || !can_retry;
+    let retry_title = if !spiral_available {
+        "Configure SpiralDB in Settings; this episode will sync automatically"
+    } else if !can_retry {
+        "Only complete, kept episodes can be synced to SpiralDB"
+    } else {
+        "Retry the failed automatic SpiralDB sync"
     };
     let delete_title = if storage_state == EpisodeStorageState::Synced {
         "Remove this computer's copy; the SpiralDB copy is kept"
@@ -463,17 +465,17 @@ fn EpisodeRow(
                     }
                 } else {
                     div { class: "data-episode-actions",
-                        if matches!(storage_state, EpisodeStorageState::Local | EpisodeStorageState::Failed) {
+                        if storage_state == EpisodeStorageState::Failed {
                             button {
                                 r#type: "button",
                                 class: "btn data-push-action",
-                                disabled: push_disabled,
-                                title: push_title,
+                                disabled: retry_disabled,
+                                title: retry_title,
                                 onclick: {
                                     let id = episode.id.clone();
                                     move |_| on_push.call(id.clone())
                                 },
-                                if storage_state == EpisodeStorageState::Failed { "Retry" } else { "Push" }
+                                "Retry"
                             }
                         }
                         button {
@@ -538,7 +540,9 @@ fn episode_storage_state(status: Option<&PublicationStatus>) -> EpisodeStorageSt
 
 fn episode_storage_title(status: Option<&PublicationStatus>) -> String {
     match episode_storage_state(status) {
-        EpisodeStorageState::Local => "Stored only on this computer".to_owned(),
+        EpisodeStorageState::Local => {
+            "Saved locally; it will sync automatically when SpiralDB is configured".to_owned()
+        }
         EpisodeStorageState::Queued => "Waiting to push to SpiralDB".to_owned(),
         EpisodeStorageState::Pushing => "Pushing this episode to SpiralDB".to_owned(),
         EpisodeStorageState::Synced => "Stored in SpiralDB".to_owned(),

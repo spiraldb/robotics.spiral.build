@@ -127,9 +127,9 @@ selects and monitors a rollout but never becomes the motor-control runtime.
 - A fullstack Dioxus Studio with four primary operating activities:
   - **Live** owns recording, arm selection, Hold / Release / Teleop, joint
     control, health, and camera status.
-  - **Data** owns the local episode buffer, per-episode Local / Synced state,
-    explicit SpiralDB push, replay/delete actions, import and export, and
-    guarded read-only Spiral SQL.
+  - **Data** owns the episode catalog, automatic SpiralDB publication and retry
+    visibility, replay/delete actions, import and export, and guarded read-only
+    Spiral SQL.
   - **Training** owns random anchor and camera/action sampling through the
     Spiral ADBC/Arrow path, local Burn vision ACT configuration, learning and
     throughput telemetry, graceful cancellation, and Spiral checkpoints.
@@ -157,7 +157,7 @@ selects and monitors a rollout but never becomes the motor-control runtime.
   and discard. Pause/resume preserves one episode identity and records explicit
   time gaps. Assigned cameras can be encoded by the backend into browser-
   playable MP4 segments with episode-clock offsets. A completed recording is
-  staged locally until the operator pushes it to SpiralDB.
+  queued automatically for the configured SpiralDB destination.
 - One canonical **Timeline** in both Live and Data. During capture it follows
   new joint and camera data. A paused or completed episode can be scrubbed to
   synchronize recorded camera frames, historical 3D pose, signals, and the
@@ -171,9 +171,10 @@ selects and monitors a rollout but never becomes the motor-control runtime.
 - Replay ramps a compatible calibrated follower to the first pose before
   playback. Pause/resume keeps the current replay frame rather than restarting
   the episode.
-- An explicit per-episode SpiralDB push writes completed episode metadata,
-  stream semantics, fixed-rate joint samples, actions, and MP4 assets as Arrow
-  relations through a trusted ADBC driver. Hosted configurations maintain
+- Automatic SpiralDB publication writes completed episode metadata, stream
+  semantics, fixed-rate joint samples, actions, and MP4 assets as Arrow
+  relations through a trusted ADBC driver. Publication and retry do not depend
+  on a browser session. Hosted configurations maintain
   managed per-episode MP4 datasets. Training derives the MP4 frame directly
   from sample index and the declared stream rates, then submits only finite
   frame manifests; Spiral performs frame selection, decode, resize,

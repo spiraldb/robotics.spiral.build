@@ -162,9 +162,10 @@ impl StorageManager {
         statuses.into_values().collect()
     }
 
-    /// Finish the backend-owned recording transaction without crossing the
-    /// network boundary. Completed JSONL and camera assets form the local
-    /// staging buffer until the operator explicitly pushes the episode.
+    /// Finish the backend-owned recording transaction on durable local disk,
+    /// then hand the complete episode to the automatic Spiral publication
+    /// queue when a destination is configured. Local staging remains the
+    /// recovery boundary if the network is unavailable.
     pub(crate) fn stage_local(
         self: &Arc<Self>,
         episode_id: String,
@@ -185,7 +186,55 @@ impl StorageManager {
             updated_ms: unix_millis(),
             ..PublicationStatus::default()
         });
+        if self.settings.get().spiral.configured()
+            && let Err(error) = self.sync_spiral_existing(episode_id.clone())
+        {
+            // The episode is already safe locally. Publication failures stay
+            // on the row and are retried by the background backlog scanner.
+            tracing::warn!(episode = %episode_id, "could not queue automatic Spiral publication: {error}");
+        }
         Ok(())
+    }
+
+    /// Queue every complete local episode that is not already synchronized.
+    ///
+    /// This is intentionally idempotent and cheap to call after startup,
+    /// imports, settings changes, and periodic recovery scans. Per-episode
+    /// admission below closes the race with a newly completed recording.
+    pub(crate) fn sync_pending(self: &Arc<Self>) -> usize {
+        if !self.settings.get().spiral.configured() {
+            return 0;
+        }
+        let statuses = self
+            .statuses()
+            .into_iter()
+            .map(|status| (status.episode_id.clone(), status))
+            .collect::<BTreeMap<_, _>>();
+        let pending = self
+            .episodes
+            .list()
+            .into_iter()
+            .filter(|episode| episode.usable() && !episode.discarded)
+            .filter(|episode| {
+                statuses.get(&episode.id).is_none_or(|status| {
+                    !matches!(status.state.as_str(), "queued" | "publishing" | "published")
+                        && !status.spiral.as_deref().is_some_and(|detail| {
+                            detail.starts_with("failed: local video manifest:")
+                        })
+                })
+            })
+            .map(|episode| episode.id)
+            .collect::<Vec<_>>();
+        let mut queued = 0;
+        for episode_id in pending {
+            match self.sync_spiral_existing(episode_id.clone()) {
+                Ok(()) => queued += 1,
+                Err(error) => {
+                    tracing::warn!(episode = %episode_id, "could not queue pending Spiral publication: {error}");
+                }
+            }
+        }
+        queued
     }
 
     fn claim_publish(&self, episode_id: &str) -> Result<(), String> {
@@ -1823,6 +1872,7 @@ mod tests {
     use spiral_robotics_contracts::api::EpisodeArm;
 
     use super::*;
+    use crate::backend::recording::episodes::Sample;
 
     #[test]
     fn backend_owned_arrow_schemas_match_the_shared_contract() {
@@ -2154,7 +2204,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_recordings_stage_locally_until_an_explicit_push() {
+    fn completed_recordings_stay_local_while_spiral_is_unconfigured() {
         let directory = tempfile::tempdir().unwrap();
         let settings = Arc::new(DataSettingsStore::open(directory.path()).unwrap());
         let episodes = Arc::new(EpisodeStore::open(directory.path().to_path_buf()).unwrap());
@@ -2174,6 +2224,47 @@ mod tests {
                 .join("videos/episode_000024/assets.json")
                 .is_file()
         );
+    }
+
+    #[tokio::test]
+    async fn completed_recordings_automatically_enter_the_spiral_queue() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings = Arc::new(DataSettingsStore::open(directory.path()).unwrap());
+        let mut update = spiral_robotics_contracts::api::UpdateDataSettingsRequest::default();
+        update.spiral.uri = "spiral:memory:".to_owned();
+        update.spiral.dataset = "spiral_robotics".to_owned();
+        settings.update(update).unwrap();
+        let episodes = Arc::new(EpisodeStore::open(directory.path().to_path_buf()).unwrap());
+        let writer = episodes
+            .begin(
+                "Teleoperation".to_owned(),
+                None,
+                30.0,
+                vec![EpisodeArm {
+                    id: "follower".to_owned(),
+                    robot_type: None,
+                    joints: vec!["shoulder_pan".to_owned()],
+                }],
+                Vec::new(),
+            )
+            .unwrap();
+        assert!(writer.push(Sample {
+            seconds: 0.0,
+            normalized: vec![vec![Some(0.25)]],
+            raw: vec![vec![2048]],
+            ..Sample::default()
+        }));
+        let episode = writer
+            .finish(1.0 / 30.0, Vec::new(), None, false, Vec::new())
+            .unwrap();
+        episodes.reload().unwrap();
+        let manager = Arc::new(StorageManager::new(settings, episodes, None).unwrap());
+
+        manager.stage_local(episode.id.clone(), Vec::new()).unwrap();
+
+        let publications = lock(&manager.publications);
+        assert_eq!(publications[&episode.id].state, "queued");
+        assert_eq!(publications[&episode.id].spiral.as_deref(), Some("queued"));
     }
 
     #[test]

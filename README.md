@@ -7,8 +7,8 @@ SO-ARM101 arms; records synchronized robot and camera data; publishes and querie
 episodes through SpiralDB; trains vision-conditioned ACT policies; and safely
 executes trained policies through the follower's bounded rollout path.
 
-Completed recordings use a local recovery buffer before explicit publication to
-SpiralDB.
+Completed recordings publish to the configured SpiralDB destination
+automatically.
 
 ## Development
 
