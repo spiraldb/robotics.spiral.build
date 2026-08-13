@@ -6,16 +6,18 @@
 //! buffers for Burn.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
 
 use adbc_core::{Connection as _, Statement as _};
 use adbc_driver_manager::ManagedConnection;
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, FixedSizeListArray, Float16Array, Float32Array, Float64Array,
-    Int8Array, Int16Array, Int32Array, Int64Array, LargeListArray, LargeStringArray, ListArray,
-    RecordBatch, StringArray, StringViewArray, StructArray, UInt8Array, UInt16Array, UInt32Array,
-    UInt64Array,
+    Array, ArrayRef, BinaryArray, BinaryViewArray, BooleanArray, FixedSizeListArray, Float16Array,
+    Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, LargeBinaryArray,
+    LargeListArray, LargeStringArray, ListArray, RecordBatch, StringArray, StringViewArray,
+    StructArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema};
 use spiral_robotics_contracts::api::StartTrainingRequest;
@@ -87,16 +89,21 @@ pub(crate) struct SpiralActLoader<'a> {
     image_height: usize,
     resize_images: bool,
     video_decoder: String,
+    ffmpeg: String,
     train_ranges: Vec<SampleRange>,
     validation_ranges: Vec<SampleRange>,
     train_anchors: AnchorIndex,
     validation_anchors: AnchorIndex,
     video_segments: BTreeMap<(String, String), Vec<VideoSegment>>,
+    raw_video_segments: BTreeSet<(String, String, u32)>,
+    raw_video_files: BTreeMap<(String, String, u32), PathBuf>,
+    raw_video_directory: tempfile::TempDir,
     train_random: SplitMix64,
     validation_random: SplitMix64,
     pub stats: NormalizationStats,
     pub joint_names: Vec<String>,
     pub robot_type: String,
+    joint_sample_hz: f64,
     pub sample_hz: f64,
 }
 
@@ -105,6 +112,7 @@ impl<'a> SpiralActLoader<'a> {
         connection: &'a mut ManagedConnection,
         request: &StartTrainingRequest,
         dataset: &str,
+        ffmpeg: &str,
     ) -> Result<Self, String> {
         let base_sql = clean_query(&request.sql)?;
         if !spiral::is_identifier(&request.state_column)
@@ -115,6 +123,8 @@ impl<'a> SpiralActLoader<'a> {
                 "training query, columns, or dataset contain an invalid identifier".to_owned(),
             );
         }
+        let raw_video_directory = tempfile::tempdir()
+            .map_err(|error| format!("could not create the training video cache: {error}"))?;
         let mut loader = Self {
             connection,
             base_sql,
@@ -127,20 +137,25 @@ impl<'a> SpiralActLoader<'a> {
             image_height: request.act.image_height,
             resize_images: request.act.image_width != 0,
             video_decoder: request.act.video_decoder.clone(),
+            ffmpeg: ffmpeg.to_owned(),
             train_ranges: Vec::new(),
             validation_ranges: Vec::new(),
             train_anchors: AnchorIndex::default(),
             validation_anchors: AnchorIndex::default(),
             video_segments: BTreeMap::new(),
+            raw_video_segments: BTreeSet::new(),
+            raw_video_files: BTreeMap::new(),
+            raw_video_directory,
             train_random: SplitMix64::new(request.seed),
             validation_random: SplitMix64::new(request.seed ^ 0xA17C_9E3D),
             stats: NormalizationStats::identity(1, 1),
             joint_names: Vec::new(),
             robot_type: String::new(),
+            joint_sample_hz: 0.0,
             sample_hz: 0.0,
         };
         let population = loader.load_population()?;
-        loader.sample_hz = population.sample_hz;
+        loader.joint_sample_hz = population.sample_hz;
         let ranges = population.ranges;
         let contract = loader.load_stream_contracts(&ranges)?;
         loader.video_segments = loader.load_video_segments(&ranges)?;
@@ -160,10 +175,13 @@ impl<'a> SpiralActLoader<'a> {
                 ));
             }
         }
-        let ranges = population::ranges_with_camera_coverage(
+        loader.sample_hz =
+            population::camera_sample_hz(&ranges, &loader.camera_streams, &camera_coverage)?;
+        let ranges = population::ranges_with_camera_frame_coverage(
             &ranges,
             &loader.camera_streams,
             &camera_coverage,
+            loader.sample_hz,
         )?;
         loader.resolve_image_dimensions(&ranges)?;
         validate_image_batch_size(
@@ -213,13 +231,18 @@ impl<'a> SpiralActLoader<'a> {
         &self.camera_streams
     }
 
+    #[cfg(test)]
+    pub(crate) fn raw_video_fallback_count(&self) -> usize {
+        self.raw_video_segments.len()
+    }
+
     pub(crate) fn has_validation(&self) -> bool {
         !self.validation_ranges.is_empty()
     }
 
     pub(crate) fn summary(&self) -> String {
         format!(
-            "{} train anchors, {} validation anchors, {} camera(s)",
+            "{} camera-frame train anchors, {} validation anchors, {} camera(s)",
             self.train_anchors.total(),
             self.validation_anchors.total(),
             self.camera_streams.len()
@@ -448,6 +471,11 @@ impl<'a> SpiralActLoader<'a> {
     }
 
     fn load_vector_contract(&mut self, range: &SampleRange) -> Result<(usize, usize), String> {
+        let sample_index = population::joint_sample_for_frame(
+            range.first_index,
+            range.sample_hz,
+            self.joint_sample_hz,
+        )?;
         let query = format!(
             "WITH training_rows AS ({}) \
              SELECT {} AS state_value, {} AS action_value FROM training_rows \
@@ -457,7 +485,7 @@ impl<'a> SpiralActLoader<'a> {
             self.action_column,
             sql_string(&range.episode_id),
             sql_string(&range.stream_id),
-            range.first_index
+            sample_index
         );
         let batches = query_batches(self.connection, &query)?;
         let mut rows = Vec::new();
@@ -493,17 +521,19 @@ impl<'a> SpiralActLoader<'a> {
                 let episode_id = string_value(required(batch, "episode_id")?, row)?;
                 let stream_id = string_value(required(batch, "stream_id")?, row)?;
                 let sample_index = integer_value(required(batch, "sample_index")?, row)?;
-                if !population::sample_is_eligible(
+                if !population::joint_sample_is_frame_aligned(
                     &self.train_ranges,
                     &episode_id,
                     &stream_id,
                     sample_index,
-                ) && !population::sample_is_eligible(
+                    self.joint_sample_hz,
+                )? && !population::joint_sample_is_frame_aligned(
                     &self.validation_ranges,
                     &episode_id,
                     &stream_id,
                     sample_index,
-                ) {
+                    self.joint_sample_hz,
+                )? {
                     continue;
                 }
                 let state = numeric_vector(required(batch, "state_value")?, row)?;
@@ -547,21 +577,29 @@ impl<'a> SpiralActLoader<'a> {
     }
 
     fn fetch_actions(&mut self, anchors: &[Anchor]) -> Result<ActionBatch, String> {
-        let requests = anchors
-            .iter()
-            .enumerate()
-            .flat_map(|(request, anchor)| {
-                (0..self.chunk_size).map(move |offset| {
-                    format!(
-                        "({request}, {offset}, {}, {}, {})",
-                        sql_string(&anchor.episode_id),
-                        sql_string(&anchor.stream_id),
-                        anchor.sample_index + offset as i64
-                    )
-                })
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+        let mut request_rows = Vec::with_capacity(anchors.len() * self.chunk_size);
+        for (request, anchor) in anchors.iter().enumerate() {
+            for offset in 0..self.chunk_size {
+                let offset: i64 = offset
+                    .try_into()
+                    .map_err(|_| "ACT action chunk offset exceeds i64".to_owned())?;
+                let frame_index = anchor
+                    .frame_index
+                    .checked_add(offset)
+                    .ok_or_else(|| "ACT action frame index overflowed".to_owned())?;
+                let sample_index = population::joint_sample_for_frame(
+                    frame_index,
+                    anchor.sample_hz,
+                    self.joint_sample_hz,
+                )?;
+                request_rows.push(format!(
+                    "({request}, {offset}, {}, {}, {sample_index})",
+                    sql_string(&anchor.episode_id),
+                    sql_string(&anchor.stream_id),
+                ));
+            }
+        }
+        let requests = request_rows.join(", ");
         let query = format!(
             "WITH training_rows AS ({}), \
              requested(request_index, chunk_offset, episode_id, stream_id, sample_index) AS \
@@ -660,33 +698,59 @@ impl<'a> SpiralActLoader<'a> {
                 .map(u64::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
-            let image_expression = if self.resize_images {
-                format!(
-                    "spql.image.to_tensor(spql.image.resize(spql.video.decode(f.frame, {}), $1, $2, 'bilinear'), 'chw', 'imagenet')",
-                    sql_string(&self.video_decoder)
-                )
-            } else {
-                format!(
-                    "spql.image.to_tensor(spql.video.decode(f.frame, {}), 'chw', 'imagenet')",
-                    sql_string(&self.video_decoder)
-                )
-            };
-            let query = format!(
-                "SELECT f.request_index, \
-                 {image_expression} AS image \
-                 FROM {} AS a CROSS JOIN LATERAL \
-                 spql.video.frames(a.media, spql.video.frame_indices(ARRAY[{indices}])) AS f \
-                 WHERE a.episode_id = {} AND a.stream_id = {} AND a.segment_index = {} \
-                 ORDER BY f.request_index",
-                group.media_relation,
-                sql_string(&group.episode_id),
-                sql_string(&group.camera_stream_id),
+            let segment_key = (
+                group.episode_id.clone(),
+                group.camera_stream_id.clone(),
                 group.segment_index,
             );
-            let batches = if self.resize_images {
-                query_image_batches(self.connection, &query, self.image_width, self.image_height)?
+            if self.raw_video_segments.contains(&segment_key) {
+                let decoded = self.decode_raw_video_group(group)?;
+                copy_decoded_video_frames(
+                    group_index,
+                    group,
+                    &decoded,
+                    &mut images,
+                    &mut seen,
+                    self.camera_streams.len(),
+                    image_values,
+                )?;
+                continue;
+            }
+            let image_expression =
+                training_image_expression(&self.video_decoder, "f.frame", self.resize_images);
+            let query = indexed_image_query(group, &image_expression, &indices);
+            let result = if self.resize_images {
+                query_image_batches(self.connection, &query, self.image_width, self.image_height)
             } else {
-                query_batches(self.connection, &query)?
+                query_batches(self.connection, &query)
+            };
+            let batches = match result {
+                Ok(batches) => batches,
+                Err(error) if is_unusable_video_index_error(&error) => {
+                    // The source MP4 is authoritative. A small number of
+                    // older managed assets persisted incomplete sidecars, so
+                    // decode requested frames from the original payload.
+                    let decoded = self.decode_raw_video_group(group).map_err(|fallback| {
+                        format!("{error}; raw MP4 fallback failed: {fallback}")
+                    })?;
+                    self.raw_video_segments.insert(segment_key);
+                    copy_decoded_video_frames(
+                        group_index,
+                        group,
+                        &decoded,
+                        &mut images,
+                        &mut seen,
+                        self.camera_streams.len(),
+                        image_values,
+                    )?;
+                    continue;
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "{error}; decoding episode={}, camera={}, segment={}, frames=[{}]",
+                        group.episode_id, group.camera_stream_id, group.segment_index, indices
+                    ));
+                }
             };
             for batch in &batches {
                 for row in 0..batch.num_rows() {
@@ -727,6 +791,59 @@ impl<'a> SpiralActLoader<'a> {
         Ok((images, bytes))
     }
 
+    fn decode_raw_video_group(
+        &mut self,
+        group: &FrameGroup,
+    ) -> Result<BTreeMap<u64, Vec<f32>>, String> {
+        let path = self.raw_video_path(group)?;
+        decode_video_frames(
+            &self.ffmpeg,
+            &path,
+            &group.frame_indices,
+            self.image_width,
+            self.image_height,
+            self.resize_images,
+        )
+    }
+
+    fn raw_video_path(&mut self, group: &FrameGroup) -> Result<PathBuf, String> {
+        let key = (
+            group.episode_id.clone(),
+            group.camera_stream_id.clone(),
+            group.segment_index,
+        );
+        if let Some(path) = self.raw_video_files.get(&key) {
+            return Ok(path.clone());
+        }
+        let query = format!(
+            "SELECT payload FROM {}.video_assets WHERE episode_id = {} \
+             AND stream_id = {} AND segment_index = {}",
+            self.dataset,
+            sql_string(&group.episode_id),
+            sql_string(&group.camera_stream_id),
+            group.segment_index,
+        );
+        let batches = query_batches(self.connection, &query)?;
+        let mut payload = None;
+        for batch in &batches {
+            for row in 0..batch.num_rows() {
+                if payload.is_some() {
+                    return Err("Spiral returned duplicate raw video assets".to_owned());
+                }
+                payload = Some(binary_value(required(batch, "payload")?, row)?.to_vec());
+            }
+        }
+        let payload = payload.ok_or_else(|| "Spiral returned no raw video asset".to_owned())?;
+        let path = self
+            .raw_video_directory
+            .path()
+            .join(format!("video-{}.mp4", self.raw_video_files.len()));
+        std::fs::write(&path, payload)
+            .map_err(|error| format!("could not cache raw training video: {error}"))?;
+        self.raw_video_files.insert(key, path.clone());
+        Ok(path)
+    }
+
     fn image_coordinates(&self, anchors: &[Anchor]) -> Result<Vec<ImageCoordinate>, String> {
         let mut result = Vec::new();
         for (batch_index, anchor) in anchors.iter().enumerate() {
@@ -740,15 +857,15 @@ impl<'a> SpiralActLoader<'a> {
                 {
                     if let Some(frame) = segment
                         .timing
-                        .frame_for(anchor.sample_index, anchor.sample_hz)?
+                        .frame_for(anchor.frame_index, anchor.sample_hz)?
                     {
                         matches.push((segment, frame));
                     }
                 }
                 if matches.len() != 1 {
                     return Err(format!(
-                        "fixed-FPS contract did not resolve one frame for episode={:?}, sample={}, camera={camera:?}",
-                        anchor.episode_id, anchor.sample_index
+                        "fixed-FPS contract did not resolve one frame for episode={:?}, frame={}, camera={camera:?}",
+                        anchor.episode_id, anchor.frame_index
                     ));
                 }
                 let (segment, frame_index) = matches[0];
@@ -947,6 +1064,25 @@ fn string_value(array: &ArrayRef, row: usize) -> Result<String, String> {
     ))
 }
 
+fn binary_value(array: &ArrayRef, row: usize) -> Result<&[u8], String> {
+    if array.is_null(row) {
+        return Err("required binary value is null".to_owned());
+    }
+    if let Some(values) = array.as_any().downcast_ref::<BinaryArray>() {
+        return Ok(values.value(row));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<LargeBinaryArray>() {
+        return Ok(values.value(row));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<BinaryViewArray>() {
+        return Ok(values.value(row));
+    }
+    Err(format!(
+        "expected binary Arrow value, found {}",
+        array.data_type()
+    ))
+}
+
 fn list_value(array: &ArrayRef, row: usize) -> Result<ArrayRef, String> {
     if array.is_null(row) {
         return Err("required list value is null".to_owned());
@@ -1050,6 +1186,170 @@ fn validate_relation(value: &str) -> Result<(), String> {
     }
 }
 
+fn training_image_expression(video_decoder: &str, frame_expression: &str, resize: bool) -> String {
+    let decoded = format!(
+        "spql.video.decode({frame_expression}, {})",
+        sql_string(video_decoder)
+    );
+    if resize {
+        format!(
+            "spql.image.to_tensor(spql.image.resize({decoded}, $1, $2, 'bilinear'), 'chw', 'imagenet')"
+        )
+    } else {
+        format!("spql.image.to_tensor({decoded}, 'chw', 'imagenet')")
+    }
+}
+
+fn indexed_image_query(group: &FrameGroup, image_expression: &str, indices: &str) -> String {
+    format!(
+        "SELECT f.request_index, \
+         {image_expression} AS image \
+         FROM (SELECT media FROM {} WHERE episode_id = {} \
+         AND stream_id = {} AND segment_index = {}) AS a CROSS JOIN LATERAL \
+         spql.video.frames(a.media, spql.video.frame_indices(ARRAY[{indices}])) AS f \
+         ORDER BY f.request_index",
+        group.media_relation,
+        sql_string(&group.episode_id),
+        sql_string(&group.camera_stream_id),
+        group.segment_index,
+    )
+}
+
+fn is_unusable_video_index_error(error: &str) -> bool {
+    (error.contains("video frame index") && error.contains("is outside a track with"))
+        || error.contains("frequency cannot be zero")
+}
+
+fn decode_video_frames(
+    ffmpeg: &str,
+    path: &Path,
+    frame_indices: &[u64],
+    width: usize,
+    height: usize,
+    resize: bool,
+) -> Result<BTreeMap<u64, Vec<f32>>, String> {
+    let unique = frame_indices.iter().copied().collect::<BTreeSet<_>>();
+    if unique.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let select = unique
+        .iter()
+        .map(|index| format!("eq(n\\,{index})"))
+        .collect::<Vec<_>>()
+        .join("+");
+    let mut filters = vec![format!("select={select}"), "format=rgb24".to_owned()];
+    if resize {
+        filters.push(format!("scale={width}:{height}:flags=bilinear"));
+    }
+    let output = Command::new(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+        .arg(path)
+        .args([
+            "-an",
+            "-sn",
+            "-map",
+            "0:v:0",
+            "-vf",
+            &filters.join(","),
+            "-vsync",
+            "0",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+        ])
+        .output()
+        .map_err(|error| format!("could not start {ffmpeg:?}: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "FFmpeg exited with {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+    let frame_bytes = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or_else(|| "decoded video frame byte count overflowed".to_owned())?;
+    let expected = frame_bytes
+        .checked_mul(unique.len())
+        .ok_or_else(|| "decoded video batch byte count overflowed".to_owned())?;
+    if output.stdout.len() != expected {
+        return Err(format!(
+            "FFmpeg returned {} RGB bytes for {} frame(s), expected {expected}",
+            output.stdout.len(),
+            unique.len()
+        ));
+    }
+    let mut decoded = BTreeMap::new();
+    for (position, frame_index) in unique.into_iter().enumerate() {
+        let start = position * frame_bytes;
+        decoded.insert(
+            frame_index,
+            imagenet_chw(&output.stdout[start..start + frame_bytes], width, height),
+        );
+    }
+    Ok(decoded)
+}
+
+#[cfg(test)]
+pub(crate) fn decode_video_frames_for_test(
+    ffmpeg: &str,
+    path: &Path,
+    frame_indices: &[u64],
+    width: usize,
+    height: usize,
+    resize: bool,
+) -> Result<BTreeMap<u64, Vec<f32>>, String> {
+    decode_video_frames(ffmpeg, path, frame_indices, width, height, resize)
+}
+
+fn imagenet_chw(rgb: &[u8], width: usize, height: usize) -> Vec<f32> {
+    const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
+    const INVERSE_STD: [f32; 3] = [1.0 / 0.229, 1.0 / 0.224, 1.0 / 0.225];
+    let pixels = width * height;
+    let mut values = vec![0.0; pixels * 3];
+    for pixel in 0..pixels {
+        for channel in 0..3 {
+            let sample = f32::from(rgb[pixel * 3 + channel]) / 255.0;
+            values[channel * pixels + pixel] = (sample - MEAN[channel]) * INVERSE_STD[channel];
+        }
+    }
+    values
+}
+
+fn copy_decoded_video_frames(
+    group_index: usize,
+    group: &FrameGroup,
+    decoded: &BTreeMap<u64, Vec<f32>>,
+    images: &mut [f32],
+    seen: &mut BTreeSet<(usize, usize)>,
+    camera_count: usize,
+    image_values: usize,
+) -> Result<(), String> {
+    for (request, (frame_index, destination)) in group
+        .frame_indices
+        .iter()
+        .zip(&group.destinations)
+        .enumerate()
+    {
+        if !seen.insert((group_index, request)) {
+            return Err("raw video decoder returned a duplicate frame coordinate".to_owned());
+        }
+        let values = decoded
+            .get(frame_index)
+            .ok_or_else(|| format!("FFmpeg did not decode requested frame {frame_index}"))?;
+        if values.len() != image_values {
+            return Err("FFmpeg returned an invalid normalized image shape".to_owned());
+        }
+        let destination = (destination.0 * camera_count + destination.1) * image_values;
+        images[destination..destination + image_values].copy_from_slice(values);
+    }
+    Ok(())
+}
+
 fn frame_groups(coordinates: &[ImageCoordinate]) -> Vec<FrameGroup> {
     let mut groups: BTreeMap<(String, String, u32, String), Vec<&ImageCoordinate>> =
         BTreeMap::new();
@@ -1124,5 +1424,58 @@ mod tests {
     fn relation_names_are_never_interpolated_without_validation() {
         assert!(validate_relation("robotics.video_assets").is_ok());
         assert!(validate_relation("robotics.assets; DELETE").is_err());
+    }
+
+    #[test]
+    fn indexed_video_query_filters_before_lateral_decode() {
+        let group = FrameGroup {
+            episode_id: "episode-1".to_owned(),
+            camera_stream_id: "top".to_owned(),
+            segment_index: 2,
+            media_relation: "robotics.video_assets".to_owned(),
+            frame_indices: vec![71],
+            destinations: vec![(0, 0)],
+        };
+        let indexed = indexed_image_query(&group, "decode(f.frame)", "71");
+        assert!(
+            indexed.find("WHERE episode_id").unwrap() < indexed.find("CROSS JOIN LATERAL").unwrap()
+        );
+    }
+
+    #[test]
+    fn raw_video_normalization_matches_spiral_imagenet_chw() {
+        let values = imagenet_chw(&[255, 128, 0, 0, 64, 255], 2, 1);
+        assert_eq!(values.len(), 6);
+        let expected = [
+            (1.0 - 0.485) / 0.229,
+            (0.0 - 0.485) / 0.229,
+            (128.0 / 255.0 - 0.456) / 0.224,
+            (64.0 / 255.0 - 0.456) / 0.224,
+            (0.0 - 0.406) / 0.225,
+            (1.0 - 0.406) / 0.225,
+        ];
+        for (actual, expected) in values.iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn native_training_builds_the_spiral_tensor_expression() {
+        let expression = training_image_expression("auto", "f.frame", false);
+        assert_eq!(
+            expression,
+            "spql.image.to_tensor(spql.video.decode(f.frame, 'auto'), 'chw', 'imagenet')"
+        );
+    }
+
+    #[test]
+    fn only_known_unusable_sidecar_failures_enable_raw_video_fallback() {
+        assert!(is_unusable_video_index_error(
+            "video frame index 187 is outside a track with 64 frames"
+        ));
+        assert!(is_unusable_video_index_error(
+            "Vortex error: Other error: frequency cannot be zero"
+        ));
+        assert!(!is_unusable_video_index_error("video decoder failed"));
     }
 }

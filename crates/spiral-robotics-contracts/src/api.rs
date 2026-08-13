@@ -366,6 +366,15 @@ pub struct TrainingMetricPoint {
     /// Latest requested video payload bytes divided by total sample preparation time.
     pub transfer_bytes_per_second: f64,
     pub examples_per_second: f64,
+    /// Studio process CPU usage; 100% represents one fully occupied core.
+    #[serde(default)]
+    pub cpu_percent: Option<f64>,
+    /// Whole-device GPU utilization when the active backend exposes it.
+    #[serde(default)]
+    pub gpu_percent: Option<f64>,
+    /// Current resident memory used by the Studio process.
+    #[serde(default)]
+    pub memory_bytes: Option<u64>,
     pub elapsed_seconds: f64,
     #[serde(default)]
     pub event: Option<String>,

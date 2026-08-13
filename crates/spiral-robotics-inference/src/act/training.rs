@@ -9,12 +9,11 @@ use std::rc::Rc;
 
 use burn_autodiff::Autodiff;
 use burn_core as burn;
-use burn_core::module::{AutodiffModule, Initializer, Module, Param};
+use burn_core::module::{AutodiffModule, Initializer, Module, ModuleVisitor, Param};
 use burn_core::tensor::backend::{AutodiffBackend, Backend};
 use burn_core::tensor::{Bool, Distribution, Tensor, TensorData};
 use burn_nn::{Linear, LinearConfig};
 use burn_optim::adaptor::OptimizerAdaptor;
-use burn_optim::grad_clipping::GradientClippingConfig;
 use burn_optim::{AdamW, AdamWConfig, GradientsParams, Optimizer};
 use burn_store::{ModuleAdapter, ModuleSnapshot, SafetensorsStore, TensorSnapshot};
 use safetensors::tensor::{Dtype, TensorView, serialize};
@@ -27,6 +26,8 @@ use super::weights::Weights;
 
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
+const GLOBAL_GRADIENT_NORM_LIMIT: f32 = 10.0;
+const TRAINING_METRIC_INTERVAL: u64 = 10;
 
 /// Store linear and normalization parameters in the stable layout consumed by
 /// the native inference loader. Framework-specific module storage never leaks
@@ -399,6 +400,7 @@ struct Trainer<B: AutodiffBackend> {
     model: Option<FullActModel<B>>,
     optimizer: OptimizerAdaptor<AdamW, FullActModel<B>, B>,
     device: B::Device,
+    last_loss: Option<VisionActLoss>,
 }
 
 impl<B: AutodiffBackend> Trainer<B> {
@@ -412,15 +414,13 @@ impl<B: AutodiffBackend> Trainer<B> {
             .map(|bytes| Weights::from_bytes("pretrained ACT backbone", bytes.to_vec()))
             .transpose()?;
         let model = FullActModel::init(&config, pretrained.as_ref(), &device)?;
-        let optimizer = AdamWConfig::new()
-            .with_weight_decay(1.0e-4)
-            .with_grad_clipping(Some(GradientClippingConfig::Norm(10.0)))
-            .init();
+        let optimizer = AdamWConfig::new().with_weight_decay(1.0e-4).init();
         Ok(Self {
             config,
             model: Some(model),
             optimizer,
             device,
+            last_loss: None,
         })
     }
 
@@ -506,23 +506,30 @@ where
             batch.action_is_pad,
             self.config.kl_weight,
         );
-        let metrics = read_loss::<B::InnerBackend>(
-            loss.total.clone().inner(),
-            loss.l1.inner(),
-            loss.kl.inner(),
-        )?;
-        if !metrics.total.is_finite() {
-            return Err(Error::Inference(format!(
-                "ACT loss became non-finite at step {step}"
-            )));
-        }
+        let metrics = Tensor::cat(
+            vec![loss.total.clone(), loss.l1.clone(), loss.kl.clone()],
+            0,
+        )
+        .inner();
         let gradients = GradientsParams::from_grads(loss.total.backward(), model);
+        let gradients =
+            clip_gradients_by_global_norm::<B, _>(gradients, model, GLOBAL_GRADIENT_NORM_LIMIT);
         let model = self.model.take().expect("trainer model");
         self.model = Some(
             self.optimizer
                 .step(self.learning_rate(step), model, gradients),
         );
-        Ok(metrics)
+        if should_read_training_metrics(step, self.config.total_steps) {
+            let metrics = read_loss(metrics)?;
+            if !metrics.total.is_finite() {
+                return Err(Error::Inference(format!(
+                    "ACT loss became non-finite at step {step}"
+                )));
+            }
+            self.last_loss = Some(metrics);
+        }
+        self.last_loss
+            .ok_or_else(|| Error::Inference("ACT training has no loss diagnostics".to_owned()))
     }
 
     fn validation_step(&self, batch: VisionActBatch) -> Result<VisionActLoss> {
@@ -540,7 +547,7 @@ where
             batch.action_is_pad,
             self.config.kl_weight,
         );
-        read_loss::<B::InnerBackend>(loss.total, loss.l1, loss.kl)
+        read_loss(Tensor::cat(vec![loss.total, loss.l1, loss.kl], 0))
     }
 
     fn checkpoint(&self, checkpoint: VisionActCheckpoint<'_>) -> Result<Vec<u8>> {
@@ -632,15 +639,100 @@ fn act_loss<B: Backend>(
     LossOutput { total, l1, kl }
 }
 
-fn read_loss<B: Backend>(
-    total: Tensor<B, 1>,
-    l1: Tensor<B, 1>,
-    kl: Tensor<B, 1>,
-) -> Result<VisionActLoss> {
+fn should_read_training_metrics(step: u64, total_steps: u64) -> bool {
+    step == 1 || step == total_steps || step.is_multiple_of(TRAINING_METRIC_INTERVAL)
+}
+
+struct GradientNormAccumulator<'a, B: AutodiffBackend> {
+    gradients: &'a GradientsParams,
+    squared_norm: Option<Tensor<B::InnerBackend, 1>>,
+}
+
+impl<B: AutodiffBackend> ModuleVisitor<B> for GradientNormAccumulator<'_, B> {
+    fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
+        let Some(gradient) = self.gradients.get::<B::InnerBackend, D>(param.id) else {
+            return;
+        };
+        let squared_norm = gradient.square().sum();
+        self.squared_norm = Some(match self.squared_norm.take() {
+            Some(accumulated) => accumulated + squared_norm,
+            None => squared_norm,
+        });
+    }
+}
+
+struct GlobalGradientClipper<'a, B: AutodiffBackend> {
+    gradients: &'a mut GradientsParams,
+    scale: Tensor<B::InnerBackend, 1>,
+}
+
+impl<B: AutodiffBackend> ModuleVisitor<B> for GlobalGradientClipper<'_, B> {
+    fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
+        let Some(gradient) = self.gradients.remove::<B::InnerBackend, D>(param.id) else {
+            return;
+        };
+        self.gradients
+            .register::<B::InnerBackend, D>(param.id, gradient.mul(self.scale.clone().unsqueeze()));
+    }
+}
+
+fn clip_gradients_by_global_norm<B, M>(
+    mut gradients: GradientsParams,
+    model: &M,
+    maximum_norm: f32,
+) -> GradientsParams
+where
+    B: AutodiffBackend,
+    M: AutodiffModule<B>,
+{
+    let Some(squared_norm) = global_squared_gradient_norm::<B, M>(&gradients, model) else {
+        return gradients;
+    };
+    let min_positive = squared_norm
+        .dtype()
+        .finfo()
+        .unwrap_or(burn::tensor::FloatDType::F32.finfo())
+        .min_positive;
+    let scale = (maximum_norm / squared_norm.sqrt().add_scalar(min_positive)).clamp_max(1.0);
+    model.visit(&mut GlobalGradientClipper::<B> {
+        gradients: &mut gradients,
+        scale,
+    });
+    gradients
+}
+
+fn global_squared_gradient_norm<B, M>(
+    gradients: &GradientsParams,
+    model: &M,
+) -> Option<Tensor<B::InnerBackend, 1>>
+where
+    B: AutodiffBackend,
+    M: AutodiffModule<B>,
+{
+    let mut accumulator = GradientNormAccumulator::<B> {
+        gradients,
+        squared_norm: None,
+    };
+    model.visit(&mut accumulator);
+    accumulator.squared_norm
+}
+
+fn read_loss<B: Backend>(metrics: Tensor<B, 1>) -> Result<VisionActLoss> {
+    let values = metrics
+        .try_into_data()
+        .map_err(|error| Error::Inference(format!("reading Burn loss metrics: {error}")))?
+        .to_vec::<f32>()
+        .map_err(|error| Error::Inference(format!("converting Burn loss metrics: {error}")))?;
+    let [total, l1, kl] = values.as_slice() else {
+        return Err(Error::Inference(format!(
+            "Burn returned {} loss metrics, expected 3",
+            values.len()
+        )));
+    };
     Ok(VisionActLoss {
-        total: scalar(total)?,
-        l1: scalar(l1)?,
-        kl: scalar(kl)?,
+        total: f64::from(*total),
+        l1: f64::from(*l1),
+        kl: f64::from(*kl),
         // Kept in the public diagnostics shape for older Studio clients. ACT
         // has no pad prediction head or pad loss.
         pad: 0.0,
@@ -666,19 +758,6 @@ fn sinusoidal_position_embedding_1d<B: Backend>(
         }
     }
     Tensor::from_data(TensorData::new(values, [positions, dimensions]), device)
-}
-
-fn scalar<B: Backend>(value: Tensor<B, 1>) -> Result<f64> {
-    let values = value
-        .try_into_data()
-        .map_err(|error| Error::Inference(format!("reading Burn scalar: {error}")))?
-        .to_vec::<f32>()
-        .map_err(|error| Error::Inference(format!("converting Burn scalar: {error}")))?;
-    values
-        .first()
-        .copied()
-        .map(f64::from)
-        .ok_or_else(|| Error::Inference("Burn returned an empty scalar tensor".to_owned()))
 }
 
 fn resnet18_feature_size(height: usize, width: usize) -> (usize, usize) {
@@ -822,6 +901,19 @@ fn push_f32(owned: &mut Vec<OwnedTensor>, name: &str, shape: Vec<usize>, values:
 mod tests {
     use super::*;
 
+    fn global_gradient_norm<B, M>(gradients: &GradientsParams, model: &M) -> f32
+    where
+        B: AutodiffBackend,
+        M: AutodiffModule<B>,
+    {
+        global_squared_gradient_norm::<B, M>(gradients, model)
+            .expect("test model must have gradients")
+            .sqrt()
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap()[0]
+    }
+
     #[test]
     fn resnet_shape_matches_the_runtime_feature_contract() {
         assert_eq!(resnet18_feature_size(224, 224), (7, 7));
@@ -853,6 +945,29 @@ mod tests {
         assert_eq!(trainer.learning_rate(0), 1.0e-5);
         assert_eq!(trainer.learning_rate(50), 1.0e-5);
         assert_eq!(trainer.learning_rate(100), 1.0e-5);
+    }
+
+    #[test]
+    fn training_metrics_have_one_bounded_readback_cadence() {
+        let sampled = (1..=25)
+            .filter(|step| should_read_training_metrics(*step, 25))
+            .collect::<Vec<_>>();
+        assert_eq!(sampled, vec![1, 10, 20, 25]);
+    }
+
+    #[test]
+    fn gradients_are_clipped_by_one_global_model_norm() {
+        type B = Autodiff<burn_ndarray::NdArray<f32>>;
+        let device = Default::default();
+        let model = LinearConfig::new(2, 1).init::<B>(&device);
+        let input = Tensor::<B, 2>::from_floats([[100.0, 100.0]], &device);
+        let loss = model.forward(input).sum();
+        let gradients = GradientsParams::from_grads(loss.backward(), &model);
+        assert!(global_gradient_norm::<B, _>(&gradients, &model) > 100.0);
+
+        let gradients = clip_gradients_by_global_norm::<B, _>(gradients, &model, 10.0);
+        let norm = global_gradient_norm::<B, _>(&gradients, &model);
+        assert!((norm - 10.0).abs() < 1.0e-4, "global norm was {norm}");
     }
 
     #[test]
@@ -988,11 +1103,8 @@ mod tests {
         assert_eq!(policy.specification().image_inputs[0].name, "wrist");
     }
 
-    /// Burn 0.21's optional fusion planner reuses an invalid cached ordering
-    /// after a recurring graph synchronizes scalar losses, and CubeCL 0.10's
-    /// autotune profiler can invalidate its Metal timestamp readback buffer.
-    /// Keep the full train/validate/checkpoint sequence covered on eager Metal
-    /// so either feature can't silently restore a training-loop panic.
+    /// Keep fusion covered across recurring packed metric readbacks plus
+    /// validation and checkpoint synchronization boundaries.
     #[cfg(all(target_os = "macos", feature = "metal"))]
     #[test]
     fn metal_repeats_training_sync_segments_and_checkpoints() {
@@ -1016,7 +1128,7 @@ mod tests {
             decoder_layers: 1,
             kl_weight: 1.0,
             learning_rate: 1.0e-5,
-            total_steps: 2,
+            total_steps: 12,
             seed: 42,
         };
         let batch = || VisionActBatch {
@@ -1028,7 +1140,7 @@ mod tests {
         };
         let mut trainer = NativeActTrainer::new(config, "metal", None).unwrap();
 
-        for step in 1..=2 {
+        for step in 1..=12 {
             assert!(trainer.train_step(batch(), step).unwrap().total.is_finite());
         }
         assert!(trainer.validation_step(batch()).unwrap().total.is_finite());

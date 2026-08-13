@@ -94,6 +94,9 @@ pub(crate) struct TrainingMetric {
     pub learning_rate: f64,
     pub transfer_bytes_per_second: f64,
     pub examples_per_second: f64,
+    pub cpu_percent: Option<f64>,
+    pub gpu_percent: Option<f64>,
+    pub memory_bytes: Option<u64>,
     pub elapsed_seconds: f64,
     pub event: Option<String>,
 }

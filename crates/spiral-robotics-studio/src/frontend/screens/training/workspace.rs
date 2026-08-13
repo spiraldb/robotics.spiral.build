@@ -19,8 +19,9 @@ use spiral_robotics_panels::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorks
 
 use crate::frontend::app::state::studio;
 use crate::frontend::components::charts::{
-    COLOR_INK_FAINT, COLOR_LINE, COLOR_THROUGHPUT, COLOR_TRAIN, COLOR_TRANSFER, COLOR_VALIDATION,
-    CharmingChart, MONO_FONT, TooltipRateUnit, downsample_extrema, studio_numeric_tooltip,
+    COLOR_CPU, COLOR_GPU, COLOR_INK_FAINT, COLOR_LINE, COLOR_MEMORY, COLOR_THROUGHPUT, COLOR_TRAIN,
+    COLOR_TRANSFER, COLOR_VALIDATION, CharmingChart, MONO_FONT, TooltipRateUnit,
+    downsample_extrema, studio_bytes_tooltip, studio_numeric_tooltip, studio_percent_tooltip,
     studio_rate_tooltip,
 };
 use crate::frontend::screens::training::state::training_controller;
@@ -712,15 +713,33 @@ fn TrainingPerformance(run: TrainingRun) -> Element {
     let transfer = last
         .map(|point| format_rate(point.transfer_bytes_per_second))
         .unwrap_or_else(|| "—".to_owned());
+    let cpu = last
+        .and_then(|point| point.cpu_percent)
+        .map(|value| format!("{value:.1}%"))
+        .unwrap_or_else(|| "—".to_owned());
+    let gpu = last
+        .and_then(|point| point.gpu_percent)
+        .map(|value| format!("{value:.1}%"))
+        .unwrap_or_else(|| "—".to_owned());
+    let memory = last
+        .and_then(|point| point.memory_bytes)
+        .map(format_bytes)
+        .unwrap_or_else(|| "—".to_owned());
     let throughput_chart =
         training_resource_chart(metrics, total_steps, ResourceSeries::Throughput);
     let transfer_chart = training_resource_chart(metrics, total_steps, ResourceSeries::Transfer);
+    let cpu_chart = training_resource_chart(metrics, total_steps, ResourceSeries::Cpu);
+    let gpu_chart = training_resource_chart(metrics, total_steps, ResourceSeries::Gpu);
+    let memory_chart = training_resource_chart(metrics, total_steps, ResourceSeries::Memory);
 
     rsx! {
         section { class: "training-resources",
             div { class: "training-resource-grid",
                 ResourceLane { id: chart_dom_id("training-rate", &run.id), label: "Training rate", value: throughput, chart: throughput_chart, class: "resource-throughput", description: "Samples completed per second." }
                 ResourceLane { id: chart_dom_id("input-rate", &run.id), label: "Input rate", value: transfer, chart: transfer_chart, class: "resource-transfer", description: "Prepared camera data per second." }
+                ResourceLane { id: chart_dom_id("cpu-utilization", &run.id), label: "CPU", value: cpu, chart: cpu_chart, class: "resource-cpu", description: "Studio process CPU utilization. 100% is one fully occupied core." }
+                ResourceLane { id: chart_dom_id("gpu-utilization", &run.id), label: "GPU", value: gpu, chart: gpu_chart, class: "resource-gpu", description: "Whole-device Apple GPU utilization reported by macOS; other processes may contribute." }
+                ResourceLane { id: chart_dom_id("memory-usage", &run.id), label: "Memory", value: memory, chart: memory_chart, class: "resource-memory", description: "Current resident memory used by the Studio process, including training allocations." }
             }
         }
     }
@@ -752,6 +771,9 @@ fn ResourceLane(
 enum ResourceSeries {
     Throughput,
     Transfer,
+    Cpu,
+    Gpu,
+    Memory,
 }
 
 pub(crate) fn default_training_sql(namespace: &str, dataset_id: &str) -> String {
@@ -810,20 +832,26 @@ fn training_resource_chart(
     let (id, name, color) = match series {
         ResourceSeries::Throughput => ("training-rate", "Training rate", COLOR_THROUGHPUT),
         ResourceSeries::Transfer => ("input-rate", "Input rate", COLOR_TRANSFER),
+        ResourceSeries::Cpu => ("cpu-utilization", "CPU", COLOR_CPU),
+        ResourceSeries::Gpu => ("gpu-utilization", "GPU", COLOR_GPU),
+        ResourceSeries::Memory => ("memory-usage", "Memory", COLOR_MEMORY),
     };
     let data = metric_series_data(
         metrics,
-        |point| {
-            Some(match series {
-                ResourceSeries::Throughput => point.examples_per_second,
-                ResourceSeries::Transfer => point.transfer_bytes_per_second,
-            })
+        |point| match series {
+            ResourceSeries::Throughput => Some(point.examples_per_second),
+            ResourceSeries::Transfer => Some(point.transfer_bytes_per_second),
+            ResourceSeries::Cpu => point.cpu_percent,
+            ResourceSeries::Gpu => point.gpu_percent,
+            ResourceSeries::Memory => point.memory_bytes.map(|value| value as f64),
         },
         false,
     );
     let tooltip = match series {
         ResourceSeries::Throughput => studio_rate_tooltip(TooltipRateUnit::SamplesPerSecond),
         ResourceSeries::Transfer => studio_rate_tooltip(TooltipRateUnit::BytesPerSecond),
+        ResourceSeries::Cpu | ResourceSeries::Gpu => studio_percent_tooltip(),
+        ResourceSeries::Memory => studio_bytes_tooltip(),
     };
 
     Chart::new()
@@ -836,7 +864,10 @@ fn training_resource_chart(
                 .min(0)
                 .max(total_steps.max(1) as f64),
         )
-        .y_axis(chart_axis(AxisType::Value, false).min(0).scale(true))
+        .y_axis(match series {
+            ResourceSeries::Gpu => chart_axis(AxisType::Value, false).min(0).max(100),
+            _ => chart_axis(AxisType::Value, false).min(0).scale(true),
+        })
         .series(
             metric_line(id, name, color, data, 1.5)
                 .area_style(AreaStyle::new().color(color).opacity(0.09)),
@@ -942,6 +973,17 @@ fn format_rate(bytes_per_second: f64) -> String {
         format!("{:.2} GiB/s", bytes_per_second / GIB)
     } else {
         format!("{:.1} MiB/s", bytes_per_second / MIB)
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    let bytes = bytes as f64;
+    if bytes >= GIB {
+        format!("{:.2} GiB", bytes / GIB)
+    } else {
+        format!("{:.1} MiB", bytes / MIB)
     }
 }
 

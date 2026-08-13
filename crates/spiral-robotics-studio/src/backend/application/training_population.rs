@@ -350,20 +350,78 @@ pub(crate) fn common_camera_streams(
     common.unwrap_or_default().into_iter().collect()
 }
 
-pub(crate) fn ranges_with_camera_coverage(
+/// Resolve the one camera cadence that owns ACT's observation and action axis.
+///
+/// Joint telemetry may be sampled faster, but every selected camera in every
+/// admitted episode must describe the same fixed-FPS policy clock.
+pub(crate) fn camera_sample_hz(
     ranges: &[SampleRange],
     cameras: &[String],
     segments: &BTreeMap<StreamKey, Vec<CameraSegment>>,
+) -> Result<f64, String> {
+    if cameras.is_empty() {
+        return Err("ACT requires at least one camera stream".to_owned());
+    }
+    let episodes = ranges
+        .iter()
+        .map(|range| range.episode_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut expected = None;
+    for episode in episodes {
+        for camera in cameras {
+            let key = (episode.to_owned(), camera.clone());
+            let values = segments
+                .get(&key)
+                .filter(|values| !values.is_empty())
+                .ok_or_else(|| format!("camera stream {key:?} has no recorded video segment"))?;
+            for segment in values {
+                if expected.is_some_and(|fps| fps != segment.fps) {
+                    return Err(format!(
+                        "one ACT run requires one fixed camera frame rate; {key:?} uses {} FPS",
+                        segment.fps
+                    ));
+                }
+                expected.get_or_insert(segment.fps);
+            }
+        }
+    }
+    expected
+        .map(|fps| fps as f64)
+        .ok_or_else(|| "the selected cameras have no fixed frame rate".to_owned())
+}
+
+/// Convert joint-sample population ranges onto the shared camera-frame axis.
+///
+/// The returned `SampleRange::first_index`/`last_index` values are camera
+/// frame indices. `sample_hz` is consequently the camera rate, not the motor
+/// polling rate stored on the source range.
+pub(crate) fn ranges_with_camera_frame_coverage(
+    ranges: &[SampleRange],
+    cameras: &[String],
+    segments: &BTreeMap<StreamKey, Vec<CameraSegment>>,
+    camera_hz: f64,
 ) -> Result<Vec<SampleRange>, String> {
+    if !sample_rate_is_exact(camera_hz, camera_hz) {
+        return Err("camera frame coverage requires a finite positive rate".to_owned());
+    }
     let mut accepted = Vec::new();
     for range in ranges {
-        let mut intervals = vec![(range.first_index, range.last_index)];
+        if range.sample_hz < camera_hz {
+            return Err(format!(
+                "joint stream ({:?}, {:?}) runs at {} Hz, below the {camera_hz} Hz camera rate",
+                range.episode_id, range.stream_id, range.sample_hz
+            ));
+        }
+        let Some(joint_bounds) = camera_bounds_for_joint_range(range, camera_hz)? else {
+            continue;
+        };
+        let mut intervals = vec![joint_bounds];
         for camera in cameras {
             let mut camera_intervals = segments
                 .get(&(range.episode_id.clone(), camera.clone()))
                 .into_iter()
                 .flatten()
-                .map(|segment| segment.sample_bounds(range.sample_hz))
+                .map(|segment| segment.sample_bounds(camera_hz))
                 .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
                 .flatten()
@@ -375,12 +433,90 @@ pub(crate) fn ranges_with_camera_coverage(
             }
         }
         accepted.extend(intervals.into_iter().map(|(first, last)| SampleRange {
+            episode_id: range.episode_id.clone(),
+            stream_id: range.stream_id.clone(),
             first_index: first,
             last_index: last,
-            ..range.clone()
+            robot_type: range.robot_type.clone(),
+            sample_hz: camera_hz,
         }));
     }
     Ok(accepted)
+}
+
+fn camera_bounds_for_joint_range(
+    range: &SampleRange,
+    camera_hz: f64,
+) -> Result<Option<(i64, i64)>, String> {
+    let mut first = finite_i64_bound(
+        range.first_index as f64 * camera_hz / range.sample_hz,
+        f64::floor,
+    )?;
+    let last_exclusive = range
+        .last_index
+        .checked_add(1)
+        .ok_or_else(|| "joint sample range overflowed while aligning camera frames".to_owned())?;
+    let mut last = finite_i64_bound(
+        last_exclusive as f64 * camera_hz / range.sample_hz,
+        f64::ceil,
+    )?;
+    while first <= last
+        && joint_sample_for_frame(first, camera_hz, range.sample_hz)? < range.first_index
+    {
+        first = first
+            .checked_add(1)
+            .ok_or_else(|| "camera frame range overflowed".to_owned())?;
+    }
+    while first <= last
+        && joint_sample_for_frame(last, camera_hz, range.sample_hz)? > range.last_index
+    {
+        last = last
+            .checked_sub(1)
+            .ok_or_else(|| "camera frame range overflowed".to_owned())?;
+    }
+    Ok((first <= last).then_some((first, last)))
+}
+
+/// Select the latest non-future joint sample for one camera-frame timestamp.
+pub(crate) fn joint_sample_for_frame(
+    frame_index: i64,
+    camera_hz: f64,
+    joint_hz: f64,
+) -> Result<i64, String> {
+    if frame_index < 0
+        || !sample_rate_is_exact(camera_hz, camera_hz)
+        || !sample_rate_is_exact(joint_hz, joint_hz)
+    {
+        return Err(
+            "camera-to-joint alignment requires valid non-negative indices and rates".to_owned(),
+        );
+    }
+    finite_i64_bound(frame_index as f64 * joint_hz / camera_hz, f64::floor)
+}
+
+/// Whether a raw joint row is selected by one admitted camera-frame anchor.
+pub(crate) fn joint_sample_is_frame_aligned(
+    ranges: &[SampleRange],
+    episode_id: &str,
+    stream_id: &str,
+    sample_index: i64,
+    joint_hz: f64,
+) -> Result<bool, String> {
+    for range in ranges
+        .iter()
+        .filter(|range| range.episode_id == episode_id && range.stream_id == stream_id)
+    {
+        let estimate =
+            finite_i64_bound(sample_index as f64 * range.sample_hz / joint_hz, f64::floor)?;
+        for candidate in estimate.saturating_sub(1)..=estimate.saturating_add(2) {
+            if (range.first_index..=range.last_index).contains(&candidate)
+                && joint_sample_for_frame(candidate, range.sample_hz, joint_hz)? == sample_index
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn intersect_intervals(left: &[(i64, i64)], right: &[(i64, i64)]) -> Vec<(i64, i64)> {
@@ -402,24 +538,11 @@ pub(crate) fn intersect_intervals(left: &[(i64, i64)], right: &[(i64, i64)]) -> 
     result
 }
 
-pub(crate) fn sample_is_eligible(
-    ranges: &[SampleRange],
-    episode_id: &str,
-    stream_id: &str,
-    sample_index: i64,
-) -> bool {
-    ranges.iter().any(|range| {
-        range.episode_id == episode_id
-            && range.stream_id == stream_id
-            && (range.first_index..=range.last_index).contains(&sample_index)
-    })
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Anchor {
     pub episode_id: String,
     pub stream_id: String,
-    pub sample_index: i64,
+    pub frame_index: i64,
     pub sample_hz: f64,
 }
 
@@ -460,7 +583,7 @@ impl AnchorIndex {
         let within: i64 = (offset - previous)
             .try_into()
             .map_err(|_| "training anchor offset exceeds the sample index range".to_owned())?;
-        let sample_index = range
+        let frame_index = range
             .first_index
             .checked_add(within)
             .filter(|sample| *sample <= range.last_index)
@@ -468,7 +591,7 @@ impl AnchorIndex {
         Ok(Anchor {
             episode_id: range.episode_id.clone(),
             stream_id: range.stream_id.clone(),
-            sample_index,
+            frame_index,
             sample_hz: range.sample_hz,
         })
     }
@@ -774,8 +897,35 @@ mod tests {
     }
 
     #[test]
-    fn camera_coverage_keeps_only_samples_shared_by_every_requested_camera() {
+    fn camera_frames_own_act_anchors_and_stride_joint_targets() {
         let ranges = vec![range("one", 0, 19)];
+        let mut cameras = BTreeMap::new();
+        for camera in ["top", "wrist"] {
+            cameras.insert(
+                ("one".to_owned(), camera.to_owned()),
+                vec![CameraSegment::new(0, 30, 10).unwrap()],
+            );
+        }
+        let selected = ["top".to_owned(), "wrist".to_owned()];
+        let camera_hz = camera_sample_hz(&ranges, &selected, &cameras).unwrap();
+        let accepted =
+            ranges_with_camera_frame_coverage(&ranges, &selected, &cameras, camera_hz).unwrap();
+
+        assert_eq!(camera_hz, 30.0);
+        assert_eq!(accepted.len(), 1);
+        assert_eq!((accepted[0].first_index, accepted[0].last_index), (0, 9));
+        assert_eq!(accepted[0].sample_hz, 30.0);
+        assert_eq!(joint_sample_for_frame(0, camera_hz, 60.0).unwrap(), 0);
+        assert_eq!(joint_sample_for_frame(1, camera_hz, 60.0).unwrap(), 2);
+        assert_eq!(joint_sample_for_frame(9, camera_hz, 60.0).unwrap(), 18);
+        assert!(joint_sample_is_frame_aligned(&accepted, "one", "follower", 18, 60.0).unwrap());
+        assert!(!joint_sample_is_frame_aligned(&accepted, "one", "follower", 19, 60.0).unwrap());
+    }
+
+    #[test]
+    fn camera_policy_clock_rejects_mixed_fps_and_slower_joint_streams() {
+        let ranges = vec![range("one", 0, 19)];
+        let selected = ["top".to_owned(), "wrist".to_owned()];
         let mut cameras = BTreeMap::new();
         cameras.insert(
             ("one".to_owned(), "top".to_owned()),
@@ -783,14 +933,17 @@ mod tests {
         );
         cameras.insert(
             ("one".to_owned(), "wrist".to_owned()),
-            vec![CameraSegment::new(5 * 1_000_000_000 / 60, 60, 10).unwrap()],
+            vec![CameraSegment::new(0, 24, 10).unwrap()],
         );
-        let accepted =
-            ranges_with_camera_coverage(&ranges, &["top".to_owned(), "wrist".to_owned()], &cameras)
-                .unwrap();
-        assert_eq!((accepted[0].first_index, accepted[0].last_index), (5, 14));
-        assert!(!sample_is_eligible(&accepted, "one", "follower", 4));
-        assert!(sample_is_eligible(&accepted, "one", "follower", 5));
+        assert!(camera_sample_hz(&ranges, &selected, &cameras).is_err());
+
+        cameras.insert(
+            ("one".to_owned(), "wrist".to_owned()),
+            vec![CameraSegment::new(0, 30, 10).unwrap()],
+        );
+        let mut slow = range("one", 0, 19);
+        slow.sample_hz = 20.0;
+        assert!(ranges_with_camera_frame_coverage(&[slow], &selected, &cameras, 30.0).is_err());
     }
 
     #[test]
@@ -819,10 +972,10 @@ mod tests {
         let ranges = vec![range("one", 10, 11), range("two", 20, 22)];
         let index = AnchorIndex::new(&ranges).unwrap();
         assert_eq!(index.total(), 5);
-        assert_eq!(index.select(&ranges, 0).unwrap().sample_index, 10);
-        assert_eq!(index.select(&ranges, 1).unwrap().sample_index, 11);
-        assert_eq!(index.select(&ranges, 2).unwrap().sample_index, 20);
-        assert_eq!(index.select(&ranges, 4).unwrap().sample_index, 22);
+        assert_eq!(index.select(&ranges, 0).unwrap().frame_index, 10);
+        assert_eq!(index.select(&ranges, 1).unwrap().frame_index, 11);
+        assert_eq!(index.select(&ranges, 2).unwrap().frame_index, 20);
+        assert_eq!(index.select(&ranges, 4).unwrap().frame_index, 22);
         assert!(index.select(&ranges, 5).is_err());
     }
 

@@ -18,6 +18,9 @@ pub(crate) const COLOR_TRAIN: &str = "#2a78d6";
 pub(crate) const COLOR_VALIDATION: &str = "#d9572b";
 pub(crate) const COLOR_THROUGHPUT: &str = "#448361";
 pub(crate) const COLOR_TRANSFER: &str = "#7560b8";
+pub(crate) const COLOR_CPU: &str = "#d9572b";
+pub(crate) const COLOR_GPU: &str = "#2a78d6";
+pub(crate) const COLOR_MEMORY: &str = "#7a58a5";
 
 pub(crate) const MONO_FONT: &str = "ui-monospace, SF Mono, JetBrains Mono, Menlo, monospace";
 
@@ -72,6 +75,34 @@ return scaled.toLocaleString(undefined, { maximumFractionDigits: 2 }) + (large ?
         }
     };
     studio_tooltip(JsFunction::new_with_args("value", body))
+}
+
+pub(crate) fn studio_percent_tooltip() -> Tooltip {
+    studio_tooltip(JsFunction::new_with_args(
+        "value",
+        r#"
+const raw = Array.isArray(value) ? value[value.length - 1] : value;
+const numeric = Number(raw);
+if (!Number.isFinite(numeric)) return '—';
+return numeric.toLocaleString(undefined, { maximumFractionDigits: 1 }) + '%';
+"#,
+    ))
+}
+
+pub(crate) fn studio_bytes_tooltip() -> Tooltip {
+    studio_tooltip(JsFunction::new_with_args(
+        "value",
+        r#"
+const raw = Array.isArray(value) ? value[value.length - 1] : value;
+const numeric = Number(raw);
+if (!Number.isFinite(numeric)) return '—';
+const gib = 1073741824;
+const mib = 1048576;
+const large = Math.abs(numeric) >= gib;
+const scaled = numeric / (large ? gib : mib);
+return scaled.toLocaleString(undefined, { maximumFractionDigits: 2 }) + (large ? ' GiB' : ' MiB');
+"#,
+    ))
 }
 
 fn studio_tooltip(value_formatter: JsFunction) -> Tooltip {

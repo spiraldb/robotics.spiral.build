@@ -180,7 +180,7 @@ async fn serve(args: Args, camera_access_error: Option<String>) -> Result<()> {
             .map_err(std::io::Error::other)?,
     );
     let training = Arc::new(
-        TrainingManager::open(training_root, storage.clone())
+        TrainingManager::open(training_root, storage.clone(), args.ffmpeg.clone())
             .await
             .map_err(std::io::Error::other)?,
     );

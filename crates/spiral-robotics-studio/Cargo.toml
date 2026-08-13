@@ -105,9 +105,13 @@ tempfile = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 spiral-robotics-inference = { workspace = true, features = ["metal", "accelerate", "download"], optional = true }
+mach2 = "0.5"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 spiral-robotics-inference = { workspace = true, features = ["download"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true

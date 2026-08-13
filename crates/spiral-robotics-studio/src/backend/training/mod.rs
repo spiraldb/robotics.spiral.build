@@ -6,3 +6,4 @@
 
 pub(crate) mod data;
 pub(crate) mod manager;
+mod resources;

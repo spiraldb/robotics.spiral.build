@@ -448,8 +448,15 @@ async fn record_camera(
             "-an",
             "-c:v",
             &segment.codec,
+            // JPEG camera frames are full-range. Convert their sample values as
+            // well as tagging the H.264 output, so decoders see ordinary
+            // limited-range yuv420p instead of the deprecated yuvj420p alias.
+            "-vf",
+            "scale=in_range=auto:out_range=tv",
             "-pix_fmt",
             "yuv420p",
+            "-color_range",
+            "tv",
             "-movflags",
             "+faststart",
             "-y",

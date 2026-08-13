@@ -22,6 +22,7 @@ struct CheckpointChoice {
     validation_loss: Option<f64>,
     action_steps: usize,
     sample_hz: f64,
+    camera_roles: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -70,7 +71,11 @@ pub(crate) fn RolloutWorkbench() -> Element {
     let arm_ready = follower.as_ref().is_some_and(|robot| {
         robot.connection.connected && robot.calibrated && robot.problem.is_none()
     });
-    let camera_summary = rollout_camera_summary(follower.as_ref(), &snapshot.cameras);
+    let camera_summary = rollout_camera_summary(
+        follower.as_ref(),
+        selected.map(|choice| choice.camera_roles.as_slice()),
+        &snapshot.cameras,
+    );
     let follower_ready = arm_ready && camera_summary.ready;
     let follower_detail = follower.as_ref().map(|robot| {
         let connection = if robot.connection.connected {
@@ -318,6 +323,7 @@ pub(crate) fn RolloutWorkbench() -> Element {
 
 fn rollout_camera_summary(
     follower: Option<&RobotSummary>,
+    expected_roles: Option<&[String]>,
     camera_statuses: &[CameraStatus],
 ) -> RolloutCameraSummary {
     let Some(follower) = follower else {
@@ -326,7 +332,17 @@ fn rollout_camera_summary(
             detail: "no cameras".to_owned(),
         };
     };
-    let total = follower.cameras.len();
+    let camera_roles = expected_roles
+        .filter(|roles| !roles.is_empty())
+        .map(|roles| roles.to_vec())
+        .unwrap_or_else(|| {
+            follower
+                .cameras
+                .iter()
+                .map(|binding| binding.name.clone())
+                .collect()
+        });
+    let total = camera_roles.len();
     if total == 0 {
         return RolloutCameraSummary {
             ready: false,
@@ -334,19 +350,24 @@ fn rollout_camera_summary(
         };
     }
 
-    let available = follower
-        .cameras
+    let available = camera_roles
         .iter()
-        .filter(|binding| {
-            camera_statuses
+        .filter(|role| {
+            follower
+                .cameras
                 .iter()
-                .any(|status| status.id == binding.id && status.error.is_none())
+                .find(|binding| binding.name == role.as_str())
+                .is_some_and(|binding| {
+                    camera_statuses
+                        .iter()
+                        .any(|status| status.id == binding.id && status.error.is_none())
+                })
         })
         .count();
     let ready = available == total;
     let detail = match (total, available) {
-        (1, 1) => format!("{} available", follower.cameras[0].name),
-        (1, _) => format!("{} unavailable", follower.cameras[0].name),
+        (1, 1) => format!("{} available", camera_roles[0]),
+        (1, _) => format!("{} unavailable", camera_roles[0]),
         (_, available) if ready => format!("{available} cameras available"),
         _ => format!("{available} of {total} cameras available"),
     };
@@ -405,6 +426,18 @@ fn checkpoint_choices(snapshot: &TrainingSnapshot) -> Vec<CheckpointChoice> {
     choices
 }
 
+pub(crate) fn selected_checkpoint_camera_roles(
+    snapshot: &TrainingSnapshot,
+    selected_key: Option<&str>,
+) -> Vec<String> {
+    let choices = checkpoint_choices(snapshot);
+    selected_key
+        .and_then(|key| choices.iter().find(|choice| choice.key == key))
+        .or_else(|| choices.first())
+        .map(|choice| choice.camera_roles.clone())
+        .unwrap_or_default()
+}
+
 fn checkpoints_for_run(run: &TrainingRun) -> impl Iterator<Item = CheckpointChoice> + '_ {
     run.checkpoints
         .iter()
@@ -424,7 +457,19 @@ fn checkpoints_for_run(run: &TrainingRun) -> impl Iterator<Item = CheckpointChoi
                     .min(run.config.chunk_size)
             },
             sample_hz: checkpoint.sample_hz,
+            camera_roles: camera_roles(&run.config.act.camera_streams),
         })
+}
+
+fn camera_roles(streams: &[String]) -> Vec<String> {
+    let mut roles = Vec::with_capacity(streams.len());
+    for stream in streams {
+        let role = stream.rsplit('.').next().unwrap_or(stream).to_owned();
+        if !roles.contains(&role) {
+            roles.push(role);
+        }
+    }
+    roles
 }
 
 fn rollout_precondition_blocker(
@@ -452,7 +497,7 @@ fn rollout_precondition_blocker(
         return Some("Calibrate the follower.".to_owned());
     }
     if !cameras_ready {
-        return Some("Start every follower camera.".to_owned());
+        return Some("Make every policy camera available.".to_owned());
     }
     if !controls_available {
         return Some("Waiting for fresh telemetry.".to_owned());
@@ -520,7 +565,7 @@ mod tests {
     };
 
     use super::{
-        RolloutCameraSummary, checkpoints_for_run, follower, rollout_camera_summary,
+        RolloutCameraSummary, camera_roles, checkpoints_for_run, follower, rollout_camera_summary,
         rollout_precondition_blocker,
     };
 
@@ -582,6 +627,7 @@ mod tests {
         assert_eq!(
             rollout_camera_summary(
                 Some(&follower),
+                Some(&["gripper".to_owned(), "top".to_owned()]),
                 &[camera("camera-1", None), camera("camera-2", None)],
             ),
             RolloutCameraSummary {
@@ -592,6 +638,7 @@ mod tests {
         assert_eq!(
             rollout_camera_summary(
                 Some(&follower),
+                Some(&["gripper".to_owned(), "top".to_owned()]),
                 &[
                     camera("camera-1", None),
                     camera("camera-2", Some("offline")),
@@ -601,6 +648,17 @@ mod tests {
                 ready: false,
                 detail: "1 of 2 cameras available".to_owned(),
             }
+        );
+    }
+
+    #[test]
+    fn rollout_camera_roles_follow_the_recorded_stream_contract() {
+        assert_eq!(
+            camera_roles(&[
+                "follower.camera.gripper".to_owned(),
+                "follower.camera.top".to_owned(),
+            ]),
+            ["gripper", "top"]
         );
     }
 

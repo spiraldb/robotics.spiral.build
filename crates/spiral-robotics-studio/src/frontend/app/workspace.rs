@@ -34,8 +34,10 @@ use crate::frontend::screens::data::workbench::{
 };
 use crate::frontend::screens::live::actions::dispatch_live_action;
 use crate::frontend::screens::live::workbench::LiveWorkbench;
+use crate::frontend::screens::rollout::state::rollout_controller;
 use crate::frontend::screens::rollout::workspace::{
     InferencePanel, RolloutWorkbench, follower as rollout_follower,
+    selected_checkpoint_camera_roles,
 };
 
 use historical::{HistoricalPreview, historical_replay_slot, request_historical_preview};
@@ -811,6 +813,25 @@ fn assigned_cameras(activity: Activity) -> Vec<(String, String, String)> {
     let Some(focused) = robot else {
         return Vec::new();
     };
+    if activity == Activity::Rollout {
+        let selected_key = rollout_controller().checkpoint();
+        let roles =
+            selected_checkpoint_camera_roles(&studio.training.read(), selected_key.as_deref());
+        if !roles.is_empty() {
+            return roles
+                .iter()
+                .filter_map(|role| {
+                    focused
+                        .cameras
+                        .iter()
+                        .find(|binding| binding.name == role.as_str())
+                        .map(|binding| {
+                            (focused.id.clone(), binding.name.clone(), binding.id.clone())
+                        })
+                })
+                .collect();
+        }
+    }
     focused
         .cameras
         .iter()

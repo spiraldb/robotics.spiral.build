@@ -8,11 +8,11 @@ publish = false
 [features]
 default = ["cli"]
 accelerate = ["burn-ndarray/blas-accelerate"]
-# Burn 0.21's fusion planner can reuse an invalid ordering after a recurring
-# training graph synchronizes scalar losses, while CubeCL 0.10's autotune
-# profiler can invalidate its Metal timestamp readback buffer on production ACT
-# shapes. Keep Metal eager with statically selected kernels until those fixes
-# are available together in a stable Burn release.
+# Fusion now sees one recurring training graph between infrequent packed metric
+# readbacks, and the Metal regression test exercises repeated train, validation,
+# and checkpoint boundaries. CubeCL 0.10 autotuning remains disabled because its
+# Metal device-timestamp profiler can invalidate the readback buffer on
+# production ACT shapes independently of graph synchronization.
 metal = [
     "dep:burn-wgpu",
     "dep:futures-lite",
@@ -29,7 +29,7 @@ burn-autodiff = { version = "0.21.0", default-features = false, features = ["std
 burn-optim = { version = "0.21.0", default-features = false, features = ["std"] }
 burn-store = { version = "0.21.0", default-features = false, features = ["safetensors", "std"] }
 burn-ndarray = { version = "0.21.0", default-features = false, features = ["std", "simd", "multi-threads"] }
-burn-wgpu = { version = "0.21.0", default-features = false, features = ["std"], optional = true }
+burn-wgpu = { version = "0.21.0", default-features = false, features = ["std", "fusion"], optional = true }
 clap = { workspace = true, features = ["derive"], optional = true }
 dirs = { version = "6", optional = true }
 futures-lite = { version = "2.6", optional = true }

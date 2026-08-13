@@ -2355,7 +2355,13 @@ mod tests {
         .unwrap();
         // A completed retry is idempotent even though Spiral's disposable
         // memory catalog intentionally does not support SQL DELETE.
-        publish_spiral_blocking(&mut adbc.connection, &settings, &episode, &[video]).unwrap();
+        publish_spiral_blocking(
+            &mut adbc.connection,
+            &settings,
+            &episode,
+            std::slice::from_ref(&video),
+        )
+        .unwrap();
 
         let episodes = run_query(
             &mut adbc.connection,
@@ -2385,6 +2391,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(mp4_tracks.rows.len(), 1);
+        let raw_frames = crate::backend::training::data::decode_video_frames_for_test(
+            "ffmpeg",
+            &video.path,
+            &[0],
+            32,
+            24,
+            true,
+        )
+        .unwrap();
+        assert_eq!(raw_frames[&0].len(), 3 * 32 * 24);
         let payload = run_binary_query(
             &mut adbc.connection,
             &sql::video_asset(
@@ -2409,6 +2425,9 @@ mod tests {
         let dataset = std::env::var("SPIRAL_ROBOTICS_SPIRAL_DATASET")
             .unwrap_or_else(|_| "spiral_robotics".to_owned());
         let episode_id = std::env::var("SPIRAL_ROBOTICS_TEST_EPISODE").unwrap();
+        let frame_index = std::env::var("SPIRAL_ROBOTICS_TEST_FRAME")
+            .map_or(Ok(0_u64), |value| value.parse::<u64>())
+            .expect("SPIRAL_ROBOTICS_TEST_FRAME must be an unsigned integer");
         validate_safe_value("episode ID", &episode_id).unwrap();
         validate_dataset_identifier(&dataset).unwrap();
         let settings = StoredSpiralSettings {
@@ -2421,7 +2440,7 @@ mod tests {
         let assets = run_query(
             &mut adbc.connection,
             &format!(
-                "SELECT media_relation, stream_id, segment_index FROM {dataset}.video_assets \
+                "SELECT stream_id, segment_index, frames FROM {dataset}.video_assets \
                  WHERE episode_id = '{}' ORDER BY stream_id, segment_index LIMIT 1",
                 episode_id.replace('\'', "''")
             ),
@@ -2432,44 +2451,32 @@ mod tests {
             .rows
             .first()
             .expect("the selected episode must have a published video asset");
-        let media_relation = asset["media_relation"].as_str().unwrap();
-        assert!(media_relation.split('.').all(spiral::is_identifier));
         let stream_id = asset["stream_id"].as_str().unwrap();
         let segment_index = asset["segment_index"].as_u64().unwrap();
-        let tensor_sql = format!(
-            "SELECT f.request_index, \
-             spql.image.to_tensor(\
-               spql.image.resize(\
-                 spql.video.decode(f.frame, 'auto'), $1, $2, 'bilinear'\
-               ), 'chw', 'imagenet'\
-             ) AS image \
-             FROM {media_relation} AS a CROSS JOIN LATERAL \
-             spql.video.frames(a.media, spql.video.frame_indices(ARRAY[0])) AS f \
-             WHERE a.episode_id = '{}' AND a.stream_id = '{}' \
-             AND a.segment_index = {segment_index} ORDER BY f.request_index",
-            episode_id.replace('\'', "''"),
-            stream_id.replace('\'', "''"),
-        );
-        let batches = crate::backend::training::data::query_image_batches(
+        assert!(frame_index < asset["frames"].as_u64().unwrap());
+        let payload = run_binary_query(
             &mut adbc.connection,
-            &tensor_sql,
-            32,
-            32,
+            &sql::video_asset(
+                &dataset,
+                &episode_id,
+                stream_id,
+                Some(segment_index.try_into().unwrap()),
+            ),
         )
         .unwrap();
-        let mut decoded = 0;
-        for batch in &batches {
-            let images = batch.column_by_name("image").unwrap();
-            for row in 0..batch.num_rows() {
-                let (values, shape) =
-                    crate::backend::training::data::tensor_value(images, row).unwrap();
-                assert_eq!(shape, [3, 32, 32]);
-                assert_eq!(values.len(), 3 * 32 * 32);
-                assert!(values.iter().all(|value| value.is_finite()));
-                decoded += 1;
-            }
-        }
-        assert_eq!(decoded, 1);
+        let video = tempfile::Builder::new().suffix(".mp4").tempfile().unwrap();
+        std::fs::write(video.path(), payload).unwrap();
+        let frames = crate::backend::training::data::decode_video_frames_for_test(
+            "ffmpeg",
+            video.path(),
+            &[frame_index],
+            32,
+            32,
+            true,
+        )
+        .unwrap();
+        assert_eq!(frames[&frame_index].len(), 3 * 32 * 32);
+        assert!(frames[&frame_index].iter().all(|value| value.is_finite()));
 
         let request = spiral_robotics_contracts::api::StartTrainingRequest {
             sql: format!(
@@ -2491,9 +2498,23 @@ mod tests {
             &mut adbc.connection,
             &request,
             &dataset,
+            "ffmpeg",
         )
         .unwrap();
-        let loaded = loader.fetch(1, false).unwrap();
+        let mut loaded = loader.fetch(1, false).unwrap();
+        if std::env::var_os("SPIRAL_ROBOTICS_EXPECT_TRUNCATED_INDEX").is_some() {
+            for _ in 0..8 {
+                if loader.raw_video_fallback_count() != 0 {
+                    break;
+                }
+                loaded = loader.fetch(1, false).unwrap();
+            }
+            assert_eq!(
+                loader.raw_video_fallback_count(),
+                1,
+                "the known truncated managed index never exercised the raw-MP4 retry"
+            );
+        }
         assert_eq!(loaded.batch.batch_size, 1);
         assert_eq!(loaded.batch.states.len(), loader.state_dimensions());
         assert_eq!(

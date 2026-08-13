@@ -5,7 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 
 use adbc_driver_manager::ManagedConnection;
@@ -43,15 +43,19 @@ use crate::backend::application::training_execution::{
     TrainingLaunch, TrainingRunIdentity, TrainingRunPort, TrainingRuntimeEvent,
     TrainingRuntimeOutcome, TrainingRuntimePort, TrainingRuntimeSession,
 };
+use crate::backend::application::training_population::NormalizationStats;
 use crate::backend::application::training_runs::{
     RunPhase as ApplicationRunPhase, RunRecord, TrainingRunRegistry,
 };
 use crate::backend::storage::manager::StorageManager;
 use crate::backend::storage::settings::StoredSpiralSettings;
-use crate::backend::training::data::SpiralActLoader;
+use crate::backend::training::data::{LoadedActBatch, SpiralActLoader};
+use crate::backend::training::resources::ResourceSampler;
 
 const HISTORY_FILE: &str = "runs.json";
 const STOP_GRACE: Duration = Duration::from_secs(30);
+const PREFETCH_BUFFER_SIZE: usize = 1;
+const LOADER_STALL: Duration = Duration::from_secs(2);
 static RUN_IDS: StableIdSequence = StableIdSequence::new("train", 0);
 
 #[derive(Clone)]
@@ -62,6 +66,7 @@ pub(crate) struct TrainingManager {
 struct TrainingManagerInner {
     root: PathBuf,
     storage: Arc<StorageManager>,
+    ffmpeg: String,
     clock: Arc<dyn Clock>,
     snapshot: Mutex<TrainingSnapshot>,
     updates: broadcast::Sender<TrainingUpdate>,
@@ -85,14 +90,60 @@ pub(crate) struct NativeCheckpoint {
     acknowledged: std::sync::mpsc::SyncSender<Result<(), String>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrefetchedBatchKind {
+    Training,
+    Validation,
+}
+
+enum PrefetchMessage {
+    Batch {
+        step: u64,
+        kind: PrefetchedBatchKind,
+        result: Result<LoadedActBatch, String>,
+    },
+    Stopped,
+}
+
+struct ActDataContract {
+    state_dimensions: usize,
+    action_dimensions: usize,
+    image_width: usize,
+    image_height: usize,
+    stats: NormalizationStats,
+    joint_names: Vec<String>,
+    robot_type: String,
+    sample_hz: f64,
+}
+
+impl ActDataContract {
+    fn from_loader(loader: &SpiralActLoader<'_>) -> Self {
+        Self {
+            state_dimensions: loader.state_dimensions(),
+            action_dimensions: loader.action_dimensions(),
+            image_width: loader.image_width(),
+            image_height: loader.image_height(),
+            stats: loader.stats.clone(),
+            joint_names: loader.joint_names.clone(),
+            robot_type: loader.robot_type.clone(),
+            sample_hz: loader.sample_hz,
+        }
+    }
+}
+
 impl TrainingManager {
-    pub(crate) async fn open(root: PathBuf, storage: Arc<StorageManager>) -> Result<Self, String> {
-        Self::open_with_clock(root, storage, Arc::new(SystemClock)).await
+    pub(crate) async fn open(
+        root: PathBuf,
+        storage: Arc<StorageManager>,
+        ffmpeg: String,
+    ) -> Result<Self, String> {
+        Self::open_with_clock(root, storage, ffmpeg, Arc::new(SystemClock)).await
     }
 
     pub(crate) async fn open_with_clock(
         root: PathBuf,
         storage: Arc<StorageManager>,
+        ffmpeg: String,
         clock: Arc<dyn Clock>,
     ) -> Result<Self, String> {
         fs::create_dir_all(&root)
@@ -134,6 +185,7 @@ impl TrainingManager {
             inner: Arc::new(TrainingManagerInner {
                 root,
                 storage,
+                ffmpeg,
                 clock,
                 snapshot: Mutex::new(snapshot),
                 updates,
@@ -231,6 +283,7 @@ impl TrainingManager {
         let training_run_id = run_id.clone();
         let training_cancel = cancel.clone();
         let training_clock = self.inner.clock.clone();
+        let ffmpeg = self.inner.ffmpeg.clone();
         let storage = self.inner.storage.clone();
         let training_settings = settings.clone();
         let mut training = Box::pin(storage.run_training_adbc(
@@ -242,6 +295,7 @@ impl TrainingManager {
                     &training_request,
                     &training_settings,
                     &training_source,
+                    &ffmpeg,
                     training_clock,
                     training_cancel,
                     pretrained.as_deref(),
@@ -638,6 +692,7 @@ fn train_blocking(
     request: &StartTrainingRequest,
     settings: &StoredSpiralSettings,
     source: &TrainingSource,
+    ffmpeg: &str,
     clock: Arc<dyn Clock>,
     cancel: Arc<AtomicBool>,
     pretrained: Option<&[u8]>,
@@ -647,7 +702,7 @@ fn train_blocking(
         "Opening the dedicated Spiral ADBC connection and indexing eligible ACT anchors…"
             .to_owned(),
     ));
-    let mut loader = SpiralActLoader::open(connection, request, &settings.dataset)?;
+    let mut loader = SpiralActLoader::open(connection, request, &settings.dataset, ffmpeg)?;
     let mut resolved_request = request.clone();
     resolved_request.act.camera_streams = loader.camera_streams().to_vec();
     let _ = events.send(NativeEvent::Configured(Box::new(resolved_request.clone())));
@@ -679,7 +734,7 @@ fn train_blocking(
         trainer.parameter_count() as f64 / 1_000_000.0
     )));
     let _ = events.send(NativeEvent::Log(format!(
-        "ACT inputs: state={}, action={}, image={}x{}, chunk={}, cameras={}. Spiral owns frame decode, optional resize, CHW conversion, and ImageNet normalization.",
+        "ACT inputs: state={}, action={}, image={}x{}, chunk={}, cameras={}. Spiral owns the normal decode path; Studio recovers unusable managed indexes from the original MP4 with equivalent resize and ImageNet normalization.",
         loader.state_dimensions(),
         loader.action_dimensions(),
         loader.image_width(),
@@ -687,11 +742,133 @@ fn train_blocking(
         request.chunk_size,
         resolved_request.act.camera_streams.join(", ")
     )));
+    let _ = events.send(NativeEvent::Log(
+        "ACT input prefetch is active with one completed batch buffered while Metal trains."
+            .to_owned(),
+    ));
 
+    let data_contract = ActDataContract::from_loader(&loader);
+    let has_validation = loader.has_validation();
+    let validation_every = request.checkpoint_every.saturating_div(4).clamp(25, 250);
+    std::thread::scope(|scope| {
+        let (prefetch_tx, prefetch_rx) = std_mpsc::sync_channel(PREFETCH_BUFFER_SIZE);
+        let prefetch_cancel = cancel.clone();
+        let batch_size = request.batch_size;
+        let steps = request.steps;
+        let prefetch_worker = scope.spawn(move || {
+            prefetch_batches(
+                |validation| loader.fetch(batch_size, validation),
+                steps,
+                validation_every,
+                has_validation,
+                &prefetch_cancel,
+                &prefetch_tx,
+            );
+        });
+
+        let result = train_prefetched(
+            prefetch_rx,
+            run_id,
+            request,
+            &resolved_request,
+            source,
+            clock.as_ref(),
+            cancel.as_ref(),
+            &events,
+            &data_contract,
+            &mut trainer,
+            validation_every,
+            has_validation,
+        );
+        let worker_result = prefetch_worker
+            .join()
+            .map_err(|_| "ACT input prefetch worker panicked".to_owned());
+        match (result, worker_result) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(outcome), Ok(())) => Ok(outcome),
+        }
+    })
+}
+
+fn prefetch_batches<F>(
+    mut fetch: F,
+    steps: u64,
+    validation_every: u64,
+    has_validation: bool,
+    cancel: &AtomicBool,
+    sender: &std_mpsc::SyncSender<PrefetchMessage>,
+) where
+    F: FnMut(bool) -> Result<LoadedActBatch, String>,
+{
+    for step in 1..=steps {
+        if cancel.load(Ordering::Acquire) {
+            let _ = sender.send(PrefetchMessage::Stopped);
+            return;
+        }
+        if !send_prefetched_batch(sender, step, PrefetchedBatchKind::Training, fetch(false)) {
+            return;
+        }
+        if has_validation
+            && step % validation_every == 0
+            && !send_prefetched_batch(sender, step, PrefetchedBatchKind::Validation, fetch(true))
+        {
+            return;
+        }
+    }
+}
+
+fn send_prefetched_batch(
+    sender: &std_mpsc::SyncSender<PrefetchMessage>,
+    step: u64,
+    kind: PrefetchedBatchKind,
+    result: Result<LoadedActBatch, String>,
+) -> bool {
+    let failed = result.is_err();
+    sender
+        .send(PrefetchMessage::Batch { step, kind, result })
+        .is_ok()
+        && !failed
+}
+
+fn receive_prefetched_batch(
+    receiver: &std_mpsc::Receiver<PrefetchMessage>,
+    expected_step: u64,
+    expected_kind: PrefetchedBatchKind,
+) -> Result<Option<LoadedActBatch>, String> {
+    match receiver.recv() {
+        Ok(PrefetchMessage::Batch { step, kind, result })
+            if step == expected_step && kind == expected_kind =>
+        {
+            result.map(Some)
+        }
+        Ok(PrefetchMessage::Batch { step, kind, .. }) => Err(format!(
+            "ACT input prefetch order mismatch: expected {expected_kind:?} batch for step {expected_step}, received {kind:?} batch for step {step}"
+        )),
+        Ok(PrefetchMessage::Stopped) => Ok(None),
+        Err(_) => Err("ACT input prefetch worker stopped unexpectedly".to_owned()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn train_prefetched(
+    receiver: std_mpsc::Receiver<PrefetchMessage>,
+    run_id: &str,
+    request: &StartTrainingRequest,
+    resolved_request: &StartTrainingRequest,
+    source: &TrainingSource,
+    clock: &dyn Clock,
+    cancel: &AtomicBool,
+    events: &mpsc::UnboundedSender<NativeEvent>,
+    data_contract: &ActDataContract,
+    trainer: &mut NativeActTrainer,
+    validation_every: u64,
+    has_validation: bool,
+) -> Result<TrainingRuntimeOutcome, String> {
     let started = Instant::now();
     let mut metric_started = started;
     let mut examples_since_metric = 0_usize;
-    let validation_every = request.checkpoint_every.saturating_div(4).clamp(25, 250);
+    let mut resources = ResourceSampler::new(trainer.backend_name() == "Metal");
     let mut last_validation = None;
     let mut last_checkpoint = 0;
     let mut completed_steps = 0;
@@ -699,7 +876,13 @@ fn train_blocking(
         if cancel.load(Ordering::Acquire) {
             break;
         }
-        let loaded = loader.fetch(request.batch_size, false)?;
+        let loader_wait_started = Instant::now();
+        let Some(loaded) =
+            receive_prefetched_batch(&receiver, step, PrefetchedBatchKind::Training)?
+        else {
+            break;
+        };
+        let loader_wait = loader_wait_started.elapsed();
         let loader_metrics = loaded.metrics;
         let loss = trainer
             .train_step(loaded.batch, step)
@@ -707,8 +890,11 @@ fn train_blocking(
         completed_steps = step;
         examples_since_metric += request.batch_size;
         let mut event = Vec::new();
-        let validation_loss = if loader.has_validation() && step % validation_every == 0 {
-            let batch = loader.fetch(request.batch_size, true)?;
+        let validation_loss = if has_validation && step % validation_every == 0 {
+            let batch = receive_prefetched_batch(&receiver, step, PrefetchedBatchKind::Validation)?
+                .ok_or_else(|| {
+                    format!("ACT input prefetch stopped before validation at step {step}")
+                })?;
             let loss = trainer
                 .validation_step(batch.batch)
                 .map_err(|error| error.to_string())?;
@@ -718,58 +904,60 @@ fn train_blocking(
         } else {
             None
         };
-        if loader_metrics.seconds >= 2.0 {
+        if loader_wait >= LOADER_STALL {
             event.push("loader stall");
         }
-        if step == 1 || step % 10 == 0 || step == request.steps || !event.is_empty() {
-            let now = Instant::now();
-            let elapsed = now.duration_since(metric_started).as_secs_f64().max(1.0e-9);
-            let _ = events.send(NativeEvent::Metric(TrainingMetricPoint {
-                step,
-                train_loss: loss.total,
-                validation_loss,
-                learning_rate: trainer.learning_rate(step),
-                transfer_bytes_per_second: loader_metrics.source_bytes as f64
-                    / loader_metrics.seconds.max(1.0e-9),
-                examples_per_second: examples_since_metric as f64 / elapsed,
-                elapsed_seconds: now.duration_since(started).as_secs_f64(),
-                event: (!event.is_empty()).then(|| event.join(" · ")),
-            }));
-            if step == 1 {
-                let _ = events.send(NativeEvent::Log(format!(
-                    "Loss components at step 1: L1={:.4}, KL={:.4}, pad={:.4}; decoded {} frame(s).",
-                    loss.l1, loss.kl, loss.pad, loader_metrics.requested_frames
-                )));
-            }
-            metric_started = now;
-            examples_since_metric = 0;
+        let now = Instant::now();
+        let elapsed = now.duration_since(metric_started).as_secs_f64().max(1.0e-9);
+        let usage = resources.sample();
+        let _ = events.send(NativeEvent::Metric(TrainingMetricPoint {
+            step,
+            train_loss: loss.total,
+            validation_loss,
+            learning_rate: trainer.learning_rate(step),
+            transfer_bytes_per_second: loader_metrics.source_bytes as f64
+                / loader_metrics.seconds.max(1.0e-9),
+            examples_per_second: examples_since_metric as f64 / elapsed,
+            cpu_percent: usage.cpu_percent,
+            gpu_percent: usage.gpu_percent,
+            memory_bytes: usage.memory_bytes,
+            elapsed_seconds: now.duration_since(started).as_secs_f64(),
+            event: (!event.is_empty()).then(|| event.join(" · ")),
+        }));
+        if step == 1 {
+            let _ = events.send(NativeEvent::Log(format!(
+                "Loss components at step 1: L1={:.4}, KL={:.4}, pad={:.4}; decoded {} frame(s).",
+                loss.l1, loss.kl, loss.pad, loader_metrics.requested_frames
+            )));
         }
+        metric_started = now;
+        examples_since_metric = 0;
         if step % request.checkpoint_every == 0 {
             send_checkpoint(
-                &events,
+                events,
                 run_id,
-                &resolved_request,
+                resolved_request,
                 source,
-                &loader,
-                &trainer,
+                data_contract,
+                trainer,
                 step,
                 last_validation,
-                clock.as_ref(),
+                clock,
             )?;
             last_checkpoint = step;
         }
     }
     if completed_steps > 0 && last_checkpoint != completed_steps {
         send_checkpoint(
-            &events,
+            events,
             run_id,
-            &resolved_request,
+            resolved_request,
             source,
-            &loader,
-            &trainer,
+            data_contract,
+            trainer,
             completed_steps,
             last_validation,
-            clock.as_ref(),
+            clock,
         )?;
     }
     Ok(TrainingRuntimeOutcome {
@@ -784,22 +972,22 @@ fn send_checkpoint(
     run_id: &str,
     request: &StartTrainingRequest,
     source: &TrainingSource,
-    loader: &SpiralActLoader<'_>,
+    data_contract: &ActDataContract,
     trainer: &NativeActTrainer,
     step: u64,
     validation_loss: Option<f64>,
     clock: &dyn Clock,
 ) -> Result<(), String> {
-    let manifest = checkpoint_manifest(run_id, request, source, loader, step);
+    let manifest = checkpoint_manifest(run_id, request, source, data_contract, step);
     let manifest_json = serde_json::to_string(&manifest)
         .map_err(|error| format!("encoding ACT checkpoint manifest: {error}"))?;
     let payload = trainer
         .checkpoint(VisionActCheckpoint {
             manifest_json: &manifest_json,
-            state_mean: &loader.stats.state_mean,
-            state_std: &loader.stats.state_std,
-            action_mean: &loader.stats.action_mean,
-            action_std: &loader.stats.action_std,
+            state_mean: &data_contract.stats.state_mean,
+            state_std: &data_contract.stats.state_std,
+            action_mean: &data_contract.stats.action_mean,
+            action_std: &data_contract.stats.action_std,
         })
         .map_err(|error| error.to_string())?;
     let (acknowledged, result) = std::sync::mpsc::sync_channel(1);
@@ -822,20 +1010,20 @@ fn checkpoint_manifest(
     run_id: &str,
     request: &StartTrainingRequest,
     source: &TrainingSource,
-    loader: &SpiralActLoader<'_>,
+    data_contract: &ActDataContract,
     step: u64,
 ) -> serde_json::Value {
     let mut input_features = serde_json::Map::new();
     input_features.insert(
         "observation.state".to_owned(),
-        serde_json::json!({"type": "STATE", "shape": [loader.state_dimensions()]}),
+        serde_json::json!({"type": "STATE", "shape": [data_contract.state_dimensions]}),
     );
     for camera in &request.act.camera_streams {
         input_features.insert(
             camera.clone(),
             serde_json::json!({
                 "type": "VISUAL",
-                "shape": [3, loader.image_height(), loader.image_width()]
+                "shape": [3, data_contract.image_height, data_contract.image_width]
             }),
         );
     }
@@ -849,7 +1037,7 @@ fn checkpoint_manifest(
         },
         "input_features": input_features,
         "output_features": {
-            "action": {"type": "ACTION", "shape": [loader.action_dimensions()]}
+            "action": {"type": "ACTION", "shape": [data_contract.action_dimensions]}
         },
         "chunk_size": request.chunk_size,
         "n_action_steps": request.chunk_size,
@@ -880,10 +1068,10 @@ fn checkpoint_manifest(
         },
         "data_contract": {
             "value_space": "centered_normalized",
-            "robot_type": loader.robot_type,
-            "joint_names": loader.joint_names,
+            "robot_type": data_contract.robot_type,
+            "joint_names": data_contract.joint_names,
             "camera_streams": request.act.camera_streams,
-            "sample_hz": loader.sample_hz,
+            "sample_hz": data_contract.sample_hz,
             "image_layout": "chw",
             "image_normalization": "imagenet",
             "frame_alignment": "fixed_fps",
@@ -1179,6 +1367,9 @@ fn application_training_metric(metric: TrainingMetricPoint) -> ApplicationTraini
         learning_rate: metric.learning_rate,
         transfer_bytes_per_second: metric.transfer_bytes_per_second,
         examples_per_second: metric.examples_per_second,
+        cpu_percent: metric.cpu_percent,
+        gpu_percent: metric.gpu_percent,
+        memory_bytes: metric.memory_bytes,
         elapsed_seconds: metric.elapsed_seconds,
         event: metric.event,
     }
@@ -1192,6 +1383,9 @@ fn contract_training_metric(metric: ApplicationTrainingMetric) -> TrainingMetric
         learning_rate: metric.learning_rate,
         transfer_bytes_per_second: metric.transfer_bytes_per_second,
         examples_per_second: metric.examples_per_second,
+        cpu_percent: metric.cpu_percent,
+        gpu_percent: metric.gpu_percent,
+        memory_bytes: metric.memory_bytes,
         elapsed_seconds: metric.elapsed_seconds,
         event: metric.event,
     }
@@ -1403,6 +1597,23 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 mod tests {
     use super::*;
 
+    fn loaded_batch(marker: f32) -> LoadedActBatch {
+        LoadedActBatch {
+            batch: spiral_robotics_inference::act::VisionActBatch {
+                batch_size: 1,
+                states: vec![marker],
+                images: vec![marker],
+                actions: vec![marker],
+                action_is_pad: vec![false],
+            },
+            metrics: crate::backend::training::data::LoaderMetrics {
+                seconds: f64::from(marker),
+                source_bytes: 4,
+                requested_frames: 1,
+            },
+        }
+    }
+
     fn run(id: &str) -> TrainingRun {
         TrainingRun {
             id: id.to_owned(),
@@ -1513,6 +1724,135 @@ mod tests {
         ] {
             assert!(checkpoint_sample_hz(&invalid).is_err());
         }
+    }
+
+    #[test]
+    fn input_prefetch_fetches_the_next_batch_while_training_consumes_the_current_one() {
+        let cancel = AtomicBool::new(false);
+        let (prefetch_tx, prefetch_rx) = std_mpsc::sync_channel(PREFETCH_BUFFER_SIZE);
+        let (fetch_tx, fetch_rx) = std_mpsc::channel();
+
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let mut marker = 0.0_f32;
+                prefetch_batches(
+                    |validation| {
+                        assert!(!validation);
+                        marker += 1.0;
+                        fetch_tx.send(marker).unwrap();
+                        Ok(loaded_batch(marker))
+                    },
+                    2,
+                    25,
+                    false,
+                    &cancel,
+                    &prefetch_tx,
+                );
+            });
+
+            assert_eq!(fetch_rx.recv_timeout(Duration::from_secs(1)), Ok(1.0));
+            let first = receive_prefetched_batch(&prefetch_rx, 1, PrefetchedBatchKind::Training)
+                .unwrap()
+                .unwrap();
+            assert_eq!(first.batch.states, vec![1.0]);
+
+            // The consumer deliberately has not requested step 2 yet. Seeing
+            // this signal proves its load is already overlapping step 1 work.
+            assert_eq!(fetch_rx.recv_timeout(Duration::from_secs(1)), Ok(2.0));
+            let second = receive_prefetched_batch(&prefetch_rx, 2, PrefetchedBatchKind::Training)
+                .unwrap()
+                .unwrap();
+            assert_eq!(second.batch.states, vec![2.0]);
+            worker.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn input_prefetch_preserves_training_and_validation_order() {
+        let cancel = AtomicBool::new(false);
+        let (prefetch_tx, prefetch_rx) = std_mpsc::sync_channel(4);
+        let mut requests = Vec::new();
+        prefetch_batches(
+            |validation| {
+                requests.push(validation);
+                Ok(loaded_batch(requests.len() as f32))
+            },
+            2,
+            2,
+            true,
+            &cancel,
+            &prefetch_tx,
+        );
+
+        assert_eq!(requests, vec![false, false, true]);
+        assert!(
+            receive_prefetched_batch(&prefetch_rx, 1, PrefetchedBatchKind::Training)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            receive_prefetched_batch(&prefetch_rx, 2, PrefetchedBatchKind::Training)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            receive_prefetched_batch(&prefetch_rx, 2, PrefetchedBatchKind::Validation)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn input_prefetch_propagates_loader_errors_and_honors_cancellation() {
+        let cancel = AtomicBool::new(false);
+        let (prefetch_tx, prefetch_rx) = std_mpsc::sync_channel(3);
+        let mut calls = 0;
+        prefetch_batches(
+            |_| {
+                calls += 1;
+                if calls == 2 {
+                    Err("decode failed".to_owned())
+                } else {
+                    Ok(loaded_batch(calls as f32))
+                }
+            },
+            3,
+            25,
+            false,
+            &cancel,
+            &prefetch_tx,
+        );
+        assert_eq!(calls, 2);
+        assert!(
+            receive_prefetched_batch(&prefetch_rx, 1, PrefetchedBatchKind::Training)
+                .unwrap()
+                .is_some()
+        );
+        match receive_prefetched_batch(&prefetch_rx, 2, PrefetchedBatchKind::Training) {
+            Err(error) => assert_eq!(error, "decode failed"),
+            Ok(_) => panic!("the decode failure must reach the trainer"),
+        }
+
+        let cancel = AtomicBool::new(true);
+        let (prefetch_tx, prefetch_rx) = std_mpsc::sync_channel(1);
+        let mut cancelled_calls = 0;
+        prefetch_batches(
+            |_| {
+                cancelled_calls += 1;
+                Ok(loaded_batch(1.0))
+            },
+            1,
+            25,
+            false,
+            &cancel,
+            &prefetch_tx,
+        );
+        assert_eq!(cancelled_calls, 0);
+        assert!(
+            receive_prefetched_batch(&prefetch_rx, 1, PrefetchedBatchKind::Training)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
