@@ -431,6 +431,11 @@ impl HardwareHandle {
         self.state.borrow().clone()
     }
 
+    /// Observe authoritative states published after control-thread commands.
+    pub(crate) fn subscribe(&self) -> watch::Receiver<HardwareState> {
+        self.state.clone()
+    }
+
     /// Open a robot's motor bus.
     pub(crate) async fn connect(&self, spec: RobotSpec) -> Result<(), String> {
         self.request(|reply| Command::Connect {
@@ -3108,9 +3113,25 @@ mod tests {
             "policy motion stays inside the fast control-path step bound"
         );
 
+        let measured = after.saturating_sub(1);
+        controller
+            .robots
+            .get_mut("arm")
+            .unwrap()
+            .positions
+            .insert("gripper".to_owned(), measured);
+
         controller
             .set_mode(ModeSelection::Idle)
             .expect("stop policy");
+        assert!(
+            controller.robots["arm"].torque,
+            "stopping policy control must not release the arm"
+        );
+        assert_eq!(
+            controller.robots["arm"].target["gripper"], measured,
+            "stopping policy control holds the arm at its measured position"
+        );
         assert!(
             controller
                 .set_policy_goals("arm", "rollout-1", &goals)

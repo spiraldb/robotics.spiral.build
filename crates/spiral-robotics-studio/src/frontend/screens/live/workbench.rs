@@ -77,7 +77,7 @@ fn CaptureSection() -> Element {
                 if recording.is_some() {
                     "Dataset assignment is locked until this episode finishes."
                 } else {
-                    "Record creates an episode in this dataset; import and Training use the same selection."
+                    "New episodes are saved to this dataset."
                 }
             }
         }

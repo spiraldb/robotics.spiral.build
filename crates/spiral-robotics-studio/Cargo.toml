@@ -31,6 +31,7 @@ server = [
     "dep:safetensors",
     "dep:spiral-robotics-inference",
     "dep:image",
+    "dep:tempfile",
 ]
 
 [dependencies]
@@ -65,6 +66,9 @@ web-sys = { version = "0.3", features = [
     "DomRect",
     "Element",
     "EventTarget",
+    "File",
+    "AbortController",
+    "AbortSignal",
     "HtmlCanvasElement",
     "HtmlElement",
     "Node",
@@ -93,6 +97,7 @@ adbc_core = { version = "0.24.0", optional = true }
 adbc_driver_manager = { version = "0.24.0", optional = true }
 safetensors = { version = "0.7", optional = true }
 image = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 spiral-robotics-inference = { workspace = true, features = ["metal", "accelerate", "download"], optional = true }

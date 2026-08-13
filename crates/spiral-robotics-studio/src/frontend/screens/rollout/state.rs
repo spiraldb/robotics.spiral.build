@@ -5,19 +5,18 @@
 //! between Studio activities.
 
 use dioxus::prelude::*;
+use spiral_robotics_core::api::{DEFAULT_ROLLOUT_DURATION_SECONDS, MAX_ROLLOUT_DURATION_SECONDS};
 
 #[derive(Clone, Copy)]
 pub(crate) struct RolloutController {
     checkpoint: Signal<Option<String>>,
-    action_steps: Signal<usize>,
-    control_rate_hz: Signal<u32>,
+    duration_draft: Signal<String>,
 }
 
 pub(crate) fn use_rollout_controller() -> RolloutController {
     let controller = RolloutController {
         checkpoint: use_signal(|| None),
-        action_steps: use_signal(|| 20),
-        control_rate_hz: use_signal(|| 50),
+        duration_draft: use_signal(|| DEFAULT_ROLLOUT_DURATION_SECONDS.to_string()),
     };
     use_context_provider(|| controller)
 }
@@ -31,23 +30,41 @@ impl RolloutController {
         self.checkpoint.read().clone()
     }
 
-    pub(crate) fn action_steps(&self) -> usize {
-        *self.action_steps.read()
-    }
-
-    pub(crate) fn control_rate_hz(&self) -> u32 {
-        *self.control_rate_hz.read()
-    }
-
     pub(crate) fn select_checkpoint(mut self, checkpoint: Option<String>) {
         self.checkpoint.set(checkpoint);
     }
 
-    pub(crate) fn set_action_steps(mut self, steps: usize) {
-        self.action_steps.set(steps.clamp(1, 256));
+    pub(crate) fn duration_draft(&self) -> String {
+        self.duration_draft.read().clone()
     }
 
-    pub(crate) fn set_control_rate(mut self, rate: u32) {
-        self.control_rate_hz.set(rate.clamp(1, 100));
+    pub(crate) fn duration_seconds(&self) -> Option<u32> {
+        parse_duration(&self.duration_draft.read())
+    }
+
+    pub(crate) fn set_duration_draft(mut self, draft: String) {
+        self.duration_draft.set(draft);
+    }
+}
+
+fn parse_duration(draft: &str) -> Option<u32> {
+    draft
+        .parse::<u32>()
+        .ok()
+        .filter(|seconds| (1..=MAX_ROLLOUT_DURATION_SECONDS).contains(seconds))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_duration;
+
+    #[test]
+    fn duration_draft_must_be_a_bounded_whole_number() {
+        assert_eq!(parse_duration("30"), Some(30));
+        assert_eq!(parse_duration(""), None);
+        assert_eq!(parse_duration("0"), None);
+        assert_eq!(parse_duration("1.5"), None);
+        assert_eq!(parse_duration("-1"), None);
+        assert_eq!(parse_duration("601"), None);
     }
 }

@@ -455,6 +455,24 @@ fn download_file(
     Ok(())
 }
 
+#[cfg(feature = "download")]
+pub(crate) fn download_verified_file(url: &str, destination: &Path, sha256: &str) -> Result<()> {
+    require_https_url(url, "artifact URL")?;
+    require_hex(sha256, 64, "artifact SHA-256")?;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| Error::Artifact("download destination has no parent".to_owned()))?;
+    std::fs::create_dir_all(parent).at(parent)?;
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(concat!("spiral-robotics/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|source| Error::Download {
+            url: "HTTP client".to_owned(),
+            source,
+        })?;
+    download_file(&client, url, destination, Some(sha256))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{require_hex, verify_digest};

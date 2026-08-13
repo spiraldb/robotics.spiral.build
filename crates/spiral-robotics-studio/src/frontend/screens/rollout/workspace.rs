@@ -1,12 +1,10 @@
-//! Compact, follower-only Rollout instruments.
-//!
-//! The backend owns checkpoint loading, native inference, safety, and motion.
-//! This surface selects an artifact and renders that authoritative lifecycle.
+//! Checkpoint selection and follower rollout controls.
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
 use spiral_robotics_core::api::{
-    RobotSummary, RolloutPhase, RolloutSnapshot, StartRolloutRequest, TrainingRun, TrainingSnapshot,
+    MAX_ROLLOUT_DURATION_SECONDS, RobotSummary, RolloutPhase, RolloutSnapshot, StartRolloutRequest,
+    TrainingRun, TrainingSnapshot,
 };
 
 use crate::frontend::api::http as api;
@@ -19,10 +17,17 @@ struct CheckpointChoice {
     key: String,
     run_id: String,
     run_name: String,
+    run_active: bool,
     step: u64,
     validation_loss: Option<f64>,
-    byte_size: u64,
-    chunk_size: usize,
+    action_steps: usize,
+    sample_hz: f64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PendingRolloutAction {
+    Start,
+    Stop,
 }
 
 /// Rollout never asks the operator to choose a target. The configured follower
@@ -43,7 +48,7 @@ pub(crate) fn follower(robots: &[RobotSummary]) -> Option<RobotSummary> {
 pub(crate) fn RolloutWorkbench() -> Element {
     let studio = studio();
     let controller = rollout_controller();
-    let mut requesting = use_signal(|| false);
+    let mut pending_action = use_signal(|| None::<PendingRolloutAction>);
     let snapshot = studio.snapshot.read().clone();
     let training = studio.training.read().clone();
     let rollout = studio.rollout.read().clone();
@@ -86,21 +91,34 @@ pub(crate) fn RolloutWorkbench() -> Element {
             Some(binding) => format!("{} unavailable", binding.name),
             None => "no camera".to_owned(),
         };
-        format!("Fixed target · {connection} · {calibration} · {camera}")
+        format!("{connection} · {calibration} · {camera}")
     });
     let precondition_blocker = rollout_precondition_blocker(
-        selected.is_some(),
+        selected,
         follower.as_ref(),
         camera_ready,
         studio.controls_available(),
     );
     let active = rollout.phase.active();
     let stopping = rollout.phase == RolloutPhase::Stopping;
-    let blocker = precondition_blocker.clone();
-    let action_steps = selected
-        .map(|choice| controller.action_steps().min(choice.chunk_size.max(1)))
-        .unwrap_or_else(|| controller.action_steps());
-    let control_rate = controller.control_rate_hz();
+    let pending = *pending_action.read();
+    let duration_seconds = controller.duration_seconds();
+    let duration_draft = if active {
+        rollout
+            .duration_seconds
+            .map(|seconds| seconds.to_string())
+            .unwrap_or_else(|| controller.duration_draft())
+    } else {
+        controller.duration_draft()
+    };
+    let duration_valid = duration_seconds.is_some();
+    let blocker = precondition_blocker.clone().or_else(|| {
+        (!duration_valid).then_some(format!(
+            "Set a whole-number duration from 1 to {MAX_ROLLOUT_DURATION_SECONDS} seconds."
+        ))
+    });
+    let action_steps = selected.map_or(0, |choice| choice.action_steps);
+    let control_rate = selected.map_or(0.0, |choice| choice.sample_hz);
     let validation_loss = selected
         .and_then(|choice| choice.validation_loss)
         .map(format_loss)
@@ -125,6 +143,7 @@ pub(crate) fn RolloutWorkbench() -> Element {
                             option {
                                 value: choice.key.clone(),
                                 "{choice.run_name} · step {format_count(choice.step)}"
+                                if choice.run_active { " · training" }
                             }
                         }
                     }
@@ -132,12 +151,18 @@ pub(crate) fn RolloutWorkbench() -> Element {
                 if let Some(choice) = selected {
                     div { class: "rollout-checkpoint-meta",
                         span { "ACT · vision" }
-                        span { "SafeTensors" }
                         span { "Validation {validation_loss}" }
-                        span { "{format_bytes(choice.byte_size)}" }
+                        span {
+                            class: if choice.run_active { "rollout-state" } else { "rollout-state rollout-state-ready" },
+                            if choice.run_active { "Training" } else { "Ready" }
+                        }
+                    }
+                } else if let Some(run) = training.active_run() {
+                    p { class: "rollout-empty-copy",
+                        "Checkpoints appear every {format_count(run.config.checkpoint_every)} steps."
                     }
                 } else {
-                    p { class: "rollout-empty-copy", "Finish a training run to create one." }
+                    p { class: "rollout-empty-copy", "Train a policy to create a checkpoint." }
                 }
             }
 
@@ -167,31 +192,38 @@ pub(crate) fn RolloutWorkbench() -> Element {
             section { class: "rollout-section",
                 header { class: "rollout-section-heading", h3 { "Execution" } }
                 div { class: "rollout-field-grid",
-                    label { class: "rollout-field",
+                    div { class: "rollout-field",
                         span { "Action steps" }
-                        input {
-                            r#type: "number",
-                            min: "1",
-                            max: "{selected.map_or(256, |choice| choice.chunk_size)}",
-                            value: action_steps,
-                            disabled: active,
-                            oninput: move |event| if let Ok(value) = event.value().parse() {
-                                controller.set_action_steps(value);
-                            },
-                        }
+                        strong { "{action_steps}" }
                     }
-                    label { class: "rollout-field",
+                    div { class: "rollout-field",
                         span { "Control rate" }
-                        select {
-                            value: control_rate,
-                            disabled: active,
-                            onchange: move |event| if let Ok(value) = event.value().parse() {
-                                controller.set_control_rate(value);
-                            },
-                            option { value: "10", "10 Hz" }
-                            option { value: "20", "20 Hz" }
-                            option { value: "30", "30 Hz" }
-                            option { value: "50", "50 Hz" }
+                        strong { "{control_rate:.1} Hz" }
+                    }
+                    label { class: "rollout-field rollout-duration-field",
+                        span { "Duration" }
+                        div { class: "rollout-duration-control",
+                            input {
+                                r#type: "number",
+                                min: "1",
+                                max: "{MAX_ROLLOUT_DURATION_SECONDS}",
+                                step: "1",
+                                value: "{duration_draft}",
+                                disabled: active || pending.is_some(),
+                                title: "Policy control time; loading and warm-up are excluded",
+                                "aria-describedby": "rollout-duration-help",
+                                "aria-invalid": if duration_valid { "false" } else { "true" },
+                                oninput: move |event| controller.set_duration_draft(event.value()),
+                            }
+                            small {
+                                id: "rollout-duration-help",
+                                class: if duration_valid { "" } else { "rollout-duration-error" },
+                                if duration_valid {
+                                    "seconds · then hold"
+                                } else {
+                                    "Enter 1–{MAX_ROLLOUT_DURATION_SECONDS} s"
+                                }
+                            }
                         }
                     }
                 }
@@ -207,40 +239,33 @@ pub(crate) fn RolloutWorkbench() -> Element {
                         small { "{runtime_detail(&rollout)}" }
                     }
                 }
-                button {
-                    r#type: "button",
-                    class: "rollout-run-button",
-                    disabled: *requesting.read() || stopping || (!active && blocker.is_some()),
-                    title: if active {
-                        "Stop policy and return the follower to idle".to_owned()
-                    } else {
-                        blocker.clone().unwrap_or_else(|| "Run policy on the follower".to_owned())
-                    },
-                    onclick: {
-                        let selected = selected.cloned();
-                        let follower = follower.clone();
-                        move |_| {
-                            if *requesting.peek() {
-                                return;
-                            }
-                            requesting.set(true);
-                            let mut requesting = requesting;
-                            if active {
-                                spawn(async move {
-                                    if let Err(error) = api::post("/api/rollout/stop").await {
-                                        studio.report_from(MessageSource::Rollout, error);
-                                    }
-                                    requesting.set(false);
-                                });
-                            } else if let (Some(checkpoint), Some(robot)) =
-                                (selected.clone(), follower.clone())
-                            {
+                div { class: "rollout-action-buttons",
+                    button {
+                        r#type: "button",
+                        class: "rollout-run-button",
+                        disabled: pending.is_some() || active || blocker.is_some(),
+                        title: blocker
+                            .clone()
+                            .unwrap_or_else(|| "Run policy on the follower".to_owned()),
+                        onclick: {
+                            let selected = selected.cloned();
+                            let follower = follower.clone();
+                            move |_| {
+                                if pending_action.peek().is_some() {
+                                    return;
+                                }
+                                let (Some(checkpoint), Some(robot), Some(duration_seconds)) =
+                                    (selected.clone(), follower.clone(), duration_seconds)
+                                else {
+                                    return;
+                                };
+                                pending_action.set(Some(PendingRolloutAction::Start));
+                                let mut pending_action = pending_action;
                                 let request = StartRolloutRequest {
                                     run_id: checkpoint.run_id,
                                     checkpoint_step: checkpoint.step,
                                     robot: robot.id,
-                                    action_steps,
-                                    control_rate_hz: control_rate,
+                                    duration_seconds,
                                 };
                                 spawn(async move {
                                     let result = api::send_json::<_, RolloutSnapshot>(
@@ -252,22 +277,43 @@ pub(crate) fn RolloutWorkbench() -> Element {
                                     if let Err(error) = result {
                                         studio.report_from(MessageSource::Rollout, error);
                                     }
-                                    requesting.set(false);
+                                    pending_action.set(None);
                                 });
-                            } else {
-                                requesting.set(false);
                             }
+                        },
+                        if pending == Some(PendingRolloutAction::Start) {
+                            "Starting…"
+                        } else {
+                            "Run policy"
                         }
-                    },
-                    if stopping || *requesting.read() {
-                        "Please wait…"
-                    } else if active {
-                        "Stop policy"
-                    } else {
-                        "Run policy"
+                    }
+                    button {
+                        r#type: "button",
+                        class: "rollout-stop-button",
+                        disabled: pending.is_some() || !active || stopping,
+                        title: "Stop policy control and hold the follower at its current position",
+                        "aria-label": "Stop policy and hold the follower",
+                        onclick: move |_| {
+                            if pending_action.peek().is_some() || !active || stopping {
+                                return;
+                            }
+                            pending_action.set(Some(PendingRolloutAction::Stop));
+                            let mut pending_action = pending_action;
+                            spawn(async move {
+                                if let Err(error) = api::post("/api/rollout/stop").await {
+                                    studio.report_from(MessageSource::Rollout, error);
+                                }
+                                pending_action.set(None);
+                            });
+                        },
+                        if pending == Some(PendingRolloutAction::Stop) || stopping {
+                            "Stopping…"
+                        } else {
+                            "Stop & hold"
+                        }
                     }
                 }
-                if !active && let Some(reason) = precondition_blocker.as_ref() {
+                if !active && let Some(reason) = blocker.as_ref() {
                     p { class: "rollout-blocker", "{reason}" }
                 }
                 if rollout.phase == RolloutPhase::Failed && let Some(reason) = rollout.message.as_ref() {
@@ -296,7 +342,7 @@ pub(crate) fn InferencePanel() -> Element {
             if metrics.inference_count == 0 {
                 div { class: "rollout-inference-empty",
                     strong { "No measurements yet" }
-                    p { "Stats appear after native ACT completes its first chunk." }
+                    p { "Starts when the policy sends its first action." }
                 }
             } else {
                 div { class: "rollout-inference-empty",
@@ -333,26 +379,36 @@ fn checkpoint_choices(snapshot: &TrainingSnapshot) -> Vec<CheckpointChoice> {
 fn checkpoints_for_run(run: &TrainingRun) -> impl Iterator<Item = CheckpointChoice> + '_ {
     run.checkpoints
         .iter()
-        .filter(|checkpoint| !run.phase.active() && checkpoint.inference_ready)
+        .filter(|checkpoint| checkpoint.inference_ready)
         .map(|checkpoint| CheckpointChoice {
             key: format!("{}::{}", run.id, checkpoint.step),
             run_id: run.id.clone(),
             run_name: run.config.run_name.clone(),
+            run_active: run.phase.active(),
             step: checkpoint.step,
             validation_loss: checkpoint.validation_loss,
-            byte_size: checkpoint.byte_size,
-            chunk_size: run.config.chunk_size,
+            action_steps: if checkpoint.recommended_action_steps == 0 {
+                run.config.chunk_size
+            } else {
+                checkpoint
+                    .recommended_action_steps
+                    .min(run.config.chunk_size)
+            },
+            sample_hz: checkpoint.sample_hz,
         })
 }
 
 fn rollout_precondition_blocker(
-    has_checkpoint: bool,
+    checkpoint: Option<&CheckpointChoice>,
     follower: Option<&RobotSummary>,
     camera_ready: bool,
     controls_available: bool,
 ) -> Option<String> {
-    if !has_checkpoint {
+    let Some(checkpoint) = checkpoint else {
         return Some("Select a checkpoint.".to_owned());
+    };
+    if checkpoint.run_active {
+        return Some("Stop or finish training before running this checkpoint.".to_owned());
     }
     let Some(follower) = follower else {
         return Some("Configure a follower in Settings.".to_owned());
@@ -377,9 +433,10 @@ fn rollout_precondition_blocker(
 
 fn runtime_title(rollout: &RolloutSnapshot) -> &'static str {
     match rollout.phase {
-        RolloutPhase::Idle => "Inference runtime available",
+        RolloutPhase::Idle if rollout.finished_ms.is_some() => "Policy stopped",
+        RolloutPhase::Idle => "Ready",
         RolloutPhase::Loading => "Loading checkpoint",
-        RolloutPhase::WarmingUp => "Warming native ACT",
+        RolloutPhase::WarmingUp => "Preparing policy",
         RolloutPhase::Running => "Policy active",
         RolloutPhase::Stopping => "Stopping policy",
         RolloutPhase::Failed => "Rollout stopped",
@@ -387,9 +444,10 @@ fn runtime_title(rollout: &RolloutSnapshot) -> &'static str {
 }
 
 fn runtime_detail(rollout: &RolloutSnapshot) -> String {
-    rollout.message.clone().unwrap_or_else(|| {
-        "SafeTensors · native Burn backend · safety-supervised control".to_owned()
-    })
+    rollout
+        .message
+        .clone()
+        .unwrap_or_else(|| "Safety limits and hold-on-stop are active.".to_owned())
 }
 
 fn runtime_note_class(rollout: &RolloutSnapshot) -> &'static str {
@@ -425,21 +483,13 @@ fn format_loss(value: f64) -> String {
     }
 }
 
-fn format_bytes(bytes: u64) -> String {
-    if bytes >= 1_048_576 {
-        format!("{:.1} MiB", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1_024 {
-        format!("{:.1} KiB", bytes as f64 / 1_024.0)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_core::api::{ConnectionStatus, RobotSummary};
+    use spiral_robotics_core::api::{
+        ConnectionStatus, RobotSummary, TrainingCheckpoint, TrainingRun, TrainingRunPhase,
+    };
 
-    use super::follower;
+    use super::{checkpoints_for_run, follower, rollout_precondition_blocker};
 
     fn robot(id: &str, role: &str) -> RobotSummary {
         RobotSummary {
@@ -467,6 +517,37 @@ mod tests {
         assert_eq!(
             follower(&robots).map(|robot| robot.id),
             Some("follower".to_owned())
+        );
+    }
+
+    #[test]
+    fn rollout_lists_inference_ready_checkpoints_from_an_active_run() {
+        let run = TrainingRun {
+            id: "active-run".to_owned(),
+            phase: TrainingRunPhase::Running,
+            checkpoints: vec![
+                TrainingCheckpoint {
+                    step: 20_000,
+                    inference_ready: true,
+                    ..TrainingCheckpoint::default()
+                },
+                TrainingCheckpoint {
+                    step: 10_000,
+                    inference_ready: false,
+                    ..TrainingCheckpoint::default()
+                },
+            ],
+            ..TrainingRun::default()
+        };
+
+        let choices = checkpoints_for_run(&run).collect::<Vec<_>>();
+
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].step, 20_000);
+        assert!(choices[0].run_active);
+        assert_eq!(
+            rollout_precondition_blocker(choices.first(), None, false, false).as_deref(),
+            Some("Stop or finish training before running this checkpoint.")
         );
     }
 }

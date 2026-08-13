@@ -1,8 +1,4 @@
-//! Curve-first Training screen workspace.
-//!
-//! This surface is intentionally a browser over Rust-owned state. It starts and
-//! stops runs through the backend, then renders only metrics received from the
-//! Studio event stream; no training lifecycle is inferred in the browser.
+//! Training setup and run monitoring.
 
 use std::collections::BTreeSet;
 
@@ -10,159 +6,166 @@ use dioxus::prelude::*;
 use spiral_robotics_core::api::{
     TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase,
 };
-use spiral_robotics_core::spiral::{self, Table};
-use spiral_robotics_panels::{LayoutNode, Panel, PanelLayout, PanelWorkspace, SplitAxis};
+use spiral_robotics_core::spiral;
+use spiral_robotics_panels::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
 
-use crate::frontend::app::notifications::MessageSource;
 use crate::frontend::app::state::studio;
 use crate::frontend::screens::training::state::training_controller;
 
 const CHART_WIDTH: f64 = 1_000.0;
 const CHART_TOP: f64 = 18.0;
 const CHART_BOTTOM: f64 = 242.0;
+const EMPTY_RUN_PANEL_ID: &str = "training-run-empty";
 
 #[component]
-pub(crate) fn TrainingWorkspace(dataset: String) -> Element {
+pub(crate) fn TrainingWorkspace() -> Element {
     let studio = studio();
     let dataset_id = studio.selected_dataset.read().clone();
     let controller = training_controller();
     let snapshot = studio.training.read().clone();
     let active_run = snapshot.active_run().cloned();
-    let viewed_run = controller
-        .selected_run()
-        .as_ref()
-        .and_then(|id| snapshot.runs.iter().find(|run| &run.id == id))
-        .or(active_run.as_ref())
-        .cloned();
-    let readiness_notice = (!snapshot.readiness.ready
-        && !snapshot.readiness.summary.starts_with("Checking "))
-    .then(|| training_readiness_guidance(&snapshot.readiness).0);
-    use_effect(use_reactive((&readiness_notice,), move |(notice,)| {
-        let Some(notice) = notice else { return };
-        if !studio
-            .notifications
-            .read()
-            .contains(MessageSource::Training, &notice)
-        {
-            studio.report_warning_from(MessageSource::Training, notice);
+    let active_run_id = active_run.as_ref().map(|run| run.id.clone());
+    use_effect(use_reactive((&active_run_id,), move |(run_id,)| {
+        if let Some(run_id) = run_id {
+            controller.open_run(run_id);
         }
     }));
 
-    let workbench = Panel::new(
-        "training-workbench",
-        "Training",
-        "training-workbench",
+    let control = Panel::new(
+        "training-control",
+        "Setup",
+        "training-control",
         rsx! {
-            TrainingRunBuilder {
-                namespace: dataset.clone(),
+            TrainingRunControl {
                 dataset_id: dataset_id.clone(),
                 readiness: snapshot.readiness.clone(),
                 active_run: active_run.clone(),
-                viewed_run: viewed_run.clone(),
-                history: snapshot.runs.clone(),
             }
         },
     )
-    .with_class("training-workbench-editor");
-    let learning = Panel::new(
-        "training-learning",
-        "Learning curves",
-        "training-learning",
-        rsx! { TrainingLearning { run: viewed_run.clone() } },
+    .with_class("training-control-editor");
+    let history = Panel::new(
+        "training-history",
+        "Runs",
+        "training-history",
+        rsx! { TrainingHistory { history: snapshot.runs.clone() } },
     )
-    .with_class("training-learning-editor");
-    let data_path = Panel::new(
-        "training-data-path",
-        "Data path",
-        "training-data",
-        rsx! { TrainingDataPath { namespace: dataset.clone(), dataset_id: dataset_id.clone(), run: viewed_run.clone() } },
-    )
-    .with_class("training-data-editor");
-    let throughput = Panel::new(
-        "training-resources",
-        "Throughput",
-        "training-resources",
-        rsx! { TrainingThroughput { run: viewed_run } },
-    )
-    .with_class("training-resource-editor");
-    let panels = vec![workbench, learning, data_path, throughput];
+    .with_class("training-history-editor");
 
-    let top = LayoutNode::split(
-        "training-upper",
-        SplitAxis::Horizontal,
-        0.76,
-        LayoutNode::tile("training-learning", ["training-learning".to_owned()]),
-        LayoutNode::tile("training-data", ["training-data-path".to_owned()]),
-    );
-    let visualization = LayoutNode::split(
-        "training-rows",
+    let opened_ids = controller.opened_runs();
+    let opened_runs = opened_ids
+        .iter()
+        .filter_map(|id| snapshot.runs.iter().find(|run| &run.id == id).cloned())
+        .collect::<Vec<_>>();
+    let registered_runs = opened_runs
+        .iter()
+        .map(|run| (run_panel_id(&run.id), run.id.clone()))
+        .collect::<Vec<_>>();
+    let mut panels = vec![control, history];
+    let right_panel_ids = if opened_runs.is_empty() {
+        panels.push(
+            Panel::new(
+                EMPTY_RUN_PANEL_ID,
+                "Run",
+                "training-runs",
+                rsx! { TrainingRunEmpty {} },
+            )
+            .with_class("training-run-editor"),
+        );
+        vec![EMPTY_RUN_PANEL_ID.to_owned()]
+    } else {
+        let ids = opened_runs
+            .iter()
+            .map(|run| run_panel_id(&run.id))
+            .collect::<Vec<_>>();
+        for run in opened_runs {
+            let panel_id = run_panel_id(&run.id);
+            panels.push(
+                Panel::new(
+                    panel_id,
+                    run.config.run_name.clone(),
+                    "training-runs",
+                    rsx! {
+                        TrainingRunDetail {
+                            run,
+                        }
+                    },
+                )
+                .with_class("training-run-editor")
+                .with_closable(true),
+            );
+        }
+        ids
+    };
+
+    let selected_panel = controller
+        .selected_run()
+        .filter(|id| snapshot.runs.iter().any(|run| &run.id == id))
+        .map(|id| PanelId::from(run_panel_id(&id)));
+    let closeable_runs = registered_runs.clone();
+    let left = LayoutNode::split(
+        "training-left-rail",
         SplitAxis::Vertical,
-        0.62,
-        top,
-        LayoutNode::tile("training-resources", ["training-resources".to_owned()]),
+        0.68,
+        LayoutNode::tile("training-control", ["training-control".to_owned()]),
+        LayoutNode::tile("training-history", ["training-history".to_owned()]),
     );
     let layout = PanelLayout::new(LayoutNode::split(
         "training-columns",
         SplitAxis::Horizontal,
-        0.29,
-        LayoutNode::tile("training-workbench", ["training-workbench".to_owned()]),
-        visualization,
+        0.3,
+        left,
+        LayoutNode::tile("training-runs", right_panel_ids),
     ));
 
     rsx! {
         PanelWorkspace {
             panels,
             initial_layout: layout,
-            storage_key: Some("spiral_robotics.panel-layout.v1.training".to_owned()),
+            storage_key: Some("spiral_robotics.panel-layout.v2.training".to_owned()),
+            active_panel: selected_panel,
             on_layout_change: move |_layout: PanelLayout| {},
-            on_panel_activate: move |_id| {},
+            on_panel_activate: move |panel_id: PanelId| {
+                if let Some((_, run_id)) = registered_runs
+                    .iter()
+                    .find(|(registered, _)| registered == panel_id.as_str())
+                {
+                    controller.select_run(run_id.clone());
+                }
+            },
+            on_panel_close: move |panel_id: PanelId| {
+                if let Some((_, run_id)) = closeable_runs
+                    .iter()
+                    .find(|(registered, _)| registered == panel_id.as_str())
+                {
+                    controller.close_run(run_id.clone());
+                }
+            },
             on_resize: move |_| {},
         }
     }
 }
 
 #[component]
-fn TrainingRunBuilder(
-    namespace: String,
+fn TrainingRunControl(
     dataset_id: String,
     readiness: TrainingReadiness,
     active_run: Option<TrainingRun>,
-    viewed_run: Option<TrainingRun>,
-    history: Vec<TrainingRun>,
 ) -> Element {
     let studio = studio();
     let mut selected_dataset = studio.selected_dataset;
     let controller = training_controller();
     let request = controller.request();
-    let inspected_request = viewed_run
-        .as_ref()
-        .map(|run| run.config.clone())
-        .unwrap_or_else(|| request.clone());
-    let inspecting_run = viewed_run.as_ref().is_some_and(|run| !run.phase.active());
     let dataset_ids = studio
         .episodes()
         .into_iter()
         .map(|episode| episode.dataset_id)
         .chain(std::iter::once(dataset_id.clone()))
         .collect::<BTreeSet<_>>();
-    let selected_run = controller.selected_run();
     let starting = controller.starting();
     let stopping = controller.stopping();
     let dataset_valid = spiral::is_dataset_id(dataset_id.trim());
     let can_start = readiness.ready && active_run.is_none() && !starting && dataset_valid;
-    let generated_dataset_query =
-        inspected_request.sql == default_training_sql(&namespace, &inspected_request.dataset_id);
-    let (local_episode_count, local_frame_count) = studio
-        .episodes()
-        .into_iter()
-        .filter(|episode| {
-            episode.dataset_id == inspected_request.dataset_id
-                && episode.usable()
-                && !episode.discarded
-        })
-        .fold((0_u64, 0_u64), |(episodes, frames), episode| {
-            (episodes + 1, frames.saturating_add(episode.frames))
-        });
     let active_id = active_run.as_ref().map(|run| run.id.clone());
     let progress = active_run.as_ref().map(|run| {
         if run.config.steps == 0 {
@@ -172,9 +175,19 @@ fn TrainingRunBuilder(
         }
     });
     let (readiness_summary, readiness_recovery) = training_readiness_guidance(&readiness);
+    let camera_summary = if request.act.camera_streams.is_empty() {
+        "All available".to_owned()
+    } else {
+        format!(
+            "{} · {}",
+            request.act.camera_streams.len(),
+            request.act.camera_streams.join(", ")
+        )
+    };
 
     rsx! {
-        div { class: "training-workbench studio-workbench-scroll",
+        div { class: "training-control",
+            div { class: "training-control-scroll",
             if !readiness.ready {
                 div { class: "training-inline-state training-inline-state-caution",
                     div { class: "training-inline-copy",
@@ -217,104 +230,72 @@ fn TrainingRunBuilder(
                     button {
                         r#type: "button",
                         class: "training-stop-button",
-                        title: "Stop after the current optimizer step and publish a checkpoint",
+                        title: "Finish the current step, save a checkpoint, and stop",
                         disabled: run.phase == TrainingRunPhase::Stopping || stopping.is_some(),
                         onclick: move |_| {
                             let id = active_id.clone().unwrap_or_default();
                             controller.stop(studio, id);
                         },
-                        if run.phase == TrainingRunPhase::Stopping || stopping.is_some() { "Stopping…" } else { "Stop after current step" }
+                        if run.phase == TrainingRunPhase::Stopping || stopping.is_some() { "Stopping…" } else { "Stop training" }
                     }
                 }
             }
 
-            if let Some(run) = viewed_run.as_ref().filter(|run| !run.phase.active()) {
-                    section {
-                        class: if run.phase == TrainingRunPhase::Failed { "training-run-result training-run-result-failed" } else { "training-run-result" },
-                        div { class: "training-run-result-heading",
-                            h3 { "{run.config.run_name}" }
-                            span { class: phase_class(run.phase), "{run.phase.label()}" }
-                        }
-                        p { {run.message.clone().unwrap_or_else(|| "The run ended without a status message.".to_owned())} }
-                        button {
-                            r#type: "button",
-                            class: "link min-h-6",
-                            onclick: move |_| controller.clear_selected_run(),
-                            "Back to new run"
-                        }
-                        if !run.logs.is_empty() {
-                            details {
-                                summary { "Logs · {run.logs.len()}" }
-                                pre {
-                                    for line in run.logs.iter().rev().take(12).rev() {
-                                        code { "{line}\n" }
-                                    }
-                                }
-                            }
-                        }
-                    }
-            }
-
-            section { class: "training-input-summary",
-                header {
-                    h3 { "Training data" }
-                    span { if inspecting_run { "Run snapshot" } else { "New run draft" } }
-                }
-                dl {
-                    div { class: "training-dataset-definition",
-                        dt { "Dataset" }
-                        dd {
-                            if inspecting_run || active_run.is_some() {
-                                "{inspected_request.dataset_id}"
-                            } else {
-                                input {
-                                    list: "training-dataset-options",
-                                    value: dataset_id.clone(),
-                                    maxlength: "96",
-                                    pattern: "[A-Za-z0-9_.-]+",
-                                    "aria-label": "Training dataset",
-                                    oninput: move |event| selected_dataset.set(event.value()),
-                                }
-                            }
-                        }
-                    }
-                    div { dt { "Namespace" } dd { "{namespace}" } }
-                    div { dt { "SQL scope" }
-                        dd { if generated_dataset_query { "Filtered by episodes.dataset_id" } else { "Custom SQL · review below" } }
-                    }
-                    div { dt { "Local preview" } dd { "{local_episode_count} kept · {local_frame_count} frames" } }
-                    div { dt { "Cameras" } dd { "{inspected_request.act.camera_streams.len()} required" } }
-                }
-                datalist { id: "training-dataset-options",
-                    for id in dataset_ids { option { value: "{id}" } }
-                }
-                details {
-                    summary { "Exact SQL and column mapping" }
-                    pre { code { "{inspected_request.sql}" } }
-                    p {
-                        "State · {inspected_request.state_column} · Action · {inspected_request.action_column}"
-                    }
-                }
-            }
-
-            if !inspecting_run {
-            section { class: "training-form-section",
+            section { class: "training-form-section training-source-section",
                 header { class: "training-form-heading",
-                    h3 { "New run" }
-                    span { "Dataset · {dataset_id}" }
+                    h3 { "Training data" }
                 }
                 label { class: "training-field training-field-wide",
-                    span { "Run name" }
-                    input {
-                        value: request.run_name.clone(),
+                    span { "Dataset" }
+                    select {
+                        value: dataset_id.clone(),
                         disabled: active_run.is_some(),
-                        oninput: move |event| {
-                            let value = event.value();
-                            controller.edit_request(move |request| request.run_name = value);
-                        },
+                        "aria-label": "Training dataset",
+                        onchange: move |event| selected_dataset.set(event.value()),
+                        for id in dataset_ids.iter() {
+                            option { value: "{id}", "{id}" }
+                        }
                     }
                 }
-                div { class: "training-form-grid",
+                dl { class: "training-source-meta",
+                    div { dt { "Cameras" } dd { "{camera_summary}" } }
+                }
+            }
+
+            section { class: "training-form-section",
+                header { class: "training-form-heading",
+                    h3 { "Run" }
+                }
+                div { class: "training-form-grid training-primary-grid",
+                    label { class: "training-field",
+                        span { "Run name" }
+                        input {
+                            value: request.run_name.clone(),
+                            disabled: active_run.is_some(),
+                            oninput: move |event| {
+                                let value = event.value();
+                                controller.edit_request(move |request| request.run_name = value);
+                            },
+                        }
+                    }
+                    label { class: "training-field",
+                        span { "Steps" }
+                        input {
+                            r#type: "number", min: "1", step: "100",
+                            value: "{request.steps}",
+                            disabled: active_run.is_some(),
+                            oninput: move |event| if let Ok(value) = event.value().parse() {
+                                controller.edit_request(move |request| request.steps = value);
+                            },
+                        }
+                    }
+                }
+            }
+
+            details { class: "training-query-section",
+                summary { "Advanced settings" }
+                div { class: "training-query-body",
+                    div { class: "training-form-grid",
                     label { class: "training-field",
                         span { "Device" }
                         select {
@@ -331,17 +312,6 @@ fn TrainingRunBuilder(
                         }
                     }
                     label { class: "training-field",
-                        span { "Steps" }
-                        input {
-                            r#type: "number", min: "1", step: "100",
-                            value: "{request.steps}",
-                            disabled: active_run.is_some(),
-                            oninput: move |event| if let Ok(value) = event.value().parse() {
-                                controller.edit_request(move |request| request.steps = value);
-                            },
-                        }
-                    }
-                    label { class: "training-field",
                         span { "Batch" }
                         input {
                             r#type: "number", min: "1",
@@ -353,7 +323,7 @@ fn TrainingRunBuilder(
                         }
                     }
                     label { class: "training-field",
-                        span { "Action chunk" }
+                        span { "Action horizon" }
                         input {
                             r#type: "number", min: "1", max: "256",
                             value: "{request.chunk_size}",
@@ -375,7 +345,7 @@ fn TrainingRunBuilder(
                         }
                     }
                     label { class: "training-field",
-                        span { "Checkpoint every" }
+                        span { "Checkpoint interval" }
                         input {
                             r#type: "number", min: "1", step: "100",
                             value: "{request.checkpoint_every}",
@@ -385,17 +355,10 @@ fn TrainingRunBuilder(
                             },
                         }
                     }
-                }
-            }
-
-            details { class: "training-query-section",
-                summary {
-                    span { "New run data query" }
-                    small { "{request.dataset_id}" }
-                }
-                div { class: "training-query-body",
+                    }
+                    div { class: "training-advanced-label", "Data query" }
                     textarea {
-                        "aria-label": "Spiral SQL query",
+                        "aria-label": "Training data query",
                         spellcheck: "false",
                         value: request.sql.clone(),
                         disabled: active_run.is_some(),
@@ -433,7 +396,7 @@ fn TrainingRunBuilder(
                             span { "Camera streams" }
                             input {
                                 value: request.act.camera_streams.join(", "),
-                                placeholder: "follower.camera.gripper, follower.camera.top",
+                                placeholder: "All available",
                                 disabled: active_run.is_some(),
                                 oninput: move |event| {
                                     let streams = event.value()
@@ -447,9 +410,9 @@ fn TrainingRunBuilder(
                             }
                         }
                         label { class: "training-field",
-                            span { "Image width" }
+                            span { "Image width (0 = source)" }
                             input {
-                                r#type: "number", min: "32", max: "1024", step: "16",
+                                r#type: "number", min: "0", max: "1024", step: "1",
                                 value: "{request.act.image_width}",
                                 disabled: active_run.is_some(),
                                 oninput: move |event| if let Ok(value) = event.value().parse() {
@@ -458,9 +421,9 @@ fn TrainingRunBuilder(
                             }
                         }
                         label { class: "training-field",
-                            span { "Image height" }
+                            span { "Image height (0 = source)" }
                             input {
-                                r#type: "number", min: "32", max: "1024", step: "16",
+                                r#type: "number", min: "0", max: "1024", step: "1",
                                 value: "{request.act.image_height}",
                                 disabled: active_run.is_some(),
                                 oninput: move |event| if let Ok(value) = event.value().parse() {
@@ -471,6 +434,7 @@ fn TrainingRunBuilder(
                     }
                 }
             }
+            }
 
             button {
                 r#type: "button",
@@ -480,29 +444,119 @@ fn TrainingRunBuilder(
                 onclick: move |_| {
                     controller.start(studio);
                 },
-                if starting { "Starting…" } else { "Train {request.dataset_id}" }
+                if starting { "Starting…" } else { "Run training" }
             }
-            }
+        }
+    }
+}
 
-            section { class: "training-history",
-                header {
-                    h3 { "Run history" }
+#[component]
+fn TrainingHistory(history: Vec<TrainingRun>) -> Element {
+    let controller = training_controller();
+    let selected_run = controller.selected_run();
+    rsx! {
+        section { class: "training-history-panel studio-workbench-scroll",
+            if history.is_empty() {
+                div { class: "training-history-empty",
+                    strong { "No runs yet" }
+                    span { "Start training to create one." }
                 }
-                if history.is_empty() {
-                    p { class: "training-history-empty", "No runs yet." }
+            }
+            for run in history {
+                button {
+                    r#type: "button",
+                    class: if selected_run.as_deref() == Some(run.id.as_str()) { "training-history-row training-history-row-selected" } else { "training-history-row" },
+                    "aria-pressed": selected_run.as_deref() == Some(run.id.as_str()),
+                    title: "Open {run.config.run_name}",
+                    onclick: {
+                        let id = run.id.clone();
+                        move |_| controller.open_run(id.clone())
+                    },
+                    span { class: "training-history-name", "{run.config.run_name}" }
+                    span { class: "training-history-dataset", "{run.config.dataset_id}" }
+                    span { class: phase_class(run.phase), "{run.phase.label()}" }
+                    span { class: "training-history-step", "{run.current_step} / {run.config.steps}" }
                 }
-                for run in history {
-                    button {
-                        r#type: "button",
-                        class: if selected_run.as_deref() == Some(run.id.as_str()) { "training-history-row training-history-row-selected" } else { "training-history-row" },
-                        onclick: {
-                            let id = run.id.clone();
-                            move |_| controller.select_run(id.clone())
-                        },
-                        span { class: "training-history-name", "{run.config.run_name}" }
-                        span { class: "training-history-dataset", "{run.config.dataset_id}" }
+            }
+        }
+    }
+}
+
+#[component]
+fn TrainingRunEmpty() -> Element {
+    rsx! {
+        section { class: "training-run-empty",
+            strong { "Start training or select a run" }
+        }
+    }
+}
+
+#[component]
+fn TrainingRunDetail(run: TrainingRun) -> Element {
+    let progress = if run.config.steps == 0 {
+        0.0
+    } else {
+        run.current_step as f64 / run.config.steps as f64 * 100.0
+    };
+    let message = run.message.clone();
+    let logs = run.logs.clone();
+    let message_class = if run.phase == TrainingRunPhase::Failed {
+        "training-run-message training-run-message-danger"
+    } else {
+        "training-run-message"
+    };
+    rsx! {
+        article { class: "training-run-detail",
+            header { class: "training-run-overview",
+                div { class: "training-run-identity",
+                    div {
+                        h2 { "{run.config.run_name}" }
                         span { class: phase_class(run.phase), "{run.phase.label()}" }
-                        span { class: "training-history-step", "{run.current_step}" }
+                    }
+                    p { "Dataset · {run.config.dataset_id} · {run.config.policy.label()} · {run.config.device}" }
+                }
+                dl { class: "training-run-facts",
+                    div { dt { "Step" } dd { "{run.current_step} / {run.config.steps}" } }
+                    div { dt { "Progress" } dd { "{progress.clamp(0.0, 100.0):.1}%" } }
+                    div { dt { "Checkpoints" } dd { "{run.checkpoints.len()}" } }
+                }
+            }
+            if let Some(message) = message {
+                div { class: "{message_class}", "{message}" }
+            }
+            div { class: "training-run-evidence",
+                section { class: "training-run-region training-run-learning-region",
+                    header { class: "training-subpanel-heading",
+                        h3 { "Loss" }
+                    }
+                    div { class: "training-subpanel-body",
+                        TrainingLearning { run: run.clone() }
+                    }
+                }
+                section { class: "training-run-region training-run-data-region",
+                    header { class: "training-subpanel-heading",
+                        h3 { "Inputs" }
+                    }
+                    div { class: "training-subpanel-body",
+                        TrainingInputs { run: run.clone() }
+                    }
+                }
+                section { class: "training-run-region training-run-throughput-region",
+                    header { class: "training-subpanel-heading",
+                        h3 { "Performance" }
+                    }
+                    div { class: "training-subpanel-body",
+                        TrainingPerformance { run: run.clone() }
+                    }
+                }
+            }
+            if !logs.is_empty() {
+                details { class: "training-run-logs",
+                    summary { "Log · {logs.len()} lines" }
+                    pre {
+                        for line in logs.iter().rev().take(20).rev() {
+                            code { "{line}\n" }
+                        }
                     }
                 }
             }
@@ -510,27 +564,22 @@ fn TrainingRunBuilder(
     }
 }
 
+fn run_panel_id(run_id: &str) -> String {
+    format!("training-run-{run_id}")
+}
+
 fn training_readiness_guidance(readiness: &TrainingReadiness) -> (String, String) {
     if !readiness.spiral_ready {
         return (
-            "SpiralDB is not ready for training.".to_owned(),
-            "Open Settings, verify the Spiral catalog, project, namespace, and ADBC driver, then test the connection again."
-                .to_owned(),
+            "SpiralDB is unavailable.".to_owned(),
+            "Open Settings and test the SpiralDB connection.".to_owned(),
         );
     }
     (readiness.summary.clone(), "Training is ready.".to_owned())
 }
 
 #[component]
-fn TrainingLearning(run: Option<TrainingRun>) -> Element {
-    let Some(run) = run else {
-        return rsx! {
-            div { class: "training-panel-empty",
-                strong { "No run" }
-                span { "Start training to see loss." }
-            }
-        };
-    };
+fn TrainingLearning(run: TrainingRun) -> Element {
     let (train_points, validation_points, loss_top, loss_bottom) = loss_points(&run);
     let last = run.metrics.last();
     let latest_train = last.map(|point| format_loss(point.train_loss));
@@ -547,13 +596,6 @@ fn TrainingLearning(run: Option<TrainingRun>) -> Element {
 
     rsx! {
         section { class: "training-learning",
-            header { class: "training-panel-heading",
-                div {
-                    h2 { "{run.config.run_name}" }
-                    p { "{run.config.policy.label()} · {run.config.device} · {run.current_step}/{run.config.steps}" }
-                }
-                span { class: phase_class(run.phase), "{run.phase.label()}" }
-            }
             div { class: "training-loss-summary",
                 div {
                     span { class: "training-series-dot training-series-train" }
@@ -617,7 +659,7 @@ fn TrainingLearning(run: Option<TrainingRun>) -> Element {
                         span {
                             class: "training-event-tick training-event-checkpoint",
                             style: "left: {step_percent(checkpoint.step, run.config.steps):.3}%",
-                            title: "Checkpoint {checkpoint.step} published to Spiral",
+                            title: "Checkpoint saved at step {checkpoint.step}",
                             "aria-label": "Checkpoint at step {checkpoint.step}",
                         }
                     }
@@ -641,77 +683,41 @@ fn TrainingLearning(run: Option<TrainingRun>) -> Element {
 }
 
 #[component]
-fn TrainingDataPath(namespace: String, dataset_id: String, run: Option<TrainingRun>) -> Element {
-    let transfer = run
-        .as_ref()
-        .and_then(|run| run.metrics.last())
-        .map(|point| format_rate(point.transfer_bytes_per_second))
-        .unwrap_or_else(|| "—".to_owned());
-    let examples = run
-        .as_ref()
-        .and_then(|run| run.metrics.last())
-        .map(|point| format!("{:.0}/s", point.examples_per_second))
-        .unwrap_or_else(|| "—".to_owned());
-    let checkpoint_count = run.as_ref().map_or(0, |run| run.checkpoints.len());
-    let frames_per_batch = run
-        .as_ref()
-        .map(|run| run.config.batch_size * run.config.act.camera_streams.len())
-        .map(|frames| format!("{frames}/batch"))
-        .unwrap_or_else(|| "—".to_owned());
-    let source_namespace = run
-        .as_ref()
-        .map(|run| run.source.dataset.as_str())
-        .filter(|dataset| !dataset.is_empty())
-        .unwrap_or(&namespace);
-    let source_dataset = run
-        .as_ref()
-        .map(|run| run.source.dataset_id.as_str())
-        .filter(|dataset| !dataset.is_empty())
-        .unwrap_or(&dataset_id);
-    let checkpoint_table = run
-        .as_ref()
-        .map(|run| run.source.checkpoint_table.as_str())
-        .filter(|table| !table.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| spiral::relation(&namespace, Table::TrainingCheckpoints));
+fn TrainingInputs(run: TrainingRun) -> Element {
+    let cameras = if run.config.act.camera_streams.is_empty() {
+        "All available".to_owned()
+    } else {
+        run.config.act.camera_streams.join(", ")
+    };
+    let image_size = match (run.config.act.image_width, run.config.act.image_height) {
+        (0, 0) => "Source size".to_owned(),
+        (0, height) => format!("Source width × {height}"),
+        (width, 0) => format!("{width} × source height"),
+        (width, height) => format!("{width} × {height}"),
+    };
     rsx! {
-        section { class: "training-data-path",
-            ol { class: "training-path-stages",
-                li {
-                    span { class: "training-path-index", "1" }
-                    div { strong { "Dataset · {source_dataset}" } small { "{source_namespace}.episodes → joint_samples" } }
-                    em { "{transfer}" }
+        section { class: "training-inputs",
+            dl { class: "training-input-facts",
+                div { class: "training-input-wide",
+                    dt { "Cameras" }
+                    dd { "{cameras}" }
                 }
-                li {
-                    span { class: "training-path-index", "2" }
-                    div { strong { "Arrow tensors" } small { "decode · resize · normalize" } }
-                    em { "{frames_per_batch}" }
-                }
-                li {
-                    span { class: "training-path-index", "3" }
-                    div { strong { "Burn ACT" } small { "native optimizer" } }
-                    em { "{examples}" }
-                }
-                li {
-                    span { class: "training-path-index", "4" }
-                    div { strong { "Checkpoints" } small { "{checkpoint_table}" } }
-                    em { "{checkpoint_count}" }
-                }
+                div { dt { "Batch" } dd { "{run.config.batch_size} samples" } }
+                div { dt { "Action horizon" } dd { "{run.config.chunk_size} steps" } }
+                div { dt { "Image size" } dd { "{image_size}" } }
+                div { dt { "Checkpoint interval" } dd { "{run.config.checkpoint_every} steps" } }
             }
         }
     }
 }
 
 #[component]
-fn TrainingThroughput(run: Option<TrainingRun>) -> Element {
-    let total_steps = run.as_ref().map_or(1, |run| run.config.steps);
-    let metrics = run
-        .as_ref()
-        .map(|run| run.metrics.as_slice())
-        .unwrap_or(&[]);
+fn TrainingPerformance(run: TrainingRun) -> Element {
+    let total_steps = run.config.steps;
+    let metrics = run.metrics.as_slice();
     let last = metrics.last();
     let throughput = last
-        .map(|point| format!("{:.1} examples/s", point.examples_per_second))
+        .map(|point| format!("{:.1} samples/s", point.examples_per_second))
         .unwrap_or_else(|| "—".to_owned());
     let transfer = last
         .map(|point| format_rate(point.transfer_bytes_per_second))
@@ -720,12 +726,8 @@ fn TrainingThroughput(run: Option<TrainingRun>) -> Element {
     rsx! {
         section { class: "training-resources",
             div { class: "training-resource-grid",
-                ResourceLane { label: "Optimizer throughput", value: throughput, points: resource_points(metrics, total_steps, ResourceSeries::Throughput), class: "resource-throughput", description: "Examples completed per second over the latest measured optimizer interval." }
-                ResourceLane { label: "Spiral tensor rate", value: transfer, points: resource_points(metrics, total_steps, ResourceSeries::Transfer), class: "resource-transfer", description: "Decoded image-tensor bytes returned by Spiral divided by total sample-preparation time." }
-            }
-            div { class: "training-resource-definitions",
-                small { "Optimizer throughput counts completed examples over the latest metric interval." }
-                small { "Spiral tensor rate = decoded Arrow image-tensor bytes ÷ batch preparation time. It excludes Burn model compute and is not raw network speed." }
+                ResourceLane { label: "Training rate", value: throughput, points: resource_points(metrics, total_steps, ResourceSeries::Throughput), class: "resource-throughput", description: "Samples completed per second." }
+                ResourceLane { label: "Input rate", value: transfer, points: resource_points(metrics, total_steps, ResourceSeries::Transfer), class: "resource-transfer", description: "Prepared camera data per second." }
             }
         }
     }
@@ -899,6 +901,8 @@ fn format_rate(bytes_per_second: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use spiral_robotics_core::spiral::Table;
+
     use super::*;
 
     #[test]

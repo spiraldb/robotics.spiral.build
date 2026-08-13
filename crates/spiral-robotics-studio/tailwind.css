@@ -453,32 +453,25 @@
      A curve-first instrument inside the same compact panel grammar. Panels
      provide the only large containers; their contents stay flat and divided
      by rhythm and hairlines instead of dashboard cards. */
-  .training-workbench-editor,
-  .training-learning-editor,
-  .training-data-editor,
-  .training-resource-editor {
+  .training-control-editor,
+  .training-history-editor,
+  .training-run-editor {
     min-height: 0;
     min-width: 0;
   }
 
-  .training-workbench {
+  .training-control,
+  .training-history-panel,
+  .training-run-detail {
     color: var(--tone-ink);
   }
 
-  .training-panel-heading {
-    @apply flex min-h-11 items-center gap-3 border-b border-line px-3;
+  .training-control {
+    @apply flex h-full min-h-0 flex-col bg-surface;
   }
 
-  .training-panel-heading > div {
-    @apply min-w-0 flex-1;
-  }
-
-  .training-panel-heading h2 {
-    @apply truncate text-[12px] font-semibold tracking-[-0.01em];
-  }
-
-  .training-panel-heading p {
-    @apply mt-0.5 truncate text-[10px] text-ink-faint;
+  .training-control-scroll {
+    @apply min-h-0 flex-1 overflow-y-auto bg-surface;
   }
 
   .training-phase {
@@ -525,10 +518,6 @@
 
   .training-inline-copy .technical-details {
     @apply mt-0.5 text-[10px] text-ink-soft;
-  }
-
-  .training-inline-dismiss {
-    @apply -mr-1 min-h-6 shrink-0 cursor-pointer rounded px-1 text-[10px] font-medium outline-none hover:bg-surface/60 focus-visible:ring-2 focus-visible:ring-current;
   }
 
   .training-inline-state-caution {
@@ -590,120 +579,50 @@
     background: var(--tone-danger-soft);
   }
 
-  .training-run-result {
-    @apply border-b border-line px-3 py-3 text-[10px];
-    background: var(--tone-sunken);
-  }
-
-  .training-run-result h3 {
-    @apply min-w-0 flex-1 truncate text-[11px] font-semibold;
-  }
-
-  .training-run-result-heading {
-    @apply flex min-w-0 items-center gap-2;
-  }
-
-  .training-run-result p {
-    @apply mt-1 leading-4 text-ink-soft;
-  }
-
-  .training-run-result details {
-    @apply mt-2;
-  }
-
-  .training-run-result summary {
-    @apply min-h-6 cursor-pointer select-none py-1 font-medium text-ink-soft outline-none;
-  }
-
-  .training-run-result summary:focus-visible {
-    color: var(--tone-accent);
-  }
-
-  .training-run-result pre {
-    @apply mt-1 max-h-40 overflow-auto rounded bg-surface px-2 py-1.5 font-mono text-[10px] leading-4 text-ink-soft;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-  }
-
-  .training-run-result code {
-    font: inherit;
-  }
-
-  .training-run-result-failed {
-    border-inline-start: 1px solid var(--tone-danger);
-  }
-
   .training-form-section,
-  .training-query-section,
-  .training-history {
+  .training-query-section {
     @apply border-b border-line px-3 py-3;
   }
 
-  .training-input-summary {
-    @apply border-b border-line bg-surface px-3 py-3;
+  .training-source-section {
+    @apply pt-3;
   }
 
-  .training-input-summary > header,
-  .training-form-heading {
-    @apply mb-2 flex min-w-0 items-center gap-2;
+  .training-source-meta {
+    @apply mt-2 grid gap-1 border-t border-line pt-2;
   }
 
-  .training-input-summary h3,
-  .training-form-heading h3 {
-    @apply min-w-0 flex-1 text-[11px] font-semibold;
-  }
-
-  .training-input-summary > header span,
-  .training-form-heading span {
-    @apply truncate text-[10px] text-ink-faint;
-  }
-
-  .training-input-summary dl {
-    @apply grid grid-cols-2 gap-x-3 gap-y-1;
-  }
-
-  .training-input-summary dl > div {
+  .training-source-meta > div {
     @apply flex min-w-0 items-start gap-1 text-[10px];
   }
 
-  .training-input-summary dt {
+  .training-source-meta dt {
     @apply shrink-0 text-ink-faint;
   }
 
-  .training-input-summary dd {
+  .training-source-meta dd {
     @apply min-w-0 font-mono leading-4 text-ink;
     overflow-wrap: anywhere;
   }
 
-  .training-dataset-definition input {
-    @apply w-full min-w-0 border-0 border-b border-line bg-transparent font-mono font-semibold text-ink outline-none;
+  .training-form-heading {
+    @apply mb-2 flex min-w-0 items-center gap-2;
   }
 
-  .training-dataset-definition input:hover,
-  .training-dataset-definition input:focus-visible {
-    border-bottom-color: var(--tone-accent);
+  .training-form-heading h3 {
+    @apply min-w-0 flex-1 text-[11px] font-semibold;
   }
 
-  .training-input-summary details {
-    @apply mt-2 border-t border-line pt-1 text-[10px];
-  }
-
-  .training-input-summary summary {
-    @apply min-h-6 cursor-pointer py-1 font-medium text-ink-soft outline-none focus-visible:text-accent;
-  }
-
-  .training-input-summary pre {
-    @apply max-h-40 overflow-auto bg-sunken px-2 py-1.5 font-mono text-[10px] leading-4 text-ink-soft;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-  }
-
-  .training-input-summary p {
-    @apply mt-1 text-[10px] text-ink-faint;
+  .training-form-heading span {
+    @apply truncate text-[10px] text-ink-faint;
   }
 
   .training-form-grid {
     @apply mt-2 grid grid-cols-2 gap-x-2 gap-y-2;
+  }
+
+  .training-primary-grid {
+    grid-template-columns: minmax(0, 1fr) 6.5rem;
   }
 
   .training-field {
@@ -727,18 +646,6 @@
     box-shadow: 0 0 0 1px var(--tone-accent);
   }
 
-  .training-history > header {
-    @apply mb-2 flex items-start gap-2;
-  }
-
-  .training-history > header h3 {
-    @apply min-w-0 flex-1;
-  }
-
-  .training-history h3 {
-    @apply text-[11px] font-semibold;
-  }
-
   .training-query-section > summary {
     @apply min-h-7 cursor-pointer py-1 text-[11px] font-semibold outline-none;
   }
@@ -755,6 +662,10 @@
     @apply mt-2;
   }
 
+  .training-advanced-label {
+    @apply mt-3 border-t border-line pt-2 text-[10px] font-medium text-ink-soft;
+  }
+
   .training-query-section textarea {
     @apply min-h-32 resize-y py-2 font-mono text-[10px] leading-4 tabular-nums;
   }
@@ -764,7 +675,7 @@
   }
 
   .training-start-button {
-    @apply mx-3 my-3 flex min-h-8 cursor-pointer items-center justify-center rounded px-3 text-[11px] font-semibold text-accent-ink transition-colors disabled:cursor-not-allowed disabled:opacity-45;
+    @apply mx-3 my-3 flex min-h-8 shrink-0 cursor-pointer items-center justify-center rounded px-3 text-[11px] font-semibold text-accent-ink transition-colors disabled:cursor-not-allowed disabled:opacity-45;
     width: calc(100% - 1.5rem);
     background: var(--tone-accent);
   }
@@ -773,16 +684,24 @@
     filter: brightness(0.94);
   }
 
-  .training-history {
-    border-bottom: 0;
+  .training-history-empty {
+    @apply flex h-full min-h-32 flex-col items-center justify-center gap-1 px-4 text-center;
   }
 
-  .training-history-empty {
-    @apply py-2 text-[10px] text-ink-faint;
+  .training-history-empty strong {
+    @apply text-[11px] font-medium text-ink-soft;
+  }
+
+  .training-history-empty span {
+    @apply max-w-[30ch] text-[10px] leading-4 text-ink-faint;
+  }
+
+  .training-history-panel {
+    @apply bg-surface p-1;
   }
 
   .training-history-row {
-    @apply -mx-1 grid min-h-8 w-[calc(100%+0.5rem)] cursor-pointer grid-cols-[minmax(0,1fr)_minmax(4rem,0.7fr)_auto_3rem] items-center gap-2 rounded px-1 text-left transition-colors hover:bg-hover;
+    @apply grid min-h-9 w-full cursor-pointer grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-0.5 rounded px-2 py-1 text-left outline-none transition-colors hover:bg-hover focus-visible:ring-1 focus-visible:ring-accent;
   }
 
   .training-history-row-selected {
@@ -790,39 +709,153 @@
   }
 
   .training-history-name {
-    @apply truncate text-[11px];
+    @apply truncate text-[11px] font-medium;
   }
 
   .training-history-dataset {
-    @apply truncate font-mono text-[10px] text-ink-faint;
+    @apply min-w-0 truncate font-mono text-[10px] text-ink-faint;
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .training-history-row .training-phase {
+    grid-column: 2;
+    grid-row: 1;
   }
 
   .training-history-step {
     @apply text-right font-mono text-[10px] tabular-nums text-ink-faint;
+    grid-column: 2;
+    grid-row: 2;
   }
 
-  .training-panel-empty,
+  .training-run-empty {
+    @apply flex h-full flex-col items-center justify-center gap-1 bg-surface px-6 text-center;
+  }
+
+  .training-run-empty strong {
+    @apply text-[12px] font-semibold;
+  }
+
+  .training-run-empty span {
+    @apply max-w-[38ch] text-[11px] leading-4 text-ink-faint;
+  }
+
+  .training-run-detail {
+    @apply flex h-full min-h-0 flex-col overflow-hidden bg-surface;
+    container: training-run / inline-size;
+  }
+
+  .training-run-overview {
+    @apply flex min-h-14 shrink-0 items-center gap-5 border-b border-line px-3 py-2;
+  }
+
+  .training-run-identity {
+    @apply min-w-0 flex-1;
+  }
+
+  .training-run-identity > div {
+    @apply flex min-w-0 items-center gap-2;
+  }
+
+  .training-run-identity h2 {
+    @apply truncate text-[12px] font-semibold tracking-[-0.01em];
+  }
+
+  .training-run-identity p {
+    @apply mt-0.5 truncate font-mono text-[10px] text-ink-faint;
+  }
+
+  .training-run-facts {
+    @apply grid shrink-0 grid-cols-3 divide-x divide-line;
+  }
+
+  .training-run-facts > div {
+    @apply min-w-20 px-3 first:pl-0 last:pr-0;
+  }
+
+  .training-run-facts dt {
+    @apply text-[10px] text-ink-faint;
+  }
+
+  .training-run-facts dd {
+    @apply mt-0.5 font-mono text-[11px] font-medium tabular-nums;
+  }
+
+  .training-run-message {
+    @apply shrink-0 border-b border-line px-3 py-1.5 text-[10px] leading-4 text-ink-soft;
+    background: var(--tone-sunken);
+  }
+
+  .training-run-message-danger {
+    color: var(--tone-danger);
+    background: var(--tone-danger-soft);
+  }
+
+  .training-run-evidence {
+    @apply grid min-h-0 flex-1 overflow-hidden;
+    grid-template-columns: minmax(0, 3fr) minmax(15rem, 1fr);
+    grid-template-rows: minmax(16rem, 1fr) minmax(10rem, 0.58fr);
+  }
+
+  .training-run-region {
+    @apply flex min-h-0 min-w-0 flex-col overflow-hidden;
+  }
+
+  .training-run-learning-region {
+    @apply border-b border-r border-line;
+  }
+
+  .training-run-data-region {
+    @apply border-b border-line;
+  }
+
+  .training-run-throughput-region {
+    @apply col-span-2;
+  }
+
+  .training-subpanel-heading {
+    @apply flex min-h-8 shrink-0 items-center gap-2 border-b border-line bg-sunken px-2.5;
+  }
+
+  .training-subpanel-heading h3 {
+    @apply min-w-0 flex-1 text-[11px] font-semibold;
+  }
+
+  .training-subpanel-body {
+    @apply flex min-h-0 flex-1 overflow-hidden;
+  }
+
+  .training-run-logs {
+    @apply shrink-0 border-t border-line bg-sunken text-[10px];
+  }
+
+  .training-run-logs summary {
+    @apply min-h-7 cursor-pointer px-3 py-1.5 font-medium text-ink-soft outline-none focus-visible:text-accent;
+  }
+
+  .training-run-logs pre {
+    @apply max-h-40 overflow-auto border-t border-line bg-surface px-3 py-2 font-mono text-[10px] leading-4 text-ink-soft;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .training-run-logs code {
+    font: inherit;
+  }
+
   .training-chart-empty {
     @apply flex h-full flex-col items-center justify-center gap-1 px-4 text-center;
   }
 
-  .training-panel-empty strong {
-    @apply text-[12px] font-medium;
-  }
-
-  .training-panel-empty span,
   .training-chart-empty {
     @apply text-[11px] text-ink-faint;
   }
 
   .training-learning,
-  .training-data-path,
+  .training-inputs,
   .training-resources {
-    @apply flex h-full min-h-0 flex-col bg-surface;
-  }
-
-  .training-data-path {
-    container-type: inline-size;
+    @apply flex h-full min-h-0 w-full flex-col bg-surface;
   }
 
   .training-loss-summary {
@@ -948,68 +981,29 @@
     background: var(--tone-danger);
   }
 
-  .training-path-stages {
-    @apply flex min-h-0 flex-1 flex-col overflow-y-auto px-3 py-2;
+  .training-input-facts {
+    @apply grid min-h-0 flex-1 content-start grid-cols-2 overflow-y-auto px-3 py-2;
   }
 
-  .training-path-stages li {
-    @apply relative flex min-h-16 items-center gap-2 border-b border-line py-2 last:border-b-0;
+  .training-input-facts > div {
+    @apply min-w-0 border-b border-line py-2 last:border-b-0;
   }
 
-  .training-path-stages li:not(:last-child)::after {
-    content: "";
-    @apply absolute -bottom-1 left-3 z-10 h-2 w-px;
-    background: var(--tone-accent);
+  .training-input-facts > div:nth-last-child(2) {
+    border-bottom: 0;
   }
 
-  .training-path-index {
-    @apply flex h-6 w-6 shrink-0 items-center justify-center rounded-full font-mono text-[10px] tabular-nums;
-    background: var(--tone-selected);
-    color: var(--tone-accent);
+  .training-input-wide {
+    @apply col-span-2;
   }
 
-  .training-path-stages li > div {
-    @apply flex min-w-0 flex-1 flex-col;
+  .training-input-facts dt {
+    @apply text-[10px] text-ink-faint;
   }
 
-  .training-path-stages strong {
-    @apply truncate text-[11px] font-semibold;
-  }
-
-  .training-path-stages small {
-    @apply mt-0.5 text-[10px] leading-4 text-ink-faint;
-  }
-
-  .training-path-stages em {
-    @apply shrink-0 not-italic font-mono text-[10px] tabular-nums text-ink-soft;
-  }
-
-  @container (max-width: 280px) {
-    .training-path-stages li {
-      display: grid;
-      flex: 0 0 auto;
-      grid-template-columns: 1.5rem minmax(0, 1fr);
-      grid-template-rows: auto auto;
-      column-gap: 0.5rem;
-      row-gap: 0.125rem;
-    }
-
-    .training-path-index {
-      grid-row: 1 / span 2;
-    }
-
-    .training-path-stages strong {
-      @apply whitespace-normal;
-    }
-
-    .training-path-stages small {
-      overflow-wrap: anywhere;
-    }
-
-    .training-path-stages em {
-      grid-column: 2;
-      justify-self: start;
-    }
+  .training-input-facts dd {
+    @apply mt-0.5 min-w-0 font-mono text-[11px] leading-4 text-ink;
+    overflow-wrap: anywhere;
   }
 
   .training-resource-grid {
@@ -1071,12 +1065,43 @@
     color: var(--tone-ink);
   }
 
-  .training-resource-definitions {
-    @apply mt-2 grid gap-1 border-t border-line pt-2;
+  @container training-run (max-width: 760px) {
+    .training-run-overview {
+      @apply items-start;
+    }
+
+    .training-run-facts > div {
+      @apply min-w-16 px-2;
+    }
+
+    .training-run-evidence {
+      @apply overflow-y-auto;
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: minmax(18rem, 1fr) minmax(15rem, auto) minmax(15rem, auto);
+    }
+
+    .training-run-learning-region,
+    .training-run-data-region {
+      @apply border-r-0;
+    }
+
+    .training-run-throughput-region {
+      @apply col-span-1 border-b-0;
+    }
   }
 
-  .training-resource-definitions small {
-    @apply text-[10px] leading-snug text-ink-soft;
+  @container training-run (max-width: 480px) {
+    .training-run-overview {
+      @apply flex-col gap-2;
+    }
+
+    .training-run-facts {
+      @apply w-full;
+    }
+
+    .training-run-facts > div {
+      @apply flex-1;
+    }
   }
 
 }
@@ -1136,6 +1161,22 @@
 
   .rollout-field-grid {
     @apply grid grid-cols-2 gap-2;
+  }
+
+  .rollout-duration-field {
+    grid-column: 1 / -1;
+  }
+
+  .rollout-duration-control {
+    @apply grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2;
+  }
+
+  .rollout-duration-control small {
+    @apply whitespace-nowrap text-[10px] text-ink-faint;
+  }
+
+  .rollout-duration-control .rollout-duration-error {
+    color: var(--tone-danger);
   }
 
   .rollout-checkpoint-meta {
@@ -1205,8 +1246,17 @@
     background: var(--tone-danger);
   }
 
+  .rollout-action-buttons {
+    @apply grid grid-cols-2 gap-2;
+  }
+
+  .rollout-run-button,
+  .rollout-stop-button {
+    @apply flex min-h-8 min-w-0 cursor-pointer items-center justify-center rounded px-2 text-center text-[11px] font-semibold leading-4 transition-colors disabled:cursor-not-allowed disabled:opacity-45;
+  }
+
   .rollout-run-button {
-    @apply flex min-h-8 w-full cursor-pointer items-center justify-center rounded px-3 text-[11px] font-semibold text-accent-ink transition-colors disabled:cursor-not-allowed disabled:opacity-45;
+    @apply text-accent-ink;
     background: var(--tone-accent);
   }
 
@@ -1216,6 +1266,21 @@
 
   .rollout-run-button:focus-visible {
     outline: 2px solid var(--tone-accent);
+    outline-offset: 2px;
+  }
+
+  .rollout-stop-button {
+    @apply border bg-transparent;
+    border-color: color-mix(in srgb, var(--tone-danger) 45%, transparent);
+    color: var(--tone-danger);
+  }
+
+  .rollout-stop-button:hover:not(:disabled) {
+    background: var(--tone-danger-soft);
+  }
+
+  .rollout-stop-button:focus-visible {
+    outline: 2px solid var(--tone-danger);
     outline-offset: 2px;
   }
 
@@ -1298,6 +1363,7 @@
   }
 
   .training-form-grid,
+  .training-primary-grid,
   .training-column-row,
   .training-resource-grid,
   .rollout-field-grid {
@@ -1347,11 +1413,11 @@
   .training-start-button,
   .training-stop-button,
   .training-history-row,
-  .training-run-result summary,
   .training-query-section > summary,
-  .rollout-run-button {
-    min-height: 44px;
-  }
+    .rollout-run-button,
+    .rollout-stop-button {
+      min-height: 44px;
+    }
 
   .rollout-field input,
   .rollout-field select {

@@ -139,12 +139,6 @@ impl NotificationCenterState {
         self.messages.iter().filter(|message| !message.read).count()
     }
 
-    pub(crate) fn contains(&self, source: MessageSource, text: &str) -> bool {
-        self.messages
-            .iter()
-            .any(|message| message.source == source && message.text == text)
-    }
-
     pub(crate) const fn open(&self) -> bool {
         self.open
     }

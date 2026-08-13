@@ -91,9 +91,9 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
 
     // Arriving in Data straight from a take used to mean finding your own
     // recording in a list by eye, because Live review and Data selection are
-    // deliberately separate state. Filling an *empty* Data selection with the
-    // take just reviewed in Live closes that gap without overriding a choice
-    // the operator already made — a deliberate selection is never replaced.
+    // deliberately separate state. Restore the take only while it still
+    // belongs to the active dataset. External deletion must clear the stale
+    // review identity instead of fighting the Episodes panel's reconciliation.
     use_effect(move || {
         if activity != Activity::Data {
             return;
@@ -104,7 +104,18 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
         let Some(recent) = live_review_episode() else {
             return;
         };
-        studio.selected_episode.set(Some(recent));
+        let dataset_id = studio.selected_dataset.read();
+        let available = studio.episodes().into_iter().any(|episode| {
+            episode.id == recent
+                && episode.dataset_id == *dataset_id
+                && episode.usable()
+                && !episode.discarded
+        });
+        if available {
+            studio.selected_episode.set(Some(recent));
+        } else if live_review_episode.peek().as_deref() == Some(recent.as_str()) {
+            live_review_episode.set(None);
+        }
     });
 
     // Visual preview is a controller-owned clock. It advances the one playhead

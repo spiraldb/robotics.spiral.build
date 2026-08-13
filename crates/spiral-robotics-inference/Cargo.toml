@@ -8,15 +8,18 @@ publish = false
 [features]
 default = ["cli"]
 accelerate = ["burn-ndarray/blas-accelerate"]
+# Burn 0.21's fusion planner can reuse an invalid ordering after a recurring
+# training graph synchronizes scalar losses, while CubeCL 0.10's autotune
+# profiler can invalidate its Metal timestamp readback buffer on production ACT
+# shapes. Keep Metal eager with statically selected kernels until those fixes
+# are available together in a stable Burn release.
 metal = [
     "dep:burn-wgpu",
     "dep:futures-lite",
     "dep:wgpu",
-    "burn-wgpu/autotune",
-    "burn-wgpu/fusion",
     "burn-wgpu/metal",
 ]
-download = ["dep:dirs", "dep:reqwest", "dep:tempfile"]
+download = ["dep:dirs", "dep:reqwest", "dep:tempfile", "burn-store/pytorch"]
 cli = ["dep:clap", "dep:image", "download"]
 
 [dependencies]

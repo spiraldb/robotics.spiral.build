@@ -84,10 +84,7 @@ pub(crate) fn SettingsPanel(
                         }
                         testing.set(false);
                     } else {
-                        studio.report_success_from(
-                            MessageSource::Settings,
-                            "Data settings saved on the backend.",
-                        );
+                        studio.report_success_from(MessageSource::Settings, "Settings saved.");
                     }
                 }
                 Err(error) => studio.report_from(MessageSource::Settings, error),
@@ -115,7 +112,7 @@ pub(crate) fn SettingsPanel(
             header { class: "settings-header",
                 div {
                     h2 { id: "data-settings-title", "Settings" }
-                    p { "Robot hardware and backend-owned data destinations." }
+                    p { "Robots, storage, and video." }
                 }
                 button {
                     id: "settings-close-button",
@@ -145,7 +142,7 @@ pub(crate) fn SettingsPanel(
                         match section() {
                             SettingsSection::Robots => rsx! {},
                             SettingsSection::Spiral => rsx! {
-                                ProviderHeading { title: "SpiralDB", description: "Primary relational episode store, connected through the standard ADBC interface." }
+                                ProviderHeading { title: "SpiralDB", description: "Store and query episodes, video, and checkpoints." }
                                 label { class: "settings-field",
                                     span { "Catalog" }
                                     select {
@@ -160,13 +157,18 @@ pub(crate) fn SettingsPanel(
                                     SettingsField { label: "Project", value: current().spiral.project_id, placeholder: "Required for a SpiralDB service", disabled: current().spiral.uri.trim() == "spiral:memory:", oninput: move |value| current.write().spiral.project_id = value }
                                     SettingsField { label: "Namespace", value: current().spiral.dataset, placeholder: "spiral_robotics", oninput: move |value| current.write().spiral.dataset = value }
                                 }
-                                p { class: "settings-help", "The namespace contains Spiral Robotics' datasets, episodes, streams, samples, video assets, and checkpoints tables. For a local SpiralDB stack, keep the service catalog selected and start this backend with SPIRAL__SERVER__URL and SPIRAL__SPFS__URL pointing at that stack. The in-memory option is disposable. The backend also requires --spiral-adbc-driver or SPIRALDB_ADBC_DRIVER." }
+                                p { class: "settings-help",
+                                    if current().spiral.uri.trim() == "spiral:memory:" {
+                                        "Temporary data is cleared when Studio stops."
+                                    } else {
+                                        "Choose the project and namespace this Studio should use."
+                                    }
+                                }
                                 button { r#type: "button", class: "btn btn-outline", disabled: saving() || testing(), onclick: move |_| save(Some("/api/settings/data/test/spiral")), if testing() { "Testing…" } else { "Save and test connection" } }
                             },
                             SettingsSection::Video => rsx! {
-                                ProviderHeading { title: "Video", description: "Cameras are encoded on the backend, then indexed with Spiral's MP4 and video plugins." }
-                                ToggleField { label: "Record assigned cameras with each episode", checked: current().video.enabled, onchange: move |value| current.write().video.enabled = value }
-                                p { class: "settings-help", "The backend operator chooses FFmpeg and its codec at server startup. MP4 payloads are ingested through ADBC. Service projects maintain one immutable managed MP4 index per completed episode; memory sessions expose the same MP4 and video functions ad hoc." }
+                                ProviderHeading { title: "Video", description: "Include assigned cameras in new episodes." }
+                                ToggleField { label: "Record video", checked: current().video.enabled, onchange: move |value| current.write().video.enabled = value }
                             },
                         }
                         if let Some(response) = test_result() {
@@ -184,7 +186,7 @@ pub(crate) fn SettingsPanel(
                     span { "Robot changes are saved immediately." }
                     div { button { r#type: "button", class: "btn btn-primary", onclick: move |_| on_close.call(()), "Done" } }
                 } else {
-                    span { "Data settings stay on this backend." }
+                    span { "Applies to this Studio." }
                     div {
                         button { r#type: "button", class: "btn", onclick: move |_| on_close.call(()), "Cancel" }
                         button { r#type: "button", class: "btn btn-primary", disabled: saving(), onclick: move |_| save(None), if saving() { "Saving…" } else { "Save settings" } }

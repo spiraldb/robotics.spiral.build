@@ -45,6 +45,19 @@ pub(crate) async fn send_json<B: Serialize, T: DeserializeOwned>(
     decode(&request(method, path, body).await?, path)
 }
 
+/// Send JSON with a browser-owned cancellation signal. Aborting releases the
+/// UI immediately; hosted ADBC work is isolated on its own checked-out
+/// connection, so a slow abandoned query cannot block publication or replay.
+pub(crate) async fn send_json_abortable<B: Serialize, T: DeserializeOwned>(
+    method: Method,
+    path: &str,
+    body: Option<&B>,
+    signal: Option<&web_sys::AbortSignal>,
+) -> Result<T, String> {
+    let body = body.map(to_value).transpose()?;
+    decode(&request_with_abort(method, path, body, signal).await?, path)
+}
+
 /// POST with no request body.
 pub(crate) async fn post(path: &str) -> Result<(), String> {
     send::<()>(Method::POST, path, None).await
@@ -123,6 +136,53 @@ pub(crate) async fn upload_json<T: DeserializeOwned>(
         .unwrap_or_else(|_| format!("upload to {path} failed with status {status}")))
 }
 
+/// Upload the browser's native File object directly through Fetch. This avoids
+/// copying a potentially hundreds-of-megabytes archive through Rust/WASM and
+/// a second JavaScript Uint8Array before the network request can begin.
+pub(crate) async fn upload_file_json<T: DeserializeOwned>(
+    path: &str,
+    file: &dioxus::html::FileData,
+    content_type: &str,
+) -> Result<T, String> {
+    #[cfg(target_arch = "wasm32")]
+    let request = {
+        let web_file = file
+            .inner()
+            .downcast_ref::<web_sys::File>()
+            .cloned()
+            .ok_or_else(|| format!("{} is not a browser file", file.name()))?;
+        RequestBuilder::new(path)
+            .method(Method::POST)
+            .header("Content-Type", content_type)
+            .body(web_file)
+            .map_err(|error| format!("could not build the upload: {error}"))?
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let request = {
+        let bytes = file
+            .read_bytes()
+            .await
+            .map_err(|error| format!("could not read {}: {error}", file.name()))?;
+        RequestBuilder::new(path)
+            .method(Method::POST)
+            .header("Content-Type", content_type)
+            .body(Uint8Array::from(bytes.as_ref()))
+            .map_err(|error| format!("could not build the upload: {error}"))?
+    };
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("the studio server is unreachable: {error}"))?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if (200..300).contains(&status) {
+        return decode(&text, path);
+    }
+    Err(serde_json::from_str::<ApiError>(&text)
+        .map(|failure| failure.error)
+        .unwrap_or_else(|_| format!("upload to {path} failed with status {status}")))
+}
+
 fn to_value<B: Serialize>(body: &B) -> Result<Value, String> {
     serde_json::to_value(body).map_err(|error| format!("could not encode the request: {error}"))
 }
@@ -133,7 +193,18 @@ fn decode<T: DeserializeOwned>(body: &str, path: &str) -> Result<T, String> {
 }
 
 async fn request(method: Method, path: &str, body: Option<Value>) -> Result<String, String> {
-    let builder = RequestBuilder::new(path).method(method);
+    request_with_abort(method, path, body, None).await
+}
+
+async fn request_with_abort(
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+    signal: Option<&web_sys::AbortSignal>,
+) -> Result<String, String> {
+    let builder = RequestBuilder::new(path)
+        .method(method)
+        .abort_signal(signal);
     let request = match body {
         Some(value) => builder.json(&value),
         None => builder.build(),

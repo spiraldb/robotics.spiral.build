@@ -5,7 +5,6 @@
 //! autodiff, optimization, validation, and checkpoint export stay in Rust.
 
 use std::collections::HashMap;
-use std::f64::consts::PI;
 use std::rc::Rc;
 
 use burn_autodiff::Autodiff;
@@ -13,8 +12,7 @@ use burn_core as burn;
 use burn_core::module::{AutodiffModule, Initializer, Module, Param};
 use burn_core::tensor::backend::{AutodiffBackend, Backend};
 use burn_core::tensor::{Bool, Distribution, Tensor, TensorData};
-use burn_nn::transformer::{TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput};
-use burn_nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
+use burn_nn::{Linear, LinearConfig};
 use burn_optim::adaptor::OptimizerAdaptor;
 use burn_optim::grad_clipping::GradientClippingConfig;
 use burn_optim::{AdamW, AdamWConfig, GradientsParams, Optimizer};
@@ -23,6 +21,7 @@ use safetensors::tensor::{Dtype, TensorView, serialize};
 
 use crate::{Error, Result};
 
+use super::layers::EncoderLayer;
 use super::model::ActModel;
 use super::weights::Weights;
 
@@ -123,6 +122,7 @@ pub struct VisionActTrainingConfig {
     pub attention_heads: usize,
     pub feedforward_dimensions: usize,
     pub encoder_layers: usize,
+    pub vae_encoder_layers: usize,
     pub decoder_layers: usize,
     pub kl_weight: f64,
     pub learning_rate: f64,
@@ -144,6 +144,7 @@ impl VisionActTrainingConfig {
             || !self.hidden_dimensions.is_multiple_of(self.attention_heads)
             || self.feedforward_dimensions < self.hidden_dimensions
             || self.encoder_layers == 0
+            || self.vae_encoder_layers == 0
             || self.decoder_layers == 0
             || self.total_steps == 0
             || !self.kl_weight.is_finite()
@@ -272,13 +273,13 @@ trait TrainerEngine: Send {
 #[derive(Module, Debug)]
 struct FullActModel<B: Backend> {
     model: ActModel<B>,
-    cvae_encoder: TransformerEncoder<B>,
+    cvae_encoder: Vec<EncoderLayer<B>>,
     cvae_cls: Param<Tensor<B, 3>>,
     cvae_state: Linear<B>,
     cvae_action: Linear<B>,
-    cvae_position: Embedding<B>,
     latent_stats: Linear<B>,
-    pad_head: Linear<B>,
+    chunk_size: usize,
+    hidden_dimensions: usize,
     latent_dimensions: usize,
 }
 
@@ -304,34 +305,33 @@ impl<B: Backend> FullActModel<B> {
             pretrained,
             device,
         )?;
-        let cvae_encoder = TransformerEncoderConfig::new(
-            config.hidden_dimensions,
-            config.feedforward_dimensions,
-            config.attention_heads,
-            config.encoder_layers,
-        )
-        .with_dropout(0.1)
-        .with_norm_first(false)
-        .with_activation(burn_nn::activation::ActivationConfig::Relu)
-        .init(device);
-        let cvae_position = EmbeddingConfig::new(config.chunk_size + 2, config.hidden_dimensions)
-            .with_initializer(Initializer::Normal {
-                mean: 0.0,
-                std: 0.02,
+        let cvae_encoder = (0..config.vae_encoder_layers)
+            .map(|_| {
+                EncoderLayer::init_vae(
+                    config.hidden_dimensions,
+                    config.attention_heads,
+                    config.feedforward_dimensions,
+                    0.1,
+                    device,
+                )
             })
-            .init(device);
+            .collect();
         Ok(Self {
             model,
             cvae_encoder,
-            cvae_cls: Param::from_tensor(Tensor::zeros([1, 1, config.hidden_dimensions], device)),
+            cvae_cls: Initializer::Normal {
+                mean: 0.0,
+                std: 1.0,
+            }
+            .init([1, 1, config.hidden_dimensions], device),
             cvae_state: LinearConfig::new(config.state_dimensions, config.hidden_dimensions)
                 .init(device),
             cvae_action: LinearConfig::new(config.action_dimensions, config.hidden_dimensions)
                 .init(device),
-            cvae_position,
             latent_stats: LinearConfig::new(config.hidden_dimensions, config.latent_dimensions * 2)
                 .init(device),
-            pad_head: LinearConfig::new(config.hidden_dimensions, 1).init(device),
+            chunk_size: config.chunk_size,
+            hidden_dimensions: config.hidden_dimensions,
             latent_dimensions: config.latent_dimensions,
         })
     }
@@ -347,26 +347,28 @@ impl<B: Backend> FullActModel<B> {
         let cls = self.cvae_cls.val().repeat_dim(0, batch);
         let state_token = self.cvae_state.forward(state.clone()).unsqueeze_dim(1);
         let action_tokens = self.cvae_action.forward(actions);
-        let tokens = Tensor::cat(vec![cls, state_token, action_tokens], 1)
-            + self.cvae_position.weight.val().unsqueeze_dim(0);
+        let mut tokens = Tensor::cat(vec![cls, state_token, action_tokens], 1);
+        let position = sinusoidal_position_embedding_1d::<B>(
+            self.chunk_size + 2,
+            self.hidden_dimensions,
+            &state.device(),
+        )
+        .unsqueeze_dim(0);
         let prefix_mask = Tensor::<B, 2, Bool>::zeros([batch, 2], &state.device());
         let padding = Tensor::cat(vec![prefix_mask, action_is_pad], 1);
-        let encoded = self
-            .cvae_encoder
-            .forward(TransformerEncoderInput::new(tokens).mask_pad(padding))
-            .narrow(1, 0, 1)
-            .squeeze_dim(1);
+        for layer in &self.cvae_encoder {
+            tokens = layer.forward_with_padding(tokens, &position, Some(padding.clone()));
+        }
+        let encoded = tokens.narrow(1, 0, 1).squeeze_dim(1);
         let stats = self.latent_stats.forward(encoded);
         let mean = stats.clone().narrow(1, 0, self.latent_dimensions);
         let log_variance = stats.narrow(1, self.latent_dimensions, self.latent_dimensions);
         let noise = mean.random_like(Distribution::Normal(0.0, 1.0));
         let latent = mean.clone() + log_variance.clone().mul_scalar(0.5).exp() * noise;
         let hidden = self.model.forward_hidden_with_latent(state, images, latent);
-        let actions = self.model.action_head.forward(hidden.clone());
-        let padding = self.pad_head.forward(hidden).squeeze_dim(2);
+        let actions = self.model.action_head.forward(hidden);
         ModelOutput {
             actions,
-            padding,
             mean,
             log_variance,
         }
@@ -375,7 +377,6 @@ impl<B: Backend> FullActModel<B> {
 
 struct ModelOutput<B: Backend> {
     actions: Tensor<B, 3>,
-    padding: Tensor<B, 2>,
     mean: Tensor<B, 2>,
     log_variance: Tensor<B, 2>,
 }
@@ -384,7 +385,6 @@ struct LossOutput<B: Backend> {
     total: Tensor<B, 1>,
     l1: Tensor<B, 1>,
     kl: Tensor<B, 1>,
-    pad: Tensor<B, 1>,
 }
 
 struct DeviceBatch<B: Backend> {
@@ -414,7 +414,7 @@ impl<B: AutodiffBackend> Trainer<B> {
         let model = FullActModel::init(&config, pretrained.as_ref(), &device)?;
         let optimizer = AdamWConfig::new()
             .with_weight_decay(1.0e-4)
-            .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(10.0)))
             .init();
         Ok(Self {
             config,
@@ -487,7 +487,8 @@ where
     }
 
     fn learning_rate(&self, step: u64) -> f64 {
-        cosine_learning_rate(self.config.learning_rate, step, self.config.total_steps)
+        let _ = step;
+        self.config.learning_rate
     }
 
     fn train_step(&mut self, batch: VisionActBatch, step: u64) -> Result<VisionActLoss> {
@@ -509,7 +510,6 @@ where
             loss.total.clone().inner(),
             loss.l1.inner(),
             loss.kl.inner(),
-            loss.pad.inner(),
         )?;
         if !metrics.total.is_finite() {
             return Err(Error::Inference(format!(
@@ -540,7 +540,7 @@ where
             batch.action_is_pad,
             self.config.kl_weight,
         );
-        read_loss::<B::InnerBackend>(loss.total, loss.l1, loss.kl, loss.pad)
+        read_loss::<B::InnerBackend>(loss.total, loss.l1, loss.kl)
     }
 
     fn checkpoint(&self, checkpoint: VisionActCheckpoint<'_>) -> Result<Vec<u8>> {
@@ -622,10 +622,6 @@ fn act_loss<B: Backend>(
     let keep = target_pad.clone().bool_not().float().unsqueeze_dim(2);
     let action_values = keep.clone().sum().clamp_min(1.0) * target.dims()[2] as f64;
     let l1 = ((output.actions - target).abs() * keep).sum() / action_values;
-    let pad_target = target_pad.float();
-    let pad = (output.padding.clone().clamp_min(0.0) - output.padding.clone() * pad_target
-        + output.padding.abs().neg().exp().add_scalar(1.0).log())
-    .mean();
     let kl = (output.log_variance.clone().add_scalar(1.0)
         - output.mean.square()
         - output.log_variance.exp())
@@ -633,21 +629,43 @@ fn act_loss<B: Backend>(
     .sum_dim(1)
     .mean();
     let total = l1.clone() + kl.clone().mul_scalar(kl_weight);
-    LossOutput { total, l1, kl, pad }
+    LossOutput { total, l1, kl }
 }
 
 fn read_loss<B: Backend>(
     total: Tensor<B, 1>,
     l1: Tensor<B, 1>,
     kl: Tensor<B, 1>,
-    pad: Tensor<B, 1>,
 ) -> Result<VisionActLoss> {
     Ok(VisionActLoss {
         total: scalar(total)?,
         l1: scalar(l1)?,
         kl: scalar(kl)?,
-        pad: scalar(pad)?,
+        // Kept in the public diagnostics shape for older Studio clients. ACT
+        // has no pad prediction head or pad loss.
+        pad: 0.0,
     })
+}
+
+/// Fixed 1D sinusoidal positions used by LeRobot's VAE encoder.
+fn sinusoidal_position_embedding_1d<B: Backend>(
+    positions: usize,
+    dimensions: usize,
+    device: &B::Device,
+) -> Tensor<B, 2> {
+    let mut values = vec![0.0; positions * dimensions];
+    for position in 0..positions {
+        for dimension in 0..dimensions {
+            let divisor = 10_000.0_f32.powf(2.0 * ((dimension / 2) as f32) / dimensions as f32);
+            let angle = position as f32 / divisor;
+            values[position * dimensions + dimension] = if dimension % 2 == 0 {
+                angle.sin()
+            } else {
+                angle.cos()
+            };
+        }
+    }
+    Tensor::from_data(TensorData::new(values, [positions, dimensions]), device)
 }
 
 fn scalar<B: Backend>(value: Tensor<B, 1>) -> Result<f64> {
@@ -661,12 +679,6 @@ fn scalar<B: Backend>(value: Tensor<B, 1>) -> Result<f64> {
         .copied()
         .map(f64::from)
         .ok_or_else(|| Error::Inference("Burn returned an empty scalar tensor".to_owned()))
-}
-
-fn cosine_learning_rate(initial: f64, step: u64, total_steps: u64) -> f64 {
-    let minimum = initial.min(1.0e-6);
-    let progress = (step.min(total_steps) as f64) / total_steps.max(1) as f64;
-    minimum + (initial - minimum) * (1.0 + (PI * progress).cos()) * 0.5
 }
 
 fn resnet18_feature_size(height: usize, width: usize) -> (usize, usize) {
@@ -817,9 +829,71 @@ mod tests {
     }
 
     #[test]
-    fn cosine_schedule_reaches_its_floor() {
-        assert_eq!(cosine_learning_rate(1.0e-5, 0, 100), 1.0e-5);
-        assert!((cosine_learning_rate(1.0e-5, 100, 100) - 1.0e-6).abs() < 1.0e-12);
+    fn act_learning_rate_has_no_scheduler() {
+        let config = VisionActTrainingConfig {
+            state_dimensions: 2,
+            action_dimensions: 2,
+            camera_streams: vec!["wrist".to_owned()],
+            image_width: 32,
+            image_height: 32,
+            chunk_size: 2,
+            hidden_dimensions: 16,
+            latent_dimensions: 4,
+            attention_heads: 4,
+            feedforward_dimensions: 32,
+            encoder_layers: 1,
+            vae_encoder_layers: 1,
+            decoder_layers: 1,
+            kl_weight: 1.0,
+            learning_rate: 1.0e-5,
+            total_steps: 100,
+            seed: 42,
+        };
+        let trainer = NativeActTrainer::new(config, "cpu", None).unwrap();
+        assert_eq!(trainer.learning_rate(0), 1.0e-5);
+        assert_eq!(trainer.learning_rate(50), 1.0e-5);
+        assert_eq!(trainer.learning_rate(100), 1.0e-5);
+    }
+
+    #[test]
+    fn vae_positions_match_the_fixed_lerobot_sinusoid() {
+        type B = burn_ndarray::NdArray<f32>;
+        let positions = sinusoidal_position_embedding_1d::<B>(3, 8, &Default::default())
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
+        assert_eq!(&positions[..8], &[0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+        assert!((positions[8] - 1.0_f32.sin()).abs() < 1.0e-6);
+        assert!((positions[9] - 1.0_f32.cos()).abs() < 1.0e-6);
+        assert!((positions[10] - 0.1_f32.sin()).abs() < 1.0e-6);
+        assert!((positions[11] - 0.1_f32.cos()).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn vae_depth_is_independent_from_the_main_encoder_depth() {
+        type B = burn_ndarray::NdArray<f32>;
+        let config = VisionActTrainingConfig {
+            state_dimensions: 2,
+            action_dimensions: 2,
+            camera_streams: vec!["wrist".to_owned()],
+            image_width: 32,
+            image_height: 32,
+            chunk_size: 2,
+            hidden_dimensions: 16,
+            latent_dimensions: 4,
+            attention_heads: 4,
+            feedforward_dimensions: 32,
+            encoder_layers: 1,
+            vae_encoder_layers: 3,
+            decoder_layers: 1,
+            kl_weight: 1.0,
+            learning_rate: 1.0e-5,
+            total_steps: 1,
+            seed: 1_000,
+        };
+        let model = FullActModel::<B>::init(&config, None, &Default::default()).unwrap();
+        assert_eq!(model.model.encoder_layer_count(), 1);
+        assert_eq!(model.cvae_encoder.len(), 3);
     }
 
     #[test]
@@ -839,6 +913,7 @@ mod tests {
             attention_heads: 8,
             feedforward_dimensions: 128,
             encoder_layers: 1,
+            vae_encoder_layers: 2,
             decoder_layers: 1,
             kl_weight: 10.0,
             learning_rate: 1.0e-5,
@@ -870,6 +945,14 @@ mod tests {
                 action_std: &ones,
             })
             .unwrap();
+        let tensors = safetensors::SafeTensors::deserialize(&weights).unwrap();
+        assert!(
+            tensors
+                .names()
+                .iter()
+                .all(|name| !name.contains("camera_embedding") && !name.contains("pad_head")),
+            "new native ACT checkpoints must not contain Spiral-only camera or pad heads"
+        );
         let model_config = serde_json::json!({
             "type": "act",
             "n_obs_steps": 1,
@@ -891,10 +974,11 @@ mod tests {
             "dim_feedforward": 128,
             "feedforward_activation": "relu",
             "n_encoder_layers": 1,
+            "n_vae_encoder_layers": 2,
             "n_decoder_layers": 1,
             "use_vae": true,
             "latent_dim": 8,
-            "spiral_camera_embedding": true,
+            "spiral_camera_embedding": false,
             "spiral_camera_order": ["wrist"]
         });
         let artifact =
@@ -902,5 +986,64 @@ mod tests {
         let policy = super::super::engine::load_cpu_artifact(artifact).unwrap();
         assert_eq!(policy.specification().action_chunk_size, 4);
         assert_eq!(policy.specification().image_inputs[0].name, "wrist");
+    }
+
+    /// Burn 0.21's optional fusion planner reuses an invalid cached ordering
+    /// after a recurring graph synchronizes scalar losses, and CubeCL 0.10's
+    /// autotune profiler can invalidate its Metal timestamp readback buffer.
+    /// Keep the full train/validate/checkpoint sequence covered on eager Metal
+    /// so either feature can't silently restore a training-loop panic.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[test]
+    fn metal_repeats_training_sync_segments_and_checkpoints() {
+        if !super::super::engine::metal_available() {
+            return;
+        }
+
+        let config = VisionActTrainingConfig {
+            state_dimensions: 2,
+            action_dimensions: 2,
+            camera_streams: vec!["wrist".to_owned()],
+            image_width: 32,
+            image_height: 32,
+            chunk_size: 2,
+            hidden_dimensions: 16,
+            latent_dimensions: 4,
+            attention_heads: 4,
+            feedforward_dimensions: 32,
+            encoder_layers: 1,
+            vae_encoder_layers: 1,
+            decoder_layers: 1,
+            kl_weight: 1.0,
+            learning_rate: 1.0e-5,
+            total_steps: 2,
+            seed: 42,
+        };
+        let batch = || VisionActBatch {
+            batch_size: 1,
+            states: vec![0.0; 2],
+            images: vec![0.0; 3 * 32 * 32],
+            actions: vec![0.0; 2 * 2],
+            action_is_pad: vec![false; 2],
+        };
+        let mut trainer = NativeActTrainer::new(config, "metal", None).unwrap();
+
+        for step in 1..=2 {
+            assert!(trainer.train_step(batch(), step).unwrap().total.is_finite());
+        }
+        assert!(trainer.validation_step(batch()).unwrap().total.is_finite());
+
+        let zeros = [0.0; 2];
+        let ones = [1.0; 2];
+        let checkpoint = trainer
+            .checkpoint(VisionActCheckpoint {
+                manifest_json: "{}",
+                state_mean: &zeros,
+                state_std: &ones,
+                action_mean: &zeros,
+                action_std: &ones,
+            })
+            .unwrap();
+        assert!(!checkpoint.is_empty());
     }
 }

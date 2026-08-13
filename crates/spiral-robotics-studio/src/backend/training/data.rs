@@ -1,8 +1,9 @@
 //! Spiral ADBC to Burn ACT batch preparation.
 //!
-//! Video frame selection, decode, resize, CHW conversion, and ImageNet
-//! normalization remain SPQL operations. This module only validates Arrow's
-//! tensor storage and packs finite host buffers for Burn.
+//! Video frame selection, decode, optional resize, CHW conversion, and
+//! ImageNet normalization remain SPQL operations. This module also derives
+//! the dataset state/action normalization contract before packing finite host
+//! buffers for Burn.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -51,6 +52,8 @@ struct VideoSegment {
     timeline_offset_ns: i64,
     fps: u64,
     frames: u64,
+    width: usize,
+    height: usize,
     media_relation: String,
 }
 
@@ -63,10 +66,20 @@ impl VideoSegment {
         self.start_seconds() + self.frames as f64 / self.fps as f64
     }
 
-    fn sample_bounds(&self, sample_hz: f64) -> (i64, i64) {
-        let first = (self.start_seconds() * sample_hz).ceil() as i64;
-        let last = (self.end_seconds() * sample_hz).ceil() as i64 - 1;
-        (first, last)
+    fn sample_bounds(&self, sample_hz: f64) -> Option<(i64, i64)> {
+        // Start one candidate outside each ideal boundary, then use the same
+        // predicate as frame selection to trim the interval. Computing
+        // `ceil(end * sample_hz) - 1` directly can admit the exact end sample:
+        // for example, `62 / 30 * 60` rounds to `124.00000000000001`.
+        let mut first = (self.start_seconds() * sample_hz).floor() as i64;
+        let mut last = (self.end_seconds() * sample_hz).ceil() as i64;
+        while first <= last && self.frame_for(first, sample_hz).is_none() {
+            first += 1;
+        }
+        while first <= last && self.frame_for(last, sample_hz).is_none() {
+            last -= 1;
+        }
+        (first <= last).then_some((first, last))
     }
 
     fn frame_for(&self, sample_index: i64, sample_hz: f64) -> Option<u64> {
@@ -117,7 +130,7 @@ pub(crate) struct NormalizationStats {
 }
 
 impl NormalizationStats {
-    fn normalized_joint_space(state: usize, action: usize) -> Self {
+    fn identity(state: usize, action: usize) -> Self {
         Self {
             state_mean: vec![0.0; state],
             state_std: vec![1.0; state],
@@ -151,6 +164,7 @@ pub(crate) struct SpiralActLoader<'a> {
     chunk_size: usize,
     image_width: usize,
     image_height: usize,
+    resize_images: bool,
     video_decoder: String,
     train_ranges: Vec<SampleRange>,
     validation_ranges: Vec<SampleRange>,
@@ -190,6 +204,7 @@ impl<'a> SpiralActLoader<'a> {
             chunk_size: request.chunk_size,
             image_width: request.act.image_width,
             image_height: request.act.image_height,
+            resize_images: request.act.image_width != 0,
             video_decoder: request.act.video_decoder.clone(),
             train_ranges: Vec::new(),
             validation_ranges: Vec::new(),
@@ -198,7 +213,7 @@ impl<'a> SpiralActLoader<'a> {
             video_segments: BTreeMap::new(),
             train_random: SplitMix64::new(request.seed),
             validation_random: SplitMix64::new(request.seed ^ 0xA17C_9E3D),
-            stats: NormalizationStats::normalized_joint_space(1, 1),
+            stats: NormalizationStats::identity(1, 1),
             joint_names: Vec::new(),
             robot_type: String::new(),
             sample_hz: 0.0,
@@ -214,17 +229,27 @@ impl<'a> SpiralActLoader<'a> {
         loader.sample_hz = ranges[0].sample_hz;
         let contracts = loader.load_stream_contracts(&ranges)?;
         loader.video_segments = loader.load_video_segments(&ranges)?;
+        if loader.camera_streams.is_empty() {
+            loader.camera_streams = common_camera_streams(&loader.video_segments, &ranges);
+            if loader.camera_streams.is_empty() {
+                return Err(
+                    "the selected dataset episodes do not share a recorded camera stream"
+                        .to_owned(),
+                );
+            }
+            if loader.camera_streams.len() > 8 {
+                return Err(format!(
+                    "ACT supports at most eight camera streams, but the selected dataset has {}",
+                    loader.camera_streams.len()
+                ));
+            }
+        }
         let ranges = loader.require_camera_coverage(&ranges);
-        loader.train_ranges = ranges
-            .iter()
-            .filter(|range| !validation_episode(&range.episode_id))
-            .cloned()
-            .collect();
-        loader.validation_ranges = ranges
-            .iter()
-            .filter(|range| validation_episode(&range.episode_id))
-            .cloned()
-            .collect();
+        loader.resolve_image_dimensions(&ranges)?;
+        loader.train_ranges = ranges;
+        // LeRobot's dataset factory defaults eval_split to 0.0. Studio does
+        // not expose an explicit split yet, so every covered range trains.
+        loader.validation_ranges = Vec::new();
         if loader.train_ranges.is_empty() {
             return Err(
                 "the query has no training samples with complete synchronized camera coverage"
@@ -247,7 +272,7 @@ impl<'a> SpiralActLoader<'a> {
                     .to_owned(),
             );
         }
-        loader.stats = NormalizationStats::normalized_joint_space(state_dim, action_dim);
+        loader.stats = loader.load_normalization_stats(state_dim, action_dim)?;
         loader.joint_names = contract.joint_names.clone();
         loader.robot_type = contract.robot_type.clone();
         Ok(loader)
@@ -259,6 +284,18 @@ impl<'a> SpiralActLoader<'a> {
 
     pub(crate) fn action_dimensions(&self) -> usize {
         self.stats.action_mean.len()
+    }
+
+    pub(crate) fn image_width(&self) -> usize {
+        self.image_width
+    }
+
+    pub(crate) fn image_height(&self) -> usize {
+        self.image_height
+    }
+
+    pub(crate) fn camera_streams(&self) -> &[String] {
+        &self.camera_streams
     }
 
     pub(crate) fn has_validation(&self) -> bool {
@@ -439,17 +476,22 @@ impl<'a> SpiralActLoader<'a> {
         &mut self,
         ranges: &[SampleRange],
     ) -> Result<BTreeMap<(String, String), Vec<VideoSegment>>, String> {
-        let cameras = self
-            .camera_streams
-            .iter()
-            .map(|camera| sql_string(camera))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let camera_filter = if self.camera_streams.is_empty() {
+            String::new()
+        } else {
+            let cameras = self
+                .camera_streams
+                .iter()
+                .map(|camera| sql_string(camera))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(" WHERE stream_id IN ({cameras})")
+        };
         let query = format!(
             "SELECT episode_id, stream_id AS camera_stream_id, segment_index, \
-             timeline_offset_ns, fps, frames, media_relation FROM {}.video_assets \
-             WHERE stream_id IN ({cameras})",
-            self.dataset
+             timeline_offset_ns, fps, frames, width, height, media_relation FROM {}.video_assets \
+             {camera_filter}",
+            self.dataset,
         );
         let wanted = ranges
             .iter()
@@ -477,10 +519,20 @@ impl<'a> SpiralActLoader<'a> {
                     frames: integer_value(required(batch, "frames")?, row)?
                         .try_into()
                         .map_err(|_| "camera frame count must be positive".to_owned())?,
+                    width: integer_value(required(batch, "width")?, row)?
+                        .try_into()
+                        .map_err(|_| "camera width must be positive".to_owned())?,
+                    height: integer_value(required(batch, "height")?, row)?
+                        .try_into()
+                        .map_err(|_| "camera height must be positive".to_owned())?,
                     media_relation,
                 };
-                if segment.fps == 0 || segment.frames == 0 {
-                    return Err("camera segment has an invalid fixed-FPS contract".to_owned());
+                if segment.fps == 0
+                    || segment.frames == 0
+                    || segment.width == 0
+                    || segment.height == 0
+                {
+                    return Err("camera segment has an invalid video contract".to_owned());
                 }
                 segments
                     .entry((episode_id, camera_stream_id))
@@ -500,6 +552,43 @@ impl<'a> SpiralActLoader<'a> {
         Ok(segments)
     }
 
+    fn resolve_image_dimensions(&mut self, ranges: &[SampleRange]) -> Result<(), String> {
+        if self.resize_images {
+            return Ok(());
+        }
+        let mut dimensions = BTreeSet::new();
+        for range in ranges {
+            for camera in &self.camera_streams {
+                for segment in self
+                    .video_segments
+                    .get(&(range.episode_id.clone(), camera.clone()))
+                    .into_iter()
+                    .flatten()
+                {
+                    if segment
+                        .sample_bounds(range.sample_hz)
+                        .is_some_and(|bounds| {
+                            bounds.0 <= range.last_index && bounds.1 >= range.first_index
+                        })
+                    {
+                        dimensions.insert((segment.width, segment.height));
+                    }
+                }
+            }
+        }
+        let Some(&(width, height)) = dimensions.iter().next() else {
+            return Err("training cameras have no recorded image dimensions".to_owned());
+        };
+        if dimensions.len() != 1 {
+            return Err(format!(
+                "native-resolution ACT requires one camera image size, found {dimensions:?}; set an explicit training width and height to resize"
+            ));
+        }
+        self.image_width = width;
+        self.image_height = height;
+        Ok(())
+    }
+
     fn require_camera_coverage(&self, ranges: &[SampleRange]) -> Vec<SampleRange> {
         let mut accepted = Vec::new();
         for range in ranges {
@@ -510,7 +599,7 @@ impl<'a> SpiralActLoader<'a> {
                     .get(&(range.episode_id.clone(), camera.clone()))
                     .into_iter()
                     .flatten()
-                    .map(|segment| segment.sample_bounds(range.sample_hz))
+                    .filter_map(|segment| segment.sample_bounds(range.sample_hz))
                     .collect::<Vec<_>>();
                 intervals = intersect_intervals(&intervals, &camera_intervals);
                 if intervals.is_empty() {
@@ -552,6 +641,51 @@ impl<'a> SpiralActLoader<'a> {
             return Err("sampled stream did not resolve to one vector contract row".to_owned());
         }
         Ok((rows[0].0.len(), rows[0].1.len()))
+    }
+
+    fn load_normalization_stats(
+        &mut self,
+        state_dimensions: usize,
+        action_dimensions: usize,
+    ) -> Result<NormalizationStats, String> {
+        let query = format!(
+            "WITH training_rows AS ({}) \
+             SELECT episode_id, stream_id, sample_index, {} AS state_value, \
+             {} AS action_value FROM training_rows",
+            self.base_sql, self.state_column, self.action_column
+        );
+        let batches = query_batches(self.connection, &query)?;
+        let mut state = RunningMoments::new(state_dimensions);
+        let mut action = RunningMoments::new(action_dimensions);
+        for batch in &batches {
+            for row in 0..batch.num_rows() {
+                let episode_id = string_value(required(batch, "episode_id")?, row)?;
+                let stream_id = string_value(required(batch, "stream_id")?, row)?;
+                let sample_index = integer_value(required(batch, "sample_index")?, row)?;
+                if !self
+                    .train_ranges
+                    .iter()
+                    .chain(&self.validation_ranges)
+                    .any(|range| {
+                        range.episode_id == episode_id
+                            && range.stream_id == stream_id
+                            && (range.first_index..=range.last_index).contains(&sample_index)
+                    })
+                {
+                    continue;
+                }
+                state.update(&numeric_vector(required(batch, "state_value")?, row)?)?;
+                action.update(&numeric_vector(required(batch, "action_value")?, row)?)?;
+            }
+        }
+        let (state_mean, state_std) = state.finish("state")?;
+        let (action_mean, action_std) = action.finish("action")?;
+        Ok(NormalizationStats {
+            state_mean,
+            state_std,
+            action_mean,
+            action_std,
+        })
     }
 
     fn sample_anchors(
@@ -666,19 +800,17 @@ impl<'a> SpiralActLoader<'a> {
             }
             state_values.extend(state);
         }
-        let mut action_values =
-            Vec::with_capacity(batch_size * self.chunk_size * self.action_dimensions());
-        for row in actions {
-            for value in row {
-                match value {
-                    Some(value) if value.len() == self.action_dimensions() => {
-                        action_values.extend(value)
-                    }
-                    Some(_) => return Err("training query mixed action vector widths".to_owned()),
-                    None => action_values.extend(vec![0.0; self.action_dimensions()]),
-                }
-            }
-        }
+        normalize_vectors(
+            &mut state_values,
+            &self.stats.state_mean,
+            &self.stats.state_std,
+        );
+        let mut action_values = flatten_action_chunks(actions, self.action_dimensions())?;
+        normalize_vectors(
+            &mut action_values,
+            &self.stats.action_mean,
+            &self.stats.action_std,
+        );
         Ok((state_values, action_values, padding))
     }
 
@@ -695,25 +827,34 @@ impl<'a> SpiralActLoader<'a> {
                 .map(u64::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
+            let image_expression = if self.resize_images {
+                format!(
+                    "spql.image.to_tensor(spql.image.resize(spql.video.decode(f.frame, {}), $1, $2, 'bilinear'), 'chw', 'imagenet')",
+                    sql_string(&self.video_decoder)
+                )
+            } else {
+                format!(
+                    "spql.image.to_tensor(spql.video.decode(f.frame, {}), 'chw', 'imagenet')",
+                    sql_string(&self.video_decoder)
+                )
+            };
             let query = format!(
                 "SELECT f.request_index, \
-                 spql.image.to_tensor(\
-                   spql.image.resize(\
-                     spql.video.decode(f.frame, {}), $1, $2, 'bilinear'\
-                   ), 'chw', 'imagenet'\
-                 ) AS image \
+                 {image_expression} AS image \
                  FROM {} AS a CROSS JOIN LATERAL \
                  spql.video.frames(a.media, spql.video.frame_indices(ARRAY[{indices}])) AS f \
                  WHERE a.episode_id = {} AND a.stream_id = {} AND a.segment_index = {} \
                  ORDER BY f.request_index",
-                sql_string(&self.video_decoder),
                 group.media_relation,
                 sql_string(&group.episode_id),
                 sql_string(&group.camera_stream_id),
                 group.segment_index,
             );
-            let batches =
-                query_image_batches(self.connection, &query, self.image_width, self.image_height)?;
+            let batches = if self.resize_images {
+                query_image_batches(self.connection, &query, self.image_width, self.image_height)?
+            } else {
+                query_batches(self.connection, &query)?
+            };
             for batch in &batches {
                 for row in 0..batch.num_rows() {
                     let request: usize = integer_value(required(batch, "request_index")?, row)?
@@ -788,6 +929,29 @@ impl<'a> SpiralActLoader<'a> {
         }
         Ok(result)
     }
+}
+
+fn common_camera_streams(
+    segments: &BTreeMap<(String, String), Vec<VideoSegment>>,
+    ranges: &[SampleRange],
+) -> Vec<String> {
+    let episodes = ranges
+        .iter()
+        .map(|range| range.episode_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut common: Option<BTreeSet<String>> = None;
+    for episode in episodes {
+        let available = segments
+            .iter()
+            .filter(|((candidate, _), values)| candidate == episode && !values.is_empty())
+            .map(|((_, camera), _)| camera.clone())
+            .collect::<BTreeSet<_>>();
+        common = Some(match common {
+            None => available,
+            Some(previous) => previous.intersection(&available).cloned().collect(),
+        });
+    }
+    common.unwrap_or_default().into_iter().collect()
 }
 
 fn query_batches(
@@ -1069,18 +1233,6 @@ fn robot_type(value: Option<String>, stream_id: &str) -> Result<String, String> 
     }
 }
 
-fn validation_episode(episode_id: &str) -> bool {
-    // Stable FNV-1a split: unlike DefaultHasher this remains reproducible across
-    // Rust releases and processes without adding a hashing dependency.
-    let hash = episode_id
-        .as_bytes()
-        .iter()
-        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-            (hash ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3)
-        });
-    hash % 10 == 0
-}
-
 fn prefix(ranges: &[SampleRange]) -> Vec<u64> {
     let mut total = 0_u64;
     ranges
@@ -1094,6 +1246,98 @@ fn prefix(ranges: &[SampleRange]) -> Vec<u64> {
 
 fn range_count(ranges: &[SampleRange]) -> u64 {
     ranges.iter().map(SampleRange::count).sum()
+}
+
+#[derive(Clone, Debug)]
+struct RunningMoments {
+    count: u64,
+    mean: Vec<f64>,
+    squared_deviation: Vec<f64>,
+}
+
+impl RunningMoments {
+    fn new(dimensions: usize) -> Self {
+        Self {
+            count: 0,
+            mean: vec![0.0; dimensions],
+            squared_deviation: vec![0.0; dimensions],
+        }
+    }
+
+    fn update(&mut self, values: &[f32]) -> Result<(), String> {
+        if values.len() != self.mean.len() {
+            return Err("training query mixed vector widths while computing statistics".to_owned());
+        }
+        self.count += 1;
+        let count = self.count as f64;
+        for ((mean, squared_deviation), value) in self
+            .mean
+            .iter_mut()
+            .zip(&mut self.squared_deviation)
+            .zip(values)
+        {
+            let value = f64::from(*value);
+            let delta = value - *mean;
+            *mean += delta / count;
+            *squared_deviation += delta * (value - *mean);
+        }
+        Ok(())
+    }
+
+    fn finish(self, label: &str) -> Result<(Vec<f32>, Vec<f32>), String> {
+        if self.count == 0 {
+            return Err(format!(
+                "the accepted training population has no {label} vectors"
+            ));
+        }
+        let count = self.count as f64;
+        let means = self.mean.into_iter().map(|value| value as f32).collect();
+        let standard_deviations = self
+            .squared_deviation
+            .into_iter()
+            .map(|value| (value / count).max(0.0).sqrt() as f32)
+            .collect();
+        Ok((means, standard_deviations))
+    }
+}
+
+fn normalize_vectors(values: &mut [f32], means: &[f32], standard_deviations: &[f32]) {
+    const EPSILON: f32 = 1.0e-8;
+    for vector in values.chunks_exact_mut(means.len()) {
+        for ((value, mean), standard_deviation) in
+            vector.iter_mut().zip(means).zip(standard_deviations)
+        {
+            *value = (*value - mean) / (*standard_deviation + EPSILON);
+        }
+    }
+}
+
+fn flatten_action_chunks(
+    actions: Vec<Vec<Option<Vec<f32>>>>,
+    dimensions: usize,
+) -> Result<Vec<f32>, String> {
+    let capacity = actions
+        .iter()
+        .map(Vec::len)
+        .sum::<usize>()
+        .saturating_mul(dimensions);
+    let mut result = Vec::with_capacity(capacity);
+    for row in actions {
+        let mut last = None;
+        for value in row {
+            match value {
+                Some(value) if value.len() == dimensions => {
+                    result.extend_from_slice(&value);
+                    last = Some(value);
+                }
+                Some(_) => return Err("training query mixed action vector widths".to_owned()),
+                None => result.extend_from_slice(last.as_deref().ok_or_else(|| {
+                    "sampled action chunk is missing its anchor action".to_owned()
+                })?),
+            }
+        }
+    }
+    Ok(result)
 }
 
 fn intersect_intervals(left: &[(i64, i64)], right: &[(i64, i64)]) -> Vec<(i64, i64)> {
@@ -1177,13 +1421,45 @@ mod tests {
             timeline_offset_ns: 0,
             fps: 30,
             frames: 10,
+            width: 640,
+            height: 360,
             media_relation: "robotics.assets".to_owned(),
         };
-        assert_eq!(segment.sample_bounds(60.0), (0, 19));
+        assert_eq!(segment.sample_bounds(60.0), Some((0, 19)));
         assert_eq!(segment.frame_for(0, 60.0), Some(0));
         assert_eq!(segment.frame_for(1, 60.0), Some(0));
         assert_eq!(segment.frame_for(19, 60.0), Some(9));
         assert_eq!(segment.frame_for(20, 60.0), None);
+    }
+
+    #[test]
+    fn fixed_fps_coverage_excludes_exact_fractional_end_boundary() {
+        let segment = VideoSegment {
+            segment_index: 0,
+            timeline_offset_ns: 0,
+            fps: 30,
+            frames: 62,
+            width: 640,
+            height: 360,
+            media_relation: "robotics.assets".to_owned(),
+        };
+        assert_eq!(segment.sample_bounds(60.0), Some((0, 123)));
+        assert_eq!(segment.frame_for(123, 60.0), Some(61));
+        assert_eq!(segment.frame_for(124, 60.0), None);
+    }
+
+    #[test]
+    fn fixed_fps_coverage_omits_segments_between_sample_ticks() {
+        let segment = VideoSegment {
+            segment_index: 0,
+            timeline_offset_ns: 1,
+            fps: 120,
+            frames: 1,
+            width: 640,
+            height: 360,
+            media_relation: "robotics.assets".to_owned(),
+        };
+        assert_eq!(segment.sample_bounds(60.0), None);
     }
 
     #[test]
@@ -1195,8 +1471,70 @@ mod tests {
     }
 
     #[test]
+    fn automatic_camera_selection_uses_every_stream_shared_by_the_dataset() {
+        let segment = || VideoSegment {
+            segment_index: 0,
+            timeline_offset_ns: 0,
+            fps: 30,
+            frames: 10,
+            width: 640,
+            height: 480,
+            media_relation: "robotics.assets".to_owned(),
+        };
+        let mut segments = BTreeMap::new();
+        for episode in ["episode-1", "episode-2"] {
+            for camera in ["follower.camera.gripper", "follower.camera.top"] {
+                segments.insert((episode.to_owned(), camera.to_owned()), vec![segment()]);
+            }
+        }
+        segments.insert(
+            ("episode-1".to_owned(), "follower.camera.side".to_owned()),
+            vec![segment()],
+        );
+        let ranges = ["episode-1", "episode-2"].map(|episode_id| SampleRange {
+            episode_id: episode_id.to_owned(),
+            stream_id: "follower".to_owned(),
+            first_index: 0,
+            last_index: 9,
+            robot_type: "so101_follower".to_owned(),
+            sample_hz: 60.0,
+        });
+        assert_eq!(
+            common_camera_streams(&segments, &ranges),
+            ["follower.camera.gripper", "follower.camera.top"]
+        );
+    }
+
+    #[test]
     fn relation_names_are_never_interpolated_without_validation() {
         assert!(validate_relation("robotics.video_assets").is_ok());
         assert!(validate_relation("robotics.assets; DELETE").is_err());
+    }
+
+    #[test]
+    fn population_moments_use_population_standard_deviation() {
+        let mut moments = RunningMoments::new(2);
+        moments.update(&[1.0, 10.0]).unwrap();
+        moments.update(&[3.0, 14.0]).unwrap();
+        let (mean, standard_deviation) = moments.finish("state").unwrap();
+        assert_eq!(mean, [2.0, 12.0]);
+        assert_eq!(standard_deviation, [1.0, 2.0]);
+    }
+
+    #[test]
+    fn dataset_normalization_handles_constant_dimensions() {
+        let mut values = vec![2.0, 4.0, 2.0, 8.0];
+        normalize_vectors(&mut values, &[2.0, 6.0], &[0.0, 2.0]);
+        assert_eq!(values, [0.0, -1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn padded_action_slots_repeat_the_terminal_action() {
+        let values = flatten_action_chunks(
+            vec![vec![Some(vec![1.0, 2.0]), Some(vec![3.0, 4.0]), None, None]],
+            2,
+        )
+        .unwrap();
+        assert_eq!(values, [1.0, 2.0, 3.0, 4.0, 3.0, 4.0, 3.0, 4.0]);
     }
 }

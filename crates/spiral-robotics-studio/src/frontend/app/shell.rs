@@ -209,10 +209,10 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                 div { class: "status-bar-group",
                     span { class: "status-bar-item",
                         span { class: "status-dot", style: if backend_connected { "background: var(--tone-good)" } else { "background: var(--tone-danger)" } }
-                        if backend_connected { "Backend connected" } else { "Backend reconnecting" }
+                        if backend_connected { "Connected" } else { "Reconnecting" }
                     }
                     span { class: "status-bar-item",
-                        if training.readiness.ready { "Training runtime ready" } else { "Training runtime unavailable" }
+                        if training.readiness.ready { "Training ready" } else { "Training unavailable" }
                     }
                     span { class: "status-bar-item", "{training_runs_label}" }
                 }
@@ -225,7 +225,6 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                             "{message.text}"
                         }
                     }
-                    span { class: "status-bar-item status-bar-accent", "Training · ACT" }
                     if let Some(phase) = training_phase { span { class: "status-bar-item", "{phase}" } }
                     if let Some(step) = training_step { span { class: "status-bar-item", "{step}" } }
                     span { class: "status-bar-item", "{training_problems_label}" }

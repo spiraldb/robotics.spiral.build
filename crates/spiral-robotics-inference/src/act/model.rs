@@ -24,7 +24,9 @@ pub(super) struct ActModel<B: Backend> {
     state_projection: Linear<B>,
     latent_projection: Linear<B>,
     encoder_1d_position: Embedding<B>,
-    camera_embedding: Embedding<B>,
+    // LeRobot ACT uses the same 2D sinusoidal position encoding for every
+    // camera. Kept optional solely to load older Spiral-native checkpoints.
+    camera_embedding: Option<Embedding<B>>,
     encoder: Vec<EncoderLayer<B>>,
     decoder_position: Embedding<B>,
     decoder: Vec<DecoderLayer<B>>,
@@ -37,6 +39,11 @@ pub(super) struct ActModel<B: Backend> {
 }
 
 impl<B: Backend> ActModel<B> {
+    #[cfg(test)]
+    pub(super) fn encoder_layer_count(&self) -> usize {
+        self.encoder.len()
+    }
+
     pub fn load(config: &ActConfig, weights: &Weights, device: &B::Device) -> Result<Self> {
         let prefix = "model";
         let native = weights.contains(&format!("{prefix}.image_projection.weight"));
@@ -95,32 +102,29 @@ impl<B: Backend> ActModel<B> {
             [2, config.dim_model],
             device,
         )?;
-        let camera_embedding = if config.camera_embedding || native {
-            weights.tensor_exact::<B, 2>(
-                &format!(
-                    "{prefix}.{}.weight",
-                    if native {
-                        "camera_embedding"
-                    } else {
-                        "camera_embed"
-                    }
-                ),
-                [config.image_feature_sizes().len(), config.dim_model],
-                device,
-            )?
+        let camera_embedding = if config.camera_embedding
+            || weights.contains(&format!("{prefix}.camera_embedding.weight"))
+        {
+            Some(Embedding {
+                weight: Param::from_tensor(weights.tensor_exact::<B, 2>(
+                    &format!(
+                        "{prefix}.{}.weight",
+                        if native {
+                            "camera_embedding"
+                        } else {
+                            "camera_embed"
+                        }
+                    ),
+                    [config.image_feature_sizes().len(), config.dim_model],
+                    device,
+                )?),
+            })
         } else {
-            Tensor::zeros(
-                [config.image_feature_sizes().len(), config.dim_model],
-                device,
-            )
+            None
         };
         let encoder_1d_position = Embedding {
             weight: Param::from_tensor(one_dimensional_position),
         };
-        let camera_embedding = Embedding {
-            weight: Param::from_tensor(camera_embedding),
-        };
-
         let mut encoder = Vec::new();
         for layer in 0..config.n_encoder_layers {
             encoder.push(EncoderLayer::load(
@@ -231,18 +235,16 @@ impl<B: Backend> ActModel<B> {
         let encoder_1d_position = EmbeddingConfig::new(2, dimensions)
             .with_initializer(Initializer::Normal {
                 mean: 0.0,
-                std: 0.02,
+                std: 1.0,
             })
             .init(device);
-        let camera_embedding =
-            EmbeddingConfig::new(image_feature_sizes.len(), dimensions).init(device);
         let encoder = (0..encoder_layers)
             .map(|_| EncoderLayer::init(dimensions, heads, feedforward_dimensions, 0.1, device))
             .collect();
         let decoder_position = EmbeddingConfig::new(chunk_size, dimensions)
             .with_initializer(Initializer::Normal {
                 mean: 0.0,
-                std: 0.02,
+                std: 1.0,
             })
             .init(device);
         let decoder = (0..decoder_layers)
@@ -254,7 +256,7 @@ impl<B: Backend> ActModel<B> {
             state_projection,
             latent_projection,
             encoder_1d_position,
-            camera_embedding,
+            camera_embedding: None,
             encoder,
             decoder_position,
             decoder,
@@ -309,17 +311,20 @@ impl<B: Backend> ActModel<B> {
         for (camera, &(feature_height, feature_width)) in
             self.image_feature_sizes.iter().enumerate()
         {
-            let image_position = position_embedding_2d::<B>(
+            let mut image_position = position_embedding_2d::<B>(
                 feature_height,
                 feature_width,
                 self.dimensions,
                 &encoder_output.device(),
-            ) + self
-                .camera_embedding
-                .weight
-                .val()
-                .narrow(0, camera, 1)
-                .unsqueeze_dim(0);
+            );
+            if let Some(camera_embedding) = &self.camera_embedding {
+                image_position = image_position
+                    + camera_embedding
+                        .weight
+                        .val()
+                        .narrow(0, camera, 1)
+                        .unsqueeze_dim(0);
+            }
             encoder_positions.push(image_position);
         }
         let encoder_position = Tensor::cat(encoder_positions, 1);

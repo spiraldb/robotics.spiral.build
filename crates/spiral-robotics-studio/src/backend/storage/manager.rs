@@ -34,9 +34,13 @@ use crate::backend::storage::settings::{DataSettingsStore, StoredSpiralSettings}
 use crate::backend::storage::sql::{self, ReadOnlyMode};
 
 const MAX_QUERY_ROWS: usize = 1_000;
+const MAX_QUERY_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_INTERNAL_QUERY_RESPONSE_BYTES: usize = 128 * 1024 * 1024;
+const QUERY_JSON_CHUNK_ROWS: usize = 64;
 const MAX_REPLAY_ROWS: usize = 250_000;
 const JOINT_BATCH_ROWS: usize = 512;
 const SPIRAL_RECEIPT: &str = "spiral.json";
+const HOSTED_ADBC_CONNECTIONS: usize = 4;
 
 pub(crate) struct TrainingCheckpointWrite {
     pub run_id: String,
@@ -58,7 +62,13 @@ pub(crate) struct StorageManager {
     pub settings: Arc<DataSettingsStore>,
     episodes: Arc<EpisodeStore>,
     driver_path: Option<PathBuf>,
-    adbc: Arc<Mutex<Option<CachedAdbc>>>,
+    /// The disposable memory catalog exists only inside one connection, so it
+    /// deliberately remains serialized and cached for its whole lifetime.
+    memory_adbc: Arc<Mutex<Option<CachedAdbc>>>,
+    /// Hosted work checks a connection out only for the duration of one
+    /// operation. The pool mutex is never held across network or query work.
+    hosted_adbc: Arc<Mutex<Vec<CachedAdbc>>>,
+    hosted_adbc_slots: Arc<tokio::sync::Semaphore>,
     publications: Mutex<BTreeMap<String, PublicationStatus>>,
 }
 
@@ -94,7 +104,9 @@ impl StorageManager {
             settings,
             episodes,
             driver_path,
-            adbc: Arc::new(Mutex::new(None)),
+            memory_adbc: Arc::new(Mutex::new(None)),
+            hosted_adbc: Arc::new(Mutex::new(Vec::new())),
+            hosted_adbc_slots: Arc::new(tokio::sync::Semaphore::new(HOSTED_ADBC_CONNECTIONS)),
             publications: Mutex::new(BTreeMap::new()),
         })
     }
@@ -389,7 +401,12 @@ impl StorageManager {
         }
         let sql = sql.to_owned();
         self.run_adbc(settings, move |connection| {
-            run_query(connection, &sql, max_rows.clamp(1, MAX_QUERY_ROWS))
+            run_query_with_byte_limit(
+                connection,
+                &sql,
+                max_rows.clamp(1, MAX_QUERY_ROWS),
+                MAX_QUERY_RESPONSE_BYTES,
+            )
         })
         .await
     }
@@ -611,21 +628,61 @@ impl StorageManager {
             "Spiral ADBC driver is not configured on this backend; start it with --spiral-adbc-driver or SPIRALDB_ADBC_DRIVER".to_owned()
         })?;
         validate_adbc_settings(&settings, &driver_path)?;
-        let adbc = self.adbc.clone();
+        if settings.uri == "spiral:memory:" {
+            return self.run_memory_adbc(settings, driver_path, operation).await;
+        }
+
+        let permit = self
+            .hosted_adbc_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| "Spiral ADBC connection pool is shutting down".to_owned())?;
+        let pool = self.hosted_adbc.clone();
+        tokio::task::spawn_blocking(move || {
+            let key = AdbcConnectionKey::new(&settings, driver_path);
+            let mut adbc = {
+                let mut available = lock(&pool);
+                available.retain(|cached| cached.key == key);
+                available.pop()
+            }
+            .map(Ok)
+            .unwrap_or_else(|| open_adbc(key))?;
+            let outcome = operation(&mut adbc.connection);
+            lock(&pool).push(adbc);
+            drop(permit);
+            outcome
+        })
+        .await
+        .map_err(|error| format!("Spiral ADBC task failed: {error}"))?
+    }
+
+    async fn run_memory_adbc<T, F>(
+        &self,
+        settings: StoredSpiralSettings,
+        driver_path: PathBuf,
+        operation: F,
+    ) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut ManagedConnection) -> Result<T, String> + Send + 'static,
+    {
+        let adbc = self.memory_adbc.clone();
         tokio::task::spawn_blocking(move || {
             let key = AdbcConnectionKey::new(&settings, driver_path);
             let mut cached = lock(&adbc);
             if cached.as_ref().is_none_or(|cached| cached.key != key) {
                 *cached = Some(open_adbc(key)?);
             }
-            let connection = &mut cached
-                .as_mut()
-                .expect("ADBC connection was just installed")
-                .connection;
-            operation(connection)
+            operation(
+                &mut cached
+                    .as_mut()
+                    .expect("ADBC memory connection was just installed")
+                    .connection,
+            )
         })
         .await
-        .map_err(|error| format!("Spiral ADBC task failed: {error}"))?
+        .map_err(|error| format!("Spiral memory ADBC task failed: {error}"))?
     }
 
     fn set_status(&self, status: PublicationStatus) {
@@ -1257,6 +1314,15 @@ fn run_query(
     sql: &str,
     max_rows: usize,
 ) -> Result<SpiralQueryResponse, String> {
+    run_query_with_byte_limit(connection, sql, max_rows, MAX_INTERNAL_QUERY_RESPONSE_BYTES)
+}
+
+fn run_query_with_byte_limit(
+    connection: &mut ManagedConnection,
+    sql: &str,
+    max_rows: usize,
+    max_bytes: usize,
+) -> Result<SpiralQueryResponse, String> {
     let sql = sql.trim();
     if sql.is_empty() {
         return Err("Spiral query cannot be empty".to_owned());
@@ -1285,30 +1351,56 @@ fn run_query(
         })
         .collect();
     let fetch = max_rows.saturating_add(1);
-    let mut batches = Vec::new();
-    let mut collected = 0;
-    for batch in &mut reader {
+    let mut rows = Vec::with_capacity(max_rows.min(QUERY_JSON_CHUNK_ROWS));
+    let mut encoded_bytes = 2_usize;
+    let mut inspected = 0_usize;
+    let mut truncated = false;
+    'result: for batch in &mut reader {
         let batch = batch.map_err(|error| format!("reading Spiral result: {error}"))?;
-        let remaining = fetch.saturating_sub(collected);
-        if remaining == 0 {
-            break;
-        }
-        let rows = batch.num_rows().min(remaining);
-        batches.push(batch.slice(0, rows));
-        collected += rows;
-        if collected >= fetch {
-            break;
+        let mut offset = 0_usize;
+        while offset < batch.num_rows() && inspected < fetch {
+            let count = QUERY_JSON_CHUNK_ROWS
+                .min(batch.num_rows() - offset)
+                .min(fetch - inspected);
+            let chunk = batch.slice(offset, count);
+            for row in batch_to_json(&chunk)? {
+                inspected += 1;
+                if rows.len() >= max_rows {
+                    truncated = true;
+                    break 'result;
+                }
+                if !push_query_row(&mut rows, &mut encoded_bytes, row, max_bytes)? {
+                    truncated = true;
+                    break 'result;
+                }
+            }
+            offset += count;
         }
     }
-    let mut rows = batches_to_json(&batches)?;
-    let truncated = rows.len() > max_rows;
-    rows.truncate(max_rows);
     Ok(SpiralQueryResponse {
         columns,
         rows,
         truncated,
         elapsed_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
     })
+}
+
+fn push_query_row(
+    rows: &mut Vec<JsonMap<String, JsonValue>>,
+    encoded_bytes: &mut usize,
+    row: JsonMap<String, JsonValue>,
+    max_bytes: usize,
+) -> Result<bool, String> {
+    let row_bytes = serde_json::to_vec(&row)
+        .map_err(|error| format!("measuring Spiral row: {error}"))?
+        .len()
+        .saturating_add(usize::from(!rows.is_empty()));
+    if encoded_bytes.saturating_add(row_bytes) > max_bytes {
+        return Ok(false);
+    }
+    *encoded_bytes = encoded_bytes.saturating_add(row_bytes);
+    rows.push(row);
+    Ok(true)
 }
 
 fn run_binary_query(connection: &mut ManagedConnection, sql: &str) -> Result<Vec<u8>, String> {
@@ -1414,14 +1506,13 @@ fn run_training_checkpoint_query(
     artifact.ok_or_else(|| "No checkpoint matched that training run and step".to_owned())
 }
 
-fn batches_to_json(batches: &[RecordBatch]) -> Result<Vec<JsonMap<String, JsonValue>>, String> {
-    let refs = batches.iter().collect::<Vec<_>>();
+fn batch_to_json(batch: &RecordBatch) -> Result<Vec<JsonMap<String, JsonValue>>, String> {
     let mut bytes = Vec::new();
     let mut writer = WriterBuilder::new()
         .with_explicit_nulls(true)
         .build::<_, JsonArray>(&mut bytes);
     writer
-        .write_batches(&refs)
+        .write_batches(&[batch])
         .map_err(|error| format!("encoding Spiral rows: {error}"))?;
     writer
         .finish()
@@ -1542,6 +1633,31 @@ mod tests {
             read_only("WITH removed AS (DELETE FROM spiral_robotics.episodes) SELECT 1").is_err()
         );
         assert!(read_only("SELECT 1; DROP TABLE episodes").is_err());
+    }
+
+    #[test]
+    fn query_preview_byte_budget_stops_before_an_oversized_row() {
+        let mut rows = Vec::new();
+        let mut bytes = 2;
+        let small = JsonMap::from_iter([("value".to_owned(), JsonValue::from("ok"))]);
+        assert!(push_query_row(&mut rows, &mut bytes, small, 64).unwrap());
+        let huge = JsonMap::from_iter([("value".to_owned(), JsonValue::from("x".repeat(128)))]);
+        assert!(!push_query_row(&mut rows, &mut bytes, huge, 64).unwrap());
+        assert_eq!(rows.len(), 1);
+        assert!(bytes <= 64);
+    }
+
+    #[test]
+    fn hosted_adbc_work_has_a_small_bounded_connection_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings = Arc::new(DataSettingsStore::open(directory.path()).unwrap());
+        let episodes = Arc::new(EpisodeStore::open(directory.path().to_path_buf()).unwrap());
+        let manager = StorageManager::new(settings, episodes, None).unwrap();
+        assert_eq!(
+            manager.hosted_adbc_slots.available_permits(),
+            HOSTED_ADBC_CONNECTIONS
+        );
+        assert!(manager.hosted_adbc.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1847,6 +1963,7 @@ mod tests {
             attention_heads: 8,
             feedforward_dimensions: 128,
             encoder_layers: 1,
+            vae_encoder_layers: 1,
             decoder_layers: 1,
             kl_weight: request.act.kl_weight,
             learning_rate: request.learning_rate,

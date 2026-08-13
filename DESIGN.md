@@ -854,10 +854,25 @@ by joint name, and crosshair/focus changes emphasis without changing layout.
 
 ### Training
 
-Training is a curve-first operating instrument, not a collection of dashboard
-cards. The dominant learning curve answers whether the policy is improving;
-configuration and run history occupy the workbench, while the data path and
-throughput lanes explain whether the input pipeline and optimizer are moving.
+Training is a curve-first run desk, not a collection of dashboard cards. A
+30% left rail separates **Training control** above **Training history**. The
+remaining workspace is one tab group: every opened run owns one tab containing
+its overview, dominant learning curve, data path, throughput, events, and logs.
+Opening history never replaces or rewrites the new-run draft.
+
+- **Control and ledger:** Training control selects an available dataset,
+  policy, device, optimizer settings, and the collapsed data/tensor query. Its
+  single filled **Run training** action stays visible beneath the independently
+  scrolling form. An active run adds progress and **Stop after current step**
+  in the same control panel. Training history is a separate newest-first ledger
+  whose rows state run, dataset, phase, and step progress.
+- **Run tabs:** Selecting a history row appends or activates that immutable run
+  in the right tab group; already opened runs remain available as sibling tabs.
+  Each run tab can be closed without stopping or deleting the backend run.
+  Closing the selected tab activates the run to its right, then the one to its
+  left; closing the last run restores the empty **Run workspace**.
+  Starting a run opens its tab automatically, including when backend state
+  arrives after the start response.
 
 - **Shared step axis:** Learning traces, throughput lanes, checkpoints,
   validation, and loader events use optimizer step as one common horizontal
@@ -876,21 +891,31 @@ throughput lanes explain whether the input pipeline and optimizer are moving.
   context, while Stop remains reachable for the run in progress. Readiness is
   the backend's combined Burn-runtime-and-hosted-Spiral probe, not an inference made
   from settings in the browser. A failed run keeps its terminal reason and the
-  latest training log lines visible in the workbench.
+  latest training log lines visible in its run tab.
 - **Owned data path:** The four stages shown are the actual boundaries: Rust
   Spiral ADBC query, Arrow image/action buffers, Burn tensor/model compute, and
   Rust checkpoint ingest. Tensor and optimizer throughput are measured values;
   the Rust loader validates native Arrow tensor structs and packs fixed-shape
   float32 buffers directly for Burn.
-- **Terse operating copy:** Panel tabs name the regions, so their contents do
-  not repeat those names with explanatory headlines. Configuration uses field
-  labels, run state uses measured facts, and the SQL plus column mapping stays
-  available under one collapsed **Data query** disclosure. Data-path stages use
-  short noun labels paired with their live values instead of architecture prose.
+- **Terse operating copy:** Panel tabs name Training control, Training history,
+  and each run; run content uses only the short evidence headers **Loss**,
+  **Data path**, and **Throughput**. Configuration uses field labels, run state
+  uses measured facts, and SQL plus tensor mapping stays under one collapsed
+  **Data query & tensors** disclosure. Data-path stages pair short noun labels
+  with live values instead of architecture prose.
+- **Responsive:** At 760px and below, the shared panel switcher exposes control,
+  history, and opened runs one at a time. The selected run stacks loss, data
+  path, and throughput without hiding the tab history or consequential actions.
 
 **The Shared-Optimizer-Step Rule.** Any training view that plots, marks, or
 summarizes run progress keys that evidence to optimizer step so learning and
 system behavior can be compared without correlating unrelated axes by eye.
+
+**The Immutable-Run-Tab Rule.** A history selection opens the run as a sibling
+tab in the run workspace. It never loads historical configuration into the
+editable Training control or closes another run the operator is comparing.
+The operator may explicitly close a run tab; that removes only the workspace
+view and never changes the run's backend lifecycle.
 
 ### Rollout
 

@@ -4,6 +4,8 @@ mod config;
 mod engine;
 mod layers;
 mod model;
+#[cfg(feature = "download")]
+mod pretrained;
 mod resnet;
 mod training;
 mod weights;
@@ -13,6 +15,8 @@ pub use engine::ActPolicy;
 pub use engine::{CpuActPolicy, load_cpu, load_cpu_artifact};
 #[cfg(feature = "metal")]
 pub use engine::{MetalActPolicy, load_metal, load_metal_artifact, metal_available};
+#[cfg(feature = "download")]
+pub use pretrained::{IMAGENET_RESNET18_SHA256, IMAGENET_RESNET18_URL, imagenet_resnet18_weights};
 pub use training::{
     NativeActTrainer, VisionActBatch, VisionActCheckpoint, VisionActLoss, VisionActTrainingConfig,
 };

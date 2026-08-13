@@ -9,9 +9,12 @@
 //! state and action always, and the motors' own velocity and effort when every
 //! exported take carries them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Cursor, Read, Write};
+#[cfg(test)]
+use std::io::Cursor;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Component, Path};
 use std::sync::Arc;
 
 use arrow_array::builder::{ListBuilder, StringBuilder};
@@ -30,9 +33,18 @@ use spiral_robotics_core::api::{EpisodeArm, ImportResponse};
 use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
 
-use crate::backend::recording::episodes::{EpisodeError, EpisodeStore, Sample};
+use crate::backend::recording::episodes::{
+    EpisodeError, EpisodeStore, MAX_EPISODE_FRAMES, Sample, frame_capacity,
+};
 
 const TASK: &str = "Recorded with Spiral Robotics";
+const MAX_ARCHIVE_ENTRIES: usize = 4_096;
+pub(crate) const MAX_ARCHIVE_COMPRESSED_BYTES: usize = 256 * 1024 * 1024;
+const MAX_ARCHIVE_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_ARCHIVE_COMPRESSION_RATIO: u64 = 200;
+const COMPRESSION_RATIO_CHECK_BYTES: u64 = 1024 * 1024;
+const MAX_DATASET_EPISODES: usize = 10_000;
 const SO101_JOINTS: [&str; 6] = [
     "shoulder_pan",
     "shoulder_lift",
@@ -43,8 +55,23 @@ const SO101_JOINTS: [&str; 6] = [
 ];
 
 /// A complete downloadable dataset package.
+#[cfg(test)]
 pub(crate) struct DatasetArchive {
     pub bytes: Vec<u8>,
+    pub summary: DatasetArchiveSummary,
+}
+
+#[cfg(test)]
+impl std::ops::Deref for DatasetArchive {
+    type Target = DatasetArchiveSummary;
+
+    fn deref(&self) -> &Self::Target {
+        &self.summary
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DatasetArchiveSummary {
     pub episodes: u64,
     pub frames: u64,
     pub skipped: u64,
@@ -73,6 +100,7 @@ struct ExportEpisode {
 struct ImportedFrame {
     frame: i64,
     timestamp: f64,
+    observation: Vec<f64>,
     action: Vec<f64>,
 }
 
@@ -84,10 +112,38 @@ pub(crate) fn export_lerobot_archive(store: &EpisodeStore) -> Result<DatasetArch
 
 /// Export complete episodes assigned to one dataset. `None` preserves the
 /// legacy all-episodes boundary for CLI/tests that have not selected a set.
+#[cfg(test)]
 pub(crate) fn export_lerobot_archive_for_dataset(
     store: &EpisodeStore,
     dataset_id: Option<&str>,
 ) -> Result<DatasetArchive, EpisodeError> {
+    let (cursor, summary) = export_lerobot_archive_to(store, dataset_id, Cursor::new(Vec::new()))?;
+    Ok(DatasetArchive {
+        bytes: cursor.into_inner(),
+        summary,
+    })
+}
+
+/// Write a LeRobot ZIP directly to a file so the HTTP layer can stream it
+/// without retaining a second archive-sized allocation in server memory.
+pub(crate) fn export_lerobot_archive_to_file_for_dataset(
+    store: &EpisodeStore,
+    dataset_id: Option<&str>,
+    file: File,
+) -> Result<DatasetArchiveSummary, EpisodeError> {
+    let (file, summary) = export_lerobot_archive_to(store, dataset_id, file)?;
+    file.sync_all().map_err(|source| EpisodeError::Io {
+        path: Path::new("temporary LeRobot export").to_owned(),
+        source,
+    })?;
+    Ok(summary)
+}
+
+fn export_lerobot_archive_to<W: Write + std::io::Seek>(
+    store: &EpisodeStore,
+    dataset_id: Option<&str>,
+    destination: W,
+) -> Result<(W, DatasetArchiveSummary), EpisodeError> {
     let listed = store.list();
     let candidates = listed
         .iter()
@@ -132,10 +188,21 @@ pub(crate) fn export_lerobot_archive_for_dataset(
     }
 
     let episode_count = episodes.len();
-    let total_frames = episodes
-        .iter()
-        .map(|episode| episode.positions.len())
-        .sum::<usize>();
+    if episode_count > MAX_DATASET_EPISODES {
+        return Err(invalid(format!(
+            "the export contains more than the supported {MAX_DATASET_EPISODES} episodes"
+        )));
+    }
+    let total_frames = episodes.iter().try_fold(0_usize, |total, episode| {
+        total
+            .checked_add(episode.positions.len())
+            .filter(|frames| *frames as u64 <= MAX_EPISODE_FRAMES)
+            .ok_or_else(|| {
+                invalid(format!(
+                    "the export contains more than the supported {MAX_EPISODE_FRAMES} frames"
+                ))
+            })
+    })?;
     let dimension = joints.len();
     // Every take or none: LeRobot declares one feature set for the whole
     // dataset, so one take recorded on a bus that publishes neither velocity
@@ -242,10 +309,8 @@ pub(crate) fn export_lerobot_archive_for_dataset(
         "fps": fps,
         "splits": { "train": format!("0:{episode_count}") },
         "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
-        "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4",
         "features": features,
         "data_files_size_in_mb": 100,
-        "video_files_size_in_mb": 200,
     });
     let stats = stats_document(
         dimension,
@@ -258,8 +323,7 @@ pub(crate) fn export_lerobot_archive_for_dataset(
         &indices,
     );
 
-    let cursor = Cursor::new(Vec::new());
-    let mut archive = ZipWriter::new(cursor);
+    let mut archive = ZipWriter::new(destination);
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     write_zip_entry(
         &mut archive,
@@ -292,18 +356,19 @@ pub(crate) fn export_lerobot_archive_for_dataset(
         "README.md",
         dataset_card(proprioception, without_proprioception).as_bytes(),
     )?;
-    let bytes = archive
+    let destination = archive
         .finish()
-        .map_err(|error| invalid(error.to_string()))?
-        .into_inner();
+        .map_err(|error| invalid(error.to_string()))?;
 
-    Ok(DatasetArchive {
-        bytes,
-        episodes: episode_count as u64,
-        frames: total_frames as u64,
-        skipped,
-        without_proprioception,
-    })
+    Ok((
+        destination,
+        DatasetArchiveSummary {
+            episodes: episode_count as u64,
+            frames: total_frames as u64,
+            skipped,
+            without_proprioception,
+        },
+    ))
 }
 
 /// Import a zipped LeRobot v2/v3 dataset into the local episode workspace.
@@ -315,21 +380,57 @@ pub(crate) fn import_lerobot_archive(
     import_lerobot_archive_into_dataset(store, bytes, "default")
 }
 
+#[cfg(test)]
 pub(crate) fn import_lerobot_archive_into_dataset(
     store: &EpisodeStore,
     bytes: &[u8],
     dataset_id: &str,
 ) -> Result<ImportResponse, EpisodeError> {
-    let mut archive = ZipArchive::new(Cursor::new(bytes))
+    import_lerobot_archive_reader_into_dataset(
+        store,
+        Cursor::new(bytes),
+        bytes.len() as u64,
+        dataset_id,
+    )
+}
+
+/// Import from a spool file so request bytes never need to coexist in the
+/// Axum body buffer, a ZIP allocation, and browser WASM memory.
+pub(crate) fn import_lerobot_archive_file_into_dataset(
+    store: &EpisodeStore,
+    file: File,
+    dataset_id: &str,
+) -> Result<ImportResponse, EpisodeError> {
+    let length = file
+        .metadata()
+        .map_err(|source| EpisodeError::Io {
+            path: Path::new("temporary LeRobot import").to_owned(),
+            source,
+        })?
+        .len();
+    import_lerobot_archive_reader_into_dataset(store, file, length, dataset_id)
+}
+
+fn import_lerobot_archive_reader_into_dataset<R: Read + std::io::Seek>(
+    store: &EpisodeStore,
+    source: R,
+    compressed_bytes: u64,
+    dataset_id: &str,
+) -> Result<ImportResponse, EpisodeError> {
+    if !spiral_robotics_core::spiral::is_dataset_id(dataset_id) {
+        return Err(invalid(format!(
+            "{dataset_id:?} is not a valid destination dataset id"
+        )));
+    }
+    if compressed_bytes > MAX_ARCHIVE_COMPRESSED_BYTES as u64 {
+        return Err(invalid(format!(
+            "the selected ZIP is larger than the supported {} MiB compressed limit",
+            MAX_ARCHIVE_COMPRESSED_BYTES / (1024 * 1024)
+        )));
+    }
+    let mut archive = ZipArchive::new(source)
         .map_err(|error| invalid(format!("the selected file is not a readable ZIP: {error}")))?;
-    let names = (0..archive.len())
-        .filter_map(|index| {
-            archive
-                .by_index(index)
-                .ok()
-                .map(|file| file.name().to_owned())
-        })
-        .collect::<Vec<_>>();
+    let names = validated_archive_names(&mut archive)?;
     let info_name = names
         .iter()
         .find(|name| name.ends_with("meta/info.json"))
@@ -340,8 +441,15 @@ pub(crate) fn import_lerobot_archive_into_dataset(
     let fps = info
         .get("fps")
         .and_then(Value::as_f64)
-        .filter(|fps| fps.is_finite() && *fps > 0.0)
+        .filter(|fps| fps.is_finite() && *fps > 0.0 && *fps <= 1_000.0)
         .ok_or_else(|| invalid("LeRobot metadata does not declare a usable fps"))?;
+    let video_features = declared_video_features(&info);
+    if !video_features.is_empty() {
+        return Err(invalid(format!(
+            "this archive contains camera features ({}) that this low-dimensional importer cannot preserve; import was stopped instead of silently dropping video",
+            video_features.join(", ")
+        )));
+    }
     let declared_names = action_names(&info);
     let robot_type = info
         .get("robot_type")
@@ -362,6 +470,7 @@ pub(crate) fn import_lerobot_archive_into_dataset(
 
     let mut grouped: BTreeMap<i64, Vec<ImportedFrame>> = BTreeMap::new();
     let mut dimension = None;
+    let mut total_frames = 0_u64;
     for (file_number, name) in data_names.iter().enumerate() {
         let parquet = read_zip_entry(&mut archive, name)?;
         let reader = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(parquet))
@@ -374,11 +483,26 @@ pub(crate) fn import_lerobot_archive_into_dataset(
             let actions = batch
                 .column_by_name("action")
                 .ok_or_else(|| invalid(format!("{name} has no action column")))?;
+            let observations = batch
+                .column_by_name("observation.state")
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "{name} has no observation.state column; importing it would require fabricating robot state from actions"
+                    ))
+                })?;
             let episode_index = batch.column_by_name("episode_index");
             let frame_index = batch.column_by_name("frame_index");
             let timestamp = batch.column_by_name("timestamp");
             for row in 0..batch.num_rows() {
                 let action = vector_at(actions.as_ref(), row)?;
+                let observation = vector_at(observations.as_ref(), row)?;
+                if observation.len() != action.len() {
+                    return Err(invalid(format!(
+                        "{name} row {row} has {} observation values but {} action values",
+                        observation.len(),
+                        action.len()
+                    )));
+                }
                 if let Some(expected) = dimension {
                     if action.len() != expected {
                         return Err(invalid(
@@ -392,6 +516,9 @@ pub(crate) fn import_lerobot_archive_into_dataset(
                     .map(|array| integer_at(array.as_ref(), row))
                     .transpose()?
                     .unwrap_or(file_number as i64);
+                if episode < 0 {
+                    return Err(invalid("LeRobot episode indexes must be non-negative"));
+                }
                 let frame = frame_index
                     .map(|array| integer_at(array.as_ref(), row))
                     .transpose()?
@@ -400,15 +527,35 @@ pub(crate) fn import_lerobot_archive_into_dataset(
                             .get(&episode)
                             .map_or(0, |frames| frames.len() as i64)
                     });
+                if frame < 0 {
+                    return Err(invalid("LeRobot frame indexes must be non-negative"));
+                }
                 let time = timestamp
                     .map(|array| number_at(array.as_ref(), row))
                     .transpose()?
                     .unwrap_or(frame as f64 / fps);
+                if !time.is_finite() || time < 0.0 {
+                    return Err(invalid(
+                        "LeRobot timestamps must be finite, non-negative numbers",
+                    ));
+                }
+                total_frames += 1;
+                if total_frames > MAX_EPISODE_FRAMES {
+                    return Err(invalid(format!(
+                        "the archive contains more than the supported {MAX_EPISODE_FRAMES} frames"
+                    )));
+                }
                 grouped.entry(episode).or_default().push(ImportedFrame {
                     frame,
                     timestamp: time,
+                    observation,
                     action,
                 });
+                if grouped.len() > MAX_DATASET_EPISODES {
+                    return Err(invalid(format!(
+                        "the archive contains more than the supported {MAX_DATASET_EPISODES} episodes"
+                    )));
+                }
             }
         }
     }
@@ -425,6 +572,19 @@ pub(crate) fn import_lerobot_archive_into_dataset(
         frames.sort_by_key(|frame| frame.frame);
         if frames.is_empty() {
             continue;
+        }
+        if frames.windows(2).any(|pair| pair[0].frame == pair[1].frame) {
+            return Err(invalid(
+                "a LeRobot episode contains duplicate frame indexes",
+            ));
+        }
+        if frames
+            .windows(2)
+            .any(|pair| pair[0].timestamp > pair[1].timestamp)
+        {
+            return Err(invalid(
+                "a LeRobot episode's timestamps run backward after frame ordering",
+            ));
         }
         let writer = store.begin_in_dataset(
             dataset_id.to_owned(),
@@ -445,17 +605,25 @@ pub(crate) fn import_lerobot_archive_into_dataset(
         let mut last_time = 0.0_f64;
         for frame in frames.iter() {
             let normalized = frame
-                .action
+                .observation
                 .iter()
                 .zip(&joints)
                 .map(|(value, joint)| from_lerobot_position(*value, joint))
                 .collect::<Result<Vec<_>, _>>()?;
-            let action = normalized.iter().copied().map(Some).collect();
+            let action = frame
+                .action
+                .iter()
+                .zip(&joints)
+                .map(|(value, joint)| from_lerobot_position(*value, joint).map(Some))
+                .collect::<Result<Vec<_>, _>>()?;
             last_time = frame.timestamp.max(last_time);
             if !writer.push(Sample {
                 seconds: frame.timestamp.max(0.0),
                 normalized: vec![normalized.into_iter().map(Some).collect()],
-                raw: vec![vec![0; dimension]],
+                // Encoder counts are not part of the LeRobot contract. An
+                // empty channel preserves their absence instead of inventing
+                // zero readings that look like real hardware evidence.
+                raw: Vec::new(),
                 follow_error_degrees: None,
                 velocity: None,
                 effort: None,
@@ -517,14 +685,16 @@ fn read_export_episode(
         .or_else(|| (arms.len() == 1).then_some(0))
         .ok_or_else(|| invalid(format!("{} has no unambiguous follower arm", summary.id)))?;
     let joints = arms[arm_index].joints.clone();
-    let mut positions = Vec::with_capacity(summary.frames as usize);
-    let mut actions = Vec::with_capacity(summary.frames as usize);
-    let mut velocity = Vec::with_capacity(summary.frames as usize);
-    let mut effort = Vec::with_capacity(summary.frames as usize);
+    let capacity = frame_capacity(summary.frames);
+    let mut positions = Vec::with_capacity(capacity);
+    let mut actions = Vec::with_capacity(capacity);
+    let mut velocity = Vec::with_capacity(capacity);
+    let mut effort = Vec::with_capacity(capacity);
     // One missing frame disqualifies the whole take rather than the frame: a
     // column that is present for the first half of an episode and absent for
     // the second is worse than no column at all.
     let mut proprioception = true;
+    let mut samples_seen = 0_u64;
     for line in lines {
         let line = line.map_err(|source| EpisodeError::Io {
             path: path.clone(),
@@ -533,6 +703,16 @@ fn read_export_episode(
         let Ok(frame) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        if frame.get("t").is_none() {
+            continue;
+        }
+        samples_seen += 1;
+        if samples_seen > MAX_EPISODE_FRAMES {
+            return Err(invalid(format!(
+                "{} contains more than the supported {MAX_EPISODE_FRAMES} frames",
+                summary.id
+            )));
+        }
         let arm_values = |key: &str| -> Option<Vec<f32>> {
             let values = frame
                 .get(key)?
@@ -561,6 +741,12 @@ fn read_export_episode(
             }
             _ => proprioception = false,
         }
+    }
+    if samples_seen != summary.frames {
+        return Err(invalid(format!(
+            "{} declares {} frames but contains {samples_seen} readable samples",
+            summary.id, summary.frames
+        )));
     }
     Ok(ExportEpisode {
         joints,
@@ -842,8 +1028,8 @@ fn pretty_json(value: &Value) -> Result<String, EpisodeError> {
         .map_err(|error| invalid(error.to_string()))
 }
 
-fn write_zip_entry(
-    archive: &mut ZipWriter<Cursor<Vec<u8>>>,
+fn write_zip_entry<W: Write + std::io::Seek>(
+    archive: &mut ZipWriter<W>,
     options: SimpleFileOptions,
     name: &str,
     bytes: &[u8],
@@ -856,8 +1042,8 @@ fn write_zip_entry(
         .map_err(|error| invalid(error.to_string()))
 }
 
-fn read_zip_entry(
-    archive: &mut ZipArchive<Cursor<&[u8]>>,
+fn read_zip_entry<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
     name: &str,
 ) -> Result<Vec<u8>, EpisodeError> {
     let mut file = archive
@@ -866,10 +1052,111 @@ fn read_zip_entry(
     if file.is_dir() {
         return Err(invalid(format!("{name} is a directory, not a file")));
     }
-    let mut bytes = Vec::with_capacity(file.size().min(64 * 1024 * 1024) as usize);
-    file.read_to_end(&mut bytes)
+    validate_archive_entry_metadata(name, file.size(), file.compressed_size())?;
+    let mut bytes = Vec::with_capacity(file.size().min(16 * 1024 * 1024) as usize);
+    (&mut file)
+        .take(MAX_ARCHIVE_ENTRY_BYTES + 1)
+        .read_to_end(&mut bytes)
         .map_err(|error| invalid(format!("could not read {name}: {error}")))?;
+    if bytes.len() as u64 > MAX_ARCHIVE_ENTRY_BYTES {
+        return Err(invalid(format!(
+            "{name} expands beyond the supported {} MiB entry limit",
+            MAX_ARCHIVE_ENTRY_BYTES / (1024 * 1024)
+        )));
+    }
     Ok(bytes)
+}
+
+fn validated_archive_names<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+) -> Result<Vec<String>, EpisodeError> {
+    if archive.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(invalid(format!(
+            "the ZIP contains {} entries; at most {MAX_ARCHIVE_ENTRIES} are supported",
+            archive.len()
+        )));
+    }
+    let mut names = Vec::with_capacity(archive.len());
+    let mut seen = BTreeSet::new();
+    let mut total_uncompressed = 0_u64;
+    for index in 0..archive.len() {
+        let file = archive
+            .by_index(index)
+            .map_err(|error| invalid(format!("could not inspect ZIP entry {index}: {error}")))?;
+        let name = file.name().to_owned();
+        validate_archive_entry_metadata(&name, file.size(), file.compressed_size())?;
+        total_uncompressed = total_uncompressed.checked_add(file.size()).ok_or_else(|| {
+            invalid("the ZIP's declared uncompressed size is too large to represent")
+        })?;
+        if total_uncompressed > MAX_ARCHIVE_UNCOMPRESSED_BYTES {
+            return Err(invalid(format!(
+                "the ZIP expands beyond the supported {} MiB archive limit",
+                MAX_ARCHIVE_UNCOMPRESSED_BYTES / (1024 * 1024)
+            )));
+        }
+        if !seen.insert(name.clone()) {
+            return Err(invalid(format!(
+                "the ZIP contains duplicate entry {name:?}; import is ambiguous"
+            )));
+        }
+        names.push(name);
+    }
+    Ok(names)
+}
+
+fn validate_archive_entry_metadata(
+    name: &str,
+    uncompressed: u64,
+    compressed: u64,
+) -> Result<(), EpisodeError> {
+    let path = Path::new(name);
+    if name.is_empty()
+        || name.chars().count() > 512
+        || name.contains('\\')
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::RootDir))
+    {
+        return Err(invalid(format!(
+            "the ZIP contains unsafe entry name {name:?}"
+        )));
+    }
+    if uncompressed > MAX_ARCHIVE_ENTRY_BYTES {
+        return Err(invalid(format!(
+            "{name} declares {} MiB uncompressed; the per-entry limit is {} MiB",
+            uncompressed.div_ceil(1024 * 1024),
+            MAX_ARCHIVE_ENTRY_BYTES / (1024 * 1024)
+        )));
+    }
+    if uncompressed >= COMPRESSION_RATIO_CHECK_BYTES
+        && (compressed == 0 || uncompressed / compressed.max(1) > MAX_ARCHIVE_COMPRESSION_RATIO)
+    {
+        return Err(invalid(format!(
+            "{name} has an unsafe compression ratio above {MAX_ARCHIVE_COMPRESSION_RATIO}:1"
+        )));
+    }
+    Ok(())
+}
+
+fn declared_video_features(info: &Value) -> Vec<String> {
+    info.get("features")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|features| features.iter())
+        .filter_map(|(name, feature)| {
+            let dtype = feature
+                .get("dtype")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            (name.starts_with("observation.images")
+                || name.starts_with("observation.image")
+                || dtype == "video"
+                || dtype == "image")
+                .then(|| name.clone())
+        })
+        .collect()
 }
 
 fn action_names(info: &Value) -> Vec<String> {
@@ -1135,6 +1422,64 @@ mod tests {
             .collect()
     }
 
+    fn action_only_archive() -> Vec<u8> {
+        let item = Arc::new(Field::new("item", DataType::Float32, false));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "action",
+                DataType::FixedSizeList(item.clone(), SO101_JOINTS.len() as i32),
+                false,
+            ),
+            Field::new("timestamp", DataType::Float32, false),
+            Field::new("frame_index", DataType::Int64, false),
+            Field::new("episode_index", DataType::Int64, false),
+        ]));
+        let action = FixedSizeListArray::try_new(
+            item,
+            SO101_JOINTS.len() as i32,
+            Arc::new(Float32Array::from(vec![0.0; SO101_JOINTS.len()])),
+            None,
+        )
+        .unwrap();
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(action),
+                Arc::new(Float32Array::from(vec![0.0])),
+                Arc::new(Int64Array::from(vec![0])),
+                Arc::new(Int64Array::from(vec![0])),
+            ],
+        )
+        .unwrap();
+        let parquet = parquet_bytes(schema, batch).unwrap();
+        let info = json!({
+            "codebase_version": "v3.0",
+            "robot_type": "so101_follower",
+            "fps": 30,
+            "features": {
+                "action": vector_feature(&SO101_JOINTS.iter().map(|joint| (*joint).to_owned()).collect::<Vec<_>>())
+            }
+        });
+        let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        write_zip_entry(
+            &mut archive,
+            options,
+            "meta/info.json",
+            pretty_json(&info).unwrap().as_bytes(),
+        )
+        .unwrap();
+        write_zip_entry(
+            &mut archive,
+            options,
+            "data/chunk-000/file-000.parquet",
+            &parquet,
+        )
+        .unwrap();
+        archive.finish().unwrap().into_inner()
+    }
+
     #[test]
     fn a_session_that_recorded_the_motors_exports_velocity_and_effort() {
         let (_directory, store) = recorded_store();
@@ -1217,6 +1562,8 @@ mod tests {
                 .map(|joint| format!("{joint}.pos"))
                 .collect::<Vec<_>>()
         );
+        assert!(info.get("video_path").is_none());
+        assert!(info.get("video_files_size_in_mb").is_none());
         assert!(zip.by_name("data/chunk-000/file-000.parquet").is_ok());
 
         let target_directory = TempDir::new().unwrap();
@@ -1235,8 +1582,66 @@ mod tests {
                 .all(|joint| trajectory[0].contains_key(*joint))
         );
         assert!(trajectory[0].keys().all(|joint| !joint.ends_with(".pos")));
-        assert!((trajectory[3]["shoulder_pan"] - 0.8).abs() < 0.001);
-        assert!((trajectory[3]["gripper"] - 0.8).abs() < 0.001);
+        assert!((trajectory[3]["shoulder_pan"] - 0.3).abs() < 0.001);
+        assert!((trajectory[3]["gripper"] - 0.3).abs() < 0.001);
+
+        let completed = target
+            .completed(imported.first_episode.as_deref().unwrap())
+            .unwrap();
+        assert!((completed.samples[3].normalized[0][0].unwrap() - 0.3).abs() < 0.001);
+        assert!((completed.samples[3].action[0].as_ref().unwrap()[0].unwrap() - 0.8).abs() < 0.001);
+        assert!(
+            completed.samples[3].raw.is_empty(),
+            "unavailable encoder counts stay absent instead of becoming fake zeroes"
+        );
+    }
+
+    #[test]
+    fn file_backed_archive_export_and_import_avoid_an_archive_sized_memory_copy() {
+        let (_source_directory, source) = recorded_store();
+        let archive_file = tempfile::NamedTempFile::new().unwrap();
+        let summary = export_lerobot_archive_to_file_for_dataset(
+            &source,
+            None,
+            archive_file.reopen().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(summary.episodes, 1);
+        assert!(archive_file.as_file().metadata().unwrap().len() > 0);
+
+        let target_directory = TempDir::new().unwrap();
+        let target = EpisodeStore::open(target_directory.path().join("episodes")).unwrap();
+        let imported = import_lerobot_archive_file_into_dataset(
+            &target,
+            archive_file.reopen().unwrap(),
+            "default",
+        )
+        .unwrap();
+        assert_eq!(imported.episodes, 1);
+        assert_eq!(imported.frames, 4);
+    }
+
+    #[test]
+    fn import_refuses_action_only_data_instead_of_fabricating_observations() {
+        let directory = TempDir::new().unwrap();
+        let store = EpisodeStore::open(directory.path().join("episodes")).unwrap();
+        let error = import_lerobot_archive(&store, &action_only_archive())
+            .expect_err("action-only datasets are not truthful local episodes");
+        assert!(error.to_string().contains("observation.state"), "{error}");
+        assert!(store.list().is_empty());
+    }
+
+    #[test]
+    fn archive_metadata_limits_reject_unsafe_names_and_compression_bombs() {
+        assert!(validate_archive_entry_metadata("../escape", 1, 1).is_err());
+        assert!(
+            validate_archive_entry_metadata(
+                "data/file.parquet",
+                COMPRESSION_RATIO_CHECK_BYTES * (MAX_ARCHIVE_COMPRESSION_RATIO + 1),
+                COMPRESSION_RATIO_CHECK_BYTES,
+            )
+            .is_err()
+        );
     }
 
     #[test]

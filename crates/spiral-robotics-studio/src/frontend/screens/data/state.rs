@@ -16,6 +16,23 @@ use crate::frontend::screens::data::workbench::{
 };
 use crate::frontend::screens::sql_draft::rebase_generated_sql;
 
+pub(crate) const MAX_QUERY_TABS: usize = 8;
+
+struct ActiveQuery {
+    id: u64,
+    #[cfg(target_arch = "wasm32")]
+    abort: Option<web_sys::AbortController>,
+}
+
+impl ActiveQuery {
+    fn abort(&self) {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(abort) = &self.abort {
+            abort.abort();
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct DataController {
     sql: Signal<String>,
@@ -23,6 +40,7 @@ pub(crate) struct DataController {
     max_rows: Signal<usize>,
     query_tabs: Signal<Vec<QueryTab>>,
     active_query: Signal<Option<u64>>,
+    active_request: Signal<Option<ActiveQuery>>,
     next_query_id: Signal<u64>,
     publications: Signal<Vec<PublicationStatus>>,
     publication_error: Signal<Option<String>>,
@@ -39,6 +57,7 @@ pub(crate) fn use_data_controller(namespace: &str, dataset_id: &str) -> DataCont
         max_rows: use_signal(|| DEFAULT_QUERY_ROWS),
         query_tabs: use_signal(Vec::new),
         active_query: use_signal(|| None),
+        active_request: use_signal(|| None),
         next_query_id: use_signal(|| 1),
         publications: use_signal(Vec::new),
         publication_error: use_signal(|| None),
@@ -96,6 +115,10 @@ impl DataController {
         self.active_query.read().to_owned()
     }
 
+    pub(crate) fn query_running(&self) -> bool {
+        self.active_request.read().is_some()
+    }
+
     pub(crate) fn select_query(mut self, id: u64) {
         if self.query_tabs.peek().iter().any(|tab| tab.id == id) {
             self.active_query.set(Some(id));
@@ -103,6 +126,15 @@ impl DataController {
     }
 
     pub(crate) fn close_query(mut self, id: u64) {
+        if self
+            .active_request
+            .peek()
+            .as_ref()
+            .is_some_and(|request| request.id == id)
+            && let Some(request) = self.active_request.replace(None)
+        {
+            request.abort();
+        }
         let mut tabs = self.query_tabs.peek().clone();
         let mut active = self.active_query.peek().to_owned();
         if !close_query_tab(&mut tabs, &mut active, id) {
@@ -170,6 +202,13 @@ impl DataController {
         if statement.is_empty() {
             return;
         }
+        if self.active_request.peek().is_some() {
+            studio.report_warning_from(
+                MessageSource::Data,
+                "A query is already running. Cancel it before starting another.",
+            );
+            return;
+        }
 
         let rows = (self.max_rows)();
         let id = self.next_query_id.peek().to_owned();
@@ -185,9 +224,21 @@ impl DataController {
             },
         };
         let mut tabs = self.query_tabs.peek().clone();
-        tabs.push(running);
+        push_bounded_query_tab(&mut tabs, running);
         self.query_tabs.set(tabs);
         self.active_query.set(Some(id));
+
+        #[cfg(target_arch = "wasm32")]
+        let abort = web_sys::AbortController::new().ok();
+        #[cfg(target_arch = "wasm32")]
+        let signal = abort.as_ref().map(web_sys::AbortController::signal);
+        #[cfg(not(target_arch = "wasm32"))]
+        let signal = None::<web_sys::AbortSignal>;
+        self.active_request.set(Some(ActiveQuery {
+            id,
+            #[cfg(target_arch = "wasm32")]
+            abort,
+        }));
 
         let request = SpiralQueryRequest {
             sql: statement.clone(),
@@ -197,14 +248,28 @@ impl DataController {
         // controller and its generation guard are shell-owned, so completion
         // must outlive the button that launched it.
         dioxus::dioxus_core::spawn_forever(async move {
-            let state =
-                match api::send_json(Method::POST, "/api/spiral/query", Some(&request)).await {
-                    Ok(response) => QueryState::Ready(response),
-                    Err(error) => {
-                        studio.report_from(MessageSource::Data, format!("Query failed: {error}"));
-                        QueryState::Failed(error)
-                    }
-                };
+            let outcome = api::send_json_abortable(
+                Method::POST,
+                "/api/spiral/query",
+                Some(&request),
+                signal.as_ref(),
+            )
+            .await;
+            if self
+                .active_request
+                .peek()
+                .as_ref()
+                .is_none_or(|request| request.id != id)
+            {
+                return;
+            }
+            let state = match outcome {
+                Ok(response) => QueryState::Ready(response),
+                Err(error) => {
+                    studio.report_from(MessageSource::Data, format!("Query failed: {error}"));
+                    QueryState::Failed(error)
+                }
+            };
             let mut tabs = self.query_tabs.peek().clone();
             if let Some(tab) = tabs.iter_mut().find(|tab| tab.id == id) {
                 tab.model = QueryViewModel {
@@ -214,7 +279,20 @@ impl DataController {
                 };
                 self.query_tabs.set(tabs);
             }
+            self.active_request.set(None);
         });
+    }
+
+    pub(crate) fn cancel_query(mut self) {
+        let Some(request) = self.active_request.replace(None) else {
+            return;
+        };
+        request.abort();
+        let mut tabs = self.query_tabs.peek().clone();
+        if let Some(tab) = tabs.iter_mut().find(|tab| tab.id == request.id) {
+            tab.model.state = QueryState::Failed("Cancelled by operator.".to_owned());
+            self.query_tabs.set(tabs);
+        }
     }
 
     #[cfg(all(feature = "web", target_arch = "wasm32"))]
@@ -257,6 +335,13 @@ fn close_query_tab(tabs: &mut Vec<QueryTab>, active: &mut Option<u64>, id: u64) 
     true
 }
 
+fn push_bounded_query_tab(tabs: &mut Vec<QueryTab>, tab: QueryTab) {
+    if tabs.len() >= MAX_QUERY_TABS {
+        tabs.remove(0);
+    }
+    tabs.push(tab);
+}
+
 fn query_title(sql: &str, id: u64) -> String {
     let normalized = sql.split_whitespace().collect::<Vec<_>>();
     let table = normalized
@@ -278,7 +363,7 @@ fn query_title(sql: &str, id: u64) -> String {
 mod tests {
     use crate::frontend::screens::data::workbench::{QueryState, QueryTab, QueryViewModel};
 
-    use super::{close_query_tab, query_title};
+    use super::{MAX_QUERY_TABS, close_query_tab, push_bounded_query_tab, query_title};
 
     #[test]
     fn query_tabs_name_the_first_relation_without_hiding_identity() {
@@ -307,5 +392,23 @@ mod tests {
         assert_eq!(active, Some(1));
         assert_eq!(tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(), [1, 3]);
         assert_eq!(tabs[1].model.sql, "SELECT 3");
+    }
+
+    #[test]
+    fn retained_query_results_are_bounded_to_the_newest_tabs() {
+        let tab = |id| QueryTab {
+            id,
+            title: format!("Query {id}"),
+            model: QueryViewModel {
+                sql: format!("SELECT {id}"),
+                max_rows: 100,
+                state: QueryState::Running,
+            },
+        };
+        let mut tabs = (1..=MAX_QUERY_TABS as u64).map(tab).collect::<Vec<_>>();
+        push_bounded_query_tab(&mut tabs, tab(99));
+        assert_eq!(tabs.len(), MAX_QUERY_TABS);
+        assert_eq!(tabs.first().map(|tab| tab.id), Some(2));
+        assert_eq!(tabs.last().map(|tab| tab.id), Some(99));
     }
 }

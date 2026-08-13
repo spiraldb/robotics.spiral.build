@@ -35,10 +35,11 @@ use spiral_robotics_core::api::{
     UpdateDataSettingsRequest, UpdateRobotRequest, default_teleoperation_pair,
 };
 use spiral_robotics_core::calibration::build_calibration;
-use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 
 use crate::backend::recording::dataset::{
-    export_lerobot_archive_for_dataset, import_lerobot_archive_into_dataset,
+    MAX_ARCHIVE_COMPRESSED_BYTES, export_lerobot_archive_to_file_for_dataset,
+    import_lerobot_archive_file_into_dataset,
 };
 use crate::backend::recording::episodes::{
     ArmCondition, EpisodeError, EpisodeStore, TimelineMetadata, TimelineSample, TimelineTraces,
@@ -2054,13 +2055,60 @@ async fn download_episodes(
         .as_deref()
         .map(validated_dataset_id)
         .transpose()?;
+    let temporary = tempfile::NamedTempFile::new().map_err(|error| {
+        Failure(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not create a temporary export file: {error}"),
+        )
+    })?;
+    let destination = temporary.reopen().map_err(|error| {
+        Failure(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not open the temporary export file: {error}"),
+        )
+    })?;
     let episodes = state.episodes.clone();
-    let archive = tokio::task::spawn_blocking(move || {
-        export_lerobot_archive_for_dataset(&episodes, dataset_id.as_deref())
+    let summary = tokio::task::spawn_blocking(move || {
+        export_lerobot_archive_to_file_for_dataset(&episodes, dataset_id.as_deref(), destination)
     })
     .await
     .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
-    let mut response = Body::from(archive.bytes).into_response();
+    let length = temporary
+        .as_file()
+        .metadata()
+        .map_err(|error| {
+            Failure(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not inspect the temporary export file: {error}"),
+            )
+        })?
+        .len();
+    let file = tokio::fs::File::open(temporary.path())
+        .await
+        .map_err(|error| {
+            Failure(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not stream the temporary export file: {error}"),
+            )
+        })?;
+    let stream = async_stream::stream! {
+        // The named file removes itself only after the response body finishes
+        // or is dropped by a disconnected browser.
+        let _temporary = temporary;
+        let mut file = file;
+        let mut buffer = vec![0_u8; 64 * 1024];
+        loop {
+            match file.read(&mut buffer).await {
+                Ok(0) => break,
+                Ok(read) => yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(&buffer[..read])),
+                Err(error) => {
+                    yield Err::<Bytes, std::io::Error>(error);
+                    break;
+                }
+            }
+        }
+    };
+    let mut response = Body::from_stream(stream).into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         header::HeaderValue::from_static("application/zip"),
@@ -2072,18 +2120,23 @@ async fn download_episodes(
         ),
     );
     response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        header::HeaderValue::from_str(&length.to_string())
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
+    );
+    response.headers_mut().insert(
         header::HeaderName::from_static("x-spiral-robotics-episodes"),
-        header::HeaderValue::from_str(&archive.episodes.to_string())
+        header::HeaderValue::from_str(&summary.episodes.to_string())
             .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
     );
     response.headers_mut().insert(
         header::HeaderName::from_static("x-spiral-robotics-frames"),
-        header::HeaderValue::from_str(&archive.frames.to_string())
+        header::HeaderValue::from_str(&summary.frames.to_string())
             .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
     );
     response.headers_mut().insert(
         header::HeaderName::from_static("x-spiral-robotics-skipped"),
-        header::HeaderValue::from_str(&archive.skipped.to_string())
+        header::HeaderValue::from_str(&summary.skipped.to_string())
             .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
     );
     // How many takes cost the whole dataset its velocity and effort columns.
@@ -2091,7 +2144,7 @@ async fn download_episodes(
     // file; the header is for a client that wants it without opening the ZIP.
     response.headers_mut().insert(
         header::HeaderName::from_static("x-spiral-robotics-without-proprioception"),
-        header::HeaderValue::from_str(&archive.without_proprioception.to_string())
+        header::HeaderValue::from_str(&summary.without_proprioception.to_string())
             .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
     );
     Ok(response)
@@ -2101,17 +2154,72 @@ async fn download_episodes(
 async fn import_episodes(
     State(state): State<AppState>,
     Query(query): Query<DatasetQuery>,
-    body: Bytes,
+    body: Body,
 ) -> Result<Json<ImportResponse>, Failure> {
-    if body.is_empty() {
+    let temporary = tempfile::NamedTempFile::new().map_err(|error| {
+        Failure(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not create a temporary import file: {error}"),
+        )
+    })?;
+    let output = temporary.reopen().map_err(|error| {
+        Failure(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not open the temporary import file: {error}"),
+        )
+    })?;
+    let mut output = tokio::fs::File::from_std(output);
+    let mut stream = body.into_data_stream();
+    let mut written = 0_usize;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| {
+            Failure::bad_request(format!("could not read the uploaded ZIP: {error}"))
+        })?;
+        written = written.checked_add(chunk.len()).ok_or_else(|| {
+            Failure(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "uploaded ZIP is too large".to_owned(),
+            )
+        })?;
+        if written > MAX_ARCHIVE_COMPRESSED_BYTES {
+            return Err(Failure(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "the uploaded ZIP exceeds the supported {} MiB limit",
+                    MAX_ARCHIVE_COMPRESSED_BYTES / (1024 * 1024)
+                ),
+            ));
+        }
+        output.write_all(&chunk).await.map_err(|error| {
+            Failure(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not spool the uploaded ZIP: {error}"),
+            )
+        })?;
+    }
+    output.flush().await.map_err(|error| {
+        Failure(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not finish the uploaded ZIP: {error}"),
+        )
+    })?;
+    drop(output);
+    if written == 0 {
         return Err(Failure::bad_request(
             "choose a LeRobot dataset ZIP to import",
         ));
     }
     let dataset_id = validated_dataset_id(query.dataset_id.as_deref().unwrap_or("default"))?;
     let episodes = state.episodes.clone();
+    let source = temporary.reopen().map_err(|error| {
+        Failure(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not reopen the uploaded ZIP: {error}"),
+        )
+    })?;
     let response = tokio::task::spawn_blocking(move || {
-        import_lerobot_archive_into_dataset(&episodes, &body, &dataset_id)
+        let _temporary = temporary;
+        import_lerobot_archive_file_into_dataset(&episodes, source, &dataset_id)
     })
     .await
     .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;

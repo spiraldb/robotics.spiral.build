@@ -47,6 +47,7 @@ struct TrainingManagerInner {
 }
 
 enum NativeEvent {
+    Configured(Box<StartTrainingRequest>),
     Started(String),
     Metric(TrainingMetricPoint),
     Checkpoint {
@@ -252,6 +253,7 @@ impl TrainingManager {
             },
         ));
         let mut publication_error = None;
+        let mut resolved_request = request.clone();
         let mut events_open = true;
         let terminal = loop {
             tokio::select! {
@@ -260,6 +262,16 @@ impl TrainingManager {
                     match event {
                         None => events_open = false,
                         Some(event) => match event {
+                        NativeEvent::Configured(config) => {
+                            resolved_request = (*config).clone();
+                            self.publish(
+                                TrainingUpdate::RunConfigured {
+                                    run_id: run_id.clone(),
+                                    config,
+                                },
+                                true,
+                            );
+                        }
                         NativeEvent::Started(message) => {
                             if self.phase(&run_id) == Some(TrainingRunPhase::Starting) {
                                 self.set_phase(&run_id, TrainingRunPhase::Running, None, Some(message));
@@ -285,7 +297,7 @@ impl TrainingManager {
                                 self
                                     .publish_checkpoint_bytes(
                                         &run_id,
-                                        &request,
+                                        &resolved_request,
                                         &settings,
                                         &source,
                                         step,
@@ -311,6 +323,15 @@ impl TrainingManager {
         };
         while let Ok(event) = events_rx.try_recv() {
             match event {
+                NativeEvent::Configured(config) => {
+                    self.publish(
+                        TrainingUpdate::RunConfigured {
+                            run_id: run_id.clone(),
+                            config,
+                        },
+                        true,
+                    );
+                }
                 NativeEvent::Started(message) => {
                     if self.phase(&run_id) == Some(TrainingRunPhase::Starting) {
                         self.set_phase(&run_id, TrainingRunPhase::Running, None, Some(message));
@@ -429,6 +450,11 @@ impl TrainingManager {
                     spiral_table: source.checkpoint_table.clone(),
                     byte_size,
                     inference_ready: true,
+                    recommended_action_steps: request.chunk_size,
+                    sample_hz: manifest
+                        .pointer("/data_contract/sample_hz")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or_default(),
                 },
             },
             true,
@@ -532,18 +558,22 @@ fn train_blocking(
             .to_owned(),
     ));
     let mut loader = SpiralActLoader::open(connection, request, &settings.dataset)?;
+    let mut resolved_request = request.clone();
+    resolved_request.act.camera_streams = loader.camera_streams().to_vec();
+    let _ = events.send(NativeEvent::Configured(Box::new(resolved_request.clone())));
     let config = VisionActTrainingConfig {
         state_dimensions: loader.state_dimensions(),
         action_dimensions: loader.action_dimensions(),
-        camera_streams: request.act.camera_streams.clone(),
-        image_width: request.act.image_width,
-        image_height: request.act.image_height,
+        camera_streams: resolved_request.act.camera_streams.clone(),
+        image_width: loader.image_width(),
+        image_height: loader.image_height(),
         chunk_size: request.chunk_size,
         hidden_dimensions: request.act.hidden_dim,
         latent_dimensions: request.act.latent_dim,
         attention_heads: request.act.attention_heads,
         feedforward_dimensions: request.act.feedforward_dim,
         encoder_layers: request.act.encoder_layers,
+        vae_encoder_layers: request.act.vae_encoder_layers,
         decoder_layers: request.act.decoder_layers,
         kl_weight: request.act.kl_weight,
         learning_rate: request.learning_rate,
@@ -559,11 +589,13 @@ fn train_blocking(
         trainer.parameter_count() as f64 / 1_000_000.0
     )));
     let _ = events.send(NativeEvent::Log(format!(
-        "ACT inputs: state={}, action={}, chunk={}, cameras={}. Spiral owns frame decode, resize, CHW conversion, and ImageNet normalization.",
+        "ACT inputs: state={}, action={}, image={}x{}, chunk={}, cameras={}. Spiral owns frame decode, optional resize, CHW conversion, and ImageNet normalization.",
         loader.state_dimensions(),
         loader.action_dimensions(),
+        loader.image_width(),
+        loader.image_height(),
         request.chunk_size,
-        request.act.camera_streams.join(", ")
+        resolved_request.act.camera_streams.join(", ")
     )));
 
     let started = Instant::now();
@@ -626,7 +658,7 @@ fn train_blocking(
             send_checkpoint(
                 &events,
                 run_id,
-                request,
+                &resolved_request,
                 source,
                 &loader,
                 &trainer,
@@ -640,7 +672,7 @@ fn train_blocking(
         send_checkpoint(
             &events,
             run_id,
-            request,
+            &resolved_request,
             source,
             &loader,
             &trainer,
@@ -710,7 +742,7 @@ fn checkpoint_manifest(
             camera.clone(),
             serde_json::json!({
                 "type": "VISUAL",
-                "shape": [3, request.act.image_height, request.act.image_width]
+                "shape": [3, loader.image_height(), loader.image_width()]
             }),
         );
     }
@@ -727,7 +759,7 @@ fn checkpoint_manifest(
             "action": {"type": "ACTION", "shape": [loader.action_dimensions()]}
         },
         "chunk_size": request.chunk_size,
-        "n_action_steps": request.chunk_size.min(10),
+        "n_action_steps": request.chunk_size,
         "vision_backbone": "resnet18",
         "replace_final_stride_with_dilation": false,
         "pre_norm": false,
@@ -736,10 +768,11 @@ fn checkpoint_manifest(
         "dim_feedforward": request.act.feedforward_dim,
         "feedforward_activation": "relu",
         "n_encoder_layers": request.act.encoder_layers,
+        "n_vae_encoder_layers": request.act.vae_encoder_layers,
         "n_decoder_layers": request.act.decoder_layers,
         "use_vae": true,
         "latent_dim": request.act.latent_dim,
-        "spiral_camera_embedding": true,
+        "spiral_camera_embedding": false,
         "spiral_camera_order": request.act.camera_streams,
     });
     serde_json::json!({
@@ -761,7 +794,7 @@ fn checkpoint_manifest(
             "image_layout": "chw",
             "image_normalization": "imagenet",
             "frame_alignment": "fixed_fps",
-            "spiral_schema_version": 5,
+            "spiral_schema_version": spiral::SCHEMA_VERSION,
         },
         "runtime": {
             "ml": "burn 0.21",
@@ -775,16 +808,8 @@ fn checkpoint_manifest(
 }
 
 fn load_pretrained_backbone() -> Result<Vec<u8>, String> {
-    let model = spiral_robotics_inference::act::reference_remote_model()
-        .map_err(|error| format!("resolving the pinned ACT backbone: {error}"))?;
-    let files = spiral_robotics_inference::download_remote_model(&model)
-        .map_err(|error| format!("downloading the pinned ImageNet ResNet-18 backbone: {error}"))?;
-    fs::read(files.weights_path()).map_err(|error| {
-        format!(
-            "reading pretrained backbone {}: {error}",
-            files.weights_path().display()
-        )
-    })
+    spiral_robotics_inference::act::imagenet_resnet18_weights()
+        .map_err(|error| format!("loading torchvision ResNet18 IMAGENET1K_V1: {error}"))
 }
 
 fn runtime_description() -> String {
@@ -956,8 +981,8 @@ fn validate_request(request: &StartTrainingRequest) -> Result<(), String> {
     if !request.learning_rate.is_finite() || request.learning_rate <= 0.0 {
         return Err("Learning rate must be a finite positive number.".to_owned());
     }
-    if request.act.camera_streams.is_empty() || request.act.camera_streams.len() > 8 {
-        return Err("ACT requires between one and eight camera streams.".to_owned());
+    if request.act.camera_streams.len() > 8 {
+        return Err("ACT supports at most eight camera streams.".to_owned());
     }
     let mut camera_streams = BTreeSet::new();
     for stream in &request.act.camera_streams {
@@ -972,10 +997,15 @@ fn validate_request(request: &StartTrainingRequest) -> Result<(), String> {
             return Err(format!("ACT camera stream {stream:?} is repeated."));
         }
     }
-    if !(32..=1_024).contains(&request.act.image_width)
-        || !(32..=1_024).contains(&request.act.image_height)
+    let native_images = request.act.image_width == 0 && request.act.image_height == 0;
+    if !native_images
+        && (!(32..=1_024).contains(&request.act.image_width)
+            || !(32..=1_024).contains(&request.act.image_height))
     {
-        return Err("ACT image width and height must be between 32 and 1,024.".to_owned());
+        return Err(
+            "ACT image width and height must both be zero (native) or between 32 and 1,024."
+                .to_owned(),
+        );
     }
     if !matches!(
         request.act.video_decoder.as_str(),
@@ -1035,14 +1065,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_vision_act_request_matches_recorded_camera_stream_ids() {
+    fn default_vision_act_request_discovers_dataset_camera_streams() {
         let request = StartTrainingRequest {
             sql: "SELECT 1".to_owned(),
             ..StartTrainingRequest::default()
         };
 
         validate_request(&request).unwrap();
-        assert_eq!(request.act.camera_streams, ["follower.camera.gripper"]);
+        assert!(request.act.camera_streams.is_empty());
     }
 
     #[test]

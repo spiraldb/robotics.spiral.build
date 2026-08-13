@@ -53,8 +53,11 @@ pub(crate) fn EpisodesPanel(namespace: String, spiral_available: bool) -> Elemen
     let mut importing = use_signal(|| false);
     let mut confirming_delete = use_signal(|| None::<String>);
 
-    // Land on a useful episode once without creating a parallel panel-local
-    // selection that could drift from Scene, cameras, and Timeline.
+    // Keep the shared selection inside the active dataset without creating a
+    // panel-local copy that could drift from Scene, cameras, and Timeline.
+    // The comparison before `set` is essential: Dioxus effects are reactive
+    // to reads, so writing `None` into an already-empty signal would schedule
+    // this effect forever when a dataset has no episodes.
     use_effect(move || {
         let dataset_id = studio.selected_dataset.read().trim().to_owned();
         let episodes = studio
@@ -62,15 +65,10 @@ pub(crate) fn EpisodesPanel(namespace: String, spiral_available: bool) -> Elemen
             .into_iter()
             .filter(|episode| episode.dataset_id == dataset_id)
             .collect::<Vec<_>>();
-        let selection_belongs_here = studio
-            .selected_episode
-            .read()
-            .as_ref()
-            .is_some_and(|id| episodes.iter().any(|episode| &episode.id == id));
-        if !selection_belongs_here && let Some(episode) = preferred_episode(&episodes).cloned() {
-            studio.selected_episode.set(Some(episode.id));
-        } else if episodes.is_empty() {
-            studio.selected_episode.set(None);
+        let current = studio.selected_episode.read().clone();
+        let next = reconciled_episode_selection(current.as_deref(), &episodes);
+        if current != next {
+            studio.selected_episode.set(next);
         }
     });
 
@@ -145,12 +143,9 @@ pub(crate) fn EpisodesPanel(namespace: String, spiral_available: bool) -> Elemen
                             importing.set(true);
                             studio.run_utility("", async move {
                                 let outcome = async {
-                                    let bytes = file.read_bytes().await.map_err(|error| {
-                                        format!("Could not read {}: {error}", file.name())
-                                    })?;
-                                    api::upload_json::<ImportResponse>(
+                                    api::upload_file_json::<ImportResponse>(
                                         &format!("/api/episodes/import?dataset_id={dataset_id}"),
-                                        &bytes,
+                                        &file,
                                         "application/zip",
                                     )
                                     .await
@@ -258,6 +253,7 @@ pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available:
     let controller = data_controller();
     let dataset_valid = spiral_robotics_core::spiral::is_dataset_id(&dataset_id);
     let can_query = query_available && dataset_valid;
+    let query_running = controller.query_running();
     let run_query = move || controller.run_query(studio, can_query);
 
     rsx! {
@@ -350,15 +346,25 @@ pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available:
                         }
                     }
                 }
-                p { class: "min-w-0 flex-1 text-[10px] leading-snug text-ink-faint",
-                    "New result tab · retained until closed · ⌘/Ctrl Enter"
+                p { class: "min-w-[7rem] flex-1 text-[10px] leading-snug text-ink-faint",
+                    span { class: "block", "Keeps newest 8" }
+                    span { class: "block whitespace-nowrap", "⌘/Ctrl Enter" }
                 }
-                button {
-                    r#type: "button",
-                    class: "btn btn-primary",
-                    disabled: !can_query || controller.sql().trim().is_empty(),
-                    onclick: move |_| run_query(),
-                    "Run query"
+                if query_running {
+                    button {
+                        r#type: "button",
+                        class: "btn btn-outline",
+                        onclick: move |_| controller.cancel_query(),
+                        "Cancel query"
+                    }
+                } else {
+                    button {
+                        r#type: "button",
+                        class: "btn btn-primary",
+                        disabled: !can_query || controller.sql().trim().is_empty(),
+                        onclick: move |_| run_query(),
+                        "Run query"
+                    }
                 }
             }
         }
@@ -402,7 +408,7 @@ fn EpisodeRow(
         "Push this local episode to SpiralDB"
     };
     let delete_title = if storage_state == EpisodeStorageState::Synced {
-        "Remove this local copy; the persisted SpiralDB episode is kept"
+        "Remove this computer's copy; the SpiralDB copy is kept"
     } else {
         "Delete this local episode"
     };
@@ -532,18 +538,16 @@ fn episode_storage_state(status: Option<&PublicationStatus>) -> EpisodeStorageSt
 
 fn episode_storage_title(status: Option<&PublicationStatus>) -> String {
     match episode_storage_state(status) {
-        EpisodeStorageState::Local => "Stored only in the local staging buffer".to_owned(),
+        EpisodeStorageState::Local => "Stored only on this computer".to_owned(),
         EpisodeStorageState::Queued => "Waiting to push to SpiralDB".to_owned(),
         EpisodeStorageState::Pushing => "Pushing this episode to SpiralDB".to_owned(),
-        EpisodeStorageState::Synced => {
-            "Persisted in this dataset inside the configured SpiralDB namespace".to_owned()
-        }
+        EpisodeStorageState::Synced => "Stored in SpiralDB".to_owned(),
         EpisodeStorageState::Failed => status
             .and_then(|status| status.spiral.as_deref())
             .and_then(|value| value.strip_prefix("failed:"))
             .map(str::trim)
             .filter(|message| !message.is_empty())
-            .unwrap_or("The last SpiralDB push failed; retry when the destination is available")
+            .unwrap_or("Could not save to SpiralDB. Check the connection and retry.")
             .to_owned(),
     }
 }
@@ -649,7 +653,7 @@ pub(crate) fn QueryResultView() -> Element {
                     div {
                         strong { class: "block text-[12px] font-medium text-ink", "No query results" }
                         p { class: "mt-1 max-w-[52ch] text-[11px] text-ink-faint",
-                            "Run a read-only query. Every execution opens a retained result tab here."
+                            "Run a read-only query to inspect data."
                         }
                     }
                 }
@@ -799,11 +803,11 @@ fn table_preset(table: Table) -> QueryPreset {
 fn table_description(table: Table) -> &'static str {
     match table {
         Table::Datasets => "Dataset identity and metadata",
-        Table::Episodes => "One row per completed take; references datasets",
-        Table::EpisodeStreams => "Joint and camera stream contracts",
+        Table::Episodes => "Completed episodes and their datasets",
+        Table::EpisodeStreams => "Available joint and camera streams",
         Table::JointSamples => "Synchronized state and action samples",
         Table::VideoAssets => "Recorded MP4 segments and media metadata",
-        Table::TrainingCheckpoints => "Published model artifacts by training run",
+        Table::TrainingCheckpoints => "Saved checkpoints by training run",
     }
 }
 
@@ -813,6 +817,16 @@ fn preferred_episode(episodes: &[EpisodeSummary]) -> Option<&EpisodeSummary> {
         .rev()
         .find(|episode| episode.usable() && !episode.discarded)
         .or_else(|| episodes.last())
+}
+
+fn reconciled_episode_selection(
+    current: Option<&str>,
+    episodes: &[EpisodeSummary],
+) -> Option<String> {
+    current
+        .filter(|id| episodes.iter().any(|episode| episode.id == *id))
+        .map(str::to_owned)
+        .or_else(|| preferred_episode(episodes).map(|episode| episode.id.clone()))
 }
 
 fn delete_episode(studio: crate::frontend::app::state::Studio, id: String) {
@@ -863,6 +877,47 @@ fn query_cell(value: Option<&serde_json::Value>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn episode(id: &str, usable: bool, discarded: bool) -> EpisodeSummary {
+        EpisodeSummary {
+            dataset_id: "default".to_owned(),
+            id: id.to_owned(),
+            file: format!("{id}.jsonl"),
+            arms: Vec::new(),
+            frames: 1,
+            duration_seconds: 1.0,
+            recording_gaps: Vec::new(),
+            sample_hz: 60.0,
+            started_ms: 0,
+            source: "test".to_owned(),
+            max_follow_error_degrees: None,
+            discarded,
+            problem: (!usable).then(|| "unavailable".to_owned()),
+        }
+    }
+
+    #[test]
+    fn episode_selection_reconciliation_is_stable_when_the_dataset_is_empty() {
+        assert_eq!(reconciled_episode_selection(None, &[]), None);
+        assert_eq!(reconciled_episode_selection(Some("deleted"), &[]), None);
+    }
+
+    #[test]
+    fn episode_selection_reconciliation_preserves_valid_choices_and_replaces_stale_ones() {
+        let episodes = vec![
+            episode("older", true, false),
+            episode("discarded", true, true),
+            episode("newer", true, false),
+        ];
+        assert_eq!(
+            reconciled_episode_selection(Some("older"), &episodes).as_deref(),
+            Some("older")
+        );
+        assert_eq!(
+            reconciled_episode_selection(Some("deleted"), &episodes).as_deref(),
+            Some("newer")
+        );
+    }
 
     #[test]
     fn presets_are_scoped_to_the_current_dataset() {

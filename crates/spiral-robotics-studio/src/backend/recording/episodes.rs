@@ -52,6 +52,25 @@ const FOOTER_TAIL_BYTES: u64 = 4_096;
 /// front of a stalled disk turns a recording into a memory leak.
 const SAMPLE_QUEUE_DEPTH: usize = 2_048;
 
+/// Largest episode the in-memory replay, timeline, and publication paths will
+/// accept. At the normal 60 Hz this is more than four and a half hours of
+/// continuous capture, while still putting a hard ceiling on a corrupt footer
+/// or foreign writer that would otherwise grow vectors until the process dies.
+pub(crate) const MAX_EPISODE_FRAMES: u64 = 1_000_000;
+
+/// A valid robotics controller rate. The lower edge rejects zero and denormal
+/// metadata; the upper edge leaves ample room for high-rate external writers.
+const MAX_SAMPLE_HZ: f64 = 1_000.0;
+
+/// Bound startup allocations even for a valid long recording. Vectors may
+/// grow with real parsed samples up to `MAX_EPISODE_FRAMES`, but metadata alone
+/// never reserves hundreds of megabytes.
+const MAX_PREALLOCATED_FRAMES: usize = 16_384;
+
+const MAX_EPISODE_ARMS: usize = 16;
+const MAX_JOINTS_PER_ARM: usize = 64;
+const MAX_EPISODE_DURATION_SECONDS: f64 = 7.0 * 24.0 * 60.0 * 60.0;
+
 type NormalizedPose = BTreeMap<String, f64>;
 type TimestampedPose = (f64, NormalizedPose);
 
@@ -508,10 +527,28 @@ impl EpisodeStore {
         });
 
         let stamps = self.stamps()?;
-        let mut cache = self.cache.lock().expect("episode cache");
-        cache.episodes = episodes;
-        cache.issues = issues;
-        cache.stamps = stamps;
+        let valid_indexes = episodes
+            .iter()
+            .filter_map(|episode| {
+                stamps
+                    .get(&episode.file)
+                    .cloned()
+                    .map(|stamp| (episode.id.clone(), stamp))
+            })
+            .collect::<BTreeMap<_, _>>();
+        {
+            let mut cache = self.cache.lock().expect("episode cache");
+            cache.episodes = episodes;
+            cache.issues = issues;
+            cache.stamps = stamps;
+        }
+        // A timeline index can be much larger than the summary cache. Drop it
+        // as soon as its episode disappears or changes so external deletion
+        // and repeated record/review/delete cycles reclaim their memory.
+        self.timeline_indexes
+            .lock()
+            .expect("timeline indexes")
+            .retain(|id, index| valid_indexes.get(id) == Some(&index.stamp));
         Ok(())
     }
 
@@ -557,11 +594,13 @@ impl EpisodeStore {
         let header: Header = serde_json::from_str(&header).map_err(|error| {
             EpisodeError::Invalid(format!("take {id:?} has an invalid header: {error}"))
         })?;
-        let mut samples = Vec::with_capacity(summary.frames as usize);
+        validate_header(&path, FileKind::Finished, &header)?;
+        let mut samples = Vec::with_capacity(frame_capacity(summary.frames));
         let mut footer = None;
         for line in lines {
             let line = line.map_err(|source| EpisodeError::io(&path, source))?;
             if let Some(frame) = parse_frame(&line) {
+                ensure_frame_limit(id, samples.len() as u64 + 1)?;
                 samples.push(Sample {
                     seconds: frame.t,
                     normalized: frame.n,
@@ -578,6 +617,14 @@ impl EpisodeStore {
         let footer = footer.ok_or_else(|| {
             EpisodeError::Invalid(format!("take {id:?} has no completion footer"))
         })?;
+        validate_footer(&path, &header, &footer)?;
+        if samples.len() as u64 != footer.frames {
+            return Err(EpisodeError::Invalid(format!(
+                "take {id:?} declares {} frames but contains {} readable samples",
+                footer.frames,
+                samples.len()
+            )));
+        }
         Ok(CompletedEpisode {
             start: EpisodeStart {
                 id: header.id,
@@ -685,6 +732,7 @@ impl EpisodeStore {
             condition: start.condition.clone(),
         };
         let partial = self.partial_path(&id);
+        validate_header(&partial, FileKind::Unfinished, &header)?;
         let file = File::create(&partial).map_err(|source| EpisodeError::io(&partial, source))?;
         let mut writer = BufWriter::new(file);
         write_line(&mut writer, &header).map_err(|source| EpisodeError::io(&partial, source))?;
@@ -849,12 +897,15 @@ impl EpisodeStore {
 
         let path = self.directory.join(&summary.file);
         let file = File::open(&path).map_err(|source| EpisodeError::io(&path, source))?;
-        let mut frames = Vec::with_capacity(summary.frames as usize);
+        let mut frames = Vec::with_capacity(frame_capacity(summary.frames));
+        let mut samples_seen = 0_u64;
         for line in BufReader::new(file).lines().skip(1) {
             let line = line.map_err(|source| EpisodeError::io(&path, source))?;
             let Some(frame) = parse_frame(&line).filter(|frame| frame.t.is_finite()) else {
                 continue;
             };
+            samples_seen += 1;
+            ensure_frame_limit(id, samples_seen)?;
             let Some(values) = frame.n.get(index) else {
                 continue;
             };
@@ -869,6 +920,13 @@ impl EpisodeStore {
             if !pose.is_empty() {
                 frames.push((frame.t, pose));
             }
+        }
+
+        if samples_seen != summary.frames {
+            return Err(EpisodeError::Invalid(format!(
+                "take {id:?} declares {} frames but contains {samples_seen} readable samples",
+                summary.frames
+            )));
         }
 
         if frames.is_empty() {
@@ -988,12 +1046,20 @@ impl EpisodeStore {
 
         let path = self.directory.join(&summary.file);
         let file = File::open(&path).map_err(|source| EpisodeError::io(&path, source))?;
-        let mut errors = Vec::new();
+        let mut errors = Vec::with_capacity(frame_capacity(summary.frames));
         for line in BufReader::new(file).lines().skip(1) {
             let line = line.map_err(|source| EpisodeError::io(&path, source))?;
             if let Some(frame) = parse_frame(&line) {
+                ensure_frame_limit(id, errors.len() as u64 + 1)?;
                 errors.push(frame.e);
             }
+        }
+        if errors.len() as u64 != summary.frames {
+            return Err(EpisodeError::Invalid(format!(
+                "take {id:?} declares {} frames but contains {} readable trace samples",
+                summary.frames,
+                errors.len()
+            )));
         }
         if errors.is_empty() {
             return Ok(Vec::new());
@@ -1252,7 +1318,7 @@ impl EpisodeStore {
         reader
             .read_line(&mut line)
             .map_err(|source| EpisodeError::io(&path, source))?;
-        let mut points = Vec::with_capacity(summary.frames as usize);
+        let mut points = Vec::with_capacity(frame_capacity(summary.frames));
         loop {
             let offset = reader
                 .stream_position()
@@ -1268,11 +1334,19 @@ impl EpisodeStore {
             if let Some(frame) = parse_frame(&line)
                 && frame.t.is_finite()
             {
+                ensure_frame_limit(id, points.len() as u64 + 1)?;
                 points.push(TimelinePoint {
                     seconds: frame.t,
                     offset,
                 });
             }
+        }
+        if points.len() as u64 != summary.frames {
+            return Err(EpisodeError::Invalid(format!(
+                "take {id:?} declares {} frames but contains {} readable timeline samples",
+                summary.frames,
+                points.len()
+            )));
         }
         let index = TimelineIndex { stamp, points };
         self.timeline_indexes
@@ -1553,6 +1627,18 @@ impl JsonlEpisodeWriter {
             discarded: completion.discarded,
             condition: completion.condition,
         };
+        let header = Header {
+            spiral_robotics_episode: FORMAT_VERSION,
+            id: self.start.id.clone(),
+            dataset_id: self.start.dataset_id.clone(),
+            started_ms: self.start.started_ms,
+            sample_hz: self.start.sample_hz,
+            source: self.start.source.clone(),
+            note: self.start.note.clone(),
+            arms: self.start.arms.clone(),
+            condition: self.start.condition.clone(),
+        };
+        validate_footer(&self.partial, &header, &footer)?;
         let mut file = fs::OpenOptions::new()
             .append(true)
             .open(&self.partial)
@@ -1618,6 +1704,14 @@ fn drain(
     for message in queue {
         match message {
             WriterMessage::Sample(sample) if !failed => {
+                if shared.written.load(Ordering::Relaxed) >= MAX_EPISODE_FRAMES {
+                    let error = format!(
+                        "the recording reached the supported {MAX_EPISODE_FRAMES}-sample limit"
+                    );
+                    *shared.failure.lock().expect("writer failure") = Some(error);
+                    failed = true;
+                    continue;
+                }
                 let line = FrameLine {
                     t: sample.seconds,
                     n: sample.normalized,
@@ -1702,13 +1796,7 @@ fn read_summary(path: &Path, kind: FileKind) -> Result<EpisodeSummary, EpisodeEr
             path.display()
         ))
     })?;
-    if header.spiral_robotics_episode > FORMAT_VERSION {
-        return Err(EpisodeError::Invalid(format!(
-            "'{}' is episode format {} and this build understands up to {FORMAT_VERSION}",
-            path.display(),
-            header.spiral_robotics_episode
-        )));
-    }
+    validate_header(path, kind, &header)?;
 
     let file_name = path
         .file_name()
@@ -1720,6 +1808,10 @@ fn read_summary(path: &Path, kind: FileKind) -> Result<EpisodeSummary, EpisodeEr
         FileKind::Finished => read_footer(path)?.map(|(footer, _)| footer),
         FileKind::Unfinished => None,
     };
+
+    if let Some(footer) = footer.as_ref() {
+        validate_footer(path, &header, footer)?;
+    }
 
     let (frames, duration_seconds, recording_gaps, max_follow_error_degrees, discarded, problem) =
         match footer {
@@ -1761,6 +1853,175 @@ fn read_summary(path: &Path, kind: FileKind) -> Result<EpisodeSummary, EpisodeEr
         discarded,
         problem,
     })
+}
+
+fn validate_header(path: &Path, kind: FileKind, header: &Header) -> Result<(), EpisodeError> {
+    if header.spiral_robotics_episode == 0 || header.spiral_robotics_episode > FORMAT_VERSION {
+        return Err(EpisodeError::Invalid(format!(
+            "'{}' is episode format {} and this build understands versions 1–{FORMAT_VERSION}",
+            path.display(),
+            header.spiral_robotics_episode
+        )));
+    }
+    validate_episode_id(&header.id).map_err(|_| {
+        EpisodeError::Invalid(format!(
+            "'{}' declares an invalid episode id {:?}",
+            path.display(),
+            header.id
+        ))
+    })?;
+    let expected_id = episode_id_from_path(path, kind).unwrap_or_default();
+    if header.id != expected_id {
+        return Err(EpisodeError::Invalid(format!(
+            "'{}' declares episode id {:?}; its filename identifies it as {expected_id:?}",
+            path.display(),
+            header.id
+        )));
+    }
+    if !spiral_robotics_core::spiral::is_dataset_id(&header.dataset_id) {
+        return Err(EpisodeError::Invalid(format!(
+            "take {:?} declares invalid dataset id {:?}",
+            header.id, header.dataset_id
+        )));
+    }
+    if !header.sample_hz.is_finite() || header.sample_hz <= 0.0 || header.sample_hz > MAX_SAMPLE_HZ
+    {
+        return Err(EpisodeError::Invalid(format!(
+            "take {:?} declares sample rate {}; expected a finite rate above 0 and at most {MAX_SAMPLE_HZ} Hz",
+            header.id, header.sample_hz
+        )));
+    }
+    if header.source.trim().is_empty() || header.source.chars().count() > 256 {
+        return Err(EpisodeError::Invalid(format!(
+            "take {:?} must declare a non-empty source of at most 256 characters",
+            header.id
+        )));
+    }
+    if header
+        .note
+        .as_ref()
+        .is_some_and(|note| note.chars().count() > 4_096)
+    {
+        return Err(EpisodeError::Invalid(format!(
+            "take {:?} has a note longer than 4096 characters",
+            header.id
+        )));
+    }
+    if header.arms.is_empty() || header.arms.len() > MAX_EPISODE_ARMS {
+        return Err(EpisodeError::Invalid(format!(
+            "take {:?} declares {} arms; expected 1–{MAX_EPISODE_ARMS}",
+            header.id,
+            header.arms.len()
+        )));
+    }
+    let mut arm_ids = BTreeSet::new();
+    for arm in &header.arms {
+        if arm.id.trim().is_empty() || arm.id.chars().count() > 96 || !arm_ids.insert(&arm.id) {
+            return Err(EpisodeError::Invalid(format!(
+                "take {:?} has an empty, duplicate, or overlong arm id {:?}",
+                header.id, arm.id
+            )));
+        }
+        if arm.joints.is_empty() || arm.joints.len() > MAX_JOINTS_PER_ARM {
+            return Err(EpisodeError::Invalid(format!(
+                "take {:?} arm {:?} declares {} joints; expected 1–{MAX_JOINTS_PER_ARM}",
+                header.id,
+                arm.id,
+                arm.joints.len()
+            )));
+        }
+        let mut joints = BTreeSet::new();
+        if arm.joints.iter().any(|joint| {
+            joint.trim().is_empty() || joint.chars().count() > 96 || !joints.insert(joint)
+        }) {
+            return Err(EpisodeError::Invalid(format!(
+                "take {:?} arm {:?} has an empty, duplicate, or overlong joint name",
+                header.id, arm.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_footer(path: &Path, header: &Header, footer: &Footer) -> Result<(), EpisodeError> {
+    if footer.spiral_robotics_episode_end != header.spiral_robotics_episode {
+        return Err(EpisodeError::Invalid(format!(
+            "take {:?} starts as format {} but ends as format {}",
+            header.id, header.spiral_robotics_episode, footer.spiral_robotics_episode_end
+        )));
+    }
+    if footer.frames > MAX_EPISODE_FRAMES {
+        return Err(EpisodeError::Invalid(format!(
+            "take {:?} declares {} frames; this build safely supports at most {MAX_EPISODE_FRAMES}",
+            header.id, footer.frames
+        )));
+    }
+    let bytes = fs::metadata(path)
+        .map_err(|source| EpisodeError::io(path, source))?
+        .len();
+    if footer.frames > bytes {
+        return Err(EpisodeError::Invalid(format!(
+            "take {:?} declares more frames ({}) than its {}-byte file could contain",
+            header.id, footer.frames, bytes
+        )));
+    }
+    if !footer.duration_seconds.is_finite()
+        || footer.duration_seconds < 0.0
+        || footer.duration_seconds > MAX_EPISODE_DURATION_SECONDS
+    {
+        return Err(EpisodeError::Invalid(format!(
+            "take {:?} declares invalid duration {}; expected 0–{} seconds",
+            header.id, footer.duration_seconds, MAX_EPISODE_DURATION_SECONDS
+        )));
+    }
+    if footer
+        .max_follow_error_degrees
+        .is_some_and(|error| !error.is_finite() || error < 0.0)
+    {
+        return Err(EpisodeError::Invalid(format!(
+            "take {:?} declares an invalid maximum follow error",
+            header.id
+        )));
+    }
+    if footer.recording_gaps.iter().any(|gap| {
+        !gap.after_seconds.is_finite()
+            || gap.after_seconds < 0.0
+            || gap.after_seconds > footer.duration_seconds
+            || !gap.duration_seconds.is_finite()
+            || gap.duration_seconds < 0.0
+    }) {
+        return Err(EpisodeError::Invalid(format!(
+            "take {:?} contains an invalid recording gap",
+            header.id
+        )));
+    }
+    Ok(())
+}
+
+fn episode_id_from_path(path: &Path, kind: FileKind) -> Option<&str> {
+    let name = path.file_name()?.to_str()?;
+    match kind {
+        FileKind::Finished => name.strip_suffix(&format!(".{EPISODE_EXTENSION}")),
+        FileKind::Unfinished => {
+            name.strip_suffix(&format!(".{EPISODE_EXTENSION}.{PARTIAL_EXTENSION}"))
+        }
+    }
+}
+
+pub(crate) fn frame_capacity(frames: u64) -> usize {
+    usize::try_from(frames)
+        .unwrap_or(usize::MAX)
+        .min(MAX_PREALLOCATED_FRAMES)
+}
+
+fn ensure_frame_limit(id: &str, frames: u64) -> Result<(), EpisodeError> {
+    if frames > MAX_EPISODE_FRAMES {
+        Err(EpisodeError::Invalid(format!(
+            "take {id:?} contains more than the supported {MAX_EPISODE_FRAMES} samples"
+        )))
+    } else {
+        Ok(())
+    }
 }
 
 /// Read a finished take's footer and the byte offset its line starts at.
@@ -1817,6 +2078,16 @@ fn measure_samples(path: &Path) -> Result<(u64, f64), EpisodeError> {
         let line = line.map_err(|source| EpisodeError::io(path, source))?;
         if let Some(frame) = parse_frame(&line) {
             frames += 1;
+            ensure_frame_limit(
+                episode_id_from_path(path, FileKind::Unfinished).unwrap_or("unfinished episode"),
+                frames,
+            )?;
+            if !frame.t.is_finite() || frame.t < 0.0 {
+                return Err(EpisodeError::Invalid(format!(
+                    "'{}' contains an invalid sample timestamp",
+                    path.display()
+                )));
+            }
             last = frame.t;
         }
     }
@@ -2538,6 +2809,58 @@ mod tests {
             !store.reload_if_changed().expect("stable"),
             "an idle directory must not re-read every poll"
         );
+    }
+
+    #[test]
+    fn deleting_every_take_externally_clears_the_listing_and_timeline_cache() {
+        let (_directory, store) = store();
+        let summary = record(&store, 3);
+        store
+            .timeline_metadata(&summary.id)
+            .expect("build timeline index");
+        assert_eq!(store.timeline_indexes.lock().unwrap().len(), 1);
+
+        fs::remove_file(store.directory().join(&summary.file)).expect("external delete");
+        assert!(store.reload_if_changed().expect("notice deletion"));
+        assert!(store.list().is_empty());
+        assert!(store.timeline_indexes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn hostile_footer_counts_are_reported_without_allocating_from_them() {
+        let (_directory, store) = store();
+        let take = format!(
+            "{{\"spiral_robotics_episode\":1,\"id\":\"episode_000001\",\"started_ms\":0,\"sample_hz\":60.0,\"source\":\"foreign\",\"arms\":[{{\"id\":\"follower\",\"joints\":[\"shoulder_pan\"]}}]}}\n{{\"t\":0.0,\"n\":[[0.0]],\"raw\":[[0]]}}\n{{\"spiral_robotics_episode_end\":1,\"frames\":{},\"duration_seconds\":0.016}}\n",
+            MAX_EPISODE_FRAMES + 1
+        );
+        fs::write(store.directory().join("episode_000001.jsonl"), take).expect("write take");
+
+        store.reload().expect("reload remains available");
+        assert!(store.list().is_empty());
+        assert!(
+            store
+                .issues()
+                .iter()
+                .any(|issue| issue.contains("safely supports at most"))
+        );
+    }
+
+    #[test]
+    fn recording_refuses_invalid_rates_before_creating_a_file() {
+        let (_directory, store) = store();
+        let error = match store.begin(
+            "Teleoperation".to_owned(),
+            None,
+            f64::INFINITY,
+            arms(),
+            Vec::new(),
+        ) {
+            Ok(_) => panic!("non-finite controller rate was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("sample rate"), "{error}");
+        assert!(store.list().is_empty());
+        assert!(fs::read_dir(store.directory()).unwrap().next().is_none());
     }
 
     #[test]

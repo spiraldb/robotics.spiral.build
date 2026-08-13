@@ -119,10 +119,14 @@ impl TrainingPolicy {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ActTrainingConfig {
     /// Camera stream IDs that must be present for every sampled anchor.
+    /// An empty list discovers every camera stream shared by the selected
+    /// dataset episodes, matching LeRobot's feature-driven policy inputs.
     #[serde(default = "default_training_camera_streams")]
     pub camera_streams: Vec<String>,
+    /// Requested image width. Zero preserves the recorded camera width.
     #[serde(default = "default_training_image_size")]
     pub image_width: usize,
+    /// Requested image height. Zero preserves the recorded camera height.
     #[serde(default = "default_training_image_size")]
     pub image_height: usize,
     /// Spiral video decoder implementation: auto, ffmpeg, videotoolbox, or nvdec.
@@ -137,6 +141,8 @@ pub struct ActTrainingConfig {
     pub latent_dim: usize,
     #[serde(default = "default_act_encoder_layers")]
     pub encoder_layers: usize,
+    #[serde(default = "default_act_vae_encoder_layers")]
+    pub vae_encoder_layers: usize,
     #[serde(default = "default_act_decoder_layers")]
     pub decoder_layers: usize,
     #[serde(default = "default_act_attention_heads")]
@@ -158,6 +164,7 @@ impl Default for ActTrainingConfig {
             hidden_dim: default_act_hidden_dim(),
             latent_dim: default_act_latent_dim(),
             encoder_layers: default_act_encoder_layers(),
+            vae_encoder_layers: default_act_vae_encoder_layers(),
             decoder_layers: default_act_decoder_layers(),
             attention_heads: default_act_attention_heads(),
             feedforward_dim: default_act_feedforward_dim(),
@@ -263,11 +270,11 @@ fn default_training_device() -> String {
 }
 
 const fn default_training_steps() -> u64 {
-    18_000
+    100_000
 }
 
 const fn default_training_batch_size() -> usize {
-    32
+    8
 }
 
 const fn default_training_learning_rate() -> f64 {
@@ -275,7 +282,7 @@ const fn default_training_learning_rate() -> f64 {
 }
 
 const fn default_training_checkpoint_every() -> u64 {
-    1_000
+    20_000
 }
 
 const fn default_training_chunk_size() -> usize {
@@ -283,15 +290,15 @@ const fn default_training_chunk_size() -> usize {
 }
 
 const fn default_training_seed() -> u64 {
-    42
+    1_000
 }
 
 fn default_training_camera_streams() -> Vec<String> {
-    vec!["follower.camera.gripper".to_owned()]
+    Vec::new()
 }
 
 const fn default_training_image_size() -> usize {
-    224
+    0
 }
 
 fn default_training_video_decoder() -> String {
@@ -303,7 +310,7 @@ const fn default_act_pretrained_backbone() -> bool {
 }
 
 const fn default_act_hidden_dim() -> usize {
-    256
+    512
 }
 
 const fn default_act_latent_dim() -> usize {
@@ -314,8 +321,14 @@ const fn default_act_encoder_layers() -> usize {
     4
 }
 
+const fn default_act_vae_encoder_layers() -> usize {
+    4
+}
+
 const fn default_act_decoder_layers() -> usize {
-    7
+    // The original ACT requested seven decoder layers but returned only the
+    // first layer's output. LeRobot preserves that effective architecture.
+    1
 }
 
 const fn default_act_attention_heads() -> usize {
@@ -323,7 +336,7 @@ const fn default_act_attention_heads() -> usize {
 }
 
 const fn default_act_feedforward_dim() -> usize {
-    2_048
+    3_200
 }
 
 const fn default_act_kl_weight() -> f64 {
@@ -356,6 +369,12 @@ pub struct TrainingCheckpoint {
     /// Old run-history entries default to false and cannot be selected for rollout.
     #[serde(default)]
     pub inference_ready: bool,
+    /// Number of actions to execute before refreshing the observation.
+    #[serde(default)]
+    pub recommended_action_steps: usize,
+    /// Control frequency inherited from the recorded dataset.
+    #[serde(default)]
+    pub sample_hz: f64,
 }
 
 /// Immutable Spiral identity captured when a run starts.
@@ -435,6 +454,10 @@ pub enum TrainingUpdate {
     RunAdded {
         run: Box<TrainingRun>,
     },
+    RunConfigured {
+        run_id: String,
+        config: Box<StartTrainingRequest>,
+    },
     RunState {
         run_id: String,
         phase: TrainingRunPhase,
@@ -457,13 +480,21 @@ pub enum TrainingUpdate {
 }
 
 /// Operator-approved launch parameters for one backend-owned policy session.
+pub const DEFAULT_ROLLOUT_DURATION_SECONDS: u32 = 30;
+pub const MAX_ROLLOUT_DURATION_SECONDS: u32 = 600;
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StartRolloutRequest {
     pub run_id: String,
     pub checkpoint_step: u64,
     pub robot: String,
-    pub action_steps: usize,
-    pub control_rate_hz: u32,
+    /// Time spent actively applying policy actions, excluding load and warm-up.
+    #[serde(default = "default_rollout_duration_seconds")]
+    pub duration_seconds: u32,
+}
+
+const fn default_rollout_duration_seconds() -> u32 {
+    DEFAULT_ROLLOUT_DURATION_SECONDS
 }
 
 /// Authoritative lifecycle of the native inference and motor-control task.
@@ -508,6 +539,8 @@ pub struct RolloutSnapshot {
     pub run_id: Option<String>,
     pub checkpoint_step: Option<u64>,
     pub robot: Option<String>,
+    #[serde(default)]
+    pub duration_seconds: Option<u32>,
     pub started_ms: Option<i64>,
     pub finished_ms: Option<i64>,
     pub message: Option<String>,
@@ -526,6 +559,11 @@ impl TrainingSnapshot {
                 self.runs.retain(|existing| existing.id != run.id);
                 self.runs.insert(0, *run);
                 self.runs.truncate(MAX_TRAINING_HISTORY_RUNS);
+            }
+            TrainingUpdate::RunConfigured { run_id, config } => {
+                if let Some(run) = self.runs.iter_mut().find(|run| run.id == run_id) {
+                    run.config = *config;
+                }
             }
             TrainingUpdate::RunState {
                 run_id,
@@ -1406,6 +1444,33 @@ impl ApiError {
 mod tests {
     use super::*;
 
+    #[test]
+    fn act_defaults_match_current_lerobot_architecture() {
+        let config = ActTrainingConfig::default();
+        assert_eq!(config.hidden_dim, 512);
+        assert_eq!(config.feedforward_dim, 3_200);
+        assert_eq!(config.vae_encoder_layers, 4);
+        assert_eq!(config.decoder_layers, 1);
+        assert!(config.camera_streams.is_empty());
+        let request = StartTrainingRequest::default();
+        assert_eq!(request.batch_size, 8);
+        assert_eq!(request.steps, 100_000);
+        assert_eq!(request.checkpoint_every, 20_000);
+        assert_eq!(request.seed, 1_000);
+    }
+
+    #[test]
+    fn older_rollout_requests_receive_the_safe_default_duration() {
+        let request: StartRolloutRequest = serde_json::from_value(serde_json::json!({
+            "run_id": "run-1",
+            "checkpoint_step": 20_000,
+            "robot": "follower"
+        }))
+        .expect("duration defaults for an older client");
+
+        assert_eq!(request.duration_seconds, DEFAULT_ROLLOUT_DURATION_SECONDS);
+    }
+
     fn robot(id: &str, robot_type: Option<&str>) -> RobotSummary {
         RobotSummary {
             id: id.to_owned(),
@@ -1721,5 +1786,26 @@ mod tests {
         assert_eq!(run.logs.len(), MAX_TRAINING_LOG_LINES);
         assert_eq!(run.logs[0], "line 1");
         assert_eq!(run.current_step, MAX_TRAINING_METRIC_POINTS as u64);
+    }
+
+    #[test]
+    fn resolved_training_configuration_updates_the_run_snapshot() {
+        let mut snapshot = TrainingSnapshot {
+            runs: vec![TrainingRun {
+                id: "run-a".to_owned(),
+                ..TrainingRun::default()
+            }],
+            ..TrainingSnapshot::default()
+        };
+        let mut config = StartTrainingRequest::default();
+        config.act.camera_streams = vec![
+            "follower.camera.gripper".to_owned(),
+            "follower.camera.top".to_owned(),
+        ];
+        snapshot.apply(TrainingUpdate::RunConfigured {
+            run_id: "run-a".to_owned(),
+            config: Box::new(config.clone()),
+        });
+        assert_eq!(snapshot.runs[0].config, config);
     }
 }
