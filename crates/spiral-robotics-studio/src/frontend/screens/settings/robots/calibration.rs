@@ -1,9 +1,13 @@
 use dioxus::prelude::*;
-use spiral_robotics_contracts::api::{CalibrationProgress, RobotSummary};
+use gloo_net::http::Method;
+use spiral_robotics_contracts::api::{
+    CalibrationProgress, CalibrationReapplyResponse, RobotSummary,
+};
 use spiral_robotics_core::arm;
 use spiral_robotics_core::calibration::MINIMUM_CALIBRATION_TRAVEL;
 
 use crate::frontend::api::http as api;
+use crate::frontend::app::notifications::MessageSource;
 use crate::frontend::app::state::studio;
 
 #[component]
@@ -13,15 +17,87 @@ pub(super) fn CalibrationSection(
     progress: Option<CalibrationProgress>,
 ) -> Element {
     let studio = studio();
+    let mut confirming_reapply = use_signal(|| false);
+    let mut reapplying = use_signal(|| false);
     let id = robot.id.clone();
+    let matching_episodes = studio
+        .snapshot
+        .read()
+        .episodes
+        .iter()
+        .filter(|episode| episode.arms.iter().any(|arm| arm.id == robot.id))
+        .count();
 
     let Some(progress) = progress else {
         return rsx! {
             section {
                 div { class: "device-section-head",
                     h3 { class: "label mb-0 flex-1", "Calibration" }
+                    if robot.calibrated && !confirming_reapply() {
+                        button {
+                            r#type: "button",
+                            class: "btn",
+                            disabled: reapplying() || matching_episodes == 0,
+                            title: if matching_episodes == 0 {
+                                "No recorded episodes contain this arm"
+                            } else {
+                                "Recalculate recorded joint state from raw encoder positions using this calibration"
+                            },
+                            onclick: move |_| confirming_reapply.set(true),
+                            "Reapply calibration"
+                        }
+                    } else if robot.calibrated {
+                        button {
+                            r#type: "button",
+                            class: "btn btn-primary",
+                            disabled: reapplying(),
+                            title: "Updates measured state only; recorded actions and raw positions are preserved",
+                            onclick: {
+                                let id = id.clone();
+                                move |_| {
+                                    let id = id.clone();
+                                    reapplying.set(true);
+                                    studio.run_utility("", async move {
+                                        let result = api::send_json::<(), CalibrationReapplyResponse>(
+                                            Method::POST,
+                                            &format!("/api/robots/{id}/calibration/reapply"),
+                                            None,
+                                        )
+                                        .await;
+                                        reapplying.set(false);
+                                        confirming_reapply.set(false);
+                                        match result {
+                                            Ok(result) => {
+                                                studio.report_success(format_reapply_success(&result));
+                                                if !result.warnings.is_empty() {
+                                                    studio.report_warning_from(
+                                                        MessageSource::Studio,
+                                                        result.warnings.join(" "),
+                                                    );
+                                                }
+                                                Ok(())
+                                            }
+                                            Err(error) => Err(error),
+                                        }
+                                    });
+                                }
+                            },
+                            {if reapplying() {
+                                "Reapplying…".to_owned()
+                            } else {
+                                format!("Apply to {matching_episodes} takes")
+                            }}
+                        }
+                        button {
+                            r#type: "button",
+                            class: "btn",
+                            disabled: reapplying(),
+                            onclick: move |_| confirming_reapply.set(false),
+                            "Cancel"
+                        }
+                    }
                     button {
-                        r#type: "button", class: "btn btn-outline", disabled: !connected,
+                        r#type: "button", class: "btn btn-outline", disabled: !connected || reapplying(),
                         title: if !connected {
                             "Connect the arm first"
                         } else if robot.calibrated {
@@ -96,6 +172,29 @@ pub(super) fn CalibrationSection(
             }
         }
     }
+}
+
+fn format_reapply_success(result: &CalibrationReapplyResponse) -> String {
+    let episodes = result.episodes_updated;
+    let noun = if episodes == 1 { "take" } else { "takes" };
+    let mut message = format!(
+        "Reapplied calibration to {episodes} {noun} ({} frames)",
+        result.frames_updated
+    );
+    if result.episodes_unchanged > 0 {
+        message.push_str(&format!("; {} already matched", result.episodes_unchanged));
+    }
+    if result.episodes_skipped > 0 {
+        message.push_str(&format!("; {} skipped", result.episodes_skipped));
+    }
+    if result.spiral_syncs_queued > 0 {
+        message.push_str(&format!(
+            "; {} SpiralDB syncs queued",
+            result.spiral_syncs_queued
+        ));
+    }
+    message.push('.');
+    message
 }
 
 #[component]

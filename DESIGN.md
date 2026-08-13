@@ -883,10 +883,10 @@ Opening history never replaces or rewrites the new-run draft.
 - **Flat lanes:** Data-path stages and throughput series are content within
   ordinary panels, separated by rhythm and hairlines. They do not introduce
   nested cards, decorative containers, or resting elevation.
-- **Charts:** Charming builds typed ECharts options for the logarithmic loss
-  curve and compact throughput lanes. One local tree-shaken Canvas runtime
-  registers only the line, grid, tooltip, and Canvas renderer features these
-  surfaces use. Authored chart labels, semantic text summaries, and tabular
+- **Charts:** Charming builds typed ECharts options for the linear loss curve,
+  its step-axis data zoom, and compact throughput lanes. One local Canvas runtime
+  provides the line, grid, tooltip, data-zoom, and Canvas renderer features
+  these surfaces use. Authored chart labels, semantic text summaries, and tabular
   readouts remain around the canvas; series colours use centralized roles, and
   colour is never the only legend.
 - **Truthful state:** With no run, panels explain how real data appears. After a

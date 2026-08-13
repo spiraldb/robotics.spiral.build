@@ -14,6 +14,7 @@ pub(crate) const COLOR_LINE: &str = "#e8e8e6";
 pub(crate) const COLOR_INK_FAINT: &str = "#71706c";
 pub(crate) const COLOR_SURFACE: &str = "#ffffff";
 pub(crate) const COLOR_TOOLTIP_BORDER: &str = "#d9d9d6";
+pub(crate) const COLOR_SELECTED: &str = "rgba(8, 104, 184, 0.10)";
 pub(crate) const COLOR_TRAIN: &str = "#2a78d6";
 pub(crate) const COLOR_VALIDATION: &str = "#d9572b";
 pub(crate) const COLOR_THROUGHPUT: &str = "#448361";
@@ -295,7 +296,30 @@ fn update_chart(chart: &charming::Echarts, option: &Chart) {
     let _ = js_sys::Reflect::set(&settings, &JsValue::from_str("lazyUpdate"), &JsValue::TRUE);
     let _ = js_sys::Reflect::set(&settings, &JsValue::from_str("silent"), &JsValue::TRUE);
     if let Ok(option) = serde_wasm_bindgen::to_value(option) {
+        preserve_data_zoom(chart, &option);
         let _ = call_chart_method(chart, "setOption", &[option, settings.into()]);
+    }
+}
+
+#[cfg(feature = "web")]
+fn preserve_data_zoom(chart: &charming::Echarts, option: &wasm_bindgen::JsValue) {
+    use wasm_bindgen::JsValue;
+
+    let key = JsValue::from_str("dataZoom");
+    let Ok(next_zoom) = js_sys::Reflect::get(option, &key) else {
+        return;
+    };
+    if next_zoom.is_null() || next_zoom.is_undefined() {
+        return;
+    }
+    let Ok(current) = call_chart_method(chart, "getOption", &[]) else {
+        return;
+    };
+    let Ok(current_zoom) = js_sys::Reflect::get(&current, &key) else {
+        return;
+    };
+    if !current_zoom.is_null() && !current_zoom.is_undefined() {
+        let _ = js_sys::Reflect::set(option, &key, &current_zoom);
     }
 }
 

@@ -28,8 +28,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use spiral_robotics::serial_ports::{available_ports, port_description, port_kind};
 use spiral_robotics_contracts::api::{
-    ApiError, CameraStatus, ConnectionTestResponse, CreateRobotRequest, DataSettings,
-    EpisodeSummary, ExportRequest, ExportResponse, GoalRequest, IdentifyPortRequest,
+    ApiError, CalibrationReapplyResponse, CameraStatus, ConnectionTestResponse, CreateRobotRequest,
+    DataSettings, EpisodeSummary, ExportRequest, ExportResponse, GoalRequest, IdentifyPortRequest,
     IdentifyPortResponse, ImportResponse, JudgeEpisodeRequest, ModeSelection, PortSettings,
     PublicationStatus, RobotSummary, RolloutSnapshot, SerialPortSummary, SetRecordingPausedRequest,
     SetReplayPausedRequest, SpiralQueryRequest, SpiralQueryResponse,
@@ -42,9 +42,12 @@ use spiral_robotics_core::calibration::{Calibration, CalibrationInput, MotorSpec
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 
 use crate::backend::application::calibration::{
-    self, CalibrationControlPort, RobotCalibrationRepository,
+    self, CalibrationControlPort, CalibrationHistoryActivity, CalibrationHistoryPort,
+    ReappliedLocalPositions, RobotCalibrationRepository,
 };
-use crate::backend::application::catalog_lease::CatalogMutationLease;
+use crate::backend::application::catalog_lease::{
+    CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease,
+};
 use crate::backend::application::data::{
     self as data_application, ConnectionCheck, DataCatalogPort, DataSettingsView, PublicationView,
     QueryColumn as ApplicationQueryColumn, QueryCommand, QueryResult as ApplicationQueryResult,

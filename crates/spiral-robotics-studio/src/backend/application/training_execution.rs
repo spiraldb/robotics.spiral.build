@@ -588,6 +588,7 @@ mod tests {
             device: "cpu".to_owned(),
             steps: 10,
             batch_size: 1,
+            validation_split: 0.1,
             learning_rate: 0.001,
             checkpoint_every: 5,
             chunk_size: 4,

@@ -12,6 +12,7 @@ use std::sync::{Mutex, MutexGuard};
 pub(crate) enum CatalogLeaseOwner {
     Recording,
     DatasetImport,
+    CalibrationReapply,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

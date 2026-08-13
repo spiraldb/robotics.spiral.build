@@ -237,6 +237,12 @@ pub struct StartTrainingRequest {
     pub steps: u64,
     #[serde(default = "default_training_batch_size")]
     pub batch_size: usize,
+    /// Fraction of covered episodes held out from optimizer updates.
+    ///
+    /// Missing values deserialize to zero so historical run records keep their
+    /// original no-validation semantics. Newly created requests default to 10%.
+    #[serde(default)]
+    pub validation_split: f64,
     #[serde(default = "default_training_learning_rate")]
     pub learning_rate: f64,
     #[serde(default = "default_training_checkpoint_every")]
@@ -261,6 +267,7 @@ impl Default for StartTrainingRequest {
             device: default_training_device(),
             steps: default_training_steps(),
             batch_size: default_training_batch_size(),
+            validation_split: default_training_validation_split(),
             learning_rate: default_training_learning_rate(),
             checkpoint_every: default_training_checkpoint_every(),
             chunk_size: default_training_chunk_size(),
@@ -288,6 +295,10 @@ const fn default_training_steps() -> u64 {
 
 const fn default_training_batch_size() -> usize {
     8
+}
+
+const fn default_training_validation_split() -> f64 {
+    0.1
 }
 
 const fn default_training_learning_rate() -> f64 {
@@ -506,6 +517,9 @@ pub use spiral_robotics_core::operation::{
     DEFAULT_ROLLOUT_DURATION_SECONDS, MAX_ROLLOUT_DURATION_SECONDS, MIN_ROLLOUT_DURATION_SECONDS,
 };
 
+/// Maximum predicted-action prefix consumed before rollout observes and replans.
+pub const MAX_ROLLOUT_ACTION_STEPS: usize = 20;
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StartRolloutRequest {
     pub run_id: String,
@@ -699,6 +713,17 @@ pub struct RobotSummary {
     /// the card from silently rendering as an empty robot.
     pub problem: Option<String>,
     pub connection: ConnectionStatus,
+}
+
+/// Result of reinterpreting historical measured state with a robot's current calibration.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CalibrationReapplyResponse {
+    pub episodes_updated: u64,
+    pub frames_updated: u64,
+    pub episodes_unchanged: u64,
+    pub episodes_skipped: u64,
+    pub spiral_syncs_queued: u64,
+    pub warnings: Vec<String>,
 }
 
 /// Pick the best connected pair for a recording-led teleoperation session.
@@ -1157,8 +1182,9 @@ impl CalibrationJointProgress {
 /// One recorded episode, as summarised from its file.
 ///
 /// An episode is one take: the operator arms the recorder, performs the task
-/// once, and stops. Unlike a robot, an episode is immutable except for the one
-/// judgement the operator makes about it afterwards.
+/// once, and stops. Raw observations and actions are immutable; the operator's
+/// judgement may change, and normalized measured state may be re-derived from
+/// raw counts after the originating arm is recalibrated.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeSummary {
     /// Stable identifier, also the file's stem.
@@ -1510,6 +1536,15 @@ mod tests {
         assert_eq!(request.steps, 100_000);
         assert_eq!(request.checkpoint_every, 20_000);
         assert_eq!(request.seed, 1_000);
+        assert_eq!(request.validation_split, 0.1);
+    }
+
+    #[test]
+    fn historical_training_requests_keep_no_validation_semantics() {
+        let mut value = serde_json::to_value(StartTrainingRequest::default()).unwrap();
+        value.as_object_mut().unwrap().remove("validation_split");
+        let request: StartTrainingRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(request.validation_split, 0.0);
     }
 
     #[test]

@@ -29,6 +29,7 @@ use spiral_robotics_contracts::api::{
     EpisodeArm, EpisodeSummary, ExportResponse, MotorLimits, RecordingGap, default_dataset_id,
 };
 use spiral_robotics_core::arm::SO101_JOINTS;
+use spiral_robotics_core::calibration::{Calibration, normalize_centered_raw};
 pub(crate) use spiral_robotics_core::episode::MAX_EPISODE_FRAMES;
 use spiral_robotics_core::episode::{
     EpisodeArmView, EpisodeCompletionView, EpisodeFrameView, EpisodeStartView, RecordingGapView,
@@ -498,6 +499,16 @@ pub(crate) struct CompletedEpisode {
     pub completion: EpisodeCompletion,
 }
 
+/// Local result of interpreting historical raw readings with a new calibration.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ReappliedEpisodePositions {
+    pub updated_episode_ids: Vec<String>,
+    pub frames_updated: u64,
+    pub episodes_unchanged: u64,
+    pub episodes_skipped: u64,
+    pub warnings: Vec<String>,
+}
+
 /// What a take's file looked like when it was last read.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct FileStamp {
@@ -869,6 +880,184 @@ impl EpisodeStore {
                 condition: footer.condition,
             },
         })
+    }
+
+    /// Recompute one robot's recorded normalized state from durable raw counts.
+    ///
+    /// Commanded actions are deliberately untouched: older takes do not retain
+    /// the raw goal or calibration snapshot needed to transform them without
+    /// inventing training labels. Each changed take is fully staged and synced
+    /// before an atomic rename replaces its prior interpretation.
+    pub(crate) fn reapply_calibration(
+        &self,
+        robot: &str,
+        calibration: &Calibration,
+    ) -> Result<ReappliedEpisodePositions, EpisodeError> {
+        self.reload_if_changed()?;
+        let mut result = ReappliedEpisodePositions::default();
+        let summaries = self.list();
+
+        for summary in summaries {
+            let Some(arm_index) = summary.arms.iter().position(|arm| arm.id == robot) else {
+                continue;
+            };
+            if summary.problem.is_some() || summary.file.ends_with(".jsonl.part") {
+                result.episodes_skipped += 1;
+                result.warnings.push(format!(
+                    "take {:?} is incomplete or unreadable and was skipped",
+                    summary.id
+                ));
+                continue;
+            }
+
+            let joints = &summary.arms[arm_index].joints;
+            let missing = joints
+                .iter()
+                .filter(|joint| !calibration.motors.contains_key(*joint))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                result.episodes_skipped += 1;
+                result.warnings.push(format!(
+                    "take {:?} uses joints absent from the current calibration: {}",
+                    summary.id,
+                    missing.join(", ")
+                ));
+                continue;
+            }
+
+            let mut episode = self.completed(&summary.id)?;
+            let mut changed = false;
+            for sample in &mut episode.samples {
+                let normalized = joints
+                    .iter()
+                    .enumerate()
+                    .map(|(joint_index, joint)| {
+                        let motor = calibration
+                            .motors
+                            .get(joint)
+                            .expect("missing calibration was checked above");
+                        normalize_centered_raw(motor, sample.raw[arm_index][joint_index])
+                            .map(Some)
+                            .map_err(|error| {
+                                EpisodeError::Invalid(format!(
+                                    "could not reapply calibration to take {:?} joint {joint:?}: {error}",
+                                    summary.id
+                                ))
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if sample.normalized[arm_index] != normalized {
+                    sample.normalized[arm_index] = normalized;
+                    changed = true;
+                }
+            }
+
+            if changed {
+                self.replace_completed(&summary, &episode)?;
+                result.frames_updated = result.frames_updated.saturating_add(summary.frames);
+                result.updated_episode_ids.push(summary.id);
+            } else {
+                result.episodes_unchanged += 1;
+            }
+        }
+
+        self.reload()?;
+        Ok(result)
+    }
+
+    fn replace_completed(
+        &self,
+        summary: &EpisodeSummary,
+        episode: &CompletedEpisode,
+    ) -> Result<(), EpisodeError> {
+        let path = self.directory.join(&summary.file);
+        let parent = path.parent().ok_or_else(|| {
+            EpisodeError::Invalid(format!("take path '{}' has no parent", path.display()))
+        })?;
+        let metadata = fs::metadata(&path).map_err(|source| EpisodeError::io(&path, source))?;
+        let original_stamp = FileStamp {
+            length: metadata.len(),
+            modified: metadata.modified().ok(),
+        };
+        let header = Header {
+            spiral_robotics_episode: FORMAT_VERSION,
+            id: episode.start.id.clone(),
+            dataset_id: episode.start.dataset_id.clone(),
+            started_ms: episode.start.started_ms,
+            sample_hz: episode.start.sample_hz,
+            source: episode.start.source.clone(),
+            note: episode.start.note.clone(),
+            arms: episode.start.arms.clone(),
+            condition: episode.start.condition.clone(),
+        };
+        let footer = Footer {
+            spiral_robotics_episode_end: FORMAT_VERSION,
+            frames: episode.samples.len() as u64,
+            duration_seconds: episode.completion.duration_seconds,
+            recording_gaps: episode.completion.recording_gaps.clone(),
+            max_follow_error_degrees: episode.completion.max_follow_error_degrees,
+            discarded: episode.completion.discarded,
+            condition: episode.completion.condition.clone(),
+        };
+        validate_header(&path, FileKind::Finished, &header)?;
+        validate_footer(&path, &header, &footer)?;
+
+        let (temporary_path, temporary_file) = create_temporary_file(parent, "recalibrate")
+            .map_err(|source| EpisodeError::io(parent, source))?;
+        let mut temporary = TemporaryPath::file(temporary_path.clone());
+        let mut writer = BufWriter::new(temporary_file);
+        write_line(&mut writer, &header)
+            .map_err(|source| EpisodeError::io(&temporary_path, source))?;
+        let mut previous_seconds = None;
+        for (index, sample) in episode.samples.iter().enumerate() {
+            validate_frame_values(&header.arms, FrameValues::from(sample), previous_seconds)
+                .map_err(|detail| invalid_frame(&summary.id, index as u64, detail))?;
+            previous_seconds = Some(sample.seconds);
+            write_line(
+                &mut writer,
+                &FrameLine {
+                    t: sample.seconds,
+                    n: sample.normalized.clone(),
+                    raw: sample.raw.clone(),
+                    e: sample.follow_error_degrees,
+                    v: sample.velocity.clone(),
+                    f: sample.effort.clone(),
+                    a: sample.action.clone(),
+                },
+            )
+            .map_err(|source| EpisodeError::io(&temporary_path, source))?;
+        }
+        write_line(&mut writer, &footer)
+            .map_err(|source| EpisodeError::io(&temporary_path, source))?;
+        writer
+            .flush()
+            .map_err(|source| EpisodeError::io(&temporary_path, source))?;
+        fs::set_permissions(&temporary_path, metadata.permissions())
+            .map_err(|source| EpisodeError::io(&temporary_path, source))?;
+        writer
+            .get_ref()
+            .sync_all()
+            .map_err(|source| EpisodeError::io(&temporary_path, source))?;
+
+        let current = fs::metadata(&path).map_err(|source| EpisodeError::io(&path, source))?;
+        let current_stamp = FileStamp {
+            length: current.len(),
+            modified: current.modified().ok(),
+        };
+        if current_stamp != original_stamp {
+            return Err(EpisodeError::Invalid(format!(
+                "take {:?} changed while recalibrated positions were being staged; retry",
+                summary.id
+            )));
+        }
+        fs::rename(&temporary_path, &path)
+            .map_err(|source| EpisodeError::io(&temporary_path, source))?;
+        temporary.disarm();
+        let sync_result = sync_directory(parent);
+        let reload_result = self.reload();
+        sync_result?;
+        reload_result
     }
 
     /// The identifier the next take will get.
@@ -2615,6 +2804,10 @@ pub(crate) fn build_arms(arms: &[(String, Vec<String>)]) -> Result<Vec<EpisodeAr
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
+    use spiral_robotics_core::calibration::{
+        CALIBRATION_COORDINATE_SPACE, CALIBRATION_FORMAT_VERSION, CALIBRATION_UNITS, Direction,
+        MotorCalibration,
+    };
     use tempfile::TempDir;
 
     use super::*;
@@ -2666,6 +2859,101 @@ mod tests {
                 Vec::new(),
             )
             .expect("finish take")
+    }
+
+    fn calibration() -> Calibration {
+        Calibration {
+            format_version: CALIBRATION_FORMAT_VERSION,
+            units: CALIBRATION_UNITS.to_owned(),
+            coordinate_space: CALIBRATION_COORDINATE_SPACE.to_owned(),
+            motors: BTreeMap::from([
+                (
+                    "shoulder_pan".to_owned(),
+                    MotorCalibration {
+                        id: 1,
+                        direction: Direction::Normal,
+                        range_min: 1_000,
+                        center: 2_000,
+                        range_max: 3_000,
+                    },
+                ),
+                (
+                    "gripper".to_owned(),
+                    MotorCalibration {
+                        id: 2,
+                        direction: Direction::Normal,
+                        range_min: 500,
+                        center: 1_000,
+                        range_max: 1_500,
+                    },
+                ),
+            ]),
+        }
+    }
+
+    #[test]
+    fn reapplying_calibration_rewrites_measured_state_only_and_is_idempotent() {
+        let (_directory, store) = store();
+        let writer = store
+            .begin("Teleoperation".to_owned(), None, 60.0, arms(), Vec::new())
+            .expect("begin take");
+        assert!(writer.push(Sample {
+            seconds: 0.0,
+            normalized: vec![vec![Some(-0.75), Some(0.25)]],
+            raw: vec![vec![2_500, 500]],
+            action: vec![Some(vec![Some(0.8), Some(-0.4)])],
+            ..Sample::default()
+        }));
+        writer
+            .finish(0.0, Vec::new(), None, false, Vec::new())
+            .expect("finish take");
+        store.reload().expect("reload");
+
+        let first = store
+            .reapply_calibration("follower", &calibration())
+            .expect("reapply calibration");
+        assert_eq!(first.updated_episode_ids, ["episode_000001"]);
+        assert_eq!(first.frames_updated, 1);
+        assert_eq!(first.episodes_unchanged, 0);
+        assert_eq!(first.episodes_skipped, 0);
+
+        let episode = store.completed("episode_000001").expect("updated take");
+        assert_eq!(
+            episode.samples[0].normalized,
+            vec![vec![Some(0.5), Some(-1.0)]]
+        );
+        assert_eq!(episode.samples[0].raw, vec![vec![2_500, 500]]);
+        assert_eq!(
+            episode.samples[0].action,
+            vec![Some(vec![Some(0.8), Some(-0.4)])]
+        );
+
+        let second = store
+            .reapply_calibration("follower", &calibration())
+            .expect("repeat reapply");
+        assert!(second.updated_episode_ids.is_empty());
+        assert_eq!(second.frames_updated, 0);
+        assert_eq!(second.episodes_unchanged, 1);
+    }
+
+    #[test]
+    fn reapplying_calibration_skips_incompatible_matching_takes() {
+        let (_directory, store) = store();
+        record(&store, 1);
+        let mut incomplete = calibration();
+        incomplete.motors.remove("gripper");
+
+        let result = store
+            .reapply_calibration("follower", &incomplete)
+            .expect("incompatible takes are reported, not corrupted");
+
+        assert!(result.updated_episode_ids.is_empty());
+        assert_eq!(result.episodes_skipped, 1);
+        assert!(result.warnings[0].contains("gripper"));
+        assert_eq!(
+            store.completed("episode_000001").unwrap().samples[0].normalized,
+            vec![vec![Some(0.0), Some(0.5)]]
+        );
     }
 
     #[test]

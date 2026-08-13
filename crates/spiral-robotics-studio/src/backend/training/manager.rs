@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 
 use adbc_driver_manager::ManagedConnection;
 use spiral_robotics_contracts::api::{
-    ConnectionTestResponse, MAX_TRAINING_HISTORY_RUNS, StartTrainingRequest, TrainingCheckpoint,
-    TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase, TrainingSnapshot,
-    TrainingSource, TrainingUpdate,
+    ConnectionTestResponse, MAX_ROLLOUT_ACTION_STEPS, MAX_TRAINING_HISTORY_RUNS,
+    StartTrainingRequest, TrainingCheckpoint, TrainingMetricPoint, TrainingReadiness, TrainingRun,
+    TrainingRunPhase, TrainingSnapshot, TrainingSource, TrainingUpdate,
 };
 use spiral_robotics_contracts::spiral;
 use spiral_robotics_inference::act::{
@@ -389,7 +389,7 @@ impl TrainingManager {
                     spiral_table: source.checkpoint_table.clone(),
                     byte_size,
                     inference_ready: true,
-                    recommended_action_steps: request.chunk_size,
+                    recommended_action_steps: request.chunk_size.min(MAX_ROLLOUT_ACTION_STEPS),
                     sample_hz,
                 },
             },
@@ -749,7 +749,12 @@ fn train_blocking(
 
     let data_contract = ActDataContract::from_loader(&loader);
     let has_validation = loader.has_validation();
-    let validation_every = request.checkpoint_every.saturating_div(4).clamp(25, 250);
+    let validation_every = request.checkpoint_every.div_ceil(4).clamp(1, 250);
+    if has_validation {
+        let _ = events.send(NativeEvent::Log(format!(
+            "Episode-level validation runs every {validation_every} optimizer step(s); normalization statistics use training episodes only."
+        )));
+    }
     std::thread::scope(|scope| {
         let (prefetch_tx, prefetch_rx) = std_mpsc::sync_channel(PREFETCH_BUFFER_SIZE);
         let prefetch_cancel = cancel.clone();
@@ -1040,7 +1045,7 @@ fn checkpoint_manifest(
             "action": {"type": "ACTION", "shape": [data_contract.action_dimensions]}
         },
         "chunk_size": request.chunk_size,
-        "n_action_steps": request.chunk_size,
+        "n_action_steps": request.chunk_size.min(MAX_ROLLOUT_ACTION_STEPS),
         "vision_backbone": "resnet18",
         "replace_final_stride_with_dilation": false,
         "pre_norm": false,
@@ -1254,6 +1259,7 @@ fn application_training_command(request: StartTrainingRequest) -> ApplicationSta
         device: request.device,
         steps: request.steps,
         batch_size: request.batch_size,
+        validation_split: request.validation_split,
         learning_rate: request.learning_rate,
         checkpoint_every: request.checkpoint_every,
         chunk_size: request.chunk_size,
@@ -1289,6 +1295,7 @@ fn contract_training_request(command: ApplicationStartTrainingCommand) -> StartT
         device: command.device,
         steps: command.steps,
         batch_size: command.batch_size,
+        validation_split: command.validation_split,
         learning_rate: command.learning_rate,
         checkpoint_every: command.checkpoint_every,
         chunk_size: command.chunk_size,
@@ -1612,6 +1619,37 @@ mod tests {
                 requested_frames: 1,
             },
         }
+    }
+
+    #[test]
+    fn checkpoint_predicts_the_full_horizon_but_recommends_twenty_actions() {
+        let mut request = StartTrainingRequest::default();
+        request.chunk_size = 100;
+        request.act.camera_streams = vec!["observation.images.wrist".to_owned()];
+        let data_contract = ActDataContract {
+            state_dimensions: 2,
+            action_dimensions: 2,
+            image_width: 640,
+            image_height: 480,
+            stats: NormalizationStats::identity(2, 2),
+            joint_names: vec!["shoulder".to_owned(), "elbow".to_owned()],
+            robot_type: "so101_follower".to_owned(),
+            sample_hz: 30.0,
+        };
+
+        let manifest = checkpoint_manifest(
+            "train-1",
+            &request,
+            &TrainingSource::default(),
+            &data_contract,
+            100,
+        );
+
+        assert_eq!(manifest["model_config"]["chunk_size"], 100);
+        assert_eq!(
+            manifest["model_config"]["n_action_steps"],
+            MAX_ROLLOUT_ACTION_STEPS
+        );
     }
 
     fn run(id: &str) -> TrainingRun {

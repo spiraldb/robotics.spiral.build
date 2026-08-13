@@ -55,6 +55,56 @@ impl SampleRange {
     }
 }
 
+/// Partition synchronized ranges by whole episode so validation never observes
+/// frames from an episode used for optimizer updates.
+pub(crate) fn split_episode_ranges(
+    ranges: Vec<SampleRange>,
+    validation_split: f64,
+    seed: u64,
+) -> Result<(Vec<SampleRange>, Vec<SampleRange>), String> {
+    if !validation_split.is_finite() || !(0.0..=0.5).contains(&validation_split) {
+        return Err("validation split must be between 0 and 0.5".to_owned());
+    }
+    let mut episodes = ranges
+        .iter()
+        .map(|range| range.episode_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if validation_split == 0.0 || episodes.len() < 2 {
+        return Ok((ranges, Vec::new()));
+    }
+
+    episodes.sort_by(|left, right| {
+        episode_split_score(seed, left)
+            .cmp(&episode_split_score(seed, right))
+            .then_with(|| left.cmp(right))
+    });
+    let validation_count =
+        ((episodes.len() as f64 * validation_split).round() as usize).clamp(1, episodes.len() - 1);
+    let validation_episodes = episodes
+        .into_iter()
+        .take(validation_count)
+        .collect::<BTreeSet<_>>();
+    let (validation, training) = ranges
+        .into_iter()
+        .partition(|range| validation_episodes.contains(&range.episode_id));
+    Ok((training, validation))
+}
+
+fn episode_split_score(seed: u64, episode_id: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64 ^ seed;
+    for byte in episode_id.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash ^= hash >> 30;
+    hash = hash.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    hash ^= hash >> 27;
+    hash = hash.wrapping_mul(0x94d0_49bb_1331_11eb);
+    hash ^ (hash >> 31)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TrainingPopulation {
     pub ranges: Vec<SampleRange>,
@@ -832,6 +882,46 @@ mod tests {
         assert_eq!(population.sample_hz, 60.0);
         assert_eq!(population.ranges[0].robot_type, "so101_follower");
         assert_eq!(population.ranges[1].count().unwrap(), 5);
+    }
+
+    #[test]
+    fn validation_split_is_deterministic_disjoint_and_episode_level() {
+        let mut ranges = (0..10)
+            .map(|index| range(&format!("episode-{index}"), 0, 9))
+            .collect::<Vec<_>>();
+        ranges.push(range("episode-3", 20, 29));
+
+        let (training, validation) = split_episode_ranges(ranges.clone(), 0.2, 42).unwrap();
+        let (training_again, validation_again) = split_episode_ranges(ranges, 0.2, 42).unwrap();
+        assert_eq!(training, training_again);
+        assert_eq!(validation, validation_again);
+
+        let training_episodes = training
+            .iter()
+            .map(|range| range.episode_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let validation_episodes = validation
+            .iter()
+            .map(|range| range.episode_id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(validation_episodes.len(), 2);
+        assert!(training_episodes.is_disjoint(&validation_episodes));
+        assert_eq!(training.len() + validation.len(), 11);
+    }
+
+    #[test]
+    fn validation_split_keeps_small_or_disabled_populations_trainable() {
+        let only = vec![range("only", 0, 9)];
+        assert_eq!(
+            split_episode_ranges(only.clone(), 0.1, 7).unwrap(),
+            (only.clone(), Vec::new())
+        );
+        assert_eq!(
+            split_episode_ranges(only.clone(), 0.0, 7).unwrap(),
+            (only, Vec::new())
+        );
+        assert!(split_episode_ranges(Vec::new(), f64::NAN, 7).is_err());
+        assert!(split_episode_ranges(Vec::new(), 0.51, 7).is_err());
     }
 
     #[test]

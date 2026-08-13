@@ -41,6 +41,7 @@ fn feature_routers_preserve_every_public_path_exactly_once() {
         "/robots/{id}/calibration/start",
         "/robots/{id}/calibration/finish",
         "/robots/{id}/calibration/cancel",
+        "/robots/{id}/calibration/reapply",
         "/mode",
         "/episodes",
         "/episodes/record",

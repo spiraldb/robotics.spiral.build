@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use charming::Chart;
-use charming::component::{Axis, Grid};
+use charming::component::{Axis, DataZoom, DataZoomType, FilterMode, Grid};
 use charming::datatype::{CompositeValue, DataFrame, DataPoint};
 use charming::element::{
     AreaStyle, AxisLabel, AxisLine, AxisTick, AxisType, Emphasis, LineStyle, Sampling, SplitLine,
@@ -19,10 +19,10 @@ use spiral_robotics_panels::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorks
 
 use crate::frontend::app::state::studio;
 use crate::frontend::components::charts::{
-    COLOR_CPU, COLOR_GPU, COLOR_INK_FAINT, COLOR_LINE, COLOR_MEMORY, COLOR_THROUGHPUT, COLOR_TRAIN,
-    COLOR_TRANSFER, COLOR_VALIDATION, CharmingChart, MONO_FONT, TooltipRateUnit,
-    downsample_extrema, studio_bytes_tooltip, studio_numeric_tooltip, studio_percent_tooltip,
-    studio_rate_tooltip,
+    COLOR_CPU, COLOR_GPU, COLOR_INK_FAINT, COLOR_LINE, COLOR_MEMORY, COLOR_SELECTED, COLOR_SURFACE,
+    COLOR_THROUGHPUT, COLOR_TRAIN, COLOR_TRANSFER, COLOR_VALIDATION, CharmingChart, MONO_FONT,
+    TooltipRateUnit, downsample_extrema, studio_bytes_tooltip, studio_numeric_tooltip,
+    studio_percent_tooltip, studio_rate_tooltip,
 };
 use crate::frontend::screens::training::state::training_controller;
 
@@ -196,6 +196,7 @@ fn TrainingRunControl(
             request.act.camera_streams.join(", ")
         )
     };
+    let validation_percent = request.validation_split * 100.0;
 
     rsx! {
         div { class: "training-control",
@@ -330,6 +331,18 @@ fn TrainingRunControl(
                             disabled: active_run.is_some(),
                             oninput: move |event| if let Ok(value) = event.value().parse() {
                                 controller.edit_request(move |request| request.batch_size = value);
+                            },
+                        }
+                    }
+                    label { class: "training-field",
+                        span { "Validation holdout (%)" }
+                        input {
+                            r#type: "number", min: "0", max: "50", step: "1",
+                            title: "Whole episodes reserved for validation and excluded from optimizer updates",
+                            value: "{validation_percent}",
+                            disabled: active_run.is_some(),
+                            oninput: move |event| if let Ok(value) = event.value().parse::<f64>() {
+                                controller.edit_request(move |request| request.validation_split = value / 100.0);
                             },
                         }
                     }
@@ -686,6 +699,11 @@ fn TrainingInputs(run: TrainingRun) -> Element {
         (width, 0) => format!("{width} × source height"),
         (width, height) => format!("{width} × {height}"),
     };
+    let validation = if run.config.validation_split == 0.0 {
+        "Off".to_owned()
+    } else {
+        format!("{:.0}% · episode", run.config.validation_split * 100.0)
+    };
     rsx! {
         section { class: "training-inputs",
             dl { class: "training-input-facts",
@@ -694,6 +712,7 @@ fn TrainingInputs(run: TrainingRun) -> Element {
                     dd { "{cameras}" }
                 }
                 div { dt { "Batch" } dd { "{run.config.batch_size} samples" } }
+                div { dt { "Validation" } dd { "{validation}" } }
                 div { dt { "Action horizon" } dd { "{run.config.chunk_size} steps" } }
                 div { dt { "Image size" } dd { "{image_size}" } }
                 div { dt { "Checkpoint interval" } dd { "{run.config.checkpoint_every} steps" } }
@@ -794,6 +813,11 @@ fn phase_class(phase: TrainingRunPhase) -> &'static str {
 fn training_loss_chart(run: &TrainingRun) -> Chart {
     let train = metric_series_data(&run.metrics, |point| Some(point.train_loss), true);
     let validation = metric_series_data(&run.metrics, |point| point.validation_loss, true);
+    let observed_steps = run
+        .metrics
+        .last()
+        .map_or(run.current_step, |point| point.step.max(run.current_step))
+        .max(1);
 
     Chart::new()
         .animation(false)
@@ -804,16 +828,38 @@ fn training_loss_chart(run: &TrainingRun) -> Chart {
                 .left(48)
                 .right(12)
                 .top(12)
-                .bottom(26)
+                .bottom(50)
                 .contain_label(false),
         )
         .x_axis(
             chart_axis(AxisType::Value, true)
                 .min(0)
-                .max(run.config.steps.max(1) as f64)
+                .max(observed_steps as f64)
                 .split_number(4),
         )
-        .y_axis(chart_axis(AxisType::Log, true).log_base(10).split_number(4))
+        .y_axis(chart_axis(AxisType::Value, true).split_number(5))
+        .data_zoom(
+            DataZoom::new()
+                .type_(DataZoomType::Inside)
+                .x_axis_index(0)
+                .filter_mode(FilterMode::Filter)
+                .realtime(true)
+                .throttle(50),
+        )
+        .data_zoom(
+            DataZoom::new()
+                .type_(DataZoomType::Slider)
+                .x_axis_index(0)
+                .filter_mode(FilterMode::Filter)
+                .realtime(true)
+                .brush_select(false)
+                .left(48)
+                .right(12)
+                .bottom(4)
+                .background_color(COLOR_SURFACE)
+                .border_color(COLOR_LINE)
+                .filler_color(COLOR_SELECTED),
+        )
         .series(metric_line("train-loss", "Train", COLOR_TRAIN, train, 2.0))
         .series(metric_line(
             "validation-loss",
@@ -1022,7 +1068,7 @@ mod tests {
     }
 
     #[test]
-    fn loss_chart_uses_a_log_axis_and_keeps_both_series_stable() {
+    fn loss_chart_uses_a_linear_axis_and_step_zoom_with_stable_series() {
         let run = TrainingRun {
             metrics: vec![TrainingMetricPoint {
                 step: 1,
@@ -1035,7 +1081,11 @@ mod tests {
         let option =
             serde_json::to_value(training_loss_chart(&run)).expect("chart should serialize");
 
-        assert_eq!(option["yAxis"]["type"], "log");
+        assert_eq!(option["yAxis"]["type"], "value");
+        assert_eq!(option["dataZoom"].as_array().map(Vec::len), Some(2));
+        assert_eq!(option["dataZoom"][0]["type"], "inside");
+        assert_eq!(option["dataZoom"][1]["type"], "slider");
+        assert_eq!(option["dataZoom"][0]["xAxisIndex"], 0);
         assert_eq!(option["series"].as_array().map(Vec::len), Some(2));
         assert_eq!(option["series"][0]["id"], "train-loss");
         assert_eq!(option["series"][1]["id"], "validation-loss");

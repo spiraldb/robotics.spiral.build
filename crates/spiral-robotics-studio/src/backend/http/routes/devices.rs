@@ -29,6 +29,10 @@ pub(super) fn router() -> Router<AppState> {
         .route("/robots/{id}/calibration/start", post(start_calibration))
         .route("/robots/{id}/calibration/finish", post(finish_calibration))
         .route("/robots/{id}/calibration/cancel", post(cancel_calibration))
+        .route(
+            "/robots/{id}/calibration/reapply",
+            post(reapply_calibration),
+        )
         .route("/mode", post(set_mode))
 }
 
@@ -398,6 +402,120 @@ impl CalibrationControlPort for HardwareHandle {
         HardwareHandle::apply_calibration(self, robot, calibration)
             .await
             .map_err(ApplicationError::conflict)
+    }
+}
+
+struct CalibrationHistoryHttpAdapter<'a> {
+    state: &'a AppState,
+}
+
+impl CalibrationHistoryPort for CalibrationHistoryHttpAdapter<'_> {
+    fn reserve_catalog_mutation(&self) -> Option<CatalogLeaseToken> {
+        self.state
+            .catalog_lease
+            .try_acquire(CatalogLeaseOwner::CalibrationReapply)
+    }
+
+    fn release_catalog_mutation(&self, token: CatalogLeaseToken) {
+        let released = self.state.catalog_lease.release(token);
+        debug_assert!(
+            released,
+            "calibration history refresh releases its exact catalog lease once"
+        );
+    }
+
+    fn activity(&self) -> CalibrationHistoryActivity {
+        let hardware = self.state.hardware.state();
+        CalibrationHistoryActivity {
+            recording: hardware
+                .telemetry
+                .recording
+                .map(|recording| recording.episode),
+            replaying: match hardware.mode.selection {
+                ModeSelection::Replay { episode, .. } => Some(episode),
+                _ => None,
+            },
+            training_active: self.state.training.snapshot().runs.iter().any(|run| {
+                matches!(
+                    run.phase,
+                    spiral_robotics_contracts::api::TrainingRunPhase::Starting
+                        | spiral_robotics_contracts::api::TrainingRunPhase::Running
+                        | spiral_robotics_contracts::api::TrainingRunPhase::Stopping
+                )
+            }),
+            publication_active: self
+                .state
+                .storage
+                .statuses()
+                .iter()
+                .any(|status| matches!(status.state.as_str(), "queued" | "publishing")),
+        }
+    }
+
+    fn current_calibration(&self, robot: &str) -> Result<Option<Calibration>, ApplicationError> {
+        self.state
+            .workspace
+            .reload_if_changed()
+            .map_err(workspace_application_error)?;
+        let record = self
+            .state
+            .workspace
+            .get(robot)
+            .map_err(workspace_application_error)?;
+        let motors = record.motors().map_err(workspace_application_error)?;
+        let calibration = record.calibration().map_err(workspace_application_error)?;
+        if let Some(calibration) = &calibration {
+            spiral_robotics_core::calibration::validate_calibration_for_motors(
+                &motors,
+                calibration,
+            )
+            .map_err(|error| {
+                ApplicationError::InvalidInput(format!(
+                    "robot {robot:?} has calibration that does not match its configured motors: {error}"
+                ))
+            })?;
+        }
+        Ok(calibration)
+    }
+
+    async fn reapply_local_positions(
+        &self,
+        robot: String,
+        calibration: Calibration,
+    ) -> Result<ReappliedLocalPositions, ApplicationError> {
+        let episodes = self.state.episodes.clone();
+        let result =
+            tokio::task::spawn_blocking(move || episodes.reapply_calibration(&robot, &calibration))
+                .await
+                .map_err(|error| ApplicationError::Internal(error.to_string()))?
+                .map_err(episode_application_error)?;
+        Ok(ReappliedLocalPositions {
+            updated_episode_ids: result.updated_episode_ids,
+            frames_updated: result.frames_updated,
+            episodes_unchanged: result.episodes_unchanged,
+            episodes_skipped: result.episodes_skipped,
+            warnings: result.warnings,
+        })
+    }
+
+    fn queue_spiral_sync(&self, episode: String) -> Result<bool, ApplicationError> {
+        if self
+            .state
+            .episodes
+            .get(&episode)
+            .map_err(episode_application_error)?
+            .discarded
+        {
+            return Ok(false);
+        }
+        if !self.state.data_settings.get().spiral.configured() {
+            return Ok(false);
+        }
+        self.state
+            .storage
+            .sync_spiral_existing(episode)
+            .map(|()| true)
+            .map_err(ApplicationError::Internal)
     }
 }
 
@@ -845,6 +963,22 @@ async fn cancel_calibration(
 ) -> Result<StatusCode, Failure> {
     calibration::cancel(state.hardware.as_ref(), &id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn reapply_calibration(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<CalibrationReapplyResponse>, Failure> {
+    let output =
+        calibration::reapply_history(&CalibrationHistoryHttpAdapter { state: &state }, &id).await?;
+    Ok(Json(CalibrationReapplyResponse {
+        episodes_updated: output.episodes_updated,
+        frames_updated: output.frames_updated,
+        episodes_unchanged: output.episodes_unchanged,
+        episodes_skipped: output.episodes_skipped,
+        spiral_syncs_queued: output.spiral_syncs_queued,
+        warnings: output.warnings,
+    }))
 }
 
 async fn set_mode(

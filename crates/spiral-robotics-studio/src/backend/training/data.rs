@@ -190,10 +190,10 @@ impl<'a> SpiralActLoader<'a> {
             loader.image_width,
             loader.image_height,
         )?;
-        loader.train_ranges = ranges;
-        // LeRobot's dataset factory defaults eval_split to 0.0. Studio does
-        // not expose an explicit split yet, so every covered range trains.
-        loader.validation_ranges = Vec::new();
+        let (train_ranges, validation_ranges) =
+            population::split_episode_ranges(ranges, request.validation_split, request.seed)?;
+        loader.train_ranges = train_ranges;
+        loader.validation_ranges = validation_ranges;
         if loader.train_ranges.is_empty() {
             return Err(
                 "the query has no training samples with complete synchronized camera coverage"
@@ -523,12 +523,6 @@ impl<'a> SpiralActLoader<'a> {
                 let sample_index = integer_value(required(batch, "sample_index")?, row)?;
                 if !population::joint_sample_is_frame_aligned(
                     &self.train_ranges,
-                    &episode_id,
-                    &stream_id,
-                    sample_index,
-                    self.joint_sample_hz,
-                )? && !population::joint_sample_is_frame_aligned(
-                    &self.validation_ranges,
                     &episode_id,
                     &stream_id,
                     sample_index,

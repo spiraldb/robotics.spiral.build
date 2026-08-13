@@ -6,6 +6,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use spiral_robotics_contracts::api::MAX_ROLLOUT_ACTION_STEPS;
+
 use super::error::ApplicationError;
 
 pub(crate) const ACT_ARTIFACT_FORMAT: &str = "spiral_robotics.act.safetensors.v2";
@@ -193,7 +195,7 @@ pub(crate) fn validate_rollout_contract(
         camera_bindings: resolved,
         sample_hz: data.sample_hz,
         sample_period: Duration::from_secs_f64(1.0 / data.sample_hz),
-        action_steps: model.recommended_action_steps,
+        action_steps: model.recommended_action_steps.min(MAX_ROLLOUT_ACTION_STEPS),
     })
 }
 

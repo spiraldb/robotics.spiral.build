@@ -3,8 +3,8 @@
 use dioxus::prelude::*;
 use gloo_net::http::Method;
 use spiral_robotics_contracts::api::{
-    CameraStatus, MAX_ROLLOUT_DURATION_SECONDS, RobotSummary, RolloutPhase, RolloutSnapshot,
-    StartRolloutRequest, TrainingRun, TrainingSnapshot,
+    CameraStatus, MAX_ROLLOUT_ACTION_STEPS, MAX_ROLLOUT_DURATION_SECONDS, RobotSummary,
+    RolloutPhase, RolloutSnapshot, StartRolloutRequest, TrainingRun, TrainingSnapshot,
 };
 
 use crate::frontend::api::http as api;
@@ -454,13 +454,14 @@ fn checkpoints_for_run(run: &TrainingRun) -> impl Iterator<Item = CheckpointChoi
             run_active: run.phase.active(),
             step: checkpoint.step,
             validation_loss: checkpoint.validation_loss,
-            action_steps: if checkpoint.recommended_action_steps == 0 {
+            action_steps: (if checkpoint.recommended_action_steps == 0 {
                 run.config.chunk_size
             } else {
                 checkpoint
                     .recommended_action_steps
                     .min(run.config.chunk_size)
-            },
+            })
+            .min(MAX_ROLLOUT_ACTION_STEPS),
             sample_hz: checkpoint.sample_hz,
             camera_roles: camera_roles(&run.config.act.camera_streams),
         })
@@ -568,8 +569,8 @@ fn format_loss(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use spiral_robotics_contracts::api::{
-        CameraBinding, CameraStatus, ConnectionStatus, RobotSummary, RolloutPhase, RolloutSnapshot,
-        TrainingCheckpoint, TrainingRun, TrainingRunPhase,
+        CameraBinding, CameraStatus, ConnectionStatus, MAX_ROLLOUT_ACTION_STEPS, RobotSummary,
+        RolloutPhase, RolloutSnapshot, TrainingCheckpoint, TrainingRun, TrainingRunPhase,
     };
 
     use super::{
@@ -709,6 +710,7 @@ mod tests {
         assert_eq!(choices.len(), 1);
         assert_eq!(choices[0].step, 20_000);
         assert!(choices[0].run_active);
+        assert_eq!(choices[0].action_steps, MAX_ROLLOUT_ACTION_STEPS);
         assert_eq!(
             rollout_precondition_blocker(choices.first(), None, false, false).as_deref(),
             Some("Stop or finish training before running this checkpoint.")

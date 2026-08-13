@@ -56,6 +56,7 @@ pub(crate) struct StartTrainingCommand {
     pub device: String,
     pub steps: u64,
     pub batch_size: usize,
+    pub validation_split: f64,
     pub learning_rate: f64,
     pub checkpoint_every: u64,
     pub chunk_size: usize,
@@ -253,6 +254,9 @@ fn validate_training_command(
     }
     if !(1..=512).contains(&command.batch_size) {
         return invalid("Batch size must be between 1 and 512.");
+    }
+    if !command.validation_split.is_finite() || !(0.0..=0.5).contains(&command.validation_split) {
+        return invalid("Validation split must be between 0% and 50%.");
     }
     if !(1..=256).contains(&command.chunk_size) {
         return invalid("Action chunk size must be between 1 and 256.");
@@ -501,6 +505,7 @@ mod tests {
             device: " CPU ".to_owned(),
             steps: 1_000,
             batch_size: 8,
+            validation_split: 0.1,
             learning_rate: 1.0e-5,
             checkpoint_every: 100,
             chunk_size: 16,
@@ -566,6 +571,9 @@ mod tests {
         let mut non_finite = training_command();
         non_finite.learning_rate = f64::NAN;
         commands.push(non_finite);
+        let mut invalid_validation_split = training_command();
+        invalid_validation_split.validation_split = 0.75;
+        commands.push(invalid_validation_split);
 
         let training = training(None);
         for command in commands {
