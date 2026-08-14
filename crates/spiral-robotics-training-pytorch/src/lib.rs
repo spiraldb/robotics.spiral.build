@@ -1,5 +1,9 @@
 //! Direct LibTorch implementation of the backend-neutral training contract.
 
+mod resources;
+
+use std::sync::Mutex;
+
 use spiral_robotics_inference::act::{
     NativeActTrainer, VisionActBatch, VisionActCheckpoint, VisionActTrainingConfig,
     imagenet_resnet18_weights,
@@ -7,8 +11,8 @@ use spiral_robotics_inference::act::{
 use spiral_robotics_training::{
     ActTrainingConfig, TRAINING_BACKEND_API_VERSION, TrainingBackend, TrainingBackendError,
     TrainingBackendInfo, TrainingBatch, TrainingCheckpointArtifact, TrainingCheckpointRequest,
-    TrainingExecution, TrainingInitialization, TrainingLoss, TrainingModelConfig, TrainingSession,
-    TrainingSessionInfo, TrainingSessionRequest,
+    TrainingInitialization, TrainingLoss, TrainingModelConfig, TrainingSession,
+    TrainingSessionInfo, TrainingSessionRequest, TrainingTelemetry,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -52,24 +56,24 @@ impl TrainingBackend for PyTorchTrainingBackend {
             NativeActTrainer::new(act_config(config), &request.device, pretrained.as_deref())
                 .map_err(|error| backend_error("creating ACT session", error))?;
         let device = trainer.backend_name().to_owned();
-        let execution = if device == "MPS" {
-            TrainingExecution::LocalAccelerator
-        } else {
-            TrainingExecution::LocalCpu
-        };
+        let accelerated = device == "MPS";
         let info = TrainingSessionInfo {
             backend: self.health()?,
             device,
-            execution,
             parameter_count: trainer.parameter_count(),
         };
-        Ok(Box::new(PyTorchTrainingSession { trainer, info }))
+        Ok(Box::new(PyTorchTrainingSession {
+            trainer,
+            telemetry: Mutex::new(resources::ResourceSampler::new(accelerated)),
+            info,
+        }))
     }
 }
 
 struct PyTorchTrainingSession {
     trainer: NativeActTrainer,
     info: TrainingSessionInfo,
+    telemetry: Mutex<resources::ResourceSampler>,
 }
 
 impl TrainingSession for PyTorchTrainingSession {
@@ -81,9 +85,16 @@ impl TrainingSession for PyTorchTrainingSession {
         self.trainer.learning_rate(step)
     }
 
+    fn telemetry(&self) -> Result<TrainingTelemetry, TrainingBackendError> {
+        self.telemetry
+            .lock()
+            .map_err(|_| TrainingBackendError::new("PyTorch telemetry sampler is unavailable"))
+            .map(|mut sampler| sampler.sample())
+    }
+
     fn train_step(
         &mut self,
-        batch: TrainingBatch,
+        batch: TrainingBatch<'_>,
         step: u64,
     ) -> Result<TrainingLoss, TrainingBackendError> {
         self.trainer
@@ -94,7 +105,7 @@ impl TrainingSession for PyTorchTrainingSession {
 
     fn validation_step(
         &mut self,
-        batch: TrainingBatch,
+        batch: TrainingBatch<'_>,
     ) -> Result<TrainingLoss, TrainingBackendError> {
         self.trainer
             .validation_step(vision_batch(batch))
@@ -146,7 +157,7 @@ fn act_config(config: ActTrainingConfig) -> VisionActTrainingConfig {
     }
 }
 
-fn vision_batch(batch: TrainingBatch) -> VisionActBatch {
+fn vision_batch(batch: TrainingBatch<'_>) -> VisionActBatch<'_> {
     VisionActBatch {
         batch_size: batch.batch_size,
         states: batch.states,
@@ -212,13 +223,13 @@ mod tests {
             .unwrap();
         let loss = session
             .train_step(
-                TrainingBatch {
-                    batch_size: 1,
-                    states: vec![0.0; 2],
-                    images: vec![0.0; 3 * 32 * 32],
-                    actions: vec![0.0; 2 * 2],
-                    action_is_pad: vec![false; 2],
-                },
+                TrainingBatch::owned(
+                    1,
+                    vec![0.0; 2],
+                    vec![0.0; 3 * 32 * 32],
+                    vec![0.0; 2 * 2],
+                    vec![0; 2],
+                ),
                 1,
             )
             .unwrap();

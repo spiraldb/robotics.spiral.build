@@ -71,11 +71,11 @@ pub(crate) struct LoaderMetrics {
 }
 
 pub(crate) struct LoadedActBatch {
-    pub batch: TrainingBatch,
+    pub batch: TrainingBatch<'static>,
     pub metrics: LoaderMetrics,
 }
 
-type ActionBatch = (Vec<f32>, Vec<f32>, Vec<bool>);
+type ActionBatch = (Vec<f32>, Vec<f32>, Vec<u8>);
 
 pub(crate) struct SpiralActLoader<'a> {
     connection: &'a mut ManagedConnection,
@@ -270,13 +270,7 @@ impl<'a> SpiralActLoader<'a> {
             .checked_mul(self.camera_streams.len())
             .ok_or_else(|| "requested camera frame count overflowed".to_owned())?;
         Ok(LoadedActBatch {
-            batch: TrainingBatch {
-                batch_size,
-                states,
-                images,
-                actions,
-                action_is_pad,
-            },
+            batch: TrainingBatch::owned(batch_size, states, images, actions, action_is_pad),
             metrics: LoaderMetrics {
                 seconds: started.elapsed().as_secs_f64(),
                 source_bytes,
@@ -610,7 +604,7 @@ impl<'a> SpiralActLoader<'a> {
         let batch_size = anchors.len();
         let mut states = vec![None; batch_size];
         let mut actions = vec![vec![None; self.chunk_size]; batch_size];
-        let mut padding = vec![true; batch_size * self.chunk_size];
+        let mut padding = vec![1; batch_size * self.chunk_size];
         let mut received = BTreeSet::new();
         for batch in &batches {
             for row in 0..batch.num_rows() {
@@ -638,7 +632,7 @@ impl<'a> SpiralActLoader<'a> {
                 if present {
                     actions[request][offset] =
                         Some(numeric_vector(required(batch, "action_value")?, row)?);
-                    padding[request * self.chunk_size + offset] = false;
+                    padding[request * self.chunk_size + offset] = 0;
                 }
             }
         }

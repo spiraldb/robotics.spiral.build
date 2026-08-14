@@ -23,7 +23,23 @@ use spiral_robotics_core::operation::{
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DataSettings {
     pub spiral: SpiralSettings,
+    #[serde(default)]
+    pub training: TrainingRuntimeSettings,
     pub video: VideoSettings,
+}
+
+/// HTTP and Arrow IPC endpoint selected for future training sessions.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TrainingRuntimeSettings {
+    pub endpoint: String,
+}
+
+impl Default for TrainingRuntimeSettings {
+    fn default() -> Self {
+        Self {
+            endpoint: "http://127.0.0.1:50051".to_owned(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -61,6 +77,8 @@ impl Default for VideoSettings {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UpdateDataSettingsRequest {
     pub spiral: SpiralSettings,
+    #[serde(default)]
+    pub training: TrainingRuntimeSettings,
     pub video: VideoSettings,
 }
 
@@ -430,7 +448,17 @@ pub struct TrainingSource {
 pub struct TrainingReadiness {
     pub ready: bool,
     pub spiral_ready: bool,
+    #[serde(default)]
+    pub runtime: Option<TrainingRuntimeInfo>,
     pub summary: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TrainingRuntimeInfo {
+    pub id: String,
+    pub display_name: String,
+    pub runtime: String,
+    pub devices: Vec<String>,
 }
 
 impl Default for TrainingReadiness {
@@ -438,7 +466,8 @@ impl Default for TrainingReadiness {
         Self {
             ready: false,
             spiral_ready: false,
-            summary: "Checking the local training runtime…".to_owned(),
+            runtime: None,
+            summary: "Checking the training runtime…".to_owned(),
         }
     }
 }
@@ -1807,6 +1836,20 @@ mod tests {
 
         let update: UpdateRobotRequest = serde_json::from_str("{}").unwrap();
         assert_eq!(update, UpdateRobotRequest::default());
+
+        let settings: UpdateDataSettingsRequest = serde_json::from_str(
+            r#"{
+                "spiral": {
+                    "enabled": false,
+                    "uri": "spiraldb://",
+                    "project_id": "",
+                    "dataset": "spiral_robotics"
+                },
+                "video": { "enabled": true }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(settings.training, TrainingRuntimeSettings::default());
     }
 
     #[test]

@@ -15,6 +15,7 @@ use crate::frontend::screens::settings::robots::RobotPanel;
 enum SettingsSection {
     Robots,
     Spiral,
+    Training,
     Video,
 }
 
@@ -59,6 +60,7 @@ pub(crate) fn SettingsPanel(
         on_busy_change.call(true);
         let request = UpdateDataSettingsRequest {
             spiral: current().spiral,
+            training: current().training,
             video: current().video,
         };
         spawn(async move {
@@ -114,7 +116,7 @@ pub(crate) fn SettingsPanel(
             header { class: "settings-header",
                 div {
                     h2 { id: "data-settings-title", "Settings" }
-                    p { "Robots, storage, and video." }
+                    p { "Robots, data, training, and video." }
                 }
                 button {
                     id: "settings-close-button",
@@ -130,6 +132,7 @@ pub(crate) fn SettingsPanel(
                 nav { class: "settings-nav", "aria-label": "Settings sections",
                     SettingsNavButton { label: "Robots", active: section() == SettingsSection::Robots, onclick: move |_| { section.set(SettingsSection::Robots); test_result.set(None); } }
                     SettingsNavButton { label: "SpiralDB", active: section() == SettingsSection::Spiral, onclick: move |_| { section.set(SettingsSection::Spiral); test_result.set(None); } }
+                    SettingsNavButton { label: "Training", active: section() == SettingsSection::Training, onclick: move |_| { section.set(SettingsSection::Training); test_result.set(None); } }
                     SettingsNavButton { label: "Video", active: section() == SettingsSection::Video, onclick: move |_| { section.set(SettingsSection::Video); test_result.set(None); } }
                 }
                 div { class: "settings-content",
@@ -167,6 +170,19 @@ pub(crate) fn SettingsPanel(
                                     }
                                 }
                                 button { r#type: "button", class: "btn btn-outline", disabled: saving() || testing(), onclick: move |_| save(Some("/api/settings/data/test/spiral")), if testing() { "Testing…" } else { "Save and test connection" } }
+                            },
+                            SettingsSection::Training => rsx! {
+                                ProviderHeading { title: "Training runtime", description: "Send Arrow tensor batches to a remote policy-training process." }
+                                SettingsField {
+                                    label: "Runtime endpoint",
+                                    value: current().training.endpoint,
+                                    placeholder: "http://127.0.0.1:50051",
+                                    oninput: move |value| current.write().training.endpoint = value,
+                                }
+                                p { class: "settings-help",
+                                    "Studio uses Arrow IPC over HTTP. The selected endpoint applies to new runs; an active run keeps its current connection."
+                                }
+                                button { r#type: "button", class: "btn btn-outline", disabled: saving() || testing(), onclick: move |_| save(Some("/api/settings/data/test/training")), if testing() { "Connecting…" } else { "Save and connect" } }
                             },
                             SettingsSection::Video => rsx! {
                                 ProviderHeading { title: "Video", description: "Include assigned cameras in new episodes." }

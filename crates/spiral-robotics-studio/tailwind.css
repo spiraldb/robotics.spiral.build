@@ -747,6 +747,30 @@
     overflow-wrap: anywhere;
   }
 
+  .training-runtime-summary {
+    @apply mb-2 flex min-w-0 items-start gap-2 border-b border-line pb-2;
+  }
+
+  .training-runtime-summary > div {
+    @apply flex min-w-0 flex-col gap-0.5;
+  }
+
+  .training-runtime-summary strong {
+    @apply truncate text-[11px] font-medium text-ink;
+  }
+
+  .training-runtime-summary span:not(.training-runtime-dot) {
+    @apply text-[10px] text-ink-faint;
+  }
+
+  .training-runtime-dot {
+    @apply mt-1.5 block size-1.5 shrink-0 rounded-full bg-ink-faint;
+  }
+
+  .training-runtime-dot-ready {
+    background: var(--tone-good);
+  }
+
   .training-form-heading {
     @apply mb-2 flex min-w-0 items-center gap-2;
   }

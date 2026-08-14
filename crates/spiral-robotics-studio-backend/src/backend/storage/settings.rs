@@ -7,7 +7,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 use spiral_robotics_contracts::api::{
-    DataSettings, SpiralSettings, UpdateDataSettingsRequest, VideoSettings,
+    DataSettings, SpiralSettings, TrainingRuntimeSettings, UpdateDataSettingsRequest, VideoSettings,
 };
 use spiral_robotics_contracts::spiral;
 
@@ -17,6 +17,8 @@ const SETTINGS_FILE: &str = ".spiral-robotics-data-settings.json";
 pub(crate) struct StoredDataSettings {
     #[serde(default)]
     pub spiral: StoredSpiralSettings,
+    #[serde(default)]
+    pub training: TrainingRuntimeSettings,
     #[serde(default)]
     pub video: VideoSettings,
 }
@@ -66,6 +68,7 @@ impl StoredDataSettings {
                 project_id: self.spiral.project_id.clone(),
                 dataset: self.spiral.dataset.clone(),
             },
+            training: self.training.clone(),
             video: self.video.clone(),
         }
     }
@@ -121,6 +124,7 @@ impl DataSettingsStore {
         staged.spiral.project_id = update.spiral.project_id.trim().to_owned();
         staged.spiral.dataset = update.spiral.dataset.trim().to_owned();
         staged.spiral.enabled = staged.spiral.configured();
+        staged.training.endpoint = update.training.endpoint.trim().to_owned();
         staged.video = update.video;
 
         // Publish to disk before replacing the in-memory value. A failed disk
@@ -141,6 +145,15 @@ fn validate_update(update: &UpdateDataSettingsRequest) -> Result<(), String> {
             validate_identifier("Spiral project", &update.spiral.project_id)?;
         }
         validate_dataset_identifier(&update.spiral.dataset)?;
+    }
+    validate_training_endpoint(&update.training.endpoint)?;
+    Ok(())
+}
+
+fn validate_training_endpoint(endpoint: &str) -> Result<(), String> {
+    let endpoint = endpoint.trim();
+    if !endpoint.starts_with("http://") || endpoint.len() <= "http://".len() {
+        return Err("Training runtime endpoint must be a plain http:// address".to_owned());
     }
     Ok(())
 }
@@ -279,5 +292,23 @@ mod tests {
             .spiral
             .enabled
         );
+    }
+
+    #[test]
+    fn legacy_settings_default_to_the_local_http_runtime() {
+        let stored: StoredDataSettings = serde_json::from_str(r#"{"video":{"enabled":true}}"#)
+            .expect("legacy settings still decode");
+
+        assert_eq!(stored.public().training, TrainingRuntimeSettings::default());
+    }
+
+    #[test]
+    fn training_runtime_requires_a_plain_http_endpoint() {
+        let mut update = UpdateDataSettingsRequest::default();
+        update.training.endpoint = "https://runtime.example".to_owned();
+        assert!(validate_update(&update).unwrap_err().contains("http://"));
+
+        update.training.endpoint = " http://runtime.example:50051 ".to_owned();
+        validate_update(&update).expect("remote plaintext HTTP endpoint is accepted");
     }
 }

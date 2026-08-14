@@ -1,18 +1,10 @@
-//! Low-frequency host resource sampling for training diagnostics.
+//! Low-frequency process telemetry reported by the remote runtime.
 
 use std::time::{Duration, Instant};
 
-const GPU_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+use spiral_robotics_training::TrainingTelemetry;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct ResourceUsage {
-    /// Studio process CPU usage; 100% is one fully occupied core.
-    pub cpu_percent: Option<f64>,
-    /// Whole-device GPU usage reported by macOS, not process attribution.
-    pub gpu_percent: Option<f64>,
-    /// Current resident memory owned by the Studio process.
-    pub memory_bytes: Option<u64>,
-}
+const GPU_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
 pub(crate) struct ResourceSampler {
     last_sample: Instant,
@@ -33,7 +25,7 @@ impl ResourceSampler {
         }
     }
 
-    pub(crate) fn sample(&mut self) -> ResourceUsage {
+    pub(crate) fn sample(&mut self) -> TrainingTelemetry {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_sample).as_secs_f64();
         let cpu_seconds = process_cpu_seconds();
@@ -55,7 +47,7 @@ impl ResourceSampler {
             self.last_gpu_sample = Some(now);
         }
 
-        ResourceUsage {
+        TrainingTelemetry {
             cpu_percent,
             gpu_percent: self.last_gpu_percent,
             memory_bytes: resident_memory_bytes(),
@@ -96,8 +88,7 @@ fn resident_memory_bytes() -> Option<u64> {
 
     let mut info = mach_task_basic_info::default();
     let mut count = MACH_TASK_BASIC_INFO_COUNT;
-    // SAFETY: `info` is writable for exactly `count` natural words and the
-    // task port refers to this process.
+    // SAFETY: `info` is writable for `count` natural words and this is our task port.
     let status = unsafe {
         task_info(
             mach_task_self(),
@@ -161,16 +152,4 @@ fn parse_apple_gpu_percent(output: &[u8]) -> Option<f64> {
         .parse::<f64>()
         .ok()
         .filter(|value| (0.0..=100.0).contains(value))
-}
-
-#[cfg(test)]
-mod tests {
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn parses_apple_gpu_device_utilization() {
-        let output =
-            br#""PerformanceStatistics" = {"Renderer Utilization %"=74,"Device Utilization %"=68}"#;
-        assert_eq!(super::parse_apple_gpu_percent(output), Some(68.0));
-        assert_eq!(super::parse_apple_gpu_percent(b"no statistics"), None);
-    }
 }

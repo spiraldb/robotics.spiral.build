@@ -135,7 +135,16 @@ pub(crate) struct TrainingSource {
 pub(crate) struct TrainingReadiness {
     pub ready: bool,
     pub spiral_ready: bool,
+    pub runtime: Option<TrainingRuntimeInfo>,
     pub summary: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct TrainingRuntimeInfo {
+    pub id: String,
+    pub display_name: String,
+    pub runtime: String,
+    pub devices: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

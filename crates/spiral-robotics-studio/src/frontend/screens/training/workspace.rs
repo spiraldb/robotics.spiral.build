@@ -196,6 +196,29 @@ fn TrainingRunControl(
         }
     });
     let (readiness_summary, readiness_recovery) = training_readiness_guidance(&readiness);
+    let runtime_summary = readiness
+        .runtime
+        .as_ref()
+        .map(|runtime| format!("{} · {}", runtime.display_name, runtime.runtime))
+        .unwrap_or_else(|| "Runtime unavailable".to_owned());
+    let mut runtime_devices = vec![("auto".to_owned(), "Auto".to_owned())];
+    if let Some(runtime) = &readiness.runtime {
+        for label in &runtime.devices {
+            let value = label.to_ascii_lowercase();
+            if !runtime_devices
+                .iter()
+                .any(|(existing, _)| existing == &value)
+            {
+                runtime_devices.push((value, label.clone()));
+            }
+        }
+    }
+    if !runtime_devices
+        .iter()
+        .any(|(value, _)| value == &request.device)
+    {
+        runtime_devices.push((request.device.clone(), request.device.clone()));
+    }
     let camera_summary = if request.act.camera_streams.is_empty() {
         "All available".to_owned()
     } else {
@@ -284,6 +307,42 @@ fn TrainingRunControl(
                 }
             }
 
+            section { class: "training-form-section training-runtime-section",
+                header { class: "training-form-heading",
+                    h3 { "Compute" }
+                }
+                div { class: "training-runtime-summary",
+                    span {
+                        class: if readiness.runtime.is_some() { "training-runtime-dot training-runtime-dot-ready" } else { "training-runtime-dot" },
+                        "aria-hidden": "true"
+                    }
+                    div {
+                        strong { "{runtime_summary}" }
+                        span {
+                            if readiness.runtime.is_some() {
+                                "Connected through Arrow IPC over HTTP"
+                            } else {
+                                "Connect a runtime in Settings"
+                            }
+                        }
+                    }
+                }
+                label { class: "training-field training-field-wide",
+                    span { "Device" }
+                    select {
+                        value: request.device.clone(),
+                        disabled: active_run.is_some() || readiness.runtime.is_none(),
+                        onchange: move |event| {
+                            let value = event.value();
+                            controller.edit_request(move |request| request.device = value);
+                        },
+                        for (value, label) in runtime_devices {
+                            option { value: "{value}", "{label}" }
+                        }
+                    }
+                }
+            }
+
             section { class: "training-form-section",
                 header { class: "training-form-heading",
                     h3 { "Run" }
@@ -317,20 +376,6 @@ fn TrainingRunControl(
                 summary { "Advanced settings" }
                 div { class: "training-query-body",
                     div { class: "training-form-grid",
-                    label { class: "training-field",
-                        span { "Device" }
-                        select {
-                            value: request.device.clone(),
-                            disabled: active_run.is_some(),
-                            onchange: move |event| {
-                                let value = event.value();
-                                controller.edit_request(move |request| request.device = value);
-                            },
-                            option { value: "auto", "Auto" }
-                            option { value: "mps", "Apple MPS" }
-                            option { value: "cpu", "CPU" }
-                        }
-                    }
                     label { class: "training-field",
                         span { "Batch" }
                         input {

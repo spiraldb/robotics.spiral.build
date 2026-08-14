@@ -1,9 +1,11 @@
 //! Backend-neutral model-training boundary.
 //!
 //! Studio owns datasets, run lifecycle, metrics, and artifact publication. A
-//! backend owns model state and optimizer execution. The contract uses owned,
-//! serializable values so an implementation may execute locally or proxy each
-//! operation to a remote service without exposing framework types to Studio.
+//! backend owns model state and optimizer execution. Batch buffers may be owned
+//! by Studio or borrowed from a transport decoder for the duration of a step;
+//! no framework tensor type crosses this seam.
+
+use std::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
 
@@ -70,13 +72,50 @@ pub struct TrainingSessionRequest {
     pub initialization: TrainingInitialization,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct TrainingBatch {
+#[derive(Debug, PartialEq)]
+pub struct TrainingBatch<'a> {
     pub batch_size: usize,
-    pub states: Vec<f32>,
-    pub images: Vec<f32>,
-    pub actions: Vec<f32>,
-    pub action_is_pad: Vec<bool>,
+    pub states: Cow<'a, [f32]>,
+    pub images: Cow<'a, [f32]>,
+    pub actions: Cow<'a, [f32]>,
+    /// One byte per action timestep: `0` for data and `1` for padding.
+    pub action_is_pad: Cow<'a, [u8]>,
+}
+
+impl TrainingBatch<'static> {
+    pub fn owned(
+        batch_size: usize,
+        states: Vec<f32>,
+        images: Vec<f32>,
+        actions: Vec<f32>,
+        action_is_pad: Vec<u8>,
+    ) -> Self {
+        Self {
+            batch_size,
+            states: Cow::Owned(states),
+            images: Cow::Owned(images),
+            actions: Cow::Owned(actions),
+            action_is_pad: Cow::Owned(action_is_pad),
+        }
+    }
+}
+
+impl<'a> TrainingBatch<'a> {
+    pub fn borrowed(
+        batch_size: usize,
+        states: &'a [f32],
+        images: &'a [f32],
+        actions: &'a [f32],
+        action_is_pad: &'a [u8],
+    ) -> Self {
+        Self {
+            batch_size,
+            states: Cow::Borrowed(states),
+            images: Cow::Borrowed(images),
+            actions: Cow::Borrowed(actions),
+            action_is_pad: Cow::Borrowed(action_is_pad),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -85,6 +124,18 @@ pub struct TrainingLoss {
     pub l1: f64,
     pub kl: f64,
     pub pad: f64,
+}
+
+/// Latest process and accelerator evidence reported by a training runtime.
+///
+/// Every field is optional because not every framework or device exposes the
+/// same counters. A remote adapter forwards these values from the process that
+/// actually owns the optimizer rather than sampling the Studio process.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TrainingTelemetry {
+    pub cpu_percent: Option<f64>,
+    pub gpu_percent: Option<f64>,
+    pub memory_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -103,19 +154,10 @@ pub struct TrainingCheckpointArtifact {
     pub payload: Vec<u8>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TrainingExecution {
-    LocalCpu,
-    LocalAccelerator,
-    Remote,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TrainingSessionInfo {
     pub backend: TrainingBackendInfo,
     pub device: String,
-    pub execution: TrainingExecution,
     pub parameter_count: usize,
 }
 
@@ -130,10 +172,6 @@ impl TrainingBackendError {
         Self {
             message: message.into(),
         }
-    }
-
-    pub fn message(&self) -> &str {
-        &self.message
     }
 }
 
@@ -156,15 +194,17 @@ pub trait TrainingSession: Send {
 
     fn learning_rate(&self, step: u64) -> f64;
 
+    fn telemetry(&self) -> Result<TrainingTelemetry, TrainingBackendError>;
+
     fn train_step(
         &mut self,
-        batch: TrainingBatch,
+        batch: TrainingBatch<'_>,
         step: u64,
     ) -> Result<TrainingLoss, TrainingBackendError>;
 
     fn validation_step(
         &mut self,
-        batch: TrainingBatch,
+        batch: TrainingBatch<'_>,
     ) -> Result<TrainingLoss, TrainingBackendError>;
 
     fn checkpoint(
@@ -205,16 +245,15 @@ mod tests {
     }
 
     #[test]
-    fn wire_contract_round_trips_without_framework_types() {
-        let batch = TrainingBatch {
-            batch_size: 1,
-            states: vec![0.25],
-            images: vec![0.5],
-            actions: vec![0.75],
-            action_is_pad: vec![false],
-        };
-        let encoded = serde_json::to_vec(&batch).unwrap();
-        let decoded: TrainingBatch = serde_json::from_slice(&encoded).unwrap();
-        assert_eq!(decoded, batch);
+    fn batches_can_own_or_borrow_framework_neutral_buffers() {
+        let owned = TrainingBatch::owned(1, vec![0.25], vec![0.5], vec![0.75], vec![0]);
+        let borrowed = TrainingBatch::borrowed(
+            1,
+            owned.states.as_ref(),
+            owned.images.as_ref(),
+            owned.actions.as_ref(),
+            owned.action_is_pad.as_ref(),
+        );
+        assert_eq!(borrowed, owned);
     }
 }

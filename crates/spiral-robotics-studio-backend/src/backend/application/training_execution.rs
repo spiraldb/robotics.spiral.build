@@ -401,6 +401,7 @@ mod tests {
                 readiness: TrainingReadiness {
                     ready: true,
                     spiral_ready: true,
+                    runtime: None,
                     summary: "ready".to_owned(),
                 },
                 phase: Mutex::new(Some(TrainingRunPhase::Starting)),

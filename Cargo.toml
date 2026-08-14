@@ -7,7 +7,9 @@ members = [
     "crates/spiral-robotics-studio",
     "crates/spiral-robotics-studio-backend",
     "crates/spiral-robotics-training",
+    "crates/spiral-robotics-training-http",
     "crates/spiral-robotics-training-pytorch",
+    "crates/spiral-robotics-training-runtime",
     "crates/spiral-robotics-viewport",
 ]
 exclude = ["patches/block"]
@@ -25,6 +27,7 @@ spiral-robotics-inference = { path = "crates/spiral-robotics-inference", default
 spiral-robotics-panels = { path = "crates/spiral-robotics-panels" }
 spiral-robotics-studio-backend = { path = "crates/spiral-robotics-studio-backend" }
 spiral-robotics-training = { path = "crates/spiral-robotics-training" }
+spiral-robotics-training-http = { path = "crates/spiral-robotics-training-http" }
 spiral-robotics-training-pytorch = { path = "crates/spiral-robotics-training-pytorch" }
 spiral-robotics-viewport = { path = "crates/spiral-robotics-viewport" }
 clap = { version = "4.5", features = ["derive"] }

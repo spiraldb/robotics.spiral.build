@@ -239,9 +239,22 @@ fn workspace_crate_dependencies_point_toward_policy() {
             &[][..],
         ),
         (
+            "spiral-robotics-training-http",
+            "crates/spiral-robotics-training-http/Cargo.toml",
+            &["spiral-robotics-training"][..],
+        ),
+        (
             "spiral-robotics-training-pytorch",
             "crates/spiral-robotics-training-pytorch/Cargo.toml",
             &["spiral-robotics-inference", "spiral-robotics-training"][..],
+        ),
+        (
+            "spiral-robotics-training-runtime",
+            "crates/spiral-robotics-training-runtime/Cargo.toml",
+            &[
+                "spiral-robotics-training-http",
+                "spiral-robotics-training-pytorch",
+            ][..],
         ),
         (
             "spiral-robotics-viewport",
@@ -256,7 +269,6 @@ fn workspace_crate_dependencies_point_toward_policy() {
                 "spiral-robotics-core",
                 "spiral-robotics-panels",
                 "spiral-robotics-studio-backend",
-                "spiral-robotics-training-pytorch",
                 "spiral-robotics-viewport",
             ][..],
         ),
@@ -269,6 +281,7 @@ fn workspace_crate_dependencies_point_toward_policy() {
                 "spiral-robotics-core",
                 "spiral-robotics-inference",
                 "spiral-robotics-training",
+                "spiral-robotics-training-http",
             ][..],
         ),
     ];

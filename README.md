@@ -25,6 +25,17 @@ cd crates/spiral-robotics-studio
 dx serve --release
 ```
 
+Start the policy-training runtime separately (on the same machine or a remote
+compute host):
+
+```console
+cargo run -p spiral-robotics-training-runtime -- --bind 0.0.0.0:50051
+```
+
+In Studio, open **Settings → Training**, enter the runtime's `http://` endpoint,
+and choose **Save and connect**. New training runs use that
+endpoint; an active run keeps its existing connection.
+
 To connect Studio to a local SpiralDB stack:
 
 ```console

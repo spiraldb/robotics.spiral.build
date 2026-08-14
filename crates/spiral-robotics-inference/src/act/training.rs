@@ -1,9 +1,11 @@
 //! Direct LibTorch vision ACT training.
 //!
-//! The public boundary accepts owned host buffers so Spiral's Arrow data path
-//! remains framework-neutral. Tensor upload, autograd, AdamW, validation, and
-//! checkpoint export are executed by PyTorch through `tch`.
+//! The public boundary accepts owned or borrowed host buffers so Spiral's Arrow
+//! data path remains framework-neutral. On CPU, PyTorch tensors borrow those
+//! buffers directly for the duration of a step; accelerator backends perform
+//! the required host-to-device transfer.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use safetensors::tensor::{Dtype, TensorView, serialize};
@@ -72,13 +74,14 @@ impl VisionActTrainingConfig {
 }
 
 #[derive(Clone, Debug)]
-pub struct VisionActBatch {
+pub struct VisionActBatch<'a> {
     pub batch_size: usize,
-    pub states: Vec<f32>,
+    pub states: Cow<'a, [f32]>,
     /// `[batch, camera, 3, height, width]`, already ImageNet-normalized by Spiral.
-    pub images: Vec<f32>,
-    pub actions: Vec<f32>,
-    pub action_is_pad: Vec<bool>,
+    pub images: Cow<'a, [f32]>,
+    pub actions: Cow<'a, [f32]>,
+    /// One byte per action timestep: `0` for data and `1` for padding.
+    pub action_is_pad: Cow<'a, [u8]>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -151,11 +154,11 @@ impl NativeActTrainer {
         self.trainer.config.learning_rate
     }
 
-    pub fn train_step(&mut self, batch: VisionActBatch, step: u64) -> Result<VisionActLoss> {
+    pub fn train_step(&mut self, batch: VisionActBatch<'_>, step: u64) -> Result<VisionActLoss> {
         self.trainer.train_step(batch, step)
     }
 
-    pub fn validation_step(&self, batch: VisionActBatch) -> Result<VisionActLoss> {
+    pub fn validation_step(&self, batch: VisionActBatch<'_>) -> Result<VisionActLoss> {
         self.trainer.validation_step(batch)
     }
 
@@ -320,11 +323,12 @@ struct LossOutput {
     kl: Tensor,
 }
 
-struct DeviceBatch {
+struct DeviceBatch<'a> {
     states: Tensor,
     images: Vec<Tensor>,
     actions: Tensor,
     action_is_pad: Tensor,
+    _host: VisionActBatch<'a>,
 }
 
 struct Trainer {
@@ -379,44 +383,41 @@ impl Trainer {
             .sum()
     }
 
-    fn batch(&self, batch: VisionActBatch) -> Result<DeviceBatch> {
+    fn batch<'a>(&self, batch: VisionActBatch<'a>) -> Result<DeviceBatch<'a>> {
         validate_batch(&self.config, &batch)?;
-        let VisionActBatch {
-            batch_size,
-            states,
-            images,
-            actions,
-            action_is_pad,
-        } = batch;
-        let batch_size = as_i64("batch", batch_size)?;
+        let batch_size = as_i64("batch", batch.batch_size)?;
         let state_dimensions = as_i64("state", self.config.state_dimensions)?;
         let cameras = as_i64("camera", self.config.camera_streams.len())?;
         let height = as_i64("image height", self.config.image_height)?;
         let width = as_i64("image width", self.config.image_width)?;
         let chunk = as_i64("chunk", self.config.chunk_size)?;
         let action_dimensions = as_i64("action", self.config.action_dimensions)?;
-        let states = Tensor::from_slice(&states)
-            .view([batch_size, state_dimensions])
+        let states = borrowed_f32_tensor(batch.states.as_ref(), &[batch_size, state_dimensions])
             .to_device(self.device);
-        let images = Tensor::from_slice(&images)
-            .view([batch_size, cameras, 3, height, width])
-            .to_device(self.device)
-            .unbind(1);
-        let actions = Tensor::from_slice(&actions)
-            .view([batch_size, chunk, action_dimensions])
-            .to_device(self.device);
-        let action_is_pad = Tensor::from_slice(&action_is_pad)
-            .view([batch_size, chunk])
-            .to_device(self.device);
+        let images = borrowed_f32_tensor(
+            batch.images.as_ref(),
+            &[batch_size, cameras, 3, height, width],
+        )
+        .to_device(self.device)
+        .unbind(1);
+        let actions = borrowed_f32_tensor(
+            batch.actions.as_ref(),
+            &[batch_size, chunk, action_dimensions],
+        )
+        .to_device(self.device);
+        let action_is_pad =
+            borrowed_bool_tensor(batch.action_is_pad.as_ref(), &[batch_size, chunk])
+                .to_device(self.device);
         Ok(DeviceBatch {
             states,
             images,
             actions,
             action_is_pad,
+            _host: batch,
         })
     }
 
-    fn train_step(&mut self, batch: VisionActBatch, step: u64) -> Result<VisionActLoss> {
+    fn train_step(&mut self, batch: VisionActBatch<'_>, step: u64) -> Result<VisionActLoss> {
         let batch = self.batch(batch)?;
         let output = self.model.forward_training(
             &batch.states,
@@ -450,7 +451,7 @@ impl Trainer {
         Ok(metrics)
     }
 
-    fn validation_step(&self, batch: VisionActBatch) -> Result<VisionActLoss> {
+    fn validation_step(&self, batch: VisionActBatch<'_>) -> Result<VisionActLoss> {
         let batch = self.batch(batch)?;
         tch::no_grad(|| {
             let output = self.model.forward_inference(&batch.states, &batch.images);
@@ -495,7 +496,29 @@ impl Trainer {
     }
 }
 
-fn validate_batch(config: &VisionActTrainingConfig, batch: &VisionActBatch) -> Result<()> {
+fn borrowed_f32_tensor(data: &[f32], shape: &[i64]) -> Tensor {
+    // SAFETY: `data` remains alive for the complete synchronous optimizer or
+    // validation step, and none of the model operations mutate or resize these
+    // input tensors. Arrow's f32 and u8 buffers match ATen Float and Bool's
+    // element layouts respectively.
+    unsafe {
+        Tensor::from_blob(
+            data.as_ptr().cast::<u8>(),
+            shape,
+            &[],
+            Kind::Float,
+            Device::Cpu,
+        )
+    }
+}
+
+fn borrowed_bool_tensor(data: &[u8], shape: &[i64]) -> Tensor {
+    // SAFETY: the Arrow mask is validated to contain one-byte 0/1 values and
+    // remains alive in `DeviceBatch::_host` until all tensor work completes.
+    unsafe { Tensor::from_blob(data.as_ptr(), shape, &[], Kind::Bool, Device::Cpu) }
+}
+
+fn validate_batch(config: &VisionActTrainingConfig, batch: &VisionActBatch<'_>) -> Result<()> {
     let expected = [
         (
             "states",
@@ -535,12 +558,17 @@ fn validate_batch(config: &VisionActTrainingConfig, batch: &VisionActBatch) -> R
     if batch
         .states
         .iter()
-        .chain(&batch.images)
-        .chain(&batch.actions)
+        .chain(batch.images.iter())
+        .chain(batch.actions.iter())
         .any(|value| !value.is_finite())
     {
         return Err(Error::Input(
             "ACT batch contains a non-finite numeric value".to_owned(),
+        ));
+    }
+    if batch.action_is_pad.iter().any(|value| *value > 1) {
+        return Err(Error::Input(
+            "ACT action padding values must be 0 or 1".to_owned(),
         ));
     }
     Ok(())
@@ -770,13 +798,13 @@ mod tests {
         }
     }
 
-    fn small_batch() -> VisionActBatch {
+    fn small_batch() -> VisionActBatch<'static> {
         VisionActBatch {
             batch_size: 1,
-            states: vec![0.0; 2],
-            images: vec![0.0; 3 * 32 * 32],
-            actions: vec![0.0; 2 * 2],
-            action_is_pad: vec![false; 2],
+            states: vec![0.0; 2].into(),
+            images: vec![0.0; 3 * 32 * 32].into(),
+            actions: vec![0.0; 2 * 2].into(),
+            action_is_pad: vec![0; 2].into(),
         }
     }
 
@@ -792,6 +820,17 @@ mod tests {
         assert_eq!(trainer.learning_rate(0), 1.0e-5);
         assert_eq!(trainer.learning_rate(50), 1.0e-5);
         assert_eq!(trainer.learning_rate(100), 1.0e-5);
+    }
+
+    #[test]
+    fn borrowed_cpu_tensors_share_the_host_buffer() {
+        let values = vec![1.0_f32, 2.0];
+        let tensor = borrowed_f32_tensor(&values, &[1, 2]).to_device(Device::Cpu);
+        assert_eq!(tensor.data_ptr() as *const f32, values.as_ptr());
+
+        let mask = vec![0_u8, 1];
+        let tensor = borrowed_bool_tensor(&mask, &[1, 2]).to_device(Device::Cpu);
+        assert_eq!(tensor.data_ptr() as *const u8, mask.as_ptr());
     }
 
     #[test]
@@ -872,10 +911,10 @@ mod tests {
             .train_step(
                 VisionActBatch {
                     batch_size: 1,
-                    states: vec![0.0; 6],
-                    images: vec![0.0; 3 * 32 * 32],
-                    actions: vec![0.0; 4 * 6],
-                    action_is_pad: vec![false; 4],
+                    states: vec![0.0; 6].into(),
+                    images: vec![0.0; 3 * 32 * 32].into(),
+                    actions: vec![0.0; 4 * 6].into(),
+                    action_is_pad: vec![0; 4].into(),
                 },
                 1,
             )
@@ -971,10 +1010,10 @@ mod tests {
             .train_step(
                 VisionActBatch {
                     batch_size: 1,
-                    states: vec![0.0; 2],
-                    images: vec![0.0; 3 * 32 * 32],
-                    actions: vec![0.25, -0.5, 0.75, -1.0],
-                    action_is_pad: vec![false; 2],
+                    states: vec![0.0; 2].into(),
+                    images: vec![0.0; 3 * 32 * 32].into(),
+                    actions: vec![0.25, -0.5, 0.75, -1.0].into(),
+                    action_is_pad: vec![0; 2].into(),
                 },
                 1,
             )
@@ -1095,10 +1134,10 @@ mod tests {
         };
         let batch = VisionActBatch {
             batch_size: BATCH,
-            states: vec![0.0; BATCH * 6],
-            images: vec![0.0; BATCH * 2 * 3 * 360 * 640],
-            actions: vec![0.0; BATCH * 100 * 6],
-            action_is_pad: vec![false; BATCH * 100],
+            states: vec![0.0; BATCH * 6].into(),
+            images: vec![0.0; BATCH * 2 * 3 * 360 * 640].into(),
+            actions: vec![0.0; BATCH * 100 * 6].into(),
+            action_is_pad: vec![0; BATCH * 100].into(),
         };
         let mut trainer = NativeActTrainer::new(config, "mps", None).unwrap();
         for step in 1..=WARMUP {
@@ -1155,10 +1194,10 @@ mod tests {
         };
         let batch = VisionActBatch {
             batch_size: BATCH,
-            states: vec![0.0; BATCH * 6],
-            images: vec![0.0; BATCH * 2 * 3 * 360 * 640],
-            actions: vec![0.0; BATCH * 100 * 6],
-            action_is_pad: vec![false; BATCH * 100],
+            states: vec![0.0; BATCH * 6].into(),
+            images: vec![0.0; BATCH * 2 * 3 * 360 * 640].into(),
+            actions: vec![0.0; BATCH * 100 * 6].into(),
+            action_is_pad: vec![0; BATCH * 100].into(),
         };
         let mut trainer = Trainer::new(config, None, Device::Mps).unwrap();
         for step in 1..=8 {

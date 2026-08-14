@@ -300,6 +300,7 @@ fn data_presenters_round_trip_transport_values_without_leaking_them_to_policy() 
             project_id: "project".to_owned(),
             dataset: "dataset".to_owned(),
         },
+        training: spiral_robotics_contracts::api::TrainingRuntimeSettings::default(),
         video: VideoSettings { enabled: true },
     };
     assert_eq!(

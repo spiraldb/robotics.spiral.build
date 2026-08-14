@@ -7,6 +7,7 @@ pub(super) fn router() -> Router<AppState> {
             get(get_data_settings).patch(update_data_settings),
         )
         .route("/settings/data/test/spiral", post(test_spiral))
+        .route("/settings/data/test/training", post(test_training_runtime))
         .route("/publications", get(list_publications))
         .route(
             "/spiral/publications/{episode}",
@@ -45,6 +46,9 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
                     uri: command.spiral.uri,
                     project_id: command.spiral.project_id,
                     dataset: command.spiral.namespace,
+                },
+                training: spiral_robotics_contracts::api::TrainingRuntimeSettings {
+                    endpoint: command.training_endpoint,
                 },
                 video: VideoSettings {
                     enabled: command.video_enabled,
@@ -131,6 +135,7 @@ pub(super) fn application_data_settings(settings: DataSettings) -> DataSettingsV
             project_id: settings.spiral.project_id,
             namespace: settings.spiral.dataset,
         },
+        training_endpoint: settings.training.endpoint,
         video_enabled: settings.video.enabled,
     }
 }
@@ -142,6 +147,9 @@ pub(super) fn contract_data_settings(settings: DataSettingsView) -> DataSettings
             uri: settings.spiral.uri,
             project_id: settings.spiral.project_id,
             dataset: settings.spiral.namespace,
+        },
+        training: spiral_robotics_contracts::api::TrainingRuntimeSettings {
+            endpoint: settings.training_endpoint,
         },
         video: VideoSettings {
             enabled: settings.video_enabled,
@@ -270,6 +278,7 @@ fn data_settings_command(request: UpdateDataSettingsRequest) -> UpdateDataSettin
             project_id: request.spiral.project_id,
             namespace: request.spiral.dataset,
         },
+        training_endpoint: request.training.endpoint,
         video_enabled: request.video.enabled,
     }
 }
@@ -306,6 +315,10 @@ async fn test_spiral(State(state): State<AppState>) -> Json<ConnectionTestRespon
         ok: result.ok,
         message: result.message,
     })
+}
+
+async fn test_training_runtime(State(state): State<AppState>) -> Json<ConnectionTestResponse> {
+    Json(state.training.test_runtime().await)
 }
 
 async fn list_publications(State(state): State<AppState>) -> Json<Vec<PublicationStatus>> {

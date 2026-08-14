@@ -5,4 +5,4 @@
 
 pub(crate) mod data;
 pub(crate) mod manager;
-mod resources;
+pub(crate) mod remote;

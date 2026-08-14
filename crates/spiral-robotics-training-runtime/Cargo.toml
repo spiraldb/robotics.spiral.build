@@ -1,0 +1,14 @@
+[package]
+name = "spiral-robotics-training-runtime"
+version.workspace = true
+edition.workspace = true
+description = "Remote HTTP and Arrow IPC policy-training runtime for Spiral Robotics"
+publish = false
+
+[dependencies]
+spiral-robotics-training-http.workspace = true
+spiral-robotics-training-pytorch.workspace = true
+clap.workspace = true
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -12,13 +12,13 @@ use adbc_driver_manager::ManagedConnection;
 use spiral_robotics_contracts::api::{
     ConnectionTestResponse, MAX_ROLLOUT_ACTION_STEPS, MAX_TRAINING_HISTORY_RUNS,
     StartTrainingRequest, TrainingCheckpoint, TrainingMetricPoint, TrainingReadiness, TrainingRun,
-    TrainingRunPhase, TrainingSnapshot, TrainingSource, TrainingUpdate,
+    TrainingRunPhase, TrainingRuntimeInfo, TrainingSnapshot, TrainingSource, TrainingUpdate,
 };
 use spiral_robotics_contracts::spiral;
 use spiral_robotics_training::{
     ActTrainingConfig, TRAINING_BACKEND_API_VERSION, TrainingBackend, TrainingCheckpointRequest,
-    TrainingExecution, TrainingInitialization, TrainingModelConfig, TrainingSession,
-    TrainingSessionInfo, TrainingSessionRequest,
+    TrainingInitialization, TrainingModelConfig, TrainingSession, TrainingSessionInfo,
+    TrainingSessionRequest,
 };
 use tokio::sync::{broadcast, mpsc};
 
@@ -52,7 +52,6 @@ use crate::backend::application::training_runs::{
 use crate::backend::storage::manager::StorageManager;
 use crate::backend::storage::settings::StoredSpiralSettings;
 use crate::backend::training::data::{LoadedActBatch, SpiralActLoader};
-use crate::backend::training::resources::ResourceSampler;
 
 const HISTORY_FILE: &str = "runs.json";
 const STOP_GRACE: Duration = Duration::from_secs(30);
@@ -232,6 +231,19 @@ impl TrainingManager {
             );
         }
         next
+    }
+
+    pub(crate) async fn test_runtime(&self) -> ConnectionTestResponse {
+        match probe_training_backend(&self.inner.training_backend).await {
+            Ok(info) => ConnectionTestResponse {
+                ok: true,
+                message: format!("Connected · {}", info.summary()),
+            },
+            Err(error) => ConnectionTestResponse {
+                ok: false,
+                message: error,
+            },
+        }
     }
 
     pub(crate) async fn start(&self, request: StartTrainingRequest) -> Result<TrainingRun, String> {
@@ -945,8 +957,6 @@ fn train_prefetched(
     let started = Instant::now();
     let mut metric_started = started;
     let mut examples_since_metric = 0_usize;
-    let mut resources =
-        ResourceSampler::new(trainer_info.execution == TrainingExecution::LocalAccelerator);
     let mut last_validation = None;
     let mut last_checkpoint = 0;
     let mut completed_steps = 0;
@@ -987,7 +997,7 @@ fn train_prefetched(
         }
         let now = Instant::now();
         let elapsed = now.duration_since(metric_started).as_secs_f64().max(1.0e-9);
-        let usage = resources.sample();
+        let usage = trainer.telemetry().ok();
         let _ = events.send(BackendEvent::Metric(TrainingMetricPoint {
             step,
             train_loss: loss.total,
@@ -996,9 +1006,9 @@ fn train_prefetched(
             transfer_bytes_per_second: loader_metrics.source_bytes as f64
                 / loader_metrics.seconds.max(1.0e-9),
             examples_per_second: examples_since_metric as f64 / elapsed,
-            cpu_percent: usage.cpu_percent,
-            gpu_percent: usage.gpu_percent,
-            memory_bytes: usage.memory_bytes,
+            cpu_percent: usage.and_then(|usage| usage.cpu_percent),
+            gpu_percent: usage.and_then(|usage| usage.gpu_percent),
+            memory_bytes: usage.and_then(|usage| usage.memory_bytes),
             elapsed_seconds: now.duration_since(started).as_secs_f64(),
             event: (!event.is_empty()).then(|| event.join(" · ")),
         }));
@@ -1201,26 +1211,12 @@ async fn readiness(
     storage: &StorageManager,
     training_backend: &Arc<dyn TrainingBackend>,
 ) -> TrainingReadiness {
-    let backend = training_backend.clone();
-    let backend = tokio::time::timeout(
-        Duration::from_secs(8),
-        tokio::task::spawn_blocking(move || backend.health()),
-    )
-    .await
-    .map_err(|_| "training backend health probe timed out after 8 seconds".to_owned())
-    .and_then(|result| {
-        result.map_err(|error| format!("training backend health task failed: {error}"))
-    })
-    .and_then(|result| result.map_err(|error| error.to_string()))
-    .and_then(|info| {
-        if info.api_version == TRAINING_BACKEND_API_VERSION {
-            Ok(info)
-        } else {
-            Err(format!(
-                "training backend API version {} is incompatible with Studio version {}",
-                info.api_version, TRAINING_BACKEND_API_VERSION
-            ))
-        }
+    let backend = probe_training_backend(training_backend).await;
+    let runtime = backend.as_ref().ok().map(|info| TrainingRuntimeInfo {
+        id: info.id.clone(),
+        display_name: info.display_name.clone(),
+        runtime: info.runtime.clone(),
+        devices: info.devices.clone(),
     });
     let spiral = storage.training_source("default");
     let connection = if spiral.is_ok() {
@@ -1242,7 +1238,7 @@ async fn readiness(
         (_, Some(result), _) if !result.ok => {
             format!("Spiral is not ready for training: {}", result.message)
         }
-        (_, _, Err(error)) => format!("Training backend is not ready: {error}"),
+        (_, _, Err(error)) => format!("Training runtime is not ready: {error}"),
         (Ok((_, source)), Some(_), Ok(backend)) => format!(
             "Runtime ready · {probe} · Spiral project {} · namespace {} · query checked at run start",
             source.project,
@@ -1254,8 +1250,35 @@ async fn readiness(
     TrainingReadiness {
         ready,
         spiral_ready,
+        runtime,
         summary,
     }
+}
+
+async fn probe_training_backend(
+    training_backend: &Arc<dyn TrainingBackend>,
+) -> Result<spiral_robotics_training::TrainingBackendInfo, String> {
+    let backend = training_backend.clone();
+    tokio::time::timeout(
+        Duration::from_secs(8),
+        tokio::task::spawn_blocking(move || backend.health()),
+    )
+    .await
+    .map_err(|_| "training backend health probe timed out after 8 seconds".to_owned())
+    .and_then(|result| {
+        result.map_err(|error| format!("training backend health task failed: {error}"))
+    })
+    .and_then(|result| result.map_err(|error| error.to_string()))
+    .and_then(|info| {
+        if info.api_version == TRAINING_BACKEND_API_VERSION {
+            Ok(info)
+        } else {
+            Err(format!(
+                "training backend API version {} is incompatible with Studio version {}",
+                info.api_version, TRAINING_BACKEND_API_VERSION
+            ))
+        }
+    })
 }
 
 fn validate_checkpoint_artifact(
@@ -1458,6 +1481,14 @@ fn application_training_readiness(readiness: TrainingReadiness) -> ApplicationTr
     ApplicationTrainingReadiness {
         ready: readiness.ready,
         spiral_ready: readiness.spiral_ready,
+        runtime: readiness.runtime.map(|runtime| {
+            crate::backend::application::training::TrainingRuntimeInfo {
+                id: runtime.id,
+                display_name: runtime.display_name,
+                runtime: runtime.runtime,
+                devices: runtime.devices,
+            }
+        }),
         summary: readiness.summary,
     }
 }
@@ -1707,10 +1738,10 @@ mod tests {
         LoadedActBatch {
             batch: TrainingBatch {
                 batch_size: 1,
-                states: vec![marker],
-                images: vec![marker],
-                actions: vec![marker],
-                action_is_pad: vec![false],
+                states: vec![marker].into(),
+                images: vec![marker].into(),
+                actions: vec![marker].into(),
+                action_is_pad: vec![0].into(),
             },
             metrics: crate::backend::training::data::LoaderMetrics {
                 seconds: f64::from(marker),
@@ -1730,7 +1761,6 @@ mod tests {
                 devices: vec!["remote-gpu".to_owned()],
             },
             device: "remote-gpu".to_owned(),
-            execution: TrainingExecution::Remote,
             parameter_count: 42,
         }
     }

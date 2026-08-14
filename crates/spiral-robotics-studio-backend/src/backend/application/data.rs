@@ -18,6 +18,7 @@ pub(crate) struct SpiralDestinationSettings {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct UpdateDataSettingsCommand {
     pub spiral: SpiralDestinationSettings,
+    pub training_endpoint: String,
     pub video_enabled: bool,
 }
 
@@ -25,6 +26,7 @@ pub(crate) struct UpdateDataSettingsCommand {
 pub(crate) struct DataSettingsView {
     pub spiral: SpiralDestinationSettings,
     pub spiral_configured: bool,
+    pub training_endpoint: String,
     pub video_enabled: bool,
 }
 
@@ -245,6 +247,15 @@ fn validate_settings(
     command.spiral.uri = command.spiral.uri.trim().to_owned();
     command.spiral.project_id = command.spiral.project_id.trim().to_owned();
     command.spiral.namespace = command.spiral.namespace.trim().to_owned();
+    command.training_endpoint = command.training_endpoint.trim().to_owned();
+
+    if !command.training_endpoint.starts_with("http://")
+        || command.training_endpoint.len() <= "http://".len()
+    {
+        return Err(ApplicationError::InvalidInput(
+            "Training runtime endpoint must be a plain http:// address".to_owned(),
+        ));
+    }
 
     if !matches!(
         command.spiral.uri.as_str(),
@@ -442,6 +453,7 @@ mod tests {
                 namespace: "dataset".to_owned(),
             },
             spiral_configured: true,
+            training_endpoint: "http://127.0.0.1:50051".to_owned(),
             video_enabled: true,
         }
     }
@@ -475,6 +487,7 @@ mod tests {
                 project_id: " project-1 ".to_owned(),
                 namespace: " robot_data ".to_owned(),
             },
+            training_endpoint: " http://127.0.0.1:50051 ".to_owned(),
             video_enabled: true,
         }
     }

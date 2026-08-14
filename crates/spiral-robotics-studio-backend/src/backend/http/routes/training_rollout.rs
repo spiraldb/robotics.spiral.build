@@ -335,6 +335,14 @@ pub(super) fn application_training_snapshot(
         readiness: ApplicationTrainingReadiness {
             ready: snapshot.readiness.ready,
             spiral_ready: snapshot.readiness.spiral_ready,
+            runtime: snapshot.readiness.runtime.map(|runtime| {
+                crate::backend::application::training::TrainingRuntimeInfo {
+                    id: runtime.id,
+                    display_name: runtime.display_name,
+                    runtime: runtime.runtime,
+                    devices: runtime.devices,
+                }
+            }),
             summary: snapshot.readiness.summary,
         },
         runs: snapshot
@@ -352,6 +360,14 @@ pub(super) fn contract_training_snapshot(
         readiness: spiral_robotics_contracts::api::TrainingReadiness {
             ready: snapshot.readiness.ready,
             spiral_ready: snapshot.readiness.spiral_ready,
+            runtime: snapshot.readiness.runtime.map(|runtime| {
+                spiral_robotics_contracts::api::TrainingRuntimeInfo {
+                    id: runtime.id,
+                    display_name: runtime.display_name,
+                    runtime: runtime.runtime,
+                    devices: runtime.devices,
+                }
+            }),
             summary: snapshot.readiness.summary,
         },
         runs: snapshot

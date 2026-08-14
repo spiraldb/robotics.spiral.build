@@ -18,9 +18,9 @@ use crate::backend::rollout::manager::RolloutManager;
 use crate::backend::storage::manager::StorageManager;
 use crate::backend::storage::settings::DataSettingsStore;
 use crate::backend::training::manager::TrainingManager;
+use crate::backend::training::remote::ConfiguredHttpTrainingBackend;
 use clap::Parser;
 use spiral_robotics::cameras;
-use spiral_robotics_training::TrainingBackend;
 use tracing_subscriber::EnvFilter;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -85,10 +85,7 @@ struct Args {
     teleop_max_step: i64,
 }
 
-pub fn run(
-    app: fn() -> dioxus::prelude::Element,
-    training_backend: Arc<dyn TrainingBackend>,
-) -> ExitCode {
+pub fn run(app: fn() -> dioxus::prelude::Element) -> ExitCode {
     // Camera probing re-executes this binary as an isolated worker, so this
     // must come before argument parsing.
     match cameras::worker_mode() {
@@ -154,7 +151,7 @@ pub fn run(
         }
     };
 
-    match runtime.block_on(serve(args, camera_access.err(), app, training_backend)) {
+    match runtime.block_on(serve(args, camera_access.err(), app)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
@@ -167,7 +164,6 @@ async fn serve(
     args: Args,
     camera_access_error: Option<String>,
     app: fn() -> dioxus::prelude::Element,
-    training_backend: Arc<dyn TrainingBackend>,
 ) -> Result<()> {
     // `dx serve` publishes its chosen address through the standard fullstack
     // environment. An explicit CLI value still wins for standalone launches.
@@ -192,7 +188,7 @@ async fn serve(
         TrainingManager::open(
             training_root,
             storage.clone(),
-            training_backend,
+            Arc::new(ConfiguredHttpTrainingBackend::new(data_settings.clone())),
             args.ffmpeg.clone(),
         )
         .await

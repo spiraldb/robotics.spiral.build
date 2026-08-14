@@ -27,7 +27,7 @@ when the project is opened. See **Distribution** below.
 Spiral Robotics sets up, calibrates, and drives SO-ARM101 arms, records synchronized
 robot and camera data, publishes and queries episodes, trains policies, and
 safely replays actions on a follower. Operators use it from the browser or the
-terminal without managing a separate ML runtime themselves.
+terminal and connect Studio to a selectable policy-training runtime.
 
 The durable scope is the **full robot-learning loop**: connect → calibrate →
 teleoperate → record → inspect/query → publish/export → train → run a policy.
@@ -47,10 +47,11 @@ on real hardware without writing glue code or operating a second training stack.
   backend; it never holds service credentials or drives hardware directly.
 - **Rust owns the system boundary.** The motor bus, camera capture,
   calibration, kinematics, server, run supervision, data contracts, and web
-  interface are Rust. Policy training is also native: a dedicated ADBC
-  connection streams Arrow state, action, and Spiral-decoded image tensors into
-  Burn's full vision ACT/CVAE trainer. Rust owns lifecycle, cancellation,
-  validation, telemetry, and SafeTensors checkpoint publication.
+  interface are Rust. Studio's dedicated ADBC connection reads Arrow state,
+  action, and Spiral-decoded image tensors, then streams Arrow IPC batches over
+  HTTP to a selected remote ACT/CVAE training runtime. Rust owns lifecycle,
+  cancellation, validation, remote telemetry, and SafeTensors checkpoint
+  publication.
 - **One arm is one robot instance is one JSON file.** Serial port, cameras,
   motors, and calibration live in one versioned file. There is no hidden
   calibration cache or second manifest to reconcile, and the Studio notices
@@ -81,8 +82,10 @@ Spiral Robotics backend
       ├── recording and MP4 encoding
       ├── local episode recovery
       ├── SpiralDB ingest and read-only queries
-      ├── local policy-training supervision and telemetry
-      └── episode validation and follower replay
+      ├── policy-training supervision and checkpoint publication
+      ├── episode validation and follower replay
+      └── Arrow IPC / HTTP ──► selected training runtime
+                               └── in-memory model and optimizer session
 ```
 
 - **The browser can run anywhere.** It renders the interface, WebGL scene,
@@ -131,8 +134,9 @@ selects and monitors a rollout but never becomes the motor-control runtime.
     visibility, replay/delete actions, import and export, and guarded read-only
     Spiral SQL.
   - **Training** owns random anchor and camera/action sampling through the
-    Spiral ADBC/Arrow path, local Burn vision ACT configuration, learning and
-    throughput telemetry, graceful cancellation, and Spiral checkpoints.
+    Spiral ADBC/Arrow path, remote HTTP runtime selection, vision ACT
+    configuration, learning/resource telemetry, graceful cancellation, and
+    Spiral checkpoints.
   - **Rollout** owns checkpoint selection, fixed-follower readiness, simple
     action-chunk and control-rate settings, the live 3D scene, every follower
     camera recorded for the policy, authoritative start/stop lifecycle, and
@@ -196,9 +200,10 @@ sent.
 
 - **Hardware:** SO-ARM101 only for now, with leader and follower roles. Live
   calibration supports Feetech protocol-0 motors such as the STS3215.
-- **One native training runtime.** Burn training runs in-process under the
-  backend supervisor. It uses a dedicated read-only ADBC connection for sample
-  queries and the backend's existing trusted connection for checkpoint ingest.
+- **One runtime per training run.** Studio reads samples through a dedicated
+  read-only ADBC connection and sends Arrow IPC tensor batches to the configured
+  HTTP endpoint. The remote runtime holds model and optimizer state only;
+  Studio remains responsible for queries, run history, and checkpoint ingest.
 - **Nix flake** provides the development environment and web toolchain (`dx`,
   Tailwind CLI, `wasm-bindgen`, and `wasm-opt`).
 - **Safety is enforced by the server.** Enabling torque first copies measured
