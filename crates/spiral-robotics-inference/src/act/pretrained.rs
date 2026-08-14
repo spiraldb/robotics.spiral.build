@@ -1,23 +1,21 @@
 //! Official torchvision ResNet-18 initialization for native ACT training.
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
-
-use burn_core::tensor::DType;
-use burn_store::pytorch::PytorchReader;
-use safetensors::tensor::{Dtype, TensorView, serialize};
+use std::path::PathBuf;
 
 use crate::artifact::download_verified_file;
 use crate::error::IoResultExt;
 use crate::{Error, Result};
+use safetensors::tensor::{Dtype, TensorView, serialize};
 
-pub const IMAGENET_RESNET18_URL: &str = "https://download.pytorch.org/models/resnet18-f37072fd.pth";
+pub const IMAGENET_RESNET18_URL: &str = "https://huggingface.co/timm/resnet18.tv_in1k/resolve/a987fd6b60f845221bfff84b6f0191273ba56ead/model.safetensors?download=true";
 pub const IMAGENET_RESNET18_SHA256: &str =
-    "f37072fd47e89c5e827621c5baffa7500819f7896bbacec160b1a16c560e07ec";
+    "694f673df6520a3158624e8a89af086f59923ee4cd7436fe5bc3bc71d295ad81";
 
-/// Download torchvision's `ResNet18_Weights.IMAGENET1K_V1`, verify its exact
-/// bytes, and convert only its feature extractor into the namespace consumed
-/// by the ACT trainer. The classifier head and BatchNorm counters are omitted.
+/// Download an exact SafeTensors mirror of torchvision's
+/// `ResNet18_Weights.IMAGENET1K_V1`, verify its bytes, and convert only its
+/// feature extractor into the namespace consumed by the ACT trainer. The
+/// classifier head and BatchNorm counters are omitted.
 pub fn imagenet_resnet18_weights() -> Result<Vec<u8>> {
     let root = std::env::var_os("SPIRAL_ROBOTICS_CACHE_DIR")
         .map(PathBuf::from)
@@ -28,16 +26,17 @@ pub fn imagenet_resnet18_weights() -> Result<Vec<u8>> {
         })
         .join("backbones")
         .join(IMAGENET_RESNET18_SHA256);
-    let source = root.join("resnet18-f37072fd.pth");
+    let source = root.join("resnet18-tv-in1k.safetensors");
     let converted = root.join("resnet18-imagenet1k-v1.safetensors");
-    download_verified_file(IMAGENET_RESNET18_URL, &source, IMAGENET_RESNET18_SHA256)?;
     if converted.is_file() {
         let bytes = std::fs::read(&converted).at(&converted)?;
         if validate_converted(&bytes).is_ok() {
             return Ok(bytes);
         }
     }
-    let bytes = convert_torchvision_resnet18(&source)?;
+    download_verified_file(IMAGENET_RESNET18_URL, &source, IMAGENET_RESNET18_SHA256)?;
+    let source_bytes = std::fs::read(&source).at(&source)?;
+    let bytes = convert_torchvision_resnet18(&source_bytes)?;
     let temporary = root.join("resnet18-imagenet1k-v1.safetensors.tmp");
     std::fs::write(&temporary, &bytes).at(&temporary)?;
     std::fs::rename(&temporary, &converted).at(&converted)?;
@@ -50,18 +49,15 @@ struct ConvertedTensor {
     bytes: Vec<u8>,
 }
 
-fn convert_torchvision_resnet18(path: &Path) -> Result<Vec<u8>> {
-    let reader = PytorchReader::new(path).map_err(|error| {
-        Error::Checkpoint(format!(
-            "reading torchvision ResNet-18 {}: {error}",
-            path.display()
-        ))
-    })?;
+fn convert_torchvision_resnet18(bytes: &[u8]) -> Result<Vec<u8>> {
+    let loaded = safetensors::SafeTensors::deserialize(bytes)
+        .map_err(|error| Error::Checkpoint(format!("reading torchvision ResNet-18: {error}")))?;
     let expected = expected_backbone_keys();
-    let actual = reader
-        .keys()
+    let actual = loaded
+        .names()
         .into_iter()
         .filter(|name| !name.starts_with("fc.") && !name.ends_with(".num_batches_tracked"))
+        .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     if actual != expected {
         return Err(Error::Checkpoint(format!(
@@ -72,22 +68,19 @@ fn convert_torchvision_resnet18(path: &Path) -> Result<Vec<u8>> {
     }
     let mut tensors = Vec::with_capacity(expected.len());
     for name in expected {
-        let snapshot = reader
-            .get(&name)
+        let tensor = loaded
+            .tensor(&name)
             .expect("the exact key set was validated above");
-        let data = snapshot.to_data().map_err(|error| {
-            Error::Checkpoint(format!("reading torchvision tensor {name:?}: {error}"))
-        })?;
-        if data.dtype != DType::F32 {
+        if tensor.dtype() != Dtype::F32 {
             return Err(Error::Checkpoint(format!(
                 "torchvision tensor {name:?} must be F32, found {:?}",
-                data.dtype
+                tensor.dtype()
             )));
         }
         tensors.push(ConvertedTensor {
             name: format!("model.backbone.{name}"),
-            shape: data.shape.as_slice().to_vec(),
-            bytes: data.as_bytes().to_vec(),
+            shape: tensor.shape().to_vec(),
+            bytes: tensor.data().to_vec(),
         });
     }
     let views = tensors
@@ -171,11 +164,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "set SPIRAL_IMAGENET_RESNET18_PTH to the official downloaded .pth"]
+    #[ignore = "set SPIRAL_IMAGENET_RESNET18_SAFETENSORS to the pinned exact mirror"]
     fn official_torchvision_v1_converts_and_initializes_the_native_trainer() {
-        let path = std::env::var_os("SPIRAL_IMAGENET_RESNET18_PTH")
-            .expect("SPIRAL_IMAGENET_RESNET18_PTH must name the official V1 .pth");
-        let bytes = convert_torchvision_resnet18(std::path::Path::new(&path)).unwrap();
+        let path = std::env::var_os("SPIRAL_IMAGENET_RESNET18_SAFETENSORS")
+            .expect("SPIRAL_IMAGENET_RESNET18_SAFETENSORS must name the pinned mirror");
+        let source = std::fs::read(path).unwrap();
+        let bytes = convert_torchvision_resnet18(&source).unwrap();
         let tensors = safetensors::SafeTensors::deserialize(&bytes).unwrap();
         assert_eq!(tensors.len(), 100);
         let conv1 = tensors.tensor("model.backbone.conv1.weight").unwrap();

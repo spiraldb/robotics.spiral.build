@@ -176,6 +176,7 @@ pub(crate) fn CharmingChart(
     chart: Chart,
     class: String,
     aria_label: String,
+    #[props(default)] group: Option<String>,
 ) -> Element {
     let runtime_failed = use_signal(|| false);
 
@@ -192,23 +193,32 @@ pub(crate) fn CharmingChart(
         let update_instance = Rc::clone(&instance);
         let update_observer = Rc::clone(&observer);
         let mut runtime_status = runtime_failed;
-        use_effect(use_reactive((&id, &chart), move |(id, chart)| {
-            let instance = Rc::clone(&update_instance);
-            let observer = Rc::clone(&update_observer);
-            spawn(async move {
-                for _ in 0..100 {
-                    if runtime_ready() {
-                        match render_or_update(&id, &chart, &instance, &observer) {
-                            Ok(()) => runtime_status.set(false),
-                            Err(()) => runtime_status.set(true),
+        use_effect(use_reactive(
+            (&id, &chart, &group),
+            move |(id, chart, group)| {
+                let instance = Rc::clone(&update_instance);
+                let observer = Rc::clone(&update_observer);
+                spawn(async move {
+                    for _ in 0..100 {
+                        if runtime_ready() {
+                            match render_or_update(
+                                &id,
+                                &chart,
+                                group.as_deref(),
+                                &instance,
+                                &observer,
+                            ) {
+                                Ok(()) => runtime_status.set(false),
+                                Err(()) => runtime_status.set(true),
+                            }
+                            return;
                         }
-                        return;
+                        gloo_timers::future::TimeoutFuture::new(20).await;
                     }
-                    gloo_timers::future::TimeoutFuture::new(20).await;
-                }
-                runtime_status.set(true);
-            });
-        }));
+                    runtime_status.set(true);
+                });
+            },
+        ));
 
         let cleanup_id = id.clone();
         let cleanup_instance = Rc::clone(&instance);
@@ -251,21 +261,44 @@ fn runtime_ready() -> bool {
 fn render_or_update(
     id: &str,
     chart: &Chart,
+    group: Option<&str>,
     instance: &std::rc::Rc<std::cell::RefCell<Option<charming::Echarts>>>,
     observer: &std::rc::Rc<std::cell::RefCell<Option<ChartResizeObserver>>>,
 ) -> Result<(), ()> {
     if let Some(existing) = instance.borrow().as_ref() {
         update_chart(existing, chart);
+        connect_chart(existing, group)?;
         return Ok(());
     }
 
     let rendered = charming::WasmRenderer::new_opt(None, None)
         .render(id, chart)
         .map_err(|_| ())?;
+    connect_chart(&rendered, group)?;
     observer
         .borrow_mut()
         .replace(ChartResizeObserver::new(id, std::rc::Rc::clone(instance))?);
     instance.borrow_mut().replace(rendered);
+    Ok(())
+}
+
+#[cfg(feature = "web")]
+fn connect_chart(chart: &charming::Echarts, group: Option<&str>) -> Result<(), ()> {
+    use wasm_bindgen::JsCast as _;
+    use wasm_bindgen::JsValue;
+
+    let Some(group) = group else {
+        return Ok(());
+    };
+    let group = JsValue::from_str(group);
+    js_sys::Reflect::set(chart.as_ref(), &JsValue::from_str("group"), &group).map_err(|_| ())?;
+    let runtime =
+        js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("echarts")).map_err(|_| ())?;
+    let connect = js_sys::Reflect::get(&runtime, &JsValue::from_str("connect"))
+        .map_err(|_| ())?
+        .dyn_into::<js_sys::Function>()
+        .map_err(|_| ())?;
+    connect.call1(&runtime, &group).map_err(|_| ())?;
     Ok(())
 }
 

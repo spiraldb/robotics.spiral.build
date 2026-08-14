@@ -4,6 +4,8 @@
 //! item, and in-flight command guards therefore belong to the shell rather
 //! than to the mounted Training workspace.
 
+use std::collections::BTreeSet;
+
 use dioxus::prelude::*;
 use gloo_net::http::Method;
 use spiral_robotics_contracts::api::{StartTrainingRequest, TrainingRun};
@@ -21,6 +23,9 @@ pub(crate) struct TrainingController {
     opened_runs: Signal<Vec<String>>,
     starting: Signal<bool>,
     stopping: Signal<Option<String>>,
+    deleting: Signal<Option<String>>,
+    confirming_delete: Signal<Option<String>>,
+    automatic_run_name: Signal<bool>,
 }
 
 pub(crate) fn use_training_controller(
@@ -43,6 +48,9 @@ pub(crate) fn use_training_controller(
         opened_runs: use_signal(Vec::new),
         starting: use_signal(|| false),
         stopping: use_signal(|| None),
+        deleting: use_signal(|| None),
+        confirming_delete: use_signal(|| None),
+        automatic_run_name: use_signal(|| true),
     };
     let namespace_dependency = namespace.to_owned();
     let dataset_dependency = dataset_id.to_owned();
@@ -87,6 +95,17 @@ impl TrainingController {
         edit(&mut self.request.write());
     }
 
+    pub(crate) fn set_run_name(mut self, value: String) {
+        self.automatic_run_name.set(false);
+        self.request.write().run_name = value;
+    }
+
+    pub(crate) fn sync_automatic_run_name(mut self, existing_names: &[String]) {
+        if self.automatic_run_name.peek().to_owned() {
+            self.request.write().run_name = next_default_run_name(existing_names);
+        }
+    }
+
     pub(crate) fn selected_run(&self) -> Option<String> {
         self.selected_run.read().clone()
     }
@@ -103,7 +122,26 @@ impl TrainingController {
         self.stopping.read().clone()
     }
 
+    pub(crate) fn deleting(&self) -> Option<String> {
+        self.deleting.read().clone()
+    }
+
+    pub(crate) fn confirming_delete(&self) -> Option<String> {
+        self.confirming_delete.read().clone()
+    }
+
+    pub(crate) fn confirm_delete(mut self, id: String) {
+        if self.deleting.peek().is_none() {
+            self.confirming_delete.set(Some(id));
+        }
+    }
+
+    pub(crate) fn cancel_delete(mut self) {
+        self.confirming_delete.set(None);
+    }
+
     pub(crate) fn open_run(mut self, id: String) {
+        self.confirming_delete.set(None);
         if !self.opened_runs.peek().contains(&id) {
             self.opened_runs.write().push(id.clone());
         }
@@ -111,10 +149,12 @@ impl TrainingController {
     }
 
     pub(crate) fn select_run(mut self, id: String) {
+        self.confirming_delete.set(None);
         self.selected_run.set(Some(id));
     }
 
     pub(crate) fn close_run(mut self, id: String) {
+        self.confirming_delete.set(None);
         let selected = self.selected_run.peek().clone();
         let next_selected = {
             let mut opened = self.opened_runs.write();
@@ -134,6 +174,8 @@ impl TrainingController {
         let mut starting = self.starting;
         let mut selected_run = self.selected_run;
         let mut opened_runs = self.opened_runs;
+        let mut request_signal = self.request;
+        let mut automatic_run_name = self.automatic_run_name;
         spawn(async move {
             let result = api::send_json::<_, TrainingRun>(
                 Method::POST,
@@ -144,6 +186,18 @@ impl TrainingController {
             starting.set(false);
             match result {
                 Ok(run) => {
+                    let mut existing_names = studio
+                        .training
+                        .read()
+                        .runs
+                        .iter()
+                        .map(|existing| existing.config.run_name.clone())
+                        .collect::<Vec<_>>();
+                    if !existing_names.contains(&run.config.run_name) {
+                        existing_names.push(run.config.run_name.clone());
+                    }
+                    request_signal.write().run_name = next_default_run_name(&existing_names);
+                    automatic_run_name.set(true);
                     if !opened_runs.peek().contains(&run.id) {
                         opened_runs.write().push(run.id.clone());
                     }
@@ -165,6 +219,57 @@ impl TrainingController {
             stopping.set(None);
             result
         });
+    }
+
+    pub(crate) fn delete(mut self, studio: Studio, id: String, name: String) {
+        if self.deleting.peek().is_some() {
+            return;
+        }
+        self.confirming_delete.set(None);
+        self.deleting.set(Some(id.clone()));
+        let path = format!("/api/training/runs/{id}");
+        let deleted_id = id.clone();
+        let mut deleting = self.deleting;
+        let mut selected_run = self.selected_run;
+        let mut opened_runs = self.opened_runs;
+        studio.run_utility(format!("Deleted run {name}."), async move {
+            let result = api::send::<()>(Method::DELETE, &path, None).await;
+            deleting.set(None);
+            if result.is_ok() {
+                let selected = selected_run.peek().clone();
+                let next_selected = selection_after_close(
+                    &mut opened_runs.write(),
+                    selected.as_deref(),
+                    &deleted_id,
+                );
+                if selected.as_deref() == Some(deleted_id.as_str()) {
+                    selected_run.set(next_selected);
+                }
+            }
+            result
+        });
+    }
+}
+
+fn next_default_run_name(existing_names: &[String]) -> String {
+    const PREFIX: &str = "act-run-";
+
+    let used = existing_names
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut number = existing_names
+        .iter()
+        .filter_map(|name| name.strip_prefix(PREFIX)?.parse::<u64>().ok())
+        .max()
+        .unwrap_or_default()
+        .saturating_add(1);
+    loop {
+        let candidate = format!("{PREFIX}{number:03}");
+        if !used.contains(candidate.as_str()) {
+            return candidate;
+        }
+        number = number.saturating_add(1);
     }
 }
 
@@ -188,7 +293,19 @@ fn selection_after_close(
 
 #[cfg(test)]
 mod tests {
-    use super::selection_after_close;
+    use super::{next_default_run_name, selection_after_close};
+
+    #[test]
+    fn default_run_names_advance_from_history_without_colliding() {
+        let names = vec![
+            "act-run-001".to_owned(),
+            "experiment".to_owned(),
+            "act-run-007".to_owned(),
+            "act-run-008".to_owned(),
+        ];
+        assert_eq!(next_default_run_name(&names), "act-run-009");
+        assert_eq!(next_default_run_name(&[]), "act-run-001");
+    }
 
     #[test]
     fn closing_selected_run_prefers_the_tab_to_its_right() {

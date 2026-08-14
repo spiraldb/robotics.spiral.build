@@ -24,6 +24,7 @@
 - Design language: notion style.
 - Try to make the ui rerun style, where you have a studio like layout. Don't make many tabs that user needs to switch between.
 - Make ui compact and information dense.
+- UI state changes must never cause layout shifts or flicker; reserve stable space for conditional controls and toggle their visibility without reflow.
 - Charts use Charming and deliberate, unit-aware precision; never show raw floating-point tails.
 - Camera feeds are properties of the robot instance, it should be in the properties panel, rather than the main ui.
 

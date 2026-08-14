@@ -6,12 +6,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use spiral_robotics_contracts::api::MAX_ROLLOUT_ACTION_STEPS;
+use spiral_robotics_core::operation::MAX_ROLLOUT_ACTION_STEPS;
 
 use super::error::ApplicationError;
 
 pub(crate) const ACT_ARTIFACT_FORMAT: &str = "spiral_robotics.act.safetensors.v2";
-pub(crate) const ACT_TENSOR_NAMESPACE: &str = "burn_act_state_dict_v1";
+pub(crate) const ACT_TENSOR_NAMESPACE: &str = "lerobot_act_state_dict_v1";
+const LEGACY_BURN_ACT_TENSOR_NAMESPACE: &str = "burn_act_state_dict_v1";
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ArtifactIdentity {
@@ -82,9 +83,11 @@ pub(crate) fn validate_artifact_identity(
     expected_run: &str,
     expected_step: u64,
 ) -> Result<(), ApplicationError> {
-    if actual.format != ACT_ARTIFACT_FORMAT
-        || actual.purpose != "inference"
-        || actual.tensor_namespace != ACT_TENSOR_NAMESPACE
+    let supported_namespace = matches!(
+        actual.tensor_namespace.as_str(),
+        ACT_TENSOR_NAMESPACE | LEGACY_BURN_ACT_TENSOR_NAMESPACE
+    );
+    if actual.format != ACT_ARTIFACT_FORMAT || actual.purpose != "inference" || !supported_namespace
     {
         return invalid("checkpoint is not a native Spiral ACT inference artifact");
     }

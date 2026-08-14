@@ -9,6 +9,7 @@ publish = false
 spiral-robotics.workspace = true
 spiral-robotics-contracts.workspace = true
 spiral-robotics-core.workspace = true
+spiral-robotics-training.workspace = true
 clap.workspace = true
 dioxus = { workspace = true, features = ["cli-config", "server"] }
 serde.workspace = true
@@ -32,6 +33,8 @@ adbc_driver_manager = "0.24.0"
 safetensors = "0.7"
 image.workspace = true
 tempfile.workspace = true
+torch-sys = "0.22.0"
+
 
 [target.'cfg(target_os = "macos")'.dependencies]
 spiral-robotics-inference = { workspace = true, features = ["metal", "accelerate", "download"] }

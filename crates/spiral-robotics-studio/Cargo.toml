@@ -12,6 +12,8 @@ server = [
     "dioxus/cli-config",
     "dioxus/server",
     "dep:spiral-robotics-studio-backend",
+    "dep:spiral-robotics-training-pytorch",
+    "dep:torch-sys",
 ]
 
 [dependencies]
@@ -20,6 +22,7 @@ spiral-robotics-contracts.workspace = true
 spiral-robotics-core.workspace = true
 spiral-robotics-panels.workspace = true
 spiral-robotics-studio-backend = { workspace = true, optional = true }
+spiral-robotics-training-pytorch = { workspace = true, optional = true }
 spiral-robotics-viewport.workspace = true
 dioxus = { workspace = true, features = [
     "asset",
@@ -63,9 +66,11 @@ web-sys = { version = "0.3", features = [
     "WebGlVertexArrayObject",
     "Window",
 ] }
+torch-sys = { version = "0.22.0", optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+
 
 [[bin]]
 name = "spiral-robotics-studio"

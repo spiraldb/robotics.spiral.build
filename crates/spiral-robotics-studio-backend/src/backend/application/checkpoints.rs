@@ -79,6 +79,12 @@ pub(crate) trait CheckpointRepository: Send + Sync {
     fn publish_checkpoint(&self, publication: CheckpointPublication) -> CheckpointFuture<'_, ()>;
 
     fn load_checkpoint(&self, key: CheckpointKey) -> CheckpointFuture<'_, CheckpointArtifact>;
+
+    fn delete_run_checkpoints(
+        &self,
+        run_id: String,
+        source: CheckpointSource,
+    ) -> CheckpointFuture<'_, ()>;
 }
 
 #[cfg(test)]

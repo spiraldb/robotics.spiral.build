@@ -1,9 +1,9 @@
-//! Spiral ADBC to Burn ACT batch preparation.
+//! Spiral ADBC to backend-neutral ACT batch preparation.
 //!
 //! Video frame selection, decode, optional resize, CHW conversion, and
 //! ImageNet normalization remain SPQL operations. This module also derives
 //! the dataset state/action normalization contract before packing finite host
-//! buffers for Burn.
+//! buffers for the injected training backend.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -22,7 +22,7 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema};
 use spiral_robotics_contracts::api::StartTrainingRequest;
 use spiral_robotics_contracts::spiral;
-use spiral_robotics_inference::act::VisionActBatch;
+use spiral_robotics_training::TrainingBatch;
 
 use crate::backend::application::training::MAX_TRAINING_IMAGE_BATCH_BYTES;
 use crate::backend::application::training_population::{
@@ -71,7 +71,7 @@ pub(crate) struct LoaderMetrics {
 }
 
 pub(crate) struct LoadedActBatch {
-    pub batch: VisionActBatch,
+    pub batch: TrainingBatch,
     pub metrics: LoaderMetrics,
 }
 
@@ -270,7 +270,7 @@ impl<'a> SpiralActLoader<'a> {
             .checked_mul(self.camera_streams.len())
             .ok_or_else(|| "requested camera frame count overflowed".to_owned())?;
         Ok(LoadedActBatch {
-            batch: VisionActBatch {
+            batch: TrainingBatch {
                 batch_size,
                 states,
                 images,
@@ -1454,7 +1454,7 @@ mod tests {
     }
 
     #[test]
-    fn native_training_builds_the_spiral_tensor_expression() {
+    fn backend_neutral_training_builds_the_spiral_tensor_expression() {
         let expression = training_image_expression("auto", "f.frame", false);
         assert_eq!(
             expression,

@@ -1,315 +1,146 @@
-use burn_core as burn;
-use burn_core::module::{Module, Param, RunningState};
-use burn_core::tensor::Tensor;
-use burn_core::tensor::activation::relu;
-use burn_core::tensor::backend::Backend;
-use burn_core::tensor::module::max_pool2d;
-use burn_nn::PaddingConfig2d;
-use burn_nn::conv::Conv2d;
-use burn_nn::conv::Conv2dConfig;
+use tch::nn::Module;
+use tch::{Tensor, nn};
 
-use crate::Result;
-
-use super::weights::Weights;
-
-#[derive(Module, Debug)]
-struct FrozenBatchNorm2d<B: Backend> {
-    scale: RunningState<Tensor<B, 1>>,
-    offset: RunningState<Tensor<B, 1>>,
+#[derive(Debug)]
+struct FrozenBatchNorm2d {
+    weight: Tensor,
+    bias: Tensor,
+    running_mean: Tensor,
+    running_var: Tensor,
 }
 
-impl<B: Backend> FrozenBatchNorm2d<B> {
-    fn load(weights: &Weights, prefix: &str, channels: usize, device: &B::Device) -> Result<Self> {
-        if weights.contains(&format!("{prefix}.scale")) {
-            return Ok(Self {
-                scale: RunningState::new(weights.tensor_exact(
-                    &format!("{prefix}.scale"),
-                    [channels],
-                    device,
-                )?),
-                offset: RunningState::new(weights.tensor_exact(
-                    &format!("{prefix}.offset"),
-                    [channels],
-                    device,
-                )?),
-            });
-        }
-        let gamma: Tensor<B, 1> =
-            weights.tensor_exact(&format!("{prefix}.weight"), [channels], device)?;
-        let beta: Tensor<B, 1> =
-            weights.tensor_exact(&format!("{prefix}.bias"), [channels], device)?;
-        let mean: Tensor<B, 1> =
-            weights.tensor_exact(&format!("{prefix}.running_mean"), [channels], device)?;
-        let variance: Tensor<B, 1> =
-            weights.tensor_exact(&format!("{prefix}.running_var"), [channels], device)?;
-        // The reference ACT FrozenBatchNorm2d uses eps = 1e-5.
-        let scale = gamma / variance.add_scalar(1.0e-5).sqrt();
-        let offset = beta - mean * scale.clone();
-        Ok(Self {
-            scale: RunningState::new(scale),
-            offset: RunningState::new(offset),
-        })
-    }
-
-    fn init(channels: usize, device: &B::Device) -> Self {
+impl FrozenBatchNorm2d {
+    fn new(path: &nn::Path<'_>, channels: i64) -> Self {
         Self {
-            scale: RunningState::new(Tensor::ones([channels], device)),
-            offset: RunningState::new(Tensor::zeros([channels], device)),
+            weight: path.ones_no_train("weight", &[channels]),
+            bias: path.zeros_no_train("bias", &[channels]),
+            running_mean: path.zeros_no_train("running_mean", &[channels]),
+            running_var: path.ones_no_train("running_var", &[channels]),
         }
     }
 
-    fn forward(&self, input: Tensor<B, 4>) -> Tensor<B, 4> {
-        let scale = self.scale.value();
-        let [channels] = scale.dims();
-        input * scale.reshape([1, channels, 1, 1])
-            + self.offset.value().reshape([1, channels, 1, 1])
+    fn forward(&self, input: &Tensor) -> Tensor {
+        let scale = &self.weight * (&self.running_var + 1.0e-5).rsqrt();
+        let offset = &self.bias - &self.running_mean * &scale;
+        input * scale.view([1, -1, 1, 1]) + offset.view([1, -1, 1, 1])
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn load_conv2d<B: Backend>(
-    weights: &Weights,
-    prefix: &str,
-    input_channels: usize,
-    output_channels: usize,
-    kernel: usize,
-    stride: usize,
-    padding: usize,
-    device: &B::Device,
-) -> Result<Conv2d<B>> {
-    let weight: Tensor<B, 4> = weights.tensor_exact(
-        &format!("{prefix}.weight"),
-        [output_channels, input_channels, kernel, kernel],
-        device,
-    )?;
-    Ok(Conv2d {
-        weight: Param::from_tensor(weight),
-        bias: None,
-        stride: [stride, stride],
-        kernel_size: [kernel, kernel],
-        dilation: [1, 1],
-        groups: 1,
-        padding: PaddingConfig2d::Explicit(padding, padding, padding, padding),
-    })
+fn conv2d(
+    path: &nn::Path<'_>,
+    input_channels: i64,
+    output_channels: i64,
+    kernel: i64,
+    stride: i64,
+    padding: i64,
+) -> nn::Conv2D {
+    nn::conv2d(
+        path,
+        input_channels,
+        output_channels,
+        kernel,
+        nn::ConvConfig {
+            stride,
+            padding,
+            bias: false,
+            ws_init: nn::Init::Kaiming {
+                dist: nn::init::NormalOrUniform::Normal,
+                fan: nn::init::FanInOut::FanOut,
+                non_linearity: nn::init::NonLinearity::ReLU,
+            },
+            ..Default::default()
+        },
+    )
 }
 
-fn init_conv2d<B: Backend>(
-    input_channels: usize,
-    output_channels: usize,
-    kernel: usize,
-    stride: usize,
-    padding: usize,
-    device: &B::Device,
-) -> Conv2d<B> {
-    Conv2dConfig::new([input_channels, output_channels], [kernel, kernel])
-        .with_stride([stride, stride])
-        .with_padding(PaddingConfig2d::Explicit(
-            padding, padding, padding, padding,
-        ))
-        .with_bias(false)
-        .init(device)
+#[derive(Debug)]
+struct BasicBlock {
+    conv1: nn::Conv2D,
+    norm1: FrozenBatchNorm2d,
+    conv2: nn::Conv2D,
+    norm2: FrozenBatchNorm2d,
+    downsample: Option<(nn::Conv2D, FrozenBatchNorm2d)>,
 }
 
-#[derive(Module, Debug)]
-struct BasicBlock<B: Backend> {
-    conv1: Conv2d<B>,
-    norm1: FrozenBatchNorm2d<B>,
-    conv2: Conv2d<B>,
-    norm2: FrozenBatchNorm2d<B>,
-    downsample: Option<(Conv2d<B>, FrozenBatchNorm2d<B>)>,
-}
-
-impl<B: Backend> BasicBlock<B> {
-    fn init(
-        input_channels: usize,
-        output_channels: usize,
-        stride: usize,
-        device: &B::Device,
-    ) -> Self {
+impl BasicBlock {
+    fn new(path: &nn::Path<'_>, input_channels: i64, output_channels: i64, stride: i64) -> Self {
         let downsample = if stride != 1 || input_channels != output_channels {
             Some((
-                init_conv2d(input_channels, output_channels, 1, stride, 0, device),
-                FrozenBatchNorm2d::init(output_channels, device),
-            ))
-        } else {
-            None
-        };
-        Self {
-            conv1: init_conv2d(input_channels, output_channels, 3, stride, 1, device),
-            norm1: FrozenBatchNorm2d::init(output_channels, device),
-            conv2: init_conv2d(output_channels, output_channels, 3, 1, 1, device),
-            norm2: FrozenBatchNorm2d::init(output_channels, device),
-            downsample,
-        }
-    }
-
-    fn load(
-        weights: &Weights,
-        prefix: &str,
-        input_channels: usize,
-        output_channels: usize,
-        stride: usize,
-        device: &B::Device,
-    ) -> Result<Self> {
-        let native = weights.contains(&format!("{prefix}.norm1.scale"));
-        let downsample = if stride != 1 || input_channels != output_channels {
-            Some((
-                load_conv2d(
-                    weights,
-                    &format!("{prefix}.downsample.0"),
+                conv2d(
+                    &(path / "downsample" / "0"),
                     input_channels,
                     output_channels,
                     1,
                     stride,
                     0,
-                    device,
-                )?,
-                FrozenBatchNorm2d::load(
-                    weights,
-                    &format!("{prefix}.downsample.1"),
-                    output_channels,
-                    device,
-                )?,
+                ),
+                FrozenBatchNorm2d::new(&(path / "downsample" / "1"), output_channels),
             ))
         } else {
             None
         };
-        Ok(Self {
-            conv1: load_conv2d(
-                weights,
-                &format!("{prefix}.conv1"),
+        Self {
+            conv1: conv2d(
+                &(path / "conv1"),
                 input_channels,
                 output_channels,
                 3,
                 stride,
                 1,
-                device,
-            )?,
-            norm1: FrozenBatchNorm2d::load(
-                weights,
-                &format!("{prefix}.{}", if native { "norm1" } else { "bn1" }),
-                output_channels,
-                device,
-            )?,
-            conv2: load_conv2d(
-                weights,
-                &format!("{prefix}.conv2"),
-                output_channels,
-                output_channels,
-                3,
-                1,
-                1,
-                device,
-            )?,
-            norm2: FrozenBatchNorm2d::load(
-                weights,
-                &format!("{prefix}.{}", if native { "norm2" } else { "bn2" }),
-                output_channels,
-                device,
-            )?,
+            ),
+            norm1: FrozenBatchNorm2d::new(&(path / "bn1"), output_channels),
+            conv2: conv2d(&(path / "conv2"), output_channels, output_channels, 3, 1, 1),
+            norm2: FrozenBatchNorm2d::new(&(path / "bn2"), output_channels),
             downsample,
-        })
+        }
     }
 
-    fn forward(&self, input: Tensor<B, 4>) -> Tensor<B, 4> {
+    fn forward(&self, input: &Tensor) -> Tensor {
         let residual = match &self.downsample {
-            Some((conv, norm)) => norm.forward(conv.forward(input.clone())),
-            None => input.clone(),
+            Some((conv, norm)) => norm.forward(&conv.forward(input)),
+            None => input.shallow_clone(),
         };
-        let output = relu(self.norm1.forward(self.conv1.forward(input)));
-        let output = self.norm2.forward(self.conv2.forward(output));
-        relu(output + residual)
+        let output = self.norm1.forward(&self.conv1.forward(input)).relu();
+        let output = self.norm2.forward(&self.conv2.forward(&output));
+        (output + residual).relu()
     }
 }
 
-/// Exact feature-map portion of the reference ACT ResNet-18.
-#[derive(Module, Debug)]
-pub(super) struct ResNet18<B: Backend> {
-    conv1: Conv2d<B>,
-    norm1: FrozenBatchNorm2d<B>,
-    layers: Vec<Vec<BasicBlock<B>>>,
+/// Exact feature-map portion of torchvision's ResNet-18 used by LeRobot ACT.
+#[derive(Debug)]
+pub(super) struct ResNet18 {
+    conv1: nn::Conv2D,
+    norm1: FrozenBatchNorm2d,
+    layers: Vec<Vec<BasicBlock>>,
 }
 
-impl<B: Backend> ResNet18<B> {
-    pub fn init(device: &B::Device) -> Self {
+impl ResNet18 {
+    pub fn new(path: &nn::Path<'_>) -> Self {
         let channels = [64, 128, 256, 512];
         let mut input_channels = 64;
-        let mut layers = Vec::new();
+        let mut layers = Vec::with_capacity(channels.len());
         for (index, output_channels) in channels.into_iter().enumerate() {
             let stride = if index == 0 { 1 } else { 2 };
+            let layer = path / format!("layer{}", index + 1);
             layers.push(vec![
-                BasicBlock::init(input_channels, output_channels, stride, device),
-                BasicBlock::init(output_channels, output_channels, 1, device),
+                BasicBlock::new(&(&layer / "0"), input_channels, output_channels, stride),
+                BasicBlock::new(&(&layer / "1"), output_channels, output_channels, 1),
             ]);
             input_channels = output_channels;
         }
         Self {
-            conv1: init_conv2d(3, 64, 7, 2, 3, device),
-            norm1: FrozenBatchNorm2d::init(64, device),
+            conv1: conv2d(&(path / "conv1"), 3, 64, 7, 2, 3),
+            norm1: FrozenBatchNorm2d::new(&(path / "bn1"), 64),
             layers,
         }
     }
 
-    pub fn load(weights: &Weights, prefix: &str, device: &B::Device) -> Result<Self> {
-        let native = weights.contains(&format!("{prefix}.layers.0.0.conv1.weight"));
-        let channels = [64, 128, 256, 512];
-        let mut input_channels = 64;
-        let mut layers = Vec::new();
-        for (index, output_channels) in channels.into_iter().enumerate() {
-            let layer = index + 1;
-            let stride = if layer == 1 { 1 } else { 2 };
-            layers.push(vec![
-                BasicBlock::load(
-                    weights,
-                    &format!(
-                        "{prefix}.{}",
-                        if native {
-                            format!("layers.{index}.0")
-                        } else {
-                            format!("layer{layer}.0")
-                        }
-                    ),
-                    input_channels,
-                    output_channels,
-                    stride,
-                    device,
-                )?,
-                BasicBlock::load(
-                    weights,
-                    &format!(
-                        "{prefix}.{}",
-                        if native {
-                            format!("layers.{index}.1")
-                        } else {
-                            format!("layer{layer}.1")
-                        }
-                    ),
-                    output_channels,
-                    output_channels,
-                    1,
-                    device,
-                )?,
-            ]);
-            input_channels = output_channels;
-        }
-        Ok(Self {
-            conv1: load_conv2d(weights, &format!("{prefix}.conv1"), 3, 64, 7, 2, 3, device)?,
-            norm1: FrozenBatchNorm2d::load(
-                weights,
-                &format!("{prefix}.{}", if native { "norm1" } else { "bn1" }),
-                64,
-                device,
-            )?,
-            layers,
-        })
-    }
-
-    pub fn forward(&self, input: Tensor<B, 4>) -> Tensor<B, 4> {
-        let mut output = relu(self.norm1.forward(self.conv1.forward(input)));
-        output = max_pool2d(output, [3, 3], [2, 2], [1, 1], [1, 1], false);
+    pub fn forward(&self, input: &Tensor) -> Tensor {
+        let mut output = self.norm1.forward(&self.conv1.forward(input)).relu();
+        output = output.max_pool2d([3, 3], [2, 2], [1, 1], [1, 1], false);
         for layer in &self.layers {
             for block in layer {
-                output = block.forward(output);
+                output = block.forward(&output);
             }
         }
         output

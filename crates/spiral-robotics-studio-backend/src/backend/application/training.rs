@@ -76,6 +76,17 @@ pub(crate) struct TrainingRunStatus {
     pub checkpoints: Vec<TrainingCheckpointStatus>,
 }
 
+/// Other live work that can still depend on a completed run's artifacts.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct TrainingRunActivity {
+    pub rollout: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DeleteTrainingRunCommand {
+    pub run_id: String,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum TrainingRunPhase {
     #[default]
@@ -159,6 +170,8 @@ pub(crate) trait TrainingPort: Send + Sync {
     ) -> Result<TrainingRun, ApplicationError>;
 
     fn stop_training(&self, run_id: &str) -> Result<(), ApplicationError>;
+
+    async fn delete_training(&self, run_id: String) -> Result<(), ApplicationError>;
 }
 
 pub(crate) fn list_training<P: TrainingPort + ?Sized>(port: &P) -> TrainingSnapshot {
@@ -178,6 +191,34 @@ pub(crate) fn stop_training<P: TrainingPort + ?Sized>(
     run_id: &str,
 ) -> Result<(), ApplicationError> {
     port.stop_training(run_id)
+}
+
+/// Delete one inactive run and every artifact owned by it.
+///
+/// Admission checks happen before crossing the deletion boundary so the
+/// adapter never removes a checkpoint that is training or driving an arm.
+pub(crate) async fn delete_training<P: TrainingPort + ?Sized>(
+    port: &P,
+    activity: TrainingRunActivity,
+    command: DeleteTrainingRunCommand,
+) -> Result<(), ApplicationError> {
+    let run_id = validate_run_id(command.run_id)?;
+    let Some(run) = port.training_run_status(&run_id) else {
+        return Err(ApplicationError::NotFound(format!(
+            "training run {run_id:?} is no longer available"
+        )));
+    };
+    if run.active {
+        return Err(ApplicationError::Conflict(format!(
+            "training run {run_id:?} is still active; stop it before deleting it"
+        )));
+    }
+    if activity.rollout.as_deref() == Some(run_id.as_str()) {
+        return Err(ApplicationError::Conflict(format!(
+            "training run {run_id:?} is in use by Rollout; stop Rollout before deleting it"
+        )));
+    }
+    port.delete_training(run_id).await
 }
 
 pub(crate) fn admit_rollout<T>(
@@ -365,6 +406,19 @@ fn validate_training_command(
     Ok(command)
 }
 
+fn validate_run_id(run_id: String) -> Result<String, ApplicationError> {
+    let run_id = run_id.trim().to_owned();
+    if run_id.is_empty()
+        || run_id.len() > 128
+        || !run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return invalid("Training run ID is invalid.");
+    }
+    Ok(run_id)
+}
+
 /// Conservative, checked estimate for memory owned while one ACT optimizer
 /// step is live. The exact state/action projections are dataset-dependent, so
 /// a fixed non-transformer reserve covers those, ResNet-18, CVAE projections,
@@ -452,6 +506,7 @@ mod tests {
         run: Option<TrainingRunStatus>,
         starts: Mutex<Vec<StartTrainingCommand>>,
         stops: Mutex<Vec<String>>,
+        deletes: Mutex<Vec<String>>,
     }
 
     impl TrainingPort for FakeTraining {
@@ -475,6 +530,11 @@ mod tests {
             self.stops.lock().unwrap().push(run_id.to_owned());
             Ok(())
         }
+
+        async fn delete_training(&self, run_id: String) -> Result<(), ApplicationError> {
+            self.deletes.lock().unwrap().push(run_id);
+            Ok(())
+        }
     }
 
     fn training(run: Option<TrainingRunStatus>) -> FakeTraining {
@@ -482,6 +542,7 @@ mod tests {
             run,
             starts: Mutex::new(Vec::new()),
             stops: Mutex::new(Vec::new()),
+            deletes: Mutex::new(Vec::new()),
         }
     }
 
@@ -716,5 +777,58 @@ mod tests {
         let command = rollout_command();
 
         assert_eq!(admit_rollout(&training, command.clone()), Ok(command));
+    }
+
+    #[tokio::test]
+    async fn deleting_a_run_rejects_training_and_rollout_activity() {
+        let command = || DeleteTrainingRunCommand {
+            run_id: "run-1".to_owned(),
+        };
+        let active_training = training(run(true, 20_000, true));
+        let error = delete_training(&active_training, TrainingRunActivity::default(), command())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ApplicationError::Conflict(_)));
+        assert!(active_training.deletes.lock().unwrap().is_empty());
+
+        let active_rollout = training(run(false, 20_000, true));
+        let error = delete_training(
+            &active_rollout,
+            TrainingRunActivity {
+                rollout: Some("run-1".to_owned()),
+            },
+            command(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, ApplicationError::Conflict(_)));
+        assert!(active_rollout.deletes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn deleting_a_missing_run_is_not_found_and_an_idle_run_delegates_once() {
+        let missing = training(None);
+        let error = delete_training(
+            &missing,
+            TrainingRunActivity::default(),
+            DeleteTrainingRunCommand {
+                run_id: "run-1".to_owned(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, ApplicationError::NotFound(_)));
+
+        let idle = training(run(false, 20_000, true));
+        delete_training(
+            &idle,
+            TrainingRunActivity::default(),
+            DeleteTrainingRunCommand {
+                run_id: "run-1".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(idle.deletes.lock().unwrap().as_slice(), ["run-1"]);
     }
 }

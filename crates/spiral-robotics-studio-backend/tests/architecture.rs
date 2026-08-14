@@ -234,6 +234,16 @@ fn workspace_crate_dependencies_point_toward_policy() {
             &[][..],
         ),
         (
+            "spiral-robotics-training",
+            "crates/spiral-robotics-training/Cargo.toml",
+            &[][..],
+        ),
+        (
+            "spiral-robotics-training-pytorch",
+            "crates/spiral-robotics-training-pytorch/Cargo.toml",
+            &["spiral-robotics-inference", "spiral-robotics-training"][..],
+        ),
+        (
             "spiral-robotics-viewport",
             "crates/spiral-robotics-viewport/Cargo.toml",
             &["spiral-robotics-core"][..],
@@ -246,6 +256,7 @@ fn workspace_crate_dependencies_point_toward_policy() {
                 "spiral-robotics-core",
                 "spiral-robotics-panels",
                 "spiral-robotics-studio-backend",
+                "spiral-robotics-training-pytorch",
                 "spiral-robotics-viewport",
             ][..],
         ),
@@ -257,6 +268,7 @@ fn workspace_crate_dependencies_point_toward_policy() {
                 "spiral-robotics-contracts",
                 "spiral-robotics-core",
                 "spiral-robotics-inference",
+                "spiral-robotics-training",
             ][..],
         ),
     ];
@@ -275,6 +287,44 @@ fn workspace_crate_dependencies_point_toward_policy() {
             );
         }
     }
+}
+
+#[test]
+fn studio_training_owns_only_the_backend_trait_boundary() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("Studio lives under the workspace crates directory");
+    let manager = fs::read_to_string(
+        root.join("crates/spiral-robotics-studio-backend/src/backend/training/manager.rs"),
+    )
+    .expect("training manager source");
+    assert!(
+        manager.contains("training_backend: Arc<dyn TrainingBackend>")
+            && manager.contains(".create_session")
+            && manager.contains("trainer: &mut dyn TrainingSession"),
+        "Studio must own only the backend-neutral training trait objects"
+    );
+    for detail in [
+        "NativeActTrainer",
+        "VisionActTrainingConfig",
+        "VisionActBatch",
+        "tch::",
+        "torch_sys",
+    ] {
+        assert!(
+            !manager.contains(detail),
+            "Studio training manager imports backend detail {detail:?}"
+        );
+    }
+
+    let adapter =
+        fs::read_to_string(root.join("crates/spiral-robotics-training-pytorch/src/lib.rs"))
+            .expect("PyTorch training adapter source");
+    assert!(
+        adapter.contains("impl TrainingBackend for PyTorchTrainingBackend"),
+        "PyTorch must enter through the public training boundary"
+    );
 }
 
 #[test]
@@ -297,6 +347,18 @@ fn rollout_action_scheduler_contains_no_inline_inference_work() {
         scheduler.contains("actions.merge(completed.requested_timestep, &completed.chunk)")
             && scheduler.contains("let action = actions.pop()?"),
         "async rollout must merge timed chunks into the non-blocking action queue"
+    );
+    let dispatch = scheduler
+        .find(".set_policy_goals(")
+        .expect("the scheduler dispatches a physical action");
+    let observe = scheduler
+        .find("pending_observation.replace(observation)")
+        .expect("the scheduler captures a latest-only observation");
+    assert!(
+        dispatch < observe
+            && scheduler.contains("let latest_action = actions.latest_action_timestep()?")
+            && scheduler.contains("action_refill_threshold(initial.chunk.steps())"),
+        "LeRobot parity requires execute-then-observe timestamps and the default half-chunk refill threshold"
     );
     assert!(
         !scheduler.contains("policy.infer(")

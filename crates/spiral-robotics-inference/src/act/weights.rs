@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-use burn_core::tensor::backend::Backend;
-use burn_core::tensor::{Tensor, TensorData};
 use safetensors::{Dtype, SafeTensors};
+use tch::{Device, Kind, Tensor, nn};
 
 use crate::{Error, Result};
 
@@ -21,15 +20,17 @@ impl Weights {
         Ok(Self { label, bytes })
     }
 
-    pub fn tensor_exact<B: Backend, const D: usize>(
-        &self,
-        name: &str,
-        expected: [usize; D],
-        device: &B::Device,
-    ) -> Result<Tensor<B, D>> {
-        let view = self.f32_view_exact(name, &expected)?;
-        let values = decode_f32(name, view.data())?;
-        Ok(Tensor::from_data(TensorData::new(values, expected), device))
+    pub fn tensor_exact(&self, name: &str, expected: &[usize], device: Device) -> Result<Tensor> {
+        let view = self.f32_view_exact(name, expected)?;
+        let shape = expected
+            .iter()
+            .copied()
+            .map(i64::try_from)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| Error::Checkpoint(format!("tensor {name:?} shape exceeds i64")))?;
+        let tensor = Tensor::f_from_data_size(view.data(), &shape, Kind::Float)
+            .map_err(|error| Error::Checkpoint(format!("reading tensor {name:?}: {error}")))?;
+        Ok(tensor.to_device(device))
     }
 
     pub fn vector_exact(&self, name: &str, length: usize) -> Result<Vec<f32>> {
@@ -43,6 +44,31 @@ impl Weights {
 
     pub fn contains(&self, name: &str) -> bool {
         SafeTensors::deserialize(&self.bytes).is_ok_and(|tensors| tensors.tensor(name).is_ok())
+    }
+
+    pub fn copy_prefix_into(&self, variables: &nn::VarStore, prefix: &str) -> Result<()> {
+        let selected = variables
+            .variables()
+            .into_iter()
+            .filter(|(name, _)| name.starts_with(prefix))
+            .collect::<Vec<_>>();
+        if selected.is_empty() {
+            return Err(Error::Checkpoint(format!(
+                "model has no variables under {prefix:?}"
+            )));
+        }
+        for (name, mut target) in selected {
+            let shape = target
+                .size()
+                .into_iter()
+                .map(usize::try_from)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|_| Error::Checkpoint(format!("tensor {name:?} has an invalid shape")))?;
+            let source = self.tensor_exact(&name, &shape, target.device())?;
+            tch::no_grad(|| target.f_copy_(&source))
+                .map_err(|error| Error::Checkpoint(format!("copying tensor {name:?}: {error}")))?;
+        }
+        Ok(())
     }
 
     fn f32_view_exact<'a>(

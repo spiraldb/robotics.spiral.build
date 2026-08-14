@@ -1,4 +1,4 @@
-//! Rust-owned supervision for Spiral ADBC and Burn-native vision ACT.
+//! Rust-owned supervision for Spiral ADBC and an injected training backend.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -15,8 +15,10 @@ use spiral_robotics_contracts::api::{
     TrainingRunPhase, TrainingSnapshot, TrainingSource, TrainingUpdate,
 };
 use spiral_robotics_contracts::spiral;
-use spiral_robotics_inference::act::{
-    NativeActTrainer, VisionActCheckpoint, VisionActTrainingConfig,
+use spiral_robotics_training::{
+    ActTrainingConfig, TRAINING_BACKEND_API_VERSION, TrainingBackend, TrainingCheckpointRequest,
+    TrainingExecution, TrainingInitialization, TrainingModelConfig, TrainingSession,
+    TrainingSessionInfo, TrainingSessionRequest,
 };
 use tokio::sync::{broadcast, mpsc};
 
@@ -66,6 +68,7 @@ pub(crate) struct TrainingManager {
 struct TrainingManagerInner {
     root: PathBuf,
     storage: Arc<StorageManager>,
+    training_backend: Arc<dyn TrainingBackend>,
     ffmpeg: String,
     clock: Arc<dyn Clock>,
     snapshot: Mutex<TrainingSnapshot>,
@@ -73,15 +76,15 @@ struct TrainingManagerInner {
     controls: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
 }
 
-enum NativeEvent {
+enum BackendEvent {
     Configured(Box<StartTrainingRequest>),
     Started(String),
     Metric(TrainingMetricPoint),
-    Checkpoint(NativeCheckpoint),
+    Checkpoint(BackendCheckpoint),
     Log(String),
 }
 
-pub(crate) struct NativeCheckpoint {
+pub(crate) struct BackendCheckpoint {
     step: u64,
     created_ms: i64,
     validation_loss: Option<f64>,
@@ -135,14 +138,23 @@ impl TrainingManager {
     pub(crate) async fn open(
         root: PathBuf,
         storage: Arc<StorageManager>,
+        training_backend: Arc<dyn TrainingBackend>,
         ffmpeg: String,
     ) -> Result<Self, String> {
-        Self::open_with_clock(root, storage, ffmpeg, Arc::new(SystemClock)).await
+        Self::open_with_clock(
+            root,
+            storage,
+            training_backend,
+            ffmpeg,
+            Arc::new(SystemClock),
+        )
+        .await
     }
 
     pub(crate) async fn open_with_clock(
         root: PathBuf,
         storage: Arc<StorageManager>,
+        training_backend: Arc<dyn TrainingBackend>,
         ffmpeg: String,
         clock: Arc<dyn Clock>,
     ) -> Result<Self, String> {
@@ -178,13 +190,14 @@ impl TrainingManager {
                     .map_err(|error| format!("restoring training run {:?}: {error}", run.id))?;
             }
         }
-        snapshot.readiness = readiness(&storage).await;
+        snapshot.readiness = readiness(&storage, &training_backend).await;
         persist_snapshot(&root, &snapshot)?;
         let (updates, _) = broadcast::channel(512);
         let manager = Self {
             inner: Arc::new(TrainingManagerInner {
                 root,
                 storage,
+                training_backend,
                 ffmpeg,
                 clock,
                 snapshot: Mutex::new(snapshot),
@@ -209,7 +222,7 @@ impl TrainingManager {
     }
 
     pub(crate) async fn refresh_readiness(&self) -> TrainingReadiness {
-        let next = readiness(&self.inner.storage).await;
+        let next = readiness(&self.inner.storage, &self.inner.training_backend).await;
         if lock(&self.inner.snapshot).readiness != next {
             let _ = self.publish(
                 TrainingUpdate::Readiness {
@@ -233,6 +246,70 @@ impl TrainingManager {
             .map_err(|error| error.to_string())
     }
 
+    /// Remove remote checkpoint rows before publishing the local history
+    /// removal. A failed remote deletion therefore leaves the complete run
+    /// visible and retryable instead of hiding orphaned model artifacts.
+    pub(crate) async fn delete(&self, run_id: &str) -> Result<(), String> {
+        if lock(&self.inner.controls).contains_key(run_id) {
+            return Err(format!(
+                "training run {run_id:?} is still active; stop it before deleting it"
+            ));
+        }
+        let run = lock(&self.inner.snapshot)
+            .runs
+            .iter()
+            .find(|run| run.id == run_id)
+            .cloned()
+            .ok_or_else(|| format!("training run {run_id:?} is no longer available"))?;
+        if run.phase.active() {
+            return Err(format!(
+                "training run {run_id:?} is still active; stop it before deleting it"
+            ));
+        }
+
+        let source = checkpoint_source(&run.source);
+        if run.source != TrainingSource::default() {
+            self.inner
+                .storage
+                .delete_run_checkpoints(run_id.to_owned(), source.clone())
+                .await?;
+        } else if !run.checkpoints.is_empty() {
+            return Err(format!(
+                "training run {run_id:?} has checkpoints but no frozen Spiral source; its history was preserved"
+            ));
+        }
+
+        if lock(&self.inner.controls).contains_key(run_id) {
+            return Err(format!(
+                "training run {run_id:?} became active while deletion was in progress"
+            ));
+        }
+        let update = TrainingUpdate::RunRemoved {
+            run_id: run_id.to_owned(),
+        };
+        let mut snapshot = lock(&self.inner.snapshot);
+        let current = snapshot
+            .runs
+            .iter()
+            .find(|candidate| candidate.id == run_id)
+            .ok_or_else(|| format!("training run {run_id:?} is no longer available"))?;
+        if current.phase.active() {
+            return Err(format!(
+                "training run {run_id:?} became active while deletion was in progress"
+            ));
+        }
+        let mut candidate = snapshot.clone();
+        candidate.apply(update.clone());
+        persist_snapshot(&self.inner.root, &candidate)?;
+        *snapshot = candidate;
+        let _ = self.inner.updates.send(update);
+        drop(snapshot);
+        if run.source != TrainingSource::default() {
+            self.inner.storage.unregister_run_source(run_id, &source);
+        }
+        Ok(())
+    }
+
     pub(crate) async fn shutdown(&self) {
         let controls = std::mem::take(&mut *lock(&self.inner.controls));
         for (_, cancel) in controls {
@@ -246,7 +323,7 @@ impl TrainingManager {
         .await;
     }
 
-    async fn run_native(
+    async fn run_backend(
         &self,
         launch: TrainingLaunch<StoredSpiralSettings>,
         cancel: Arc<AtomicBool>,
@@ -257,25 +334,6 @@ impl TrainingManager {
         let settings = launch.source_handle;
         let mut session =
             TrainingRuntimeSession::new(run_id.clone(), launch.command, launch.source);
-        let pretrained = if request.act.pretrained_backbone {
-            match tokio::task::spawn_blocking(load_pretrained_backbone).await {
-                Ok(Ok(bytes)) => Some(bytes),
-                Ok(Err(error)) => {
-                    training_execution::complete_runtime(self, session, Err(error));
-                    return;
-                }
-                Err(error) => {
-                    training_execution::complete_runtime(
-                        self,
-                        session,
-                        Err(format!("pretrained backbone task failed: {error}")),
-                    );
-                    return;
-                }
-            }
-        } else {
-            None
-        };
 
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
         let training_request = request.clone();
@@ -285,12 +343,14 @@ impl TrainingManager {
         let training_clock = self.inner.clock.clone();
         let ffmpeg = self.inner.ffmpeg.clone();
         let storage = self.inner.storage.clone();
+        let training_backend = self.inner.training_backend.clone();
         let training_settings = settings.clone();
         let mut training = Box::pin(storage.run_training_adbc(
             settings.clone(),
             move |connection| {
                 train_blocking(
                     connection,
+                    training_backend.as_ref(),
                     &training_run_id,
                     &training_request,
                     &training_settings,
@@ -298,7 +358,6 @@ impl TrainingManager {
                     &ffmpeg,
                     training_clock,
                     training_cancel,
-                    pretrained.as_deref(),
                     events_tx,
                 )
             },
@@ -608,14 +667,14 @@ impl TrainingCoordinatorPort for TrainingManager {
         }
         let manager = self.clone();
         tokio::spawn(async move {
-            manager.run_native(launch, cancel).await;
+            manager.run_backend(launch, cancel).await;
         });
         Ok(())
     }
 }
 
 impl TrainingRuntimePort for TrainingManager {
-    type CheckpointEnvelope = NativeCheckpoint;
+    type CheckpointEnvelope = BackendCheckpoint;
 
     fn run_phase(&self, run_id: &str) -> Option<ApplicationTrainingRunPhase> {
         self.phase(run_id).map(application_training_phase)
@@ -656,7 +715,7 @@ impl TrainingRuntimePort for TrainingManager {
         source: &ApplicationTrainingSource,
         checkpoint: Self::CheckpointEnvelope,
     ) -> Result<(), String> {
-        let NativeCheckpoint {
+        let BackendCheckpoint {
             step,
             created_ms,
             validation_loss,
@@ -688,6 +747,7 @@ impl TrainingRuntimePort for TrainingManager {
 #[allow(clippy::too_many_arguments)]
 fn train_blocking(
     connection: &mut ManagedConnection,
+    training_backend: &dyn TrainingBackend,
     run_id: &str,
     request: &StartTrainingRequest,
     settings: &StoredSpiralSettings,
@@ -695,18 +755,17 @@ fn train_blocking(
     ffmpeg: &str,
     clock: Arc<dyn Clock>,
     cancel: Arc<AtomicBool>,
-    pretrained: Option<&[u8]>,
-    events: mpsc::UnboundedSender<NativeEvent>,
+    events: mpsc::UnboundedSender<BackendEvent>,
 ) -> Result<TrainingRuntimeOutcome, String> {
-    let _ = events.send(NativeEvent::Log(
+    let _ = events.send(BackendEvent::Log(
         "Opening the dedicated Spiral ADBC connection and indexing eligible ACT anchors…"
             .to_owned(),
     ));
     let mut loader = SpiralActLoader::open(connection, request, &settings.dataset, ffmpeg)?;
     let mut resolved_request = request.clone();
     resolved_request.act.camera_streams = loader.camera_streams().to_vec();
-    let _ = events.send(NativeEvent::Configured(Box::new(resolved_request.clone())));
-    let config = VisionActTrainingConfig {
+    let _ = events.send(BackendEvent::Configured(Box::new(resolved_request.clone())));
+    let config = ActTrainingConfig {
         state_dimensions: loader.state_dimensions(),
         action_dimensions: loader.action_dimensions(),
         camera_streams: resolved_request.act.camera_streams.clone(),
@@ -725,15 +784,26 @@ fn train_blocking(
         total_steps: request.steps,
         seed: request.seed,
     };
-    let mut trainer = NativeActTrainer::new(config, &request.device, pretrained)
+    let mut trainer = training_backend
+        .create_session(TrainingSessionRequest {
+            model: TrainingModelConfig::Act(config),
+            device: request.device.clone(),
+            initialization: if request.act.pretrained_backbone {
+                TrainingInitialization::PretrainedBackbone
+            } else {
+                TrainingInitialization::Random
+            },
+        })
         .map_err(|error| error.to_string())?;
-    let _ = events.send(NativeEvent::Started(format!(
-        "Vision ACT is running on Burn/{}: {}; {:.1}M parameters.",
-        trainer.backend_name(),
+    let trainer_info = trainer.info().clone();
+    let _ = events.send(BackendEvent::Started(format!(
+        "Vision ACT is running on {}/{}: {}; {:.1}M parameters.",
+        trainer_info.backend.display_name,
+        trainer_info.device,
         loader.summary(),
-        trainer.parameter_count() as f64 / 1_000_000.0
+        trainer_info.parameter_count as f64 / 1_000_000.0
     )));
-    let _ = events.send(NativeEvent::Log(format!(
+    let _ = events.send(BackendEvent::Log(format!(
         "ACT inputs: state={}, action={}, image={}x{}, chunk={}, cameras={}. Spiral owns the normal decode path; Studio recovers unusable managed indexes from the original MP4 with equivalent resize and ImageNet normalization.",
         loader.state_dimensions(),
         loader.action_dimensions(),
@@ -742,8 +812,8 @@ fn train_blocking(
         request.chunk_size,
         resolved_request.act.camera_streams.join(", ")
     )));
-    let _ = events.send(NativeEvent::Log(
-        "ACT input prefetch is active with one completed batch buffered while Metal trains."
+    let _ = events.send(BackendEvent::Log(
+        "ACT input prefetch is active with one completed batch buffered while the training backend runs."
             .to_owned(),
     ));
 
@@ -751,7 +821,7 @@ fn train_blocking(
     let has_validation = loader.has_validation();
     let validation_every = request.checkpoint_every.div_ceil(4).clamp(1, 250);
     if has_validation {
-        let _ = events.send(NativeEvent::Log(format!(
+        let _ = events.send(BackendEvent::Log(format!(
             "Episode-level validation runs every {validation_every} optimizer step(s); normalization statistics use training episodes only."
         )));
     }
@@ -781,7 +851,8 @@ fn train_blocking(
             cancel.as_ref(),
             &events,
             &data_contract,
-            &mut trainer,
+            &trainer_info,
+            trainer.as_mut(),
             validation_every,
             has_validation,
         );
@@ -864,16 +935,18 @@ fn train_prefetched(
     source: &TrainingSource,
     clock: &dyn Clock,
     cancel: &AtomicBool,
-    events: &mpsc::UnboundedSender<NativeEvent>,
+    events: &mpsc::UnboundedSender<BackendEvent>,
     data_contract: &ActDataContract,
-    trainer: &mut NativeActTrainer,
+    trainer_info: &TrainingSessionInfo,
+    trainer: &mut dyn TrainingSession,
     validation_every: u64,
     has_validation: bool,
 ) -> Result<TrainingRuntimeOutcome, String> {
     let started = Instant::now();
     let mut metric_started = started;
     let mut examples_since_metric = 0_usize;
-    let mut resources = ResourceSampler::new(trainer.backend_name() == "Metal");
+    let mut resources =
+        ResourceSampler::new(trainer_info.execution == TrainingExecution::LocalAccelerator);
     let mut last_validation = None;
     let mut last_checkpoint = 0;
     let mut completed_steps = 0;
@@ -915,7 +988,7 @@ fn train_prefetched(
         let now = Instant::now();
         let elapsed = now.duration_since(metric_started).as_secs_f64().max(1.0e-9);
         let usage = resources.sample();
-        let _ = events.send(NativeEvent::Metric(TrainingMetricPoint {
+        let _ = events.send(BackendEvent::Metric(TrainingMetricPoint {
             step,
             train_loss: loss.total,
             validation_loss,
@@ -930,7 +1003,7 @@ fn train_prefetched(
             event: (!event.is_empty()).then(|| event.join(" · ")),
         }));
         if step == 1 {
-            let _ = events.send(NativeEvent::Log(format!(
+            let _ = events.send(BackendEvent::Log(format!(
                 "Loss components at step 1: L1={:.4}, KL={:.4}, pad={:.4}; decoded {} frame(s).",
                 loss.l1, loss.kl, loss.pad, loader_metrics.requested_frames
             )));
@@ -944,6 +1017,7 @@ fn train_prefetched(
                 resolved_request,
                 source,
                 data_contract,
+                trainer_info,
                 trainer,
                 step,
                 last_validation,
@@ -959,6 +1033,7 @@ fn train_prefetched(
             resolved_request,
             source,
             data_contract,
+            trainer_info,
             trainer,
             completed_steps,
             last_validation,
@@ -973,36 +1048,43 @@ fn train_prefetched(
 
 #[allow(clippy::too_many_arguments)]
 fn send_checkpoint(
-    events: &mpsc::UnboundedSender<NativeEvent>,
+    events: &mpsc::UnboundedSender<BackendEvent>,
     run_id: &str,
     request: &StartTrainingRequest,
     source: &TrainingSource,
     data_contract: &ActDataContract,
-    trainer: &NativeActTrainer,
+    trainer_info: &TrainingSessionInfo,
+    trainer: &dyn TrainingSession,
     step: u64,
     validation_loss: Option<f64>,
     clock: &dyn Clock,
 ) -> Result<(), String> {
-    let manifest = checkpoint_manifest(run_id, request, source, data_contract, step);
+    let manifest = checkpoint_manifest(run_id, request, source, data_contract, trainer_info, step);
     let manifest_json = serde_json::to_string(&manifest)
         .map_err(|error| format!("encoding ACT checkpoint manifest: {error}"))?;
-    let payload = trainer
-        .checkpoint(VisionActCheckpoint {
-            manifest_json: &manifest_json,
-            state_mean: &data_contract.stats.state_mean,
-            state_std: &data_contract.stats.state_std,
-            action_mean: &data_contract.stats.action_mean,
-            action_std: &data_contract.stats.action_std,
+    let artifact = trainer
+        .checkpoint(TrainingCheckpointRequest {
+            manifest_json,
+            state_mean: data_contract.stats.state_mean.clone(),
+            state_std: data_contract.stats.state_std.clone(),
+            action_mean: data_contract.stats.action_mean.clone(),
+            action_std: data_contract.stats.action_std.clone(),
         })
         .map_err(|error| error.to_string())?;
+    if artifact.format != "safetensors" || artifact.extension != "safetensors" {
+        return Err(format!(
+            "training backend returned unsupported checkpoint format {:?} with extension {:?}",
+            artifact.format, artifact.extension
+        ));
+    }
     let (acknowledged, result) = std::sync::mpsc::sync_channel(1);
     events
-        .send(NativeEvent::Checkpoint(NativeCheckpoint {
+        .send(BackendEvent::Checkpoint(BackendCheckpoint {
             step,
             created_ms: clock.now_ms(),
             validation_loss,
             manifest,
-            payload,
+            payload: artifact.payload,
             acknowledged,
         }))
         .map_err(|_| "training event channel closed before checkpoint publication".to_owned())?;
@@ -1016,6 +1098,7 @@ fn checkpoint_manifest(
     request: &StartTrainingRequest,
     source: &TrainingSource,
     data_contract: &ActDataContract,
+    trainer_info: &TrainingSessionInfo,
     step: u64,
 ) -> serde_json::Value {
     let mut input_features = serde_json::Map::new();
@@ -1083,7 +1166,12 @@ fn checkpoint_manifest(
             "spiral_schema_version": spiral::SCHEMA_VERSION,
         },
         "runtime": {
-            "ml": "burn 0.21",
+            "training_backend": {
+                "api_version": trainer_info.backend.api_version,
+                "id": trainer_info.backend.id,
+                "runtime": trainer_info.backend.runtime,
+                "device": trainer_info.device,
+            },
             "transport": "adbc 0.24 / arrow 58.4",
             "language": "rust",
         },
@@ -1101,23 +1189,6 @@ fn checkpoint_sample_hz(manifest: &serde_json::Value) -> Result<f64, String> {
         .ok_or_else(|| "checkpoint manifest has no finite positive data sample rate".to_owned())
 }
 
-fn load_pretrained_backbone() -> Result<Vec<u8>, String> {
-    spiral_robotics_inference::act::imagenet_resnet18_weights()
-        .map_err(|error| format!("loading torchvision ResNet18 IMAGENET1K_V1: {error}"))
-}
-
-fn runtime_description() -> String {
-    #[cfg(target_os = "macos")]
-    let acceleration = if spiral_robotics_inference::act::metal_available() {
-        "Metal + CPU"
-    } else {
-        "CPU"
-    };
-    #[cfg(not(target_os = "macos"))]
-    let acceleration = "CPU";
-    format!("Burn 0.21 · {acceleration} · ADBC Arrow tensors verified at run start")
-}
-
 fn checkpoint_source(source: &TrainingSource) -> CheckpointSource {
     CheckpointSource {
         project: source.project.clone(),
@@ -1126,7 +1197,31 @@ fn checkpoint_source(source: &TrainingSource) -> CheckpointSource {
     }
 }
 
-async fn readiness(storage: &StorageManager) -> TrainingReadiness {
+async fn readiness(
+    storage: &StorageManager,
+    training_backend: &Arc<dyn TrainingBackend>,
+) -> TrainingReadiness {
+    let backend = training_backend.clone();
+    let backend = tokio::time::timeout(
+        Duration::from_secs(8),
+        tokio::task::spawn_blocking(move || backend.health()),
+    )
+    .await
+    .map_err(|_| "training backend health probe timed out after 8 seconds".to_owned())
+    .and_then(|result| {
+        result.map_err(|error| format!("training backend health task failed: {error}"))
+    })
+    .and_then(|result| result.map_err(|error| error.to_string()))
+    .and_then(|info| {
+        if info.api_version == TRAINING_BACKEND_API_VERSION {
+            Ok(info)
+        } else {
+            Err(format!(
+                "training backend API version {} is incompatible with Studio version {}",
+                info.api_version, TRAINING_BACKEND_API_VERSION
+            ))
+        }
+    });
     let spiral = storage.training_source("default");
     let connection = if spiral.is_ok() {
         Some(
@@ -1141,19 +1236,20 @@ async fn readiness(storage: &StorageManager) -> TrainingReadiness {
         None
     };
     let spiral_ready = connection.as_ref().is_some_and(|result| result.ok);
-    let ready = spiral_ready;
-    let summary = match (spiral, connection) {
-        (Err(error), _) => error,
-        (_, Some(result)) if !result.ok => {
+    let ready = spiral_ready && backend.is_ok();
+    let summary = match (spiral, connection, backend) {
+        (Err(error), _, _) => error,
+        (_, Some(result), _) if !result.ok => {
             format!("Spiral is not ready for training: {}", result.message)
         }
-        (Ok((_, source)), Some(_)) => format!(
+        (_, _, Err(error)) => format!("Training backend is not ready: {error}"),
+        (Ok((_, source)), Some(_), Ok(backend)) => format!(
             "Runtime ready · {probe} · Spiral project {} · namespace {} · query checked at run start",
             source.project,
             source.dataset,
-            probe = runtime_description(),
+            probe = backend.summary(),
         ),
-        _ => "Spiral readiness could not be determined.".to_owned(),
+        _ => "Training readiness could not be determined.".to_owned(),
     };
     TrainingReadiness {
         ready,
@@ -1171,7 +1267,7 @@ fn validate_checkpoint_artifact(
     request: &StartTrainingRequest,
 ) -> Result<String, String> {
     if Path::new(file_name).extension() != Some(std::ffi::OsStr::new("safetensors")) {
-        return Err("the native trainer must publish a .safetensors checkpoint".to_owned());
+        return Err("the training backend must publish a .safetensors checkpoint".to_owned());
     }
     let tensors = safetensors::SafeTensors::deserialize(payload)
         .map_err(|error| format!("checkpoint {file_name} is not valid SafeTensors: {error}"))?;
@@ -1440,17 +1536,17 @@ fn contract_training_run(run: ApplicationTrainingRun) -> TrainingRun {
     }
 }
 
-fn application_runtime_event(event: NativeEvent) -> TrainingRuntimeEvent<NativeCheckpoint> {
+fn application_runtime_event(event: BackendEvent) -> TrainingRuntimeEvent<BackendCheckpoint> {
     match event {
-        NativeEvent::Configured(command) => {
+        BackendEvent::Configured(command) => {
             TrainingRuntimeEvent::Configured(Box::new(application_training_command(*command)))
         }
-        NativeEvent::Started(message) => TrainingRuntimeEvent::Started(message),
-        NativeEvent::Metric(metric) => {
+        BackendEvent::Started(message) => TrainingRuntimeEvent::Started(message),
+        BackendEvent::Metric(metric) => {
             TrainingRuntimeEvent::Metric(application_training_metric(metric))
         }
-        NativeEvent::Checkpoint(checkpoint) => TrainingRuntimeEvent::Checkpoint(checkpoint),
-        NativeEvent::Log(message) => TrainingRuntimeEvent::Log(message),
+        BackendEvent::Checkpoint(checkpoint) => TrainingRuntimeEvent::Checkpoint(checkpoint),
+        BackendEvent::Log(message) => TrainingRuntimeEvent::Log(message),
     }
 }
 
@@ -1602,11 +1698,14 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
+    use spiral_robotics_training::TrainingBatch;
 
     fn loaded_batch(marker: f32) -> LoadedActBatch {
         LoadedActBatch {
-            batch: spiral_robotics_inference::act::VisionActBatch {
+            batch: TrainingBatch {
                 batch_size: 1,
                 states: vec![marker],
                 images: vec![marker],
@@ -1621,11 +1720,31 @@ mod tests {
         }
     }
 
+    fn session_info() -> TrainingSessionInfo {
+        TrainingSessionInfo {
+            backend: spiral_robotics_training::TrainingBackendInfo {
+                api_version: TRAINING_BACKEND_API_VERSION,
+                id: "remote.example".to_owned(),
+                display_name: "Remote example".to_owned(),
+                runtime: "HTTP".to_owned(),
+                devices: vec!["remote-gpu".to_owned()],
+            },
+            device: "remote-gpu".to_owned(),
+            execution: TrainingExecution::Remote,
+            parameter_count: 42,
+        }
+    }
+
     #[test]
     fn checkpoint_predicts_the_full_horizon_but_recommends_twenty_actions() {
-        let mut request = StartTrainingRequest::default();
-        request.chunk_size = 100;
-        request.act.camera_streams = vec!["observation.images.wrist".to_owned()];
+        let request = StartTrainingRequest {
+            chunk_size: 100,
+            act: spiral_robotics_contracts::api::ActTrainingConfig {
+                camera_streams: vec!["observation.images.wrist".to_owned()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let data_contract = ActDataContract {
             state_dimensions: 2,
             action_dimensions: 2,
@@ -1642,6 +1761,7 @@ mod tests {
             &request,
             &TrainingSource::default(),
             &data_contract,
+            &session_info(),
             100,
         );
 
@@ -1649,6 +1769,10 @@ mod tests {
         assert_eq!(
             manifest["model_config"]["n_action_steps"],
             MAX_ROLLOUT_ACTION_STEPS
+        );
+        assert_eq!(
+            manifest["runtime"]["training_backend"]["id"],
+            "remote.example"
         );
     }
 

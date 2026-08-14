@@ -1,7 +1,6 @@
 use std::time::Instant;
 
-use burn_core::tensor::backend::Backend;
-use burn_core::tensor::{Tensor, TensorData};
+use tch::{Device, Kind, Tensor, nn};
 
 use crate::{
     ActionChunk, Error, ImageFormat, ImageView, InferenceInput, InferenceStats, ModelArtifact,
@@ -14,85 +13,92 @@ use super::weights::Weights;
 
 const NORMALIZATION_EPSILON: f32 = 1.0e-8;
 
-pub type CpuActPolicy = ActPolicy<burn_ndarray::NdArray<f32>>;
+pub type CpuActPolicy = ActPolicy;
 
 #[cfg(feature = "metal")]
-pub type MetalActPolicy = ActPolicy<burn_wgpu::Metal>;
+pub type MetalActPolicy = ActPolicy;
 
-/// Probe Metal without initializing Burn's global compute runtime. WGPU's
-/// higher-level Burn setup panics when adapter discovery returns nothing, so
-/// callers use this fallible boundary before selecting the backend.
 #[cfg(feature = "metal")]
 pub fn metal_available() -> bool {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::METAL,
-        ..wgpu::InstanceDescriptor::new_without_display_handle()
-    });
-    !futures_lite::future::block_on(instance.enumerate_adapters(wgpu::Backends::METAL)).is_empty()
+    tch::utils::has_mps()
 }
 
 #[cfg(feature = "metal")]
 fn ensure_metal_available() -> Result<()> {
     metal_available()
         .then_some(())
-        .ok_or_else(|| Error::Inference("no Metal compute adapter is available".to_owned()))
+        .ok_or_else(|| Error::Inference("PyTorch MPS is unavailable".to_owned()))
 }
 
-/// Load ACT with the portable CPU runtime.
 pub fn load_cpu(files: &ModelFiles) -> Result<CpuActPolicy> {
-    ActPolicy::load(files, Default::default())
+    ActPolicy::load(files, Device::Cpu)
 }
 
 pub fn load_cpu_artifact(artifact: ModelArtifact) -> Result<CpuActPolicy> {
-    ActPolicy::from_artifact(artifact, Default::default())
+    ActPolicy::from_artifact(artifact, Device::Cpu)
 }
 
-/// Load ACT with Burn's WGPU backend restricted to Metal by the crate feature.
 #[cfg(feature = "metal")]
 pub fn load_metal(files: &ModelFiles) -> Result<MetalActPolicy> {
     ensure_metal_available()?;
-    ActPolicy::load(files, Default::default())
+    ActPolicy::load(files, Device::Mps)
 }
 
 #[cfg(feature = "metal")]
 pub fn load_metal_artifact(artifact: ModelArtifact) -> Result<MetalActPolicy> {
     ensure_metal_available()?;
-    ActPolicy::from_artifact(artifact, Default::default())
+    ActPolicy::from_artifact(artifact, Device::Mps)
 }
 
-/// Stateless ACT chunk predictor. The generic backend is deliberately kept
-/// behind convenience constructors for normal callers, while tests and future
-/// deployments can select another Burn backend explicitly.
-pub struct ActPolicy<B: Backend> {
+/// Stateless ACT chunk predictor implemented directly on LibTorch.
+pub struct ActPolicy {
     identity: ModelIdentity,
     specification: PolicySpecification,
-    model: ActModel<B>,
+    model: ActModel,
     normalization: Normalization,
-    device: B::Device,
+    _variables: nn::VarStore,
+    device: Device,
 }
 
-impl<B: Backend> ActPolicy<B> {
-    pub fn load(files: &ModelFiles, device: B::Device) -> Result<Self> {
+impl ActPolicy {
+    pub fn load(files: &ModelFiles, device: Device) -> Result<Self> {
         Self::from_artifact(files.load()?, device)
     }
 
-    pub fn from_artifact(artifact: ModelArtifact, device: B::Device) -> Result<Self> {
+    pub fn from_artifact(artifact: ModelArtifact, device: Device) -> Result<Self> {
         let (config_bytes, weights_bytes, weights_label, identity) = artifact.into_parts();
         let config = ActConfig::from_slice(&config_bytes)?;
         let specification = config.specification();
         let weights = Weights::from_bytes(weights_label, weights_bytes)?;
         let normalization = Normalization::load(&config, &weights)?;
-        let model = ActModel::load(&config, &weights, &device)?;
+        let variables = nn::VarStore::new(device);
+        let model = ActModel::new(
+            &(variables.root() / "model"),
+            config.state_dimensions(),
+            config.action_dimensions(),
+            config.image_feature_sizes(),
+            config.chunk_size,
+            config.dim_model,
+            config.latent_dim,
+            config.n_heads,
+            config.dim_feedforward,
+            config.n_encoder_layers,
+            config.n_decoder_layers,
+            0.0,
+            config.camera_embedding,
+        )?;
+        weights.copy_prefix_into(&variables, "model.")?;
         Ok(Self {
             identity,
             specification,
             model,
             normalization,
+            _variables: variables,
             device,
         })
     }
 
-    fn prepare(&self, input: InferenceInput<'_>) -> Result<(Tensor<B, 2>, Vec<Tensor<B, 4>>)> {
+    fn prepare(&self, input: InferenceInput<'_>) -> Result<(Tensor, Vec<Tensor>)> {
         if input.state.len() != self.specification.state_dimensions {
             return Err(Error::Input(format!(
                 "state has {} values, model expects {}",
@@ -118,10 +124,11 @@ impl<B: Backend> ActPolicy<B> {
             .zip(&self.normalization.state_std)
             .map(|((&value, &mean), &std)| normalize(value, mean, std))
             .collect::<Vec<_>>();
-        let state = Tensor::from_data(
-            TensorData::new(state, [1, self.specification.state_dimensions]),
-            &self.device,
-        );
+        let state_dimensions = i64::try_from(self.specification.state_dimensions)
+            .map_err(|_| Error::Input("state dimensions exceed i64".to_owned()))?;
+        let state = Tensor::from_slice(&state)
+            .view([1, state_dimensions])
+            .to_device(self.device);
 
         let mut prepared_images = Vec::with_capacity(self.specification.image_inputs.len());
         for (index, image_spec) in self.specification.image_inputs.iter().enumerate() {
@@ -142,16 +149,21 @@ impl<B: Backend> ActPolicy<B> {
                     }
                 }
             }
-            prepared_images.push(Tensor::from_data(
-                TensorData::new(pixels, [1, 3, image.height, image.width]),
-                &self.device,
-            ));
+            let height = i64::try_from(image.height)
+                .map_err(|_| Error::Input("image height exceeds i64".to_owned()))?;
+            let width = i64::try_from(image.width)
+                .map_err(|_| Error::Input("image width exceeds i64".to_owned()))?;
+            prepared_images.push(
+                Tensor::from_slice(&pixels)
+                    .view([1, 3, height, width])
+                    .to_device(self.device),
+            );
         }
         Ok((state, prepared_images))
     }
 }
 
-impl<B: Backend> Policy for ActPolicy<B> {
+impl Policy for ActPolicy {
     fn identity(&self) -> &ModelIdentity {
         &self.identity
     }
@@ -186,23 +198,24 @@ impl<B: Backend> Policy for ActPolicy<B> {
         let (state, images) = self.prepare(input)?;
         let preprocessing = started.elapsed();
         let model_started = Instant::now();
-        let output = self.model.forward(state, images);
-        let output_shape = output.dims();
-        let expected_shape = [
+        let output = tch::no_grad(|| self.model.forward(&state, &images));
+        let expected_shape = vec![
             1,
-            self.specification.action_chunk_size,
-            self.specification.action_dimensions,
+            self.specification.action_chunk_size as i64,
+            self.specification.action_dimensions as i64,
         ];
-        if output_shape != expected_shape {
+        if output.size() != expected_shape {
             return Err(Error::Inference(format!(
-                "model returned shape {output_shape:?}, expected {expected_shape:?}"
+                "model returned shape {:?}, expected {expected_shape:?}",
+                output.size()
             )));
         }
-        let mut values = output
-            .try_into_data()
-            .map_err(|error| Error::Inference(error.to_string()))?
-            .to_vec::<f32>()
-            .map_err(|error| Error::Inference(error.to_string()))?;
+        let output = output
+            .to_device(Device::Cpu)
+            .to_kind(Kind::Float)
+            .view([-1]);
+        let mut values = Vec::<f32>::try_from(&output)
+            .map_err(|error| Error::Inference(format!("reading PyTorch actions: {error}")))?;
         let model = model_started.elapsed();
         let postprocessing_started = Instant::now();
         let action_dimensions = self.specification.action_dimensions;

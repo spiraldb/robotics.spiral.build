@@ -1,22 +1,14 @@
-//! Burn-native vision ACT training.
+//! Direct LibTorch vision ACT training.
 //!
-//! The public boundary deliberately accepts owned host buffers. Spiral's ADBC
-//! Arrow stream can therefore remain independent of Burn, while tensor upload,
-//! autodiff, optimization, validation, and checkpoint export stay in Rust.
+//! The public boundary accepts owned host buffers so Spiral's Arrow data path
+//! remains framework-neutral. Tensor upload, autograd, AdamW, validation, and
+//! checkpoint export are executed by PyTorch through `tch`.
 
 use std::collections::HashMap;
-use std::rc::Rc;
 
-use burn_autodiff::Autodiff;
-use burn_core as burn;
-use burn_core::module::{AutodiffModule, Initializer, Module, ModuleVisitor, Param};
-use burn_core::tensor::backend::{AutodiffBackend, Backend};
-use burn_core::tensor::{Bool, Distribution, Tensor, TensorData};
-use burn_nn::{Linear, LinearConfig};
-use burn_optim::adaptor::OptimizerAdaptor;
-use burn_optim::{AdamW, AdamWConfig, GradientsParams, Optimizer};
-use burn_store::{ModuleAdapter, ModuleSnapshot, SafetensorsStore, TensorSnapshot};
 use safetensors::tensor::{Dtype, TensorView, serialize};
+use tch::nn::{Module, OptimizerConfig};
+use tch::{Device, Kind, Tensor, nn};
 
 use crate::{Error, Result};
 
@@ -26,90 +18,8 @@ use super::weights::Weights;
 
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
-const GLOBAL_GRADIENT_NORM_LIMIT: f32 = 10.0;
-const TRAINING_METRIC_INTERVAL: u64 = 10;
+const GLOBAL_GRADIENT_NORM_LIMIT: f64 = 10.0;
 
-/// Store linear and normalization parameters in the stable layout consumed by
-/// the native inference loader. Framework-specific module storage never leaks
-/// into the durable checkpoint contract.
-#[derive(Clone, Debug)]
-struct InferenceLayoutAdapter;
-
-impl ModuleAdapter for InferenceLayoutAdapter {
-    fn adapt(&self, snapshot: &TensorSnapshot) -> TensorSnapshot {
-        let Some(module) = snapshot.module_type() else {
-            return snapshot.clone();
-        };
-        let Some(path) = snapshot.path_stack.as_ref() else {
-            return snapshot.clone();
-        };
-        let Some(parameter) = path.last() else {
-            return snapshot.clone();
-        };
-        if module == "Struct:Linear" && parameter == "weight" && snapshot.shape.len() == 2 {
-            return transpose_snapshot(snapshot);
-        }
-        if module == "Struct:LayerNorm" {
-            let external_name = match parameter.as_str() {
-                "gamma" => Some("weight"),
-                "beta" => Some("bias"),
-                _ => None,
-            };
-            if let Some(external_name) = external_name {
-                let mut path = path.clone();
-                *path.last_mut().expect("parameter path") = external_name.to_owned();
-                return TensorSnapshot::from_closure(
-                    snapshot.clone_data_fn(),
-                    snapshot.dtype,
-                    snapshot.shape.clone(),
-                    path,
-                    snapshot.container_stack.clone().unwrap_or_default(),
-                    snapshot.tensor_id.unwrap_or_default(),
-                );
-            }
-        }
-        snapshot.clone()
-    }
-
-    fn clone_box(&self) -> Box<dyn ModuleAdapter> {
-        Box::new(self.clone())
-    }
-}
-
-fn transpose_snapshot(snapshot: &TensorSnapshot) -> TensorSnapshot {
-    let rows = snapshot.shape[0];
-    let columns = snapshot.shape[1];
-    let dtype = snapshot.dtype;
-    let source = snapshot.clone_data_fn();
-    let data = Rc::new(move || {
-        let data = source()?;
-        let element_size = dtype.size();
-        let mut bytes = vec![0; data.as_bytes().len()];
-        for row in 0..rows {
-            for column in 0..columns {
-                let source = (row * columns + column) * element_size;
-                let destination = (column * rows + row) * element_size;
-                bytes[destination..destination + element_size]
-                    .copy_from_slice(&data.as_bytes()[source..source + element_size]);
-            }
-        }
-        Ok(TensorData::from_bytes_vec(
-            bytes,
-            vec![columns, rows],
-            dtype,
-        ))
-    });
-    TensorSnapshot::from_closure(
-        data,
-        dtype,
-        vec![columns, rows].into(),
-        snapshot.path_stack.clone().unwrap_or_default(),
-        snapshot.container_stack.clone().unwrap_or_default(),
-        snapshot.tensor_id.unwrap_or_default(),
-    )
-}
-
-/// Validated dimensions and optimizer settings for one ACT run.
 #[derive(Clone, Debug)]
 pub struct VisionActTrainingConfig {
     pub state_dimensions: usize,
@@ -154,14 +64,13 @@ impl VisionActTrainingConfig {
             || self.learning_rate <= 0.0
         {
             return Err(Error::Configuration(
-                "invalid Burn vision ACT training dimensions or optimizer settings".to_owned(),
+                "invalid PyTorch vision ACT training dimensions or optimizer settings".to_owned(),
             ));
         }
         Ok(())
     }
 }
 
-/// One Arrow-materialized ACT batch in row-major host memory.
 #[derive(Clone, Debug)]
 pub struct VisionActBatch {
     pub batch_size: usize,
@@ -172,7 +81,6 @@ pub struct VisionActBatch {
     pub action_is_pad: Vec<bool>,
 }
 
-/// Scalar diagnostics returned after one optimizer or validation step.
 #[derive(Clone, Copy, Debug)]
 pub struct VisionActLoss {
     pub total: f64,
@@ -190,9 +98,9 @@ pub struct VisionActCheckpoint<'a> {
     pub action_std: &'a [f32],
 }
 
-/// Runtime-selected native trainer. No framework types cross this boundary.
+/// Runtime-selected direct PyTorch trainer. No framework types cross this boundary.
 pub struct NativeActTrainer {
-    engine: Box<dyn TrainerEngine>,
+    trainer: Trainer,
     backend_name: &'static str,
     parameter_count: usize,
 }
@@ -205,35 +113,27 @@ impl NativeActTrainer {
     ) -> Result<Self> {
         config.validate()?;
         let requested = requested_device.trim().to_ascii_lowercase();
-        #[cfg(all(target_os = "macos", feature = "metal"))]
-        if matches!(requested.as_str(), "auto" | "mps" | "metal")
-            && super::engine::metal_available()
-        {
-            type B = Autodiff<burn_wgpu::Metal>;
-            let trainer = Trainer::<B>::new(config, pretrained_weights, Default::default())?;
-            let parameter_count = trainer.parameter_count();
-            return Ok(Self {
-                engine: Box::new(trainer),
-                backend_name: "Metal",
-                parameter_count,
-            });
-        }
-        if !matches!(requested.as_str(), "auto" | "cpu") {
-            return Err(Error::Configuration(format!(
-                "training device {requested_device:?} is unavailable; this build supports CPU{}",
-                if cfg!(target_os = "macos") {
-                    " and Metal"
-                } else {
-                    ""
-                }
-            )));
-        }
-        type B = Autodiff<burn_ndarray::NdArray<f32>>;
-        let trainer = Trainer::<B>::new(config, pretrained_weights, Default::default())?;
+        let device = match requested.as_str() {
+            "auto" if tch::utils::has_mps() => Device::Mps,
+            "auto" | "cpu" => Device::Cpu,
+            "mps" | "metal" if tch::utils::has_mps() => Device::Mps,
+            "mps" | "metal" => {
+                return Err(Error::Configuration(
+                    "training requested MPS, but this LibTorch build has no available MPS backend"
+                        .to_owned(),
+                ));
+            }
+            _ => {
+                return Err(Error::Configuration(format!(
+                    "training device {requested_device:?} is unsupported; choose auto, cpu, or mps"
+                )));
+            }
+        };
+        let trainer = Trainer::new(config, pretrained_weights, device)?;
         let parameter_count = trainer.parameter_count();
         Ok(Self {
-            engine: Box::new(trainer),
-            backend_name: "CPU",
+            trainer,
+            backend_name: if device == Device::Mps { "MPS" } else { "CPU" },
             parameter_count,
         })
     }
@@ -247,55 +147,49 @@ impl NativeActTrainer {
     }
 
     pub fn learning_rate(&self, step: u64) -> f64 {
-        self.engine.learning_rate(step)
+        let _ = step;
+        self.trainer.config.learning_rate
     }
 
     pub fn train_step(&mut self, batch: VisionActBatch, step: u64) -> Result<VisionActLoss> {
-        self.engine.train_step(batch, step)
+        self.trainer.train_step(batch, step)
     }
 
     pub fn validation_step(&self, batch: VisionActBatch) -> Result<VisionActLoss> {
-        self.engine.validation_step(batch)
+        self.trainer.validation_step(batch)
     }
 
     pub fn checkpoint(&self, checkpoint: VisionActCheckpoint<'_>) -> Result<Vec<u8>> {
-        self.engine.checkpoint(checkpoint)
+        self.trainer.checkpoint(checkpoint)
     }
 }
 
-trait TrainerEngine: Send {
-    fn parameter_count(&self) -> usize;
-    fn learning_rate(&self, step: u64) -> f64;
-    fn train_step(&mut self, batch: VisionActBatch, step: u64) -> Result<VisionActLoss>;
-    fn validation_step(&self, batch: VisionActBatch) -> Result<VisionActLoss>;
-    fn checkpoint(&self, checkpoint: VisionActCheckpoint<'_>) -> Result<Vec<u8>>;
+#[derive(Debug)]
+struct FullActModel {
+    model: ActModel,
+    cvae_encoder: Vec<EncoderLayer>,
+    cvae_cls: nn::Embedding,
+    cvae_state: nn::Linear,
+    cvae_action: nn::Linear,
+    latent_stats: nn::Linear,
+    cvae_position: Tensor,
+    latent_dimensions: i64,
 }
 
-#[derive(Module, Debug)]
-struct FullActModel<B: Backend> {
-    model: ActModel<B>,
-    cvae_encoder: Vec<EncoderLayer<B>>,
-    cvae_cls: Param<Tensor<B, 3>>,
-    cvae_state: Linear<B>,
-    cvae_action: Linear<B>,
-    latent_stats: Linear<B>,
-    chunk_size: usize,
-    hidden_dimensions: usize,
-    latent_dimensions: usize,
-}
-
-impl<B: Backend> FullActModel<B> {
-    fn init(
+impl FullActModel {
+    fn new(
         config: &VisionActTrainingConfig,
+        variables: &nn::VarStore,
         pretrained: Option<&Weights>,
-        device: &B::Device,
     ) -> Result<Self> {
+        let path = variables.root() / "model";
         let feature_size = resnet18_feature_size(config.image_height, config.image_width);
         let feature_sizes = vec![feature_size; config.camera_streams.len()];
-        let model = ActModel::init(
+        let model = ActModel::new(
+            &path,
             config.state_dimensions,
             config.action_dimensions,
-            feature_sizes,
+            &feature_sizes,
             config.chunk_size,
             config.hidden_dimensions,
             config.latent_dimensions,
@@ -303,131 +197,189 @@ impl<B: Backend> FullActModel<B> {
             config.feedforward_dimensions,
             config.encoder_layers,
             config.decoder_layers,
-            pretrained,
-            device,
+            0.1,
+            false,
         )?;
+        let hidden = as_i64("hidden", config.hidden_dimensions)?;
+        let heads = as_i64("attention heads", config.attention_heads)?;
+        let feedforward = as_i64("feedforward", config.feedforward_dimensions)?;
+        let latent = as_i64("latent", config.latent_dimensions)?;
+        let state = as_i64("state", config.state_dimensions)?;
+        let action = as_i64("action", config.action_dimensions)?;
         let cvae_encoder = (0..config.vae_encoder_layers)
-            .map(|_| {
-                EncoderLayer::init_vae(
-                    config.hidden_dimensions,
-                    config.attention_heads,
-                    config.feedforward_dimensions,
+            .map(|layer| {
+                EncoderLayer::new(
+                    &(&path / "vae_encoder" / "layers" / layer),
+                    hidden,
+                    heads,
+                    feedforward,
                     0.1,
-                    device,
+                    false,
                 )
             })
             .collect();
+        let cvae_cls = nn::embedding(
+            &path / "vae_encoder_cls_embed",
+            1,
+            hidden,
+            Default::default(),
+        );
+        let cvae_state = nn::linear(
+            &path / "vae_encoder_robot_state_input_proj",
+            state,
+            hidden,
+            Default::default(),
+        );
+        let cvae_action = nn::linear(
+            &path / "vae_encoder_action_input_proj",
+            action,
+            hidden,
+            Default::default(),
+        );
+        let latent_stats = nn::linear(
+            &path / "vae_encoder_latent_output_proj",
+            hidden,
+            latent * 2,
+            Default::default(),
+        );
+        let position =
+            sinusoidal_position_embedding_1d(config.chunk_size + 2, config.hidden_dimensions)?
+                .unsqueeze(0)
+                .to_device(variables.device());
+        let cvae_position = path.add("vae_encoder_pos_enc", position, false);
+        if let Some(pretrained) = pretrained {
+            let prefix = if pretrained.contains("model.encoder.layers.0.self_attn.in_proj_weight") {
+                "model."
+            } else {
+                "model.backbone."
+            };
+            pretrained.copy_prefix_into(variables, prefix)?;
+        }
         Ok(Self {
             model,
             cvae_encoder,
-            cvae_cls: Initializer::Normal {
-                mean: 0.0,
-                std: 1.0,
-            }
-            .init([1, 1, config.hidden_dimensions], device),
-            cvae_state: LinearConfig::new(config.state_dimensions, config.hidden_dimensions)
-                .init(device),
-            cvae_action: LinearConfig::new(config.action_dimensions, config.hidden_dimensions)
-                .init(device),
-            latent_stats: LinearConfig::new(config.hidden_dimensions, config.latent_dimensions * 2)
-                .init(device),
-            chunk_size: config.chunk_size,
-            hidden_dimensions: config.hidden_dimensions,
-            latent_dimensions: config.latent_dimensions,
+            cvae_cls,
+            cvae_state,
+            cvae_action,
+            latent_stats,
+            cvae_position,
+            latent_dimensions: latent,
         })
     }
 
-    fn forward(
+    fn forward_training(
         &self,
-        state: Tensor<B, 2>,
-        images: Vec<Tensor<B, 4>>,
-        actions: Tensor<B, 3>,
-        action_is_pad: Tensor<B, 2, Bool>,
-    ) -> ModelOutput<B> {
-        let [batch, _] = state.dims();
-        let cls = self.cvae_cls.val().repeat_dim(0, batch);
-        let state_token = self.cvae_state.forward(state.clone()).unsqueeze_dim(1);
+        state: &Tensor,
+        images: &[Tensor],
+        actions: &Tensor,
+        action_is_pad: &Tensor,
+        train: bool,
+    ) -> ModelOutput {
+        let batch = state.size()[0];
+        let cls = self.cvae_cls.ws.unsqueeze(0).repeat([batch, 1, 1]);
+        let state_token = self.cvae_state.forward(state).unsqueeze(1);
         let action_tokens = self.cvae_action.forward(actions);
-        let mut tokens = Tensor::cat(vec![cls, state_token, action_tokens], 1);
-        let position = sinusoidal_position_embedding_1d::<B>(
-            self.chunk_size + 2,
-            self.hidden_dimensions,
-            &state.device(),
-        )
-        .unsqueeze_dim(0);
-        let prefix_mask = Tensor::<B, 2, Bool>::zeros([batch, 2], &state.device());
-        let padding = Tensor::cat(vec![prefix_mask, action_is_pad], 1);
+        let mut tokens = Tensor::cat(&[cls, state_token, action_tokens], 1).transpose(0, 1);
+        let position = self.cvae_position.transpose(0, 1);
+        let prefix_mask = Tensor::zeros([batch, 2], (Kind::Bool, state.device()));
+        let padding = Tensor::cat(&[prefix_mask, action_is_pad.shallow_clone()], 1);
         for layer in &self.cvae_encoder {
-            tokens = layer.forward_with_padding(tokens, &position, Some(padding.clone()));
+            tokens = layer.forward(&tokens, &position, Some(&padding), train);
         }
-        let encoded = tokens.narrow(1, 0, 1).squeeze_dim(1);
-        let stats = self.latent_stats.forward(encoded);
-        let mean = stats.clone().narrow(1, 0, self.latent_dimensions);
+        let encoded = tokens.get(0);
+        let stats = self.latent_stats.forward(&encoded);
+        let mean = stats.narrow(1, 0, self.latent_dimensions);
         let log_variance = stats.narrow(1, self.latent_dimensions, self.latent_dimensions);
-        let noise = mean.random_like(Distribution::Normal(0.0, 1.0));
-        let latent = mean.clone() + log_variance.clone().mul_scalar(0.5).exp() * noise;
-        let hidden = self.model.forward_hidden_with_latent(state, images, latent);
-        let actions = self.model.action_head.forward(hidden);
+        let noise = Tensor::randn_like(&mean);
+        let latent = &mean + (&log_variance * 0.5).exp() * noise;
+        let actions = self
+            .model
+            .forward_with_latent(state, images, &latent, train);
         ModelOutput {
             actions,
-            mean,
-            log_variance,
+            latent_distribution: Some((mean, log_variance)),
+        }
+    }
+
+    fn forward_inference(&self, state: &Tensor, images: &[Tensor]) -> ModelOutput {
+        ModelOutput {
+            actions: self.model.forward(state, images),
+            latent_distribution: None,
         }
     }
 }
 
-struct ModelOutput<B: Backend> {
-    actions: Tensor<B, 3>,
-    mean: Tensor<B, 2>,
-    log_variance: Tensor<B, 2>,
+struct ModelOutput {
+    actions: Tensor,
+    latent_distribution: Option<(Tensor, Tensor)>,
 }
 
-struct LossOutput<B: Backend> {
-    total: Tensor<B, 1>,
-    l1: Tensor<B, 1>,
-    kl: Tensor<B, 1>,
+struct LossOutput {
+    total: Tensor,
+    l1: Tensor,
+    kl: Tensor,
 }
 
-struct DeviceBatch<B: Backend> {
-    states: Tensor<B, 2>,
-    images: Vec<Tensor<B, 4>>,
-    actions: Tensor<B, 3>,
-    action_is_pad: Tensor<B, 2, Bool>,
+struct DeviceBatch {
+    states: Tensor,
+    images: Vec<Tensor>,
+    actions: Tensor,
+    action_is_pad: Tensor,
 }
 
-struct Trainer<B: AutodiffBackend> {
+struct Trainer {
     config: VisionActTrainingConfig,
-    model: Option<FullActModel<B>>,
-    optimizer: OptimizerAdaptor<AdamW, FullActModel<B>, B>,
-    device: B::Device,
-    last_loss: Option<VisionActLoss>,
+    model: FullActModel,
+    optimizer: nn::Optimizer,
+    variables: nn::VarStore,
+    device: Device,
 }
 
-impl<B: AutodiffBackend> Trainer<B> {
+impl Trainer {
     fn new(
         config: VisionActTrainingConfig,
         pretrained_weights: Option<&[u8]>,
-        device: B::Device,
+        device: Device,
     ) -> Result<Self> {
-        B::seed(&device, config.seed);
+        let seed = i64::try_from(config.seed)
+            .map_err(|_| Error::Configuration("ACT seed exceeds i64".to_owned()))?;
+        tch::manual_seed(seed);
+        let variables = nn::VarStore::new(device);
         let pretrained = pretrained_weights
-            .map(|bytes| Weights::from_bytes("pretrained ACT backbone", bytes.to_vec()))
+            .map(|bytes| Weights::from_bytes("pretrained ACT weights", bytes.to_vec()))
             .transpose()?;
-        let model = FullActModel::init(&config, pretrained.as_ref(), &device)?;
-        let optimizer = AdamWConfig::new().with_weight_decay(1.0e-4).init();
+        let full_checkpoint = pretrained.as_ref().is_some_and(|weights| {
+            weights.contains("model.encoder.layers.0.self_attn.in_proj_weight")
+        });
+        let model = FullActModel::new(&config, &variables, pretrained.as_ref())?;
+        // A complete checkpoint fixes initialization. Resetting here gives
+        // callers a reproducible PyTorch RNG stream for dropout and VAE noise,
+        // independent of the temporary module initialization used before load.
+        if full_checkpoint {
+            tch::manual_seed(seed);
+        }
+        let optimizer = nn::AdamW::default()
+            .wd(1.0e-4)
+            .build(&variables, config.learning_rate)
+            .map_err(|error| Error::Inference(format!("creating PyTorch AdamW: {error}")))?;
         Ok(Self {
             config,
-            model: Some(model),
+            model,
             optimizer,
+            variables,
             device,
-            last_loss: None,
         })
     }
 
-    fn batch<T: Backend<Device = B::Device>>(
-        &self,
-        batch: VisionActBatch,
-    ) -> Result<DeviceBatch<T>> {
+    fn parameter_count(&self) -> usize {
+        self.variables
+            .trainable_variables()
+            .iter()
+            .map(Tensor::numel)
+            .sum()
+    }
+
+    fn batch(&self, batch: VisionActBatch) -> Result<DeviceBatch> {
         validate_batch(&self.config, &batch)?;
         let VisionActBatch {
             batch_size,
@@ -436,136 +388,110 @@ impl<B: AutodiffBackend> Trainer<B> {
             actions,
             action_is_pad,
         } = batch;
-        let states = Tensor::from_data(
-            TensorData::new(states, [batch_size, self.config.state_dimensions]),
-            &self.device,
-        );
-        let images = Tensor::<T, 5>::from_data(
-            TensorData::new(
-                images,
-                [
-                    batch_size,
-                    self.config.camera_streams.len(),
-                    3,
-                    self.config.image_height,
-                    self.config.image_width,
-                ],
-            ),
-            &self.device,
-        );
-        let images = (0..self.config.camera_streams.len())
-            .map(|camera| images.clone().narrow(1, camera, 1).squeeze_dim(1))
-            .collect();
+        let batch_size = as_i64("batch", batch_size)?;
+        let state_dimensions = as_i64("state", self.config.state_dimensions)?;
+        let cameras = as_i64("camera", self.config.camera_streams.len())?;
+        let height = as_i64("image height", self.config.image_height)?;
+        let width = as_i64("image width", self.config.image_width)?;
+        let chunk = as_i64("chunk", self.config.chunk_size)?;
+        let action_dimensions = as_i64("action", self.config.action_dimensions)?;
+        let states = Tensor::from_slice(&states)
+            .view([batch_size, state_dimensions])
+            .to_device(self.device);
+        let images = Tensor::from_slice(&images)
+            .view([batch_size, cameras, 3, height, width])
+            .to_device(self.device)
+            .unbind(1);
+        let actions = Tensor::from_slice(&actions)
+            .view([batch_size, chunk, action_dimensions])
+            .to_device(self.device);
+        let action_is_pad = Tensor::from_slice(&action_is_pad)
+            .view([batch_size, chunk])
+            .to_device(self.device);
         Ok(DeviceBatch {
             states,
             images,
-            actions: Tensor::from_data(
-                TensorData::new(
-                    actions,
-                    [
-                        batch_size,
-                        self.config.chunk_size,
-                        self.config.action_dimensions,
-                    ],
-                ),
-                &self.device,
-            ),
-            action_is_pad: Tensor::from_data(
-                TensorData::new(action_is_pad, [batch_size, self.config.chunk_size]),
-                &self.device,
-            ),
+            actions,
+            action_is_pad,
         })
-    }
-}
-
-impl<B: AutodiffBackend> TrainerEngine for Trainer<B>
-where
-    B::Device: Send,
-{
-    fn parameter_count(&self) -> usize {
-        self.model.as_ref().expect("trainer model").num_params()
-    }
-
-    fn learning_rate(&self, step: u64) -> f64 {
-        let _ = step;
-        self.config.learning_rate
     }
 
     fn train_step(&mut self, batch: VisionActBatch, step: u64) -> Result<VisionActLoss> {
-        let batch = self.batch::<B>(batch)?;
-        let model = self.model.as_ref().expect("trainer model");
-        let output = model.forward(
-            batch.states,
-            batch.images,
-            batch.actions.clone(),
-            batch.action_is_pad.clone(),
+        let batch = self.batch(batch)?;
+        let output = self.model.forward_training(
+            &batch.states,
+            &batch.images,
+            &batch.actions,
+            &batch.action_is_pad,
+            true,
         );
         let loss = act_loss(
             output,
-            batch.actions,
-            batch.action_is_pad,
+            &batch.actions,
+            &batch.action_is_pad,
             self.config.kl_weight,
         );
-        let metrics = Tensor::cat(
-            vec![loss.total.clone(), loss.l1.clone(), loss.kl.clone()],
+        let metrics = Tensor::stack(
+            &[
+                loss.total.shallow_clone(),
+                loss.l1.shallow_clone(),
+                loss.kl.shallow_clone(),
+            ],
             0,
-        )
-        .inner();
-        let gradients = GradientsParams::from_grads(loss.total.backward(), model);
-        let gradients =
-            clip_gradients_by_global_norm::<B, _>(gradients, model, GLOBAL_GRADIENT_NORM_LIMIT);
-        let model = self.model.take().expect("trainer model");
-        self.model = Some(
-            self.optimizer
-                .step(self.learning_rate(step), model, gradients),
         );
-        if should_read_training_metrics(step, self.config.total_steps) {
-            let metrics = read_loss(metrics)?;
-            if !metrics.total.is_finite() {
-                return Err(Error::Inference(format!(
-                    "ACT loss became non-finite at step {step}"
-                )));
-            }
-            self.last_loss = Some(metrics);
+        self.optimizer
+            .backward_step_clip_norm(&loss.total, GLOBAL_GRADIENT_NORM_LIMIT);
+        let metrics = read_loss(metrics)?;
+        if !metrics.total.is_finite() {
+            return Err(Error::Inference(format!(
+                "ACT loss became non-finite at step {step}"
+            )));
         }
-        self.last_loss
-            .ok_or_else(|| Error::Inference("ACT training has no loss diagnostics".to_owned()))
+        Ok(metrics)
     }
 
     fn validation_step(&self, batch: VisionActBatch) -> Result<VisionActLoss> {
-        let valid = self.model.as_ref().expect("trainer model").valid();
-        let batch = self.batch::<B::InnerBackend>(batch)?;
-        let output = valid.forward(
-            batch.states,
-            batch.images,
-            batch.actions.clone(),
-            batch.action_is_pad.clone(),
-        );
-        let loss = act_loss(
-            output,
-            batch.actions,
-            batch.action_is_pad,
-            self.config.kl_weight,
-        );
-        read_loss(Tensor::cat(vec![loss.total, loss.l1, loss.kl], 0))
+        let batch = self.batch(batch)?;
+        tch::no_grad(|| {
+            let output = self.model.forward_inference(&batch.states, &batch.images);
+            let loss = act_loss(
+                output,
+                &batch.actions,
+                &batch.action_is_pad,
+                self.config.kl_weight,
+            );
+            read_loss(Tensor::stack(&[loss.total, loss.l1, loss.kl], 0))
+        })
     }
 
     fn checkpoint(&self, checkpoint: VisionActCheckpoint<'_>) -> Result<Vec<u8>> {
         validate_checkpoint(&self.config, &checkpoint)?;
-        let valid = self.model.as_ref().expect("trainer model").valid();
-        let mut store = SafetensorsStore::from_bytes(None)
-            .with_regex(r"^model\..*")
-            .with_to_adapter(InferenceLayoutAdapter)
-            .clear_metadata()
-            .metadata("format", "spiral-act")
-            .metadata("spiral_robotics", checkpoint.manifest_json);
-        valid
-            .save_into(&mut store)
-            .map_err(|error| Error::Checkpoint(format!("saving Burn ACT tensors: {error}")))?;
-        let bytes = store
-            .get_bytes()
-            .map_err(|error| Error::Checkpoint(format!("reading Burn ACT tensors: {error}")))?;
-        add_normalization(&self.config, bytes, checkpoint)
+        let mut tensors = self
+            .variables
+            .variables()
+            .into_iter()
+            .filter(|(name, _)| name.starts_with("model."))
+            .map(|(name, tensor)| owned_tensor(name, tensor))
+            .collect::<Result<Vec<_>>>()?;
+        add_normalization_tensors(&self.config, &checkpoint, &mut tensors);
+        tensors.sort_by(|left, right| left.name.cmp(&right.name));
+        let views = tensors
+            .iter()
+            .map(|tensor| {
+                TensorView::new(tensor.dtype, tensor.shape.clone(), &tensor.bytes)
+                    .map(|view| (tensor.name.as_str(), view))
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|error| Error::Checkpoint(format!("building ACT checkpoint: {error}")))?;
+        let metadata = HashMap::from([
+            ("format".to_owned(), "spiral-act".to_owned()),
+            (
+                "spiral_robotics".to_owned(),
+                checkpoint.manifest_json.to_owned(),
+            ),
+        ]);
+        serialize(views, Some(metadata))
+            .map_err(|error| Error::Checkpoint(format!("serializing ACT checkpoint: {error}")))
     }
 }
 
@@ -620,112 +546,37 @@ fn validate_batch(config: &VisionActTrainingConfig, batch: &VisionActBatch) -> R
     Ok(())
 }
 
-fn act_loss<B: Backend>(
-    output: ModelOutput<B>,
-    target: Tensor<B, 3>,
-    target_pad: Tensor<B, 2, Bool>,
+fn act_loss(
+    output: ModelOutput,
+    target: &Tensor,
+    target_pad: &Tensor,
     kl_weight: f64,
-) -> LossOutput<B> {
-    let keep = target_pad.clone().bool_not().float().unsqueeze_dim(2);
-    let action_values = keep.clone().sum().clamp_min(1.0) * target.dims()[2] as f64;
-    let l1 = ((output.actions - target).abs() * keep).sum() / action_values;
-    let kl = (output.log_variance.clone().add_scalar(1.0)
-        - output.mean.square()
-        - output.log_variance.exp())
-    .mul_scalar(-0.5)
-    .sum_dim(1)
-    .mean();
-    let total = l1.clone() + kl.clone().mul_scalar(kl_weight);
+) -> LossOutput {
+    let keep = target_pad.logical_not().to_kind(Kind::Float).unsqueeze(2);
+    let action_values = (keep.sum(Kind::Float) * target.size()[2]).clamp_min(1.0);
+    let l1 = ((output.actions - target).abs() * keep).sum(Kind::Float) / action_values;
+    let kl = match output.latent_distribution {
+        Some((mean, log_variance)) => {
+            let kl = (&log_variance + 1.0 - mean.square() - log_variance.exp()) * -0.5;
+            kl.sum_dim_intlist([1].as_slice(), false, Kind::Float)
+                .mean(Kind::Float)
+        }
+        None => Tensor::zeros([], (Kind::Float, target.device())),
+    };
+    let total = &l1 + &kl * kl_weight;
     LossOutput { total, l1, kl }
 }
 
-fn should_read_training_metrics(step: u64, total_steps: u64) -> bool {
-    step == 1 || step == total_steps || step.is_multiple_of(TRAINING_METRIC_INTERVAL)
-}
-
-struct GradientNormAccumulator<'a, B: AutodiffBackend> {
-    gradients: &'a GradientsParams,
-    squared_norm: Option<Tensor<B::InnerBackend, 1>>,
-}
-
-impl<B: AutodiffBackend> ModuleVisitor<B> for GradientNormAccumulator<'_, B> {
-    fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
-        let Some(gradient) = self.gradients.get::<B::InnerBackend, D>(param.id) else {
-            return;
-        };
-        let squared_norm = gradient.square().sum();
-        self.squared_norm = Some(match self.squared_norm.take() {
-            Some(accumulated) => accumulated + squared_norm,
-            None => squared_norm,
-        });
-    }
-}
-
-struct GlobalGradientClipper<'a, B: AutodiffBackend> {
-    gradients: &'a mut GradientsParams,
-    scale: Tensor<B::InnerBackend, 1>,
-}
-
-impl<B: AutodiffBackend> ModuleVisitor<B> for GlobalGradientClipper<'_, B> {
-    fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
-        let Some(gradient) = self.gradients.remove::<B::InnerBackend, D>(param.id) else {
-            return;
-        };
-        self.gradients
-            .register::<B::InnerBackend, D>(param.id, gradient.mul(self.scale.clone().unsqueeze()));
-    }
-}
-
-fn clip_gradients_by_global_norm<B, M>(
-    mut gradients: GradientsParams,
-    model: &M,
-    maximum_norm: f32,
-) -> GradientsParams
-where
-    B: AutodiffBackend,
-    M: AutodiffModule<B>,
-{
-    let Some(squared_norm) = global_squared_gradient_norm::<B, M>(&gradients, model) else {
-        return gradients;
-    };
-    let min_positive = squared_norm
-        .dtype()
-        .finfo()
-        .unwrap_or(burn::tensor::FloatDType::F32.finfo())
-        .min_positive;
-    let scale = (maximum_norm / squared_norm.sqrt().add_scalar(min_positive)).clamp_max(1.0);
-    model.visit(&mut GlobalGradientClipper::<B> {
-        gradients: &mut gradients,
-        scale,
-    });
-    gradients
-}
-
-fn global_squared_gradient_norm<B, M>(
-    gradients: &GradientsParams,
-    model: &M,
-) -> Option<Tensor<B::InnerBackend, 1>>
-where
-    B: AutodiffBackend,
-    M: AutodiffModule<B>,
-{
-    let mut accumulator = GradientNormAccumulator::<B> {
-        gradients,
-        squared_norm: None,
-    };
-    model.visit(&mut accumulator);
-    accumulator.squared_norm
-}
-
-fn read_loss<B: Backend>(metrics: Tensor<B, 1>) -> Result<VisionActLoss> {
-    let values = metrics
-        .try_into_data()
-        .map_err(|error| Error::Inference(format!("reading Burn loss metrics: {error}")))?
-        .to_vec::<f32>()
-        .map_err(|error| Error::Inference(format!("converting Burn loss metrics: {error}")))?;
+fn read_loss(metrics: Tensor) -> Result<VisionActLoss> {
+    let metrics = metrics
+        .to_device(Device::Cpu)
+        .to_kind(Kind::Float)
+        .view([-1]);
+    let values = Vec::<f32>::try_from(&metrics)
+        .map_err(|error| Error::Inference(format!("reading PyTorch loss metrics: {error}")))?;
     let [total, l1, kl] = values.as_slice() else {
         return Err(Error::Inference(format!(
-            "Burn returned {} loss metrics, expected 3",
+            "PyTorch returned {} loss metrics, expected 3",
             values.len()
         )));
     };
@@ -733,18 +584,11 @@ fn read_loss<B: Backend>(metrics: Tensor<B, 1>) -> Result<VisionActLoss> {
         total: f64::from(*total),
         l1: f64::from(*l1),
         kl: f64::from(*kl),
-        // Kept in the public diagnostics shape for older Studio clients. ACT
-        // has no pad prediction head or pad loss.
         pad: 0.0,
     })
 }
 
-/// Fixed 1D sinusoidal positions used by LeRobot's VAE encoder.
-fn sinusoidal_position_embedding_1d<B: Backend>(
-    positions: usize,
-    dimensions: usize,
-    device: &B::Device,
-) -> Tensor<B, 2> {
+fn sinusoidal_position_embedding_1d(positions: usize, dimensions: usize) -> Result<Tensor> {
     let mut values = vec![0.0; positions * dimensions];
     for position in 0..positions {
         for dimension in 0..dimensions {
@@ -757,7 +601,10 @@ fn sinusoidal_position_embedding_1d<B: Backend>(
             };
         }
     }
-    Tensor::from_data(TensorData::new(values, [positions, dimensions]), device)
+    Ok(Tensor::from_slice(&values).view([
+        as_i64("position count", positions)?,
+        as_i64("position width", dimensions)?,
+    ]))
 }
 
 fn resnet18_feature_size(height: usize, width: usize) -> (usize, usize) {
@@ -810,31 +657,43 @@ struct OwnedTensor {
     bytes: Vec<u8>,
 }
 
-fn add_normalization(
-    config: &VisionActTrainingConfig,
-    model_bytes: Vec<u8>,
-    checkpoint: VisionActCheckpoint<'_>,
-) -> Result<Vec<u8>> {
-    let tensors = safetensors::SafeTensors::deserialize(&model_bytes)
-        .map_err(|error| Error::Checkpoint(format!("reading Burn checkpoint: {error}")))?;
-    let mut owned = tensors
-        .tensors()
+fn owned_tensor(name: String, tensor: Tensor) -> Result<OwnedTensor> {
+    if tensor.kind() != Kind::Float {
+        return Err(Error::Checkpoint(format!(
+            "ACT tensor {name:?} must be float32, found {:?}",
+            tensor.kind()
+        )));
+    }
+    let shape = tensor
+        .size()
         .into_iter()
-        .map(|(name, view)| OwnedTensor {
-            name,
-            dtype: view.dtype(),
-            shape: view.shape().to_vec(),
-            bytes: view.data().to_vec(),
-        })
-        .collect::<Vec<_>>();
+        .map(usize::try_from)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| Error::Checkpoint(format!("ACT tensor {name:?} has an invalid shape")))?;
+    let tensor = tensor.to_device(Device::Cpu).contiguous().view([-1]);
+    let values = Vec::<f32>::try_from(&tensor)
+        .map_err(|error| Error::Checkpoint(format!("reading ACT tensor {name:?}: {error}")))?;
+    Ok(OwnedTensor {
+        name,
+        dtype: Dtype::F32,
+        shape,
+        bytes: values.into_iter().flat_map(f32::to_le_bytes).collect(),
+    })
+}
+
+fn add_normalization_tensors(
+    config: &VisionActTrainingConfig,
+    checkpoint: &VisionActCheckpoint<'_>,
+    tensors: &mut Vec<OwnedTensor>,
+) {
     push_f32(
-        &mut owned,
+        tensors,
         "normalize_inputs.buffer_observation_state.mean",
         vec![config.state_dimensions],
         checkpoint.state_mean,
     );
     push_f32(
-        &mut owned,
+        tensors,
         "normalize_inputs.buffer_observation_state.std",
         vec![config.state_dimensions],
         checkpoint.state_std,
@@ -842,47 +701,30 @@ fn add_normalization(
     for camera in &config.camera_streams {
         let key = camera.replace(['.', '/'], "_");
         push_f32(
-            &mut owned,
+            tensors,
             &format!("normalize_inputs.buffer_{key}.mean"),
             vec![3, 1, 1],
             &IMAGENET_MEAN,
         );
         push_f32(
-            &mut owned,
+            tensors,
             &format!("normalize_inputs.buffer_{key}.std"),
             vec![3, 1, 1],
             &IMAGENET_STD,
         );
     }
     push_f32(
-        &mut owned,
+        tensors,
         "unnormalize_outputs.buffer_action.mean",
         vec![config.action_dimensions],
         checkpoint.action_mean,
     );
     push_f32(
-        &mut owned,
+        tensors,
         "unnormalize_outputs.buffer_action.std",
         vec![config.action_dimensions],
         checkpoint.action_std,
     );
-    let views = owned
-        .iter()
-        .map(|tensor| {
-            TensorView::new(tensor.dtype, tensor.shape.clone(), &tensor.bytes)
-                .map(|view| (tensor.name.as_str(), view))
-        })
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|error| Error::Checkpoint(format!("building ACT checkpoint: {error}")))?;
-    let metadata = HashMap::from([
-        ("format".to_owned(), "spiral-act".to_owned()),
-        (
-            "spiral_robotics".to_owned(),
-            checkpoint.manifest_json.to_owned(),
-        ),
-    ]);
-    serialize(views, Some(metadata))
-        .map_err(|error| Error::Checkpoint(format!("serializing ACT checkpoint: {error}")))
 }
 
 fn push_f32(owned: &mut Vec<OwnedTensor>, name: &str, shape: Vec<usize>, values: &[f32]) {
@@ -897,32 +739,17 @@ fn push_f32(owned: &mut Vec<OwnedTensor>, name: &str, shape: Vec<usize>, values:
     });
 }
 
+fn as_i64(name: &str, value: usize) -> Result<i64> {
+    i64::try_from(value)
+        .map_err(|_| Error::Configuration(format!("ACT {name} dimension exceeds i64")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn global_gradient_norm<B, M>(gradients: &GradientsParams, model: &M) -> f32
-    where
-        B: AutodiffBackend,
-        M: AutodiffModule<B>,
-    {
-        global_squared_gradient_norm::<B, M>(gradients, model)
-            .expect("test model must have gradients")
-            .sqrt()
-            .into_data()
-            .to_vec::<f32>()
-            .unwrap()[0]
-    }
-
-    #[test]
-    fn resnet_shape_matches_the_runtime_feature_contract() {
-        assert_eq!(resnet18_feature_size(224, 224), (7, 7));
-        assert_eq!(resnet18_feature_size(64, 64), (2, 2));
-    }
-
-    #[test]
-    fn act_learning_rate_has_no_scheduler() {
-        let config = VisionActTrainingConfig {
+    fn small_config() -> VisionActTrainingConfig {
+        VisionActTrainingConfig {
             state_dimensions: 2,
             action_dimensions: 2,
             camera_streams: vec!["wrist".to_owned()],
@@ -940,43 +767,73 @@ mod tests {
             learning_rate: 1.0e-5,
             total_steps: 100,
             seed: 42,
-        };
-        let trainer = NativeActTrainer::new(config, "cpu", None).unwrap();
+        }
+    }
+
+    fn small_batch() -> VisionActBatch {
+        VisionActBatch {
+            batch_size: 1,
+            states: vec![0.0; 2],
+            images: vec![0.0; 3 * 32 * 32],
+            actions: vec![0.0; 2 * 2],
+            action_is_pad: vec![false; 2],
+        }
+    }
+
+    #[test]
+    fn resnet_shape_matches_the_runtime_feature_contract() {
+        assert_eq!(resnet18_feature_size(224, 224), (7, 7));
+        assert_eq!(resnet18_feature_size(64, 64), (2, 2));
+    }
+
+    #[test]
+    fn act_learning_rate_has_no_scheduler() {
+        let trainer = NativeActTrainer::new(small_config(), "cpu", None).unwrap();
         assert_eq!(trainer.learning_rate(0), 1.0e-5);
         assert_eq!(trainer.learning_rate(50), 1.0e-5);
         assert_eq!(trainer.learning_rate(100), 1.0e-5);
     }
 
     #[test]
-    fn training_metrics_have_one_bounded_readback_cadence() {
-        let sampled = (1..=25)
-            .filter(|step| should_read_training_metrics(*step, 25))
-            .collect::<Vec<_>>();
-        assert_eq!(sampled, vec![1, 10, 20, 25]);
+    fn every_training_step_returns_its_own_metrics() {
+        let mut config = small_config();
+        config.total_steps = 2;
+        let mut trainer = NativeActTrainer::new(config, "cpu", None).unwrap();
+        let first = trainer.train_step(small_batch(), 1).unwrap();
+        let second = trainer.train_step(small_batch(), 2).unwrap();
+        assert!(first.total.is_finite());
+        assert!(second.total.is_finite());
     }
 
     #[test]
     fn gradients_are_clipped_by_one_global_model_norm() {
-        type B = Autodiff<burn_ndarray::NdArray<f32>>;
-        let device = Default::default();
-        let model = LinearConfig::new(2, 1).init::<B>(&device);
-        let input = Tensor::<B, 2>::from_floats([[100.0, 100.0]], &device);
-        let loss = model.forward(input).sum();
-        let gradients = GradientsParams::from_grads(loss.backward(), &model);
-        assert!(global_gradient_norm::<B, _>(&gradients, &model) > 100.0);
+        let variables = nn::VarStore::new(Device::Cpu);
+        let model = nn::linear(variables.root(), 2, 1, Default::default());
+        let optimizer = nn::AdamW::default().build(&variables, 1.0e-5).unwrap();
+        let input = Tensor::from_slice(&[100.0_f32, 100.0]).view([1, 2]);
+        let loss = model.forward(&input).sum(Kind::Float);
+        loss.backward();
+        let before = global_gradient_norm(&variables);
+        assert!(before > 100.0);
+        optimizer.clip_grad_norm(10.0);
+        let after = global_gradient_norm(&variables);
+        assert!((after - 10.0).abs() < 1.0e-4, "global norm was {after}");
+    }
 
-        let gradients = clip_gradients_by_global_norm::<B, _>(gradients, &model, 10.0);
-        let norm = global_gradient_norm::<B, _>(&gradients, &model);
-        assert!((norm - 10.0).abs() < 1.0e-4, "global norm was {norm}");
+    fn global_gradient_norm(variables: &nn::VarStore) -> f64 {
+        let norms = variables
+            .trainable_variables()
+            .into_iter()
+            .filter_map(|tensor| tensor.grad().defined().then(|| tensor.grad().norm()))
+            .collect::<Vec<_>>();
+        f64::try_from(Tensor::stack(&norms, 0).norm()).unwrap()
     }
 
     #[test]
     fn vae_positions_match_the_fixed_lerobot_sinusoid() {
-        type B = burn_ndarray::NdArray<f32>;
-        let positions = sinusoidal_position_embedding_1d::<B>(3, 8, &Default::default())
-            .into_data()
-            .to_vec::<f32>()
-            .unwrap();
+        let positions =
+            Vec::<f32>::try_from(&sinusoidal_position_embedding_1d(3, 8).unwrap().view([-1]))
+                .unwrap();
         assert_eq!(&positions[..8], &[0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
         assert!((positions[8] - 1.0_f32.sin()).abs() < 1.0e-6);
         assert!((positions[9] - 1.0_f32.cos()).abs() < 1.0e-6);
@@ -986,55 +843,30 @@ mod tests {
 
     #[test]
     fn vae_depth_is_independent_from_the_main_encoder_depth() {
-        type B = burn_ndarray::NdArray<f32>;
-        let config = VisionActTrainingConfig {
-            state_dimensions: 2,
-            action_dimensions: 2,
-            camera_streams: vec!["wrist".to_owned()],
-            image_width: 32,
-            image_height: 32,
-            chunk_size: 2,
-            hidden_dimensions: 16,
-            latent_dimensions: 4,
-            attention_heads: 4,
-            feedforward_dimensions: 32,
-            encoder_layers: 1,
-            vae_encoder_layers: 3,
-            decoder_layers: 1,
-            kl_weight: 1.0,
-            learning_rate: 1.0e-5,
-            total_steps: 1,
-            seed: 1_000,
-        };
-        let model = FullActModel::<B>::init(&config, None, &Default::default()).unwrap();
+        let mut config = small_config();
+        config.vae_encoder_layers = 3;
+        let variables = nn::VarStore::new(Device::Cpu);
+        let model = FullActModel::new(&config, &variables, None).unwrap();
         assert_eq!(model.model.encoder_layer_count(), 1);
         assert_eq!(model.cvae_encoder.len(), 3);
     }
 
     #[test]
-    fn burn_checkpoint_loads_through_the_native_inference_boundary() {
+    fn torch_checkpoint_loads_through_the_native_inference_boundary() {
         use crate::{ModelArtifact, Policy};
 
         let camera = "wrist".to_owned();
-        let config = VisionActTrainingConfig {
-            state_dimensions: 6,
-            action_dimensions: 6,
-            camera_streams: vec![camera.clone()],
-            image_width: 32,
-            image_height: 32,
-            chunk_size: 4,
-            hidden_dimensions: 64,
-            latent_dimensions: 8,
-            attention_heads: 8,
-            feedforward_dimensions: 128,
-            encoder_layers: 1,
-            vae_encoder_layers: 2,
-            decoder_layers: 1,
-            kl_weight: 10.0,
-            learning_rate: 1.0e-5,
-            total_steps: 1,
-            seed: 42,
-        };
+        let mut config = small_config();
+        config.state_dimensions = 6;
+        config.action_dimensions = 6;
+        config.camera_streams = vec![camera.clone()];
+        config.chunk_size = 4;
+        config.hidden_dimensions = 64;
+        config.latent_dimensions = 8;
+        config.attention_heads = 8;
+        config.feedforward_dimensions = 128;
+        config.vae_encoder_layers = 2;
+        config.total_steps = 1;
         let mut trainer = NativeActTrainer::new(config, "cpu", None).unwrap();
         let loss = trainer
             .train_step(
@@ -1063,10 +895,13 @@ mod tests {
         let tensors = safetensors::SafeTensors::deserialize(&weights).unwrap();
         assert!(
             tensors
-                .names()
-                .iter()
-                .all(|name| !name.contains("camera_embedding") && !name.contains("pad_head")),
-            "new native ACT checkpoints must not contain Spiral-only camera or pad heads"
+                .tensor("model.encoder.layers.0.self_attn.in_proj_weight")
+                .is_ok()
+        );
+        assert!(
+            tensors
+                .tensor("model.vae_encoder.layers.0.self_attn.in_proj_weight")
+                .is_ok()
         );
         let model_config = serde_json::json!({
             "type": "act",
@@ -1089,7 +924,6 @@ mod tests {
             "dim_feedforward": 128,
             "feedforward_activation": "relu",
             "n_encoder_layers": 1,
-            "n_vae_encoder_layers": 2,
             "n_decoder_layers": 1,
             "use_vae": true,
             "latent_dim": 8,
@@ -1103,15 +937,16 @@ mod tests {
         assert_eq!(policy.specification().image_inputs[0].name, "wrist");
     }
 
-    /// Keep fusion covered across recurring packed metric readbacks plus
-    /// validation and checkpoint synchronization boundaries.
-    #[cfg(all(target_os = "macos", feature = "metal"))]
     #[test]
-    fn metal_repeats_training_sync_segments_and_checkpoints() {
-        if !super::super::engine::metal_available() {
-            return;
-        }
-
+    #[ignore = "requires an independently generated PyTorch one-step reference"]
+    fn one_step_matches_pytorch_from_identical_weights_and_rng() {
+        let root = std::env::var_os("SPIRAL_ACT_TRAINING_REFERENCE_DIR")
+            .expect("SPIRAL_ACT_TRAINING_REFERENCE_DIR must name the parity fixture");
+        let root = std::path::PathBuf::from(root);
+        let initial = std::fs::read(root.join("initial.safetensors")).unwrap();
+        let expected_metrics: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("expected.json")).unwrap()).unwrap();
+        let expected_checkpoint = std::fs::read(root.join("updated.safetensors")).unwrap();
         let config = VisionActTrainingConfig {
             state_dimensions: 2,
             action_dimensions: 2,
@@ -1119,32 +954,102 @@ mod tests {
             image_width: 32,
             image_height: 32,
             chunk_size: 2,
-            hidden_dimensions: 16,
+            hidden_dimensions: 64,
             latent_dimensions: 4,
             attention_heads: 4,
-            feedforward_dimensions: 32,
+            feedforward_dimensions: 128,
             encoder_layers: 1,
             vae_encoder_layers: 1,
             decoder_layers: 1,
             kl_weight: 1.0,
             learning_rate: 1.0e-5,
-            total_steps: 12,
-            seed: 42,
+            total_steps: 1,
+            seed: 777,
         };
-        let batch = || VisionActBatch {
-            batch_size: 1,
-            states: vec![0.0; 2],
-            images: vec![0.0; 3 * 32 * 32],
-            actions: vec![0.0; 2 * 2],
-            action_is_pad: vec![false; 2],
-        };
-        let mut trainer = NativeActTrainer::new(config, "metal", None).unwrap();
-
-        for step in 1..=12 {
-            assert!(trainer.train_step(batch(), step).unwrap().total.is_finite());
+        let mut trainer = NativeActTrainer::new(config, "cpu", Some(&initial)).unwrap();
+        let metrics = trainer
+            .train_step(
+                VisionActBatch {
+                    batch_size: 1,
+                    states: vec![0.0; 2],
+                    images: vec![0.0; 3 * 32 * 32],
+                    actions: vec![0.25, -0.5, 0.75, -1.0],
+                    action_is_pad: vec![false; 2],
+                },
+                1,
+            )
+            .unwrap();
+        for (name, actual) in [
+            ("total", metrics.total),
+            ("l1", metrics.l1),
+            ("kl", metrics.kl),
+        ] {
+            let expected = expected_metrics[name].as_f64().unwrap();
+            assert!(
+                (actual - expected).abs() <= 1.0e-5,
+                "{name} mismatch: expected {expected}, got {actual}"
+            );
         }
-        assert!(trainer.validation_step(batch()).unwrap().total.is_finite());
 
+        let zeros = [0.0; 2];
+        let ones = [1.0; 2];
+        let actual_checkpoint = trainer
+            .checkpoint(VisionActCheckpoint {
+                manifest_json: "{}",
+                state_mean: &zeros,
+                state_std: &ones,
+                action_mean: &zeros,
+                action_std: &ones,
+            })
+            .unwrap();
+        let expected = safetensors::SafeTensors::deserialize(&expected_checkpoint).unwrap();
+        let actual = safetensors::SafeTensors::deserialize(&actual_checkpoint).unwrap();
+        let mut maximum_error = 0.0_f32;
+        for name in expected.names() {
+            let left = expected.tensor(name).unwrap();
+            let right = actual.tensor(name).unwrap();
+            assert_eq!(left.shape(), right.shape(), "shape mismatch for {name}");
+            for (left, right) in left
+                .data()
+                .chunks_exact(4)
+                .zip(right.data().chunks_exact(4))
+            {
+                let left = f32::from_le_bytes(left.try_into().unwrap());
+                let right = f32::from_le_bytes(right.try_into().unwrap());
+                maximum_error = maximum_error.max((left - right).abs());
+            }
+        }
+        assert!(
+            maximum_error <= 2.0e-6,
+            "one-step checkpoint maximum error was {maximum_error}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mps_repeats_training_sync_segments_and_checkpoints() {
+        if !tch::utils::has_mps() {
+            return;
+        }
+        let mut config = small_config();
+        config.total_steps = 12;
+        let mut trainer = NativeActTrainer::new(config, "mps", None).unwrap();
+        for step in 1..=12 {
+            assert!(
+                trainer
+                    .train_step(small_batch(), step)
+                    .unwrap()
+                    .total
+                    .is_finite()
+            );
+        }
+        assert!(
+            trainer
+                .validation_step(small_batch())
+                .unwrap()
+                .total
+                .is_finite()
+        );
         let zeros = [0.0; 2];
         let ones = [1.0; 2];
         let checkpoint = trainer
@@ -1157,5 +1062,144 @@ mod tests {
             })
             .unwrap();
         assert!(!checkpoint.is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "full 51.7M-parameter ACT MPS throughput benchmark"]
+    fn benchmark_full_act_mps_training() {
+        use std::time::Instant;
+
+        assert!(tch::utils::has_mps(), "PyTorch MPS must be available");
+        const BATCH: usize = 8;
+        const WARMUP: u64 = 4;
+        const MEASURED: u64 = 12;
+        let config = VisionActTrainingConfig {
+            state_dimensions: 6,
+            action_dimensions: 6,
+            camera_streams: vec!["gripper".to_owned(), "top".to_owned()],
+            image_width: 640,
+            image_height: 360,
+            chunk_size: 100,
+            hidden_dimensions: 512,
+            latent_dimensions: 32,
+            attention_heads: 8,
+            feedforward_dimensions: 3_200,
+            encoder_layers: 4,
+            vae_encoder_layers: 4,
+            decoder_layers: 1,
+            kl_weight: 10.0,
+            learning_rate: 1.0e-5,
+            total_steps: WARMUP + MEASURED,
+            seed: 1_000,
+        };
+        let batch = VisionActBatch {
+            batch_size: BATCH,
+            states: vec![0.0; BATCH * 6],
+            images: vec![0.0; BATCH * 2 * 3 * 360 * 640],
+            actions: vec![0.0; BATCH * 100 * 6],
+            action_is_pad: vec![false; BATCH * 100],
+        };
+        let mut trainer = NativeActTrainer::new(config, "mps", None).unwrap();
+        for step in 1..=WARMUP {
+            trainer.train_step(batch.clone(), step).unwrap();
+        }
+        let started = Instant::now();
+        let mut last_loss = 0.0;
+        for step in WARMUP + 1..=WARMUP + MEASURED {
+            last_loss = trainer.train_step(batch.clone(), step).unwrap().total;
+        }
+        let seconds = started.elapsed().as_secs_f64();
+        let samples_per_second = BATCH as f64 * MEASURED as f64 / seconds;
+        eprintln!(
+            "full ACT direct tch MPS: {samples_per_second:.3} samples/s ({seconds:.3}s for {MEASURED} steps, loss={last_loss:.6}, parameters={})",
+            trainer.parameter_count()
+        );
+        assert!(samples_per_second.is_finite() && samples_per_second > 0.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "phase profiler for the full ACT MPS training step"]
+    fn profile_full_act_mps_training_step() {
+        use std::time::Instant;
+
+        fn synchronize(tensor: &Tensor) {
+            let _ = tensor
+                .flatten(0, -1)
+                .get(0)
+                .to_device(Device::Cpu)
+                .double_value(&[]);
+        }
+
+        assert!(tch::utils::has_mps(), "PyTorch MPS must be available");
+        const BATCH: usize = 8;
+        let config = VisionActTrainingConfig {
+            state_dimensions: 6,
+            action_dimensions: 6,
+            camera_streams: vec!["gripper".to_owned(), "top".to_owned()],
+            image_width: 640,
+            image_height: 360,
+            chunk_size: 100,
+            hidden_dimensions: 512,
+            latent_dimensions: 32,
+            attention_heads: 8,
+            feedforward_dimensions: 3_200,
+            encoder_layers: 4,
+            vae_encoder_layers: 4,
+            decoder_layers: 1,
+            kl_weight: 10.0,
+            learning_rate: 1.0e-5,
+            total_steps: 8,
+            seed: 1_000,
+        };
+        let batch = VisionActBatch {
+            batch_size: BATCH,
+            states: vec![0.0; BATCH * 6],
+            images: vec![0.0; BATCH * 2 * 3 * 360 * 640],
+            actions: vec![0.0; BATCH * 100 * 6],
+            action_is_pad: vec![false; BATCH * 100],
+        };
+        let mut trainer = Trainer::new(config, None, Device::Mps).unwrap();
+        for step in 1..=8 {
+            let started = Instant::now();
+            let device_batch = trainer.batch(batch.clone()).unwrap();
+            synchronize(&device_batch.images[0]);
+            let uploaded = Instant::now();
+            let output = trainer.model.forward_training(
+                &device_batch.states,
+                &device_batch.images,
+                &device_batch.actions,
+                &device_batch.action_is_pad,
+                true,
+            );
+            let loss = act_loss(
+                output,
+                &device_batch.actions,
+                &device_batch.action_is_pad,
+                trainer.config.kl_weight,
+            );
+            synchronize(&loss.total);
+            let forwarded = Instant::now();
+            trainer.optimizer.zero_grad();
+            loss.total.backward();
+            let first_parameter = trainer.variables.trainable_variables().remove(0);
+            synchronize(&first_parameter.grad());
+            let backward = Instant::now();
+            trainer.optimizer.clip_grad_norm(GLOBAL_GRADIENT_NORM_LIMIT);
+            let clipped = Instant::now();
+            trainer.optimizer.step();
+            synchronize(&first_parameter);
+            let optimized = Instant::now();
+            eprintln!(
+                "step {step}: upload={:.6} forward={:.6} backward={:.6} clip={:.6} optimizer={:.6} total={:.6}",
+                uploaded.duration_since(started).as_secs_f64(),
+                forwarded.duration_since(uploaded).as_secs_f64(),
+                backward.duration_since(forwarded).as_secs_f64(),
+                clipped.duration_since(backward).as_secs_f64(),
+                optimized.duration_since(clipped).as_secs_f64(),
+                optimized.duration_since(started).as_secs_f64(),
+            );
+        }
     }
 }

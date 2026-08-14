@@ -469,7 +469,9 @@ pub struct TrainingSnapshot {
     pub runs: Vec<TrainingRun>,
 }
 
-const MAX_TRAINING_METRIC_POINTS: usize = 1_200;
+const MAX_TRAINING_METRIC_POINTS: usize = 2_400;
+const TRAINING_METRIC_COMPACTION_TARGET: usize = MAX_TRAINING_METRIC_POINTS / 2;
+const TRAINING_METRIC_SERIES_COUNT: usize = 7;
 const MAX_TRAINING_LOG_LINES: usize = 120;
 const MAX_TRAINING_CHECKPOINTS: usize = 1_000;
 pub const MAX_TRAINING_HISTORY_RUNS: usize = 40;
@@ -486,6 +488,9 @@ pub enum TrainingUpdate {
     },
     RunAdded {
         run: Box<TrainingRun>,
+    },
+    RunRemoved {
+        run_id: String,
     },
     RunConfigured {
         run_id: String,
@@ -514,11 +519,9 @@ pub enum TrainingUpdate {
 
 /// Operator-approved launch parameters for one backend-owned policy session.
 pub use spiral_robotics_core::operation::{
-    DEFAULT_ROLLOUT_DURATION_SECONDS, MAX_ROLLOUT_DURATION_SECONDS, MIN_ROLLOUT_DURATION_SECONDS,
+    DEFAULT_ROLLOUT_DURATION_SECONDS, MAX_ROLLOUT_ACTION_STEPS, MAX_ROLLOUT_DURATION_SECONDS,
+    MIN_ROLLOUT_DURATION_SECONDS,
 };
-
-/// Maximum predicted-action prefix consumed before rollout observes and replans.
-pub const MAX_ROLLOUT_ACTION_STEPS: usize = 20;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StartRolloutRequest {
@@ -602,6 +605,9 @@ impl TrainingSnapshot {
                 self.runs.insert(0, *run);
                 self.runs.truncate(MAX_TRAINING_HISTORY_RUNS);
             }
+            TrainingUpdate::RunRemoved { run_id } => {
+                self.runs.retain(|run| run.id != run_id);
+            }
             TrainingUpdate::RunConfigured { run_id, config } => {
                 if let Some(run) = self.runs.iter_mut().find(|run| run.id == run_id) {
                     run.config = *config;
@@ -623,12 +629,8 @@ impl TrainingSnapshot {
             }
             TrainingUpdate::Metric { run_id, point } => {
                 if let Some(run) = self.runs.iter_mut().find(|run| run.id == run_id) {
-                    run.current_step = point.step;
-                    run.metrics.push(*point);
-                    let excess = run.metrics.len().saturating_sub(MAX_TRAINING_METRIC_POINTS);
-                    if excess > 0 {
-                        run.metrics.drain(..excess);
-                    }
+                    run.current_step = run.current_step.max(point.step);
+                    insert_training_metric(&mut run.metrics, *point);
                 }
             }
             TrainingUpdate::Checkpoint { run_id, checkpoint } => {
@@ -654,6 +656,112 @@ impl TrainingSnapshot {
                 }
             }
         }
+    }
+}
+
+fn insert_training_metric(metrics: &mut Vec<TrainingMetricPoint>, point: TrainingMetricPoint) {
+    match metrics.binary_search_by_key(&point.step, |existing| existing.step) {
+        Ok(index) => metrics[index] = point,
+        Err(index) => metrics.insert(index, point),
+    }
+    if metrics.len() > MAX_TRAINING_METRIC_POINTS {
+        compact_training_metrics(metrics);
+    }
+}
+
+/// Keep a bounded, whole-run view instead of deleting the oldest steps.
+///
+/// Event samples, endpoints, and the extrema of every plotted metric survive
+/// each compaction pass. Remaining capacity is filled uniformly so reconnecting
+/// clients retain continuous temporal coverage while the newest interval stays
+/// dense between passes.
+fn compact_training_metrics(metrics: &mut Vec<TrainingMetricPoint>) {
+    use std::collections::BTreeSet;
+
+    if metrics.len() <= TRAINING_METRIC_COMPACTION_TARGET {
+        return;
+    }
+
+    let source = std::mem::take(metrics);
+    let mut keep = BTreeSet::from([0, source.len() - 1]);
+    let event_indices = source
+        .iter()
+        .enumerate()
+        .filter_map(|(index, point)| point.event.is_some().then_some(index))
+        .collect::<Vec<_>>();
+    retain_evenly(
+        &mut keep,
+        &event_indices,
+        TRAINING_METRIC_COMPACTION_TARGET / 8,
+    );
+
+    let extrema_capacity = TRAINING_METRIC_COMPACTION_TARGET.saturating_sub(keep.len());
+    let bucket_count = extrema_capacity / (TRAINING_METRIC_SERIES_COUNT * 2);
+    if bucket_count > 0 {
+        let bucket_size = source.len().div_ceil(bucket_count);
+        for bucket_start in (0..source.len()).step_by(bucket_size) {
+            let bucket_end = (bucket_start + bucket_size).min(source.len());
+            for series in 0..TRAINING_METRIC_SERIES_COUNT {
+                let values = (bucket_start..bucket_end).filter_map(|index| {
+                    training_metric_value(&source[index], series)
+                        .filter(|value| value.is_finite())
+                        .map(|value| (index, value))
+                });
+                let mut minimum = None::<(usize, f64)>;
+                let mut maximum = None::<(usize, f64)>;
+                for (index, value) in values {
+                    if minimum.is_none_or(|(_, current)| value < current) {
+                        minimum = Some((index, value));
+                    }
+                    if maximum.is_none_or(|(_, current)| value > current) {
+                        maximum = Some((index, value));
+                    }
+                }
+                if let Some((index, _)) = minimum {
+                    keep.insert(index);
+                }
+                if let Some((index, _)) = maximum {
+                    keep.insert(index);
+                }
+            }
+        }
+    }
+
+    let remaining = TRAINING_METRIC_COMPACTION_TARGET.saturating_sub(keep.len());
+    let all_indices = (0..source.len()).collect::<Vec<_>>();
+    retain_evenly(&mut keep, &all_indices, remaining);
+
+    *metrics = source
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, point)| keep.contains(&index).then_some(point))
+        .collect();
+}
+
+fn retain_evenly(keep: &mut std::collections::BTreeSet<usize>, candidates: &[usize], limit: usize) {
+    if candidates.is_empty() || limit == 0 {
+        return;
+    }
+    if candidates.len() <= limit {
+        keep.extend(candidates.iter().copied());
+        return;
+    }
+    for slot in 0..limit {
+        let index = slot * (candidates.len() - 1) / limit.saturating_sub(1).max(1);
+        keep.insert(candidates[index]);
+    }
+}
+
+fn training_metric_value(point: &TrainingMetricPoint, series: usize) -> Option<f64> {
+    match series {
+        0 => Some(point.train_loss),
+        1 => point.validation_loss,
+        2 => Some(point.transfer_bytes_per_second),
+        3 => Some(point.examples_per_second),
+        4 => point.cpu_percent,
+        5 => point.gpu_percent,
+        6 => point.memory_bytes.map(|value| value as f64),
+        _ => None,
     }
 }
 
@@ -1870,7 +1978,7 @@ mod tests {
     }
 
     #[test]
-    fn incremental_training_updates_are_bounded_and_change_only_the_target_run() {
+    fn incremental_training_updates_stay_bounded_without_dropping_early_history() {
         let mut snapshot = TrainingSnapshot {
             runs: vec![TrainingRun {
                 id: "run-a".to_owned(),
@@ -1878,11 +1986,14 @@ mod tests {
             }],
             ..TrainingSnapshot::default()
         };
-        for step in 0..=MAX_TRAINING_METRIC_POINTS {
+        for step in 0..=12_000 {
             snapshot.apply(TrainingUpdate::Metric {
                 run_id: "run-a".to_owned(),
                 point: Box::new(TrainingMetricPoint {
-                    step: step as u64,
+                    step,
+                    train_loss: if step == 123 { 10_000.0 } else { 1.0 },
+                    validation_loss: (step == 6_000).then_some(4.0),
+                    cpu_percent: (step == 777).then_some(9_000.0),
                     ..TrainingMetricPoint::default()
                 }),
             });
@@ -1895,11 +2006,43 @@ mod tests {
         }
 
         let run = &snapshot.runs[0];
-        assert_eq!(run.metrics.len(), MAX_TRAINING_METRIC_POINTS);
-        assert_eq!(run.metrics[0].step, 1);
+        assert!(run.metrics.len() <= MAX_TRAINING_METRIC_POINTS);
+        assert_eq!(run.metrics.first().map(|point| point.step), Some(0));
+        assert_eq!(run.metrics.last().map(|point| point.step), Some(12_000));
+        assert!(run.metrics.iter().any(|point| point.step == 123));
+        assert!(run.metrics.iter().any(|point| point.step == 777));
+        assert!(run.metrics.iter().any(|point| point.step == 6_000));
         assert_eq!(run.logs.len(), MAX_TRAINING_LOG_LINES);
         assert_eq!(run.logs[0], "line 1");
-        assert_eq!(run.current_step, MAX_TRAINING_METRIC_POINTS as u64);
+        assert_eq!(run.current_step, 12_000);
+    }
+
+    #[test]
+    fn repeated_or_late_metric_updates_replace_the_step_without_regressing_progress() {
+        let mut snapshot = TrainingSnapshot {
+            runs: vec![TrainingRun {
+                id: "run-a".to_owned(),
+                ..TrainingRun::default()
+            }],
+            ..TrainingSnapshot::default()
+        };
+        for (step, loss) in [(2, 2.0), (1, 1.0), (2, 0.5)] {
+            snapshot.apply(TrainingUpdate::Metric {
+                run_id: "run-a".to_owned(),
+                point: Box::new(TrainingMetricPoint {
+                    step,
+                    train_loss: loss,
+                    ..TrainingMetricPoint::default()
+                }),
+            });
+        }
+
+        let run = &snapshot.runs[0];
+        assert_eq!(run.current_step, 2);
+        assert_eq!(run.metrics.len(), 2);
+        assert_eq!(run.metrics[0].step, 1);
+        assert_eq!(run.metrics[1].step, 2);
+        assert_eq!(run.metrics[1].train_loss, 0.5);
     }
 
     #[test]
@@ -1921,5 +2064,32 @@ mod tests {
             config: Box::new(config.clone()),
         });
         assert_eq!(snapshot.runs[0].config, config);
+    }
+
+    #[test]
+    fn removing_a_training_run_removes_its_complete_snapshot_record() {
+        let mut snapshot = TrainingSnapshot {
+            runs: vec![
+                TrainingRun {
+                    id: "run-a".to_owned(),
+                    metrics: vec![TrainingMetricPoint::default()],
+                    checkpoints: vec![TrainingCheckpoint::default()],
+                    logs: vec!["retained only inside the run".to_owned()],
+                    ..TrainingRun::default()
+                },
+                TrainingRun {
+                    id: "run-b".to_owned(),
+                    ..TrainingRun::default()
+                },
+            ],
+            ..TrainingSnapshot::default()
+        };
+
+        snapshot.apply(TrainingUpdate::RunRemoved {
+            run_id: "run-a".to_owned(),
+        });
+
+        assert_eq!(snapshot.runs.len(), 1);
+        assert_eq!(snapshot.runs[0].id, "run-b");
     }
 }

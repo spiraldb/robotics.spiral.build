@@ -68,6 +68,7 @@ fn feature_routers_preserve_every_public_path_exactly_once() {
         "/spiral/replay",
         "/spiral/video.mp4",
         "/training/runs",
+        "/training/runs/{id}",
         "/training/runs/{id}/stop",
         "/rollout",
         "/rollout/stop",

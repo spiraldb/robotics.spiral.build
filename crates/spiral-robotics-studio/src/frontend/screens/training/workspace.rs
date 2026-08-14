@@ -24,6 +24,7 @@ use crate::frontend::components::charts::{
     TooltipRateUnit, downsample_extrema, studio_bytes_tooltip, studio_numeric_tooltip,
     studio_percent_tooltip, studio_rate_tooltip,
 };
+use crate::frontend::components::icons::Trash;
 use crate::frontend::screens::training::state::training_controller;
 
 const EMPTY_RUN_PANEL_ID: &str = "training-run-empty";
@@ -35,6 +36,14 @@ pub(crate) fn TrainingWorkspace() -> Element {
     let dataset_id = studio.selected_dataset.read().clone();
     let controller = training_controller();
     let snapshot = studio.training.read().clone();
+    let run_names = snapshot
+        .runs
+        .iter()
+        .map(|run| run.config.run_name.clone())
+        .collect::<Vec<_>>();
+    use_effect(use_reactive((&run_names,), move |(names,)| {
+        controller.sync_automatic_run_name(&names);
+    }));
     let active_run = snapshot.active_run().cloned();
     let active_run_id = active_run.as_ref().map(|run| run.id.clone());
     use_effect(use_reactive((&active_run_id,), move |(run_id,)| {
@@ -286,8 +295,7 @@ fn TrainingRunControl(
                             value: request.run_name.clone(),
                             disabled: active_run.is_some(),
                             oninput: move |event| {
-                                let value = event.value();
-                                controller.edit_request(move |request| request.run_name = value);
+                                controller.set_run_name(event.value());
                             },
                         }
                     }
@@ -487,19 +495,90 @@ fn TrainingHistory(history: Vec<TrainingRun>) -> Element {
                 }
             }
             for run in history {
-                button {
-                    r#type: "button",
-                    class: if selected_run.as_deref() == Some(run.id.as_str()) { "training-history-row training-history-row-selected" } else { "training-history-row" },
-                    "aria-pressed": selected_run.as_deref() == Some(run.id.as_str()),
-                    title: "Open {run.config.run_name}",
-                    onclick: {
-                        let id = run.id.clone();
-                        move |_| controller.open_run(id.clone())
-                    },
-                    span { class: "training-history-name", "{run.config.run_name}" }
-                    span { class: "training-history-dataset", "{run.config.dataset_id}" }
-                    span { class: phase_class(run.phase), "{run.phase.label()}" }
-                    span { class: "training-history-step", "{run.current_step} / {run.config.steps}" }
+                TrainingHistoryRow {
+                    selected: selected_run.as_deref() == Some(run.id.as_str()),
+                    run,
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn TrainingHistoryRow(run: TrainingRun, selected: bool) -> Element {
+    let studio = studio();
+    let controller = training_controller();
+    let deleting_run = controller.deleting();
+    let deleting = deleting_run.as_deref() == Some(run.id.as_str());
+    let delete_disabled = run.phase.active() || deleting_run.is_some();
+    let confirming = controller.confirming_delete().as_deref() == Some(run.id.as_str());
+    let checkpoint_word = if run.checkpoints.len() == 1 {
+        "checkpoint"
+    } else {
+        "checkpoints"
+    };
+    let delete_title = if run.phase.active() {
+        "Stop training before deleting this run."
+    } else if deleting {
+        "Deleting this run and its checkpoints."
+    } else {
+        "Delete this run and all of its checkpoints."
+    };
+
+    rsx! {
+        article {
+            class: if selected { "training-history-entry training-history-entry-selected" } else { "training-history-entry" },
+            button {
+                r#type: "button",
+                class: "training-history-row",
+                "aria-pressed": selected,
+                title: "Open {run.config.run_name}",
+                onclick: {
+                    let id = run.id.clone();
+                    move |_| controller.open_run(id.clone())
+                },
+                span { class: "training-history-name", "{run.config.run_name}" }
+                span { class: "training-history-dataset", "{run.config.dataset_id}" }
+                span { class: phase_class(run.phase), "{run.phase.label()}" }
+                span { class: "training-history-step", "{run.current_step} / {run.config.steps}" }
+            }
+            button {
+                r#type: "button",
+                class: "training-history-delete",
+                disabled: delete_disabled,
+                title: "{delete_title}",
+                "aria-label": "Delete run {run.config.run_name}",
+                onclick: {
+                    let id = run.id.clone();
+                    move |_| controller.confirm_delete(id.clone())
+                },
+                Trash {}
+            }
+            if confirming {
+                div { class: "training-history-delete-confirmation", role: "alert",
+                    span {
+                        "Delete "
+                        strong { "{run.config.run_name}" }
+                        " and its {run.checkpoints.len()} {checkpoint_word}? Metrics and logs are removed too."
+                    }
+                    button {
+                        r#type: "button",
+                        class: "btn btn-danger bg-danger-soft",
+                        disabled: deleting,
+                        onclick: {
+                            let id = run.id.clone();
+                            let name = run.config.run_name.clone();
+                            move |_| controller.delete(studio, id.clone(), name.clone())
+                        },
+                        if deleting { "Deleting…" } else { "Delete run" }
+                    }
+                    button {
+                        r#type: "button",
+                        class: "btn btn-outline",
+                        disabled: deleting,
+                        onclick: move |_| controller.cancel_delete(),
+                        "Keep"
+                    }
                 }
             }
         }
@@ -617,6 +696,7 @@ fn TrainingLearning(run: TrainingRun) -> Element {
     let latest_validation = latest_validation.unwrap_or_else(|| "—".to_owned());
     let lr = lr.unwrap_or_else(|| "—".to_owned());
     let chart_id = chart_dom_id("training-loss", &run.id);
+    let chart_group = training_chart_group(&run.id);
     let loss_chart = training_loss_chart(&run);
 
     rsx! {
@@ -654,6 +734,7 @@ fn TrainingLearning(run: TrainingRun) -> Element {
                     chart: loss_chart,
                     class: "training-loss-chart".to_owned(),
                     aria_label: "Training and validation loss by optimizer step".to_owned(),
+                    group: Some(chart_group),
                 }
             }
             div { class: "training-event-strip",
@@ -723,9 +804,12 @@ fn TrainingInputs(run: TrainingRun) -> Element {
 
 #[component]
 fn TrainingPerformance(run: TrainingRun) -> Element {
-    let total_steps = run.config.steps;
     let metrics = run.metrics.as_slice();
     let last = metrics.last();
+    let observed_steps = last
+        .map_or(run.current_step, |point| point.step.max(run.current_step))
+        .max(1);
+    let chart_group = training_chart_group(&run.id);
     let throughput = last
         .map(|point| format!("{:.1} samples/s", point.examples_per_second))
         .unwrap_or_else(|| "—".to_owned());
@@ -745,20 +829,20 @@ fn TrainingPerformance(run: TrainingRun) -> Element {
         .map(format_bytes)
         .unwrap_or_else(|| "—".to_owned());
     let throughput_chart =
-        training_resource_chart(metrics, total_steps, ResourceSeries::Throughput);
-    let transfer_chart = training_resource_chart(metrics, total_steps, ResourceSeries::Transfer);
-    let cpu_chart = training_resource_chart(metrics, total_steps, ResourceSeries::Cpu);
-    let gpu_chart = training_resource_chart(metrics, total_steps, ResourceSeries::Gpu);
-    let memory_chart = training_resource_chart(metrics, total_steps, ResourceSeries::Memory);
+        training_resource_chart(metrics, observed_steps, ResourceSeries::Throughput);
+    let transfer_chart = training_resource_chart(metrics, observed_steps, ResourceSeries::Transfer);
+    let cpu_chart = training_resource_chart(metrics, observed_steps, ResourceSeries::Cpu);
+    let gpu_chart = training_resource_chart(metrics, observed_steps, ResourceSeries::Gpu);
+    let memory_chart = training_resource_chart(metrics, observed_steps, ResourceSeries::Memory);
 
     rsx! {
         section { class: "training-resources",
             div { class: "training-resource-grid",
-                ResourceLane { id: chart_dom_id("training-rate", &run.id), label: "Training rate", value: throughput, chart: throughput_chart, class: "resource-throughput", description: "Samples completed per second." }
-                ResourceLane { id: chart_dom_id("input-rate", &run.id), label: "Input rate", value: transfer, chart: transfer_chart, class: "resource-transfer", description: "Prepared camera data per second." }
-                ResourceLane { id: chart_dom_id("cpu-utilization", &run.id), label: "CPU", value: cpu, chart: cpu_chart, class: "resource-cpu", description: "Studio process CPU utilization. 100% is one fully occupied core." }
-                ResourceLane { id: chart_dom_id("gpu-utilization", &run.id), label: "GPU", value: gpu, chart: gpu_chart, class: "resource-gpu", description: "Whole-device Apple GPU utilization reported by macOS; other processes may contribute." }
-                ResourceLane { id: chart_dom_id("memory-usage", &run.id), label: "Memory", value: memory, chart: memory_chart, class: "resource-memory", description: "Current resident memory used by the Studio process, including training allocations." }
+                ResourceLane { id: chart_dom_id("training-rate", &run.id), label: "Training rate", value: throughput, chart: throughput_chart, group: chart_group.clone(), class: "resource-throughput", description: "Samples completed per second." }
+                ResourceLane { id: chart_dom_id("input-rate", &run.id), label: "Input rate", value: transfer, chart: transfer_chart, group: chart_group.clone(), class: "resource-transfer", description: "Prepared camera data per second." }
+                ResourceLane { id: chart_dom_id("cpu-utilization", &run.id), label: "CPU", value: cpu, chart: cpu_chart, group: chart_group.clone(), class: "resource-cpu", description: "Studio process CPU utilization. 100% is one fully occupied core." }
+                ResourceLane { id: chart_dom_id("gpu-utilization", &run.id), label: "GPU", value: gpu, chart: gpu_chart, group: chart_group.clone(), class: "resource-gpu", description: "Whole-device Apple GPU utilization reported by macOS; other processes may contribute." }
+                ResourceLane { id: chart_dom_id("memory-usage", &run.id), label: "Memory", value: memory, chart: memory_chart, group: chart_group, class: "resource-memory", description: "Current resident memory used by the Studio process, including training allocations." }
             }
         }
     }
@@ -770,6 +854,7 @@ fn ResourceLane(
     label: &'static str,
     value: String,
     chart: Chart,
+    group: String,
     class: &'static str,
     description: &'static str,
 ) -> Element {
@@ -781,6 +866,7 @@ fn ResourceLane(
                 chart,
                 class: "training-resource-chart".to_owned(),
                 aria_label: format!("{label} by optimizer step. {description}"),
+                group: Some(group),
             }
         }
     }
@@ -838,28 +924,8 @@ fn training_loss_chart(run: &TrainingRun) -> Chart {
                 .split_number(4),
         )
         .y_axis(chart_axis(AxisType::Value, true).split_number(5))
-        .data_zoom(
-            DataZoom::new()
-                .type_(DataZoomType::Inside)
-                .x_axis_index(0)
-                .filter_mode(FilterMode::Filter)
-                .realtime(true)
-                .throttle(50),
-        )
-        .data_zoom(
-            DataZoom::new()
-                .type_(DataZoomType::Slider)
-                .x_axis_index(0)
-                .filter_mode(FilterMode::Filter)
-                .realtime(true)
-                .brush_select(false)
-                .left(48)
-                .right(12)
-                .bottom(4)
-                .background_color(COLOR_SURFACE)
-                .border_color(COLOR_LINE)
-                .filler_color(COLOR_SELECTED),
-        )
+        .data_zoom(training_inside_zoom())
+        .data_zoom(training_slider_zoom(48.0, 12.0))
         .series(metric_line("train-loss", "Train", COLOR_TRAIN, train, 2.0))
         .series(metric_line(
             "validation-loss",
@@ -870,9 +936,35 @@ fn training_loss_chart(run: &TrainingRun) -> Chart {
         ))
 }
 
+fn training_inside_zoom() -> DataZoom {
+    DataZoom::new()
+        .type_(DataZoomType::Inside)
+        .x_axis_index(0)
+        .filter_mode(FilterMode::Filter)
+        .realtime(true)
+        .throttle(50)
+}
+
+fn training_slider_zoom(left: f64, right: f64) -> DataZoom {
+    DataZoom::new()
+        .type_(DataZoomType::Slider)
+        .show(true)
+        .x_axis_index(0)
+        .filter_mode(FilterMode::Filter)
+        .realtime(true)
+        .throttle(50)
+        .brush_select(false)
+        .left(left)
+        .right(right)
+        .bottom(4)
+        .background_color(COLOR_SURFACE)
+        .border_color(COLOR_LINE)
+        .filler_color(COLOR_SELECTED)
+}
+
 fn training_resource_chart(
     metrics: &[TrainingMetricPoint],
-    total_steps: u64,
+    observed_steps: u64,
     series: ResourceSeries,
 ) -> Chart {
     let (id, name, color) = match series {
@@ -904,16 +996,18 @@ fn training_resource_chart(
         .animation(false)
         .color(vec![color])
         .tooltip(tooltip)
-        .grid(Grid::new().left(0).right(0).top(6).bottom(2))
+        .grid(Grid::new().left(0).right(0).top(6).bottom(40))
         .x_axis(
             chart_axis(AxisType::Value, false)
                 .min(0)
-                .max(total_steps.max(1) as f64),
+                .max(observed_steps.max(1) as f64),
         )
         .y_axis(match series {
             ResourceSeries::Gpu => chart_axis(AxisType::Value, false).min(0).max(100),
             _ => chart_axis(AxisType::Value, false).min(0).scale(true),
         })
+        .data_zoom(training_inside_zoom())
+        .data_zoom(training_slider_zoom(8.0, 8.0))
         .series(
             metric_line(id, name, color, data, 1.5)
                 .area_style(AreaStyle::new().color(color).opacity(0.09)),
@@ -992,6 +1086,10 @@ fn chart_dom_id(prefix: &str, key: &str) -> String {
     format!("{prefix}-{safe}")
 }
 
+fn training_chart_group(run_id: &str) -> String {
+    chart_dom_id("training-step-window", run_id)
+}
+
 fn step_percent(step: u64, total_steps: u64) -> f64 {
     (step as f64 / total_steps.max(1) as f64 * 100.0).clamp(0.0, 100.0)
 }
@@ -1054,7 +1152,7 @@ mod tests {
     }
 
     #[test]
-    fn throughput_uses_the_optimizer_step_axis() {
+    fn throughput_uses_the_optimizer_step_axis_and_shared_zoom() {
         let metrics = vec![TrainingMetricPoint {
             step: 50,
             examples_per_second: 25.0,
@@ -1064,6 +1162,11 @@ mod tests {
         let option = serde_json::to_value(chart).expect("chart should serialize");
         assert_eq!(option["xAxis"]["max"], 100.0);
         assert_eq!(option["series"][0]["data"][0][0], 50.0);
+        assert_eq!(option["dataZoom"].as_array().map(Vec::len), Some(2));
+        assert_eq!(option["dataZoom"][0]["type"], "inside");
+        assert_eq!(option["dataZoom"][1]["type"], "slider");
+        assert_eq!(option["dataZoom"][1]["show"], true);
+        assert_eq!(option["dataZoom"][0]["xAxisIndex"], 0);
         assert_eq!(step_percent(50, 100), 50.0);
     }
 

@@ -18,6 +18,9 @@ pub const DEFAULT_ROLLOUT_DURATION_SECONDS: u32 = 30;
 /// Longest continuous policy rollout an operator may approve.
 pub const MAX_ROLLOUT_DURATION_SECONDS: u32 = 600;
 
+/// Maximum predicted-action prefix consumed before rollout observes and replans.
+pub const MAX_ROLLOUT_ACTION_STEPS: usize = 20;
+
 /// Whether a requested policy rollout stays within the product safety window.
 pub const fn rollout_duration_is_valid(seconds: u32) -> bool {
     seconds >= MIN_ROLLOUT_DURATION_SECONDS && seconds <= MAX_ROLLOUT_DURATION_SECONDS

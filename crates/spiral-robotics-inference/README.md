@@ -1,8 +1,10 @@
 # Spiral Robotics Native ACT
 
-Native ACT training and inference with no external ML runtime. Studio's server
-uses this engine as part of the single Spiral Robotics backend; the binary in
-this crate is only a diagnostic interface to the same implementation.
+ACT training and inference through direct Rust bindings to PyTorch/LibTorch.
+The separate `spiral-robotics-training-pytorch` adapter exposes training
+through Studio's backend-neutral contract; rollout inference uses this engine's
+`Policy` boundary. The binary in this crate is only a diagnostic interface to
+the same implementation.
 
 The first compatibility target is Hugging Face LeRobot's established
 [`lerobot/act_aloha_sim_transfer_cube_human`](https://huggingface.co/lerobot/act_aloha_sim_transfer_cube_human)
@@ -41,17 +43,18 @@ cargo run --release -p spiral-robotics-inference -- run \
   --state 0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ```
 
-On Apple platforms, compile Burn's native WGPU backend for Metal:
+On Apple platforms, enable the compatibility `metal` feature to select the
+PyTorch MPS device:
 
 ```sh
 cargo run --release -p spiral-robotics-inference \
   --no-default-features --features cli,metal -- run --runs 5
 ```
 
-The CLI performs one unmeasured warm-up before reported runs. Burn's fused
-Metal backend compiles and autotunes the graph during that warm-up; it must be
-done while activating a model, never on a robot control-loop deadline. Pass
-`--cold` only when intentionally measuring startup behavior.
+The CLI performs one unmeasured warm-up before reported runs. PyTorch may
+initialize MPS kernels during that warm-up; it must be done while activating a
+model, never on a robot control-loop deadline. Pass `--cold` only when
+intentionally measuring startup behavior.
 
 ## Integration boundary
 
@@ -98,15 +101,15 @@ re-validating loosely related JSON and checkpoint values throughout inference.
 
 ## Current scope
 
-- batch size one;
-- one RGB camera;
+- configurable training batches and camera streams;
+- batch-size-one policy inference with one or more RGB cameras;
 - ResNet-18 ACT checkpoints with mean/std normalization;
 - stateless full-chunk prediction;
-- portable CPU, optional Apple Accelerate, and optional Metal backends.
+- portable LibTorch CPU and Apple MPS execution.
 
 Portable CPU training and inference are always available. On Apple platforms,
-`accelerate` enables an Accelerate-backed CPU path and `metal` enables the
-intended local real-time path.
+the `metal` compatibility feature exposes MPS; `accelerate` remains an empty
+compatibility feature for existing build commands.
 
 ## Verification
 

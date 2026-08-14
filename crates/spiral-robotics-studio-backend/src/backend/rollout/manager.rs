@@ -45,6 +45,10 @@ const INITIAL_CAMERA_TIMEOUT: Duration = Duration::from_secs(5);
 /// prediction and accepts 70% of the new one.
 const ACTION_BLEND_OLD_WEIGHT: f32 = 0.3;
 const ACTION_BLEND_NEW_WEIGHT: f32 = 0.7;
+/// LeRobot filters observations whose raw joint-state L2 distance from the
+/// last processed observation is below one. For an SO-101 those raw units are
+/// degrees for the five arm joints and a 0..100 position for the gripper.
+const OBSERVATION_SIMILARITY_TOLERANCE: f32 = 1.0;
 static SESSION_IDS: StableIdSequence = StableIdSequence::new("rollout", 1);
 
 #[derive(Debug, Deserialize)]
@@ -124,11 +128,43 @@ struct CapturedImage {
 
 struct InferenceObservation {
     state: Vec<f32>,
+    /// State in LeRobot's raw SO-101 units, retained only for its server-side
+    /// near-duplicate observation filter. Model input remains normalized.
+    similarity_state: Vec<f32>,
     images: Vec<CapturedImage>,
     /// Absolute policy timestep whose corresponding action is chunk index zero.
     requested_timestep: u64,
     /// Oldest concrete sensor input, used for end-to-end latency metrics.
     oldest_input_at: Instant,
+}
+
+/// LeRobot's asynchronous policy server accepts observations through a
+/// `Queue(maxsize=1)`: a newly arrived observation replaces an older pending
+/// one while inference is occupied. Keep that behavior explicit so queued
+/// inference can never accumulate stale camera frames.
+#[derive(Default)]
+struct LatestObservationSlot {
+    pending: Option<InferenceObservation>,
+}
+
+impl LatestObservationSlot {
+    fn replace(&mut self, observation: InferenceObservation) {
+        self.pending = Some(observation);
+    }
+
+    fn take(&mut self) -> Option<InferenceObservation> {
+        self.pending.take()
+    }
+}
+
+fn observations_similar(candidate: &[f32], previous: &[f32]) -> bool {
+    candidate.len() == previous.len()
+        && candidate
+            .iter()
+            .zip(previous)
+            .map(|(candidate, previous)| (candidate - previous).powi(2))
+            .sum::<f32>()
+            < OBSERVATION_SIMILARITY_TOLERANCE.powi(2)
 }
 
 struct DecodedImage {
@@ -179,8 +215,15 @@ impl TimedActionQueue {
         })
     }
 
+    #[cfg(test)]
     fn next_timestep(&self) -> u64 {
         self.next_timestep
+    }
+
+    fn latest_action_timestep(&self) -> Result<u64, String> {
+        self.next_timestep.checked_sub(1).ok_or_else(|| {
+            "cannot label an observation before the first action has executed".to_owned()
+        })
     }
 
     fn remaining(&self) -> usize {
@@ -207,17 +250,10 @@ impl TimedActionQueue {
             .saturating_sub(requested_timestep)
             .try_into()
             .map_err(|_| "policy inference delay exceeds the action index range".to_owned())?;
-        let future = incoming.get(elapsed..).ok_or_else(|| {
-            format!(
-                "asynchronous inference returned no future actions after {elapsed} elapsed policy steps"
-            )
-        })?;
-        if future.is_empty() {
-            return Err(format!(
-                "asynchronous inference exhausted its {}-step action horizon before completion",
-                incoming.len()
-            ));
-        }
+        // LeRobot accepts an entirely stale response as an empty queue. Its
+        // control loop keeps the servo's last target active and sends one
+        // must-go observation to recover instead of terminating the rollout.
+        let future = incoming.get(elapsed..).unwrap_or(&[]);
 
         let current = &self.actions;
         self.actions = future
@@ -263,13 +299,8 @@ fn blend_actions(existing: &[f32], incoming: &[f32]) -> Vec<f32> {
         .collect()
 }
 
-fn action_refill_threshold(chunk_steps: usize, recommended_action_steps: usize) -> usize {
-    let half_horizon = (chunk_steps / 2).max(1);
-    let reobservation_stride = recommended_action_steps.min(half_horizon);
-    chunk_steps
-        .saturating_sub(reobservation_stride)
-        .max(1)
-        .min(chunk_steps)
+fn action_refill_threshold(chunk_steps: usize) -> usize {
+    chunk_steps / 2
 }
 
 pub(crate) struct RolloutManager {
@@ -507,9 +538,11 @@ impl RolloutManager {
         )
         .map_err(|error| error.to_string())?;
         let joint_names = contract.joint_names;
-        let action_steps = contract.action_steps;
         let period = contract.sample_period;
         let sample_hz = contract.sample_hz;
+        let reobservation_steps = specification
+            .action_chunk_size
+            .saturating_sub(action_refill_threshold(specification.action_chunk_size));
         let mut cameras = Vec::with_capacity(contract.camera_bindings.len());
         for binding in contract.camera_bindings {
             cameras.push(CameraInput {
@@ -563,7 +596,7 @@ impl RolloutManager {
                 return Err("policy admission ended without a control transition".to_owned());
             }
         }
-        if !lock(&self.coordinator).running(session, sample_hz, action_steps)? {
+        if !lock(&self.coordinator).running(session, sample_hz, reobservation_steps)? {
             return lock(&self.coordinator).stopped_outcome(session);
         }
 
@@ -579,13 +612,16 @@ impl RolloutManager {
         require_healthy_policy_robot(initial_robot)?;
         require_fresh_cameras(&cameras)?;
         let initial_state = policy_observation_state(&joint_names, initial_robot)?;
+        let initial_similarity_state = lerobot_similarity_state(&joint_names, initial_robot)?;
         let initial_observation = capture_inference_observation(
             initial_state,
+            initial_similarity_state,
             &cameras,
             &specification.image_inputs,
             0,
             Instant::now(),
         )?;
+        let mut last_processed_similarity_state = initial_observation.similarity_state.clone();
         let mut initial_task = spawn_inference(policy, initial_observation);
         let initial_output = loop {
             tokio::select! {
@@ -607,8 +643,17 @@ impl RolloutManager {
 
         let mut policy = Some(initial_policy);
         let mut actions = TimedActionQueue::from_initial_chunk(&initial.chunk)?;
-        let refill_threshold = action_refill_threshold(initial.chunk.steps(), action_steps);
+        // LeRobot's async client requests observations once queue_size /
+        // action_chunk_size <= 0.5. Integer queue sizes make this floor(N / 2).
+        let refill_threshold = action_refill_threshold(initial.chunk.steps());
         let mut inference = None::<InferenceTask>;
+        // Equivalent to LeRobot's one-element server observation queue: while
+        // a forward pass is busy, every newer eligible observation replaces
+        // the previous pending one.
+        let mut pending_observation = LatestObservationSlot::default();
+        // LeRobot arms one must-go observation whenever an action chunk is
+        // received. It is consumed only if that chunk runs completely dry.
+        let mut must_go_when_empty = true;
         let deadline =
             TokioInstant::now() + Duration::from_secs(u64::from(request.duration_seconds));
         let mut ticker = tokio::time::interval(period);
@@ -661,62 +706,96 @@ impl RolloutManager {
                     duration_ms(completed.chunk.stats.model),
                 )?;
                 actions.merge(completed.requested_timestep, &completed.chunk)?;
+                must_go_when_empty = true;
                 policy = Some(returned_policy);
             }
 
-            // LeRobot requests a new chunk when the queue falls below a
-            // configurable threshold. Here the checkpoint's n_action_steps is
-            // the re-observation stride: a 100-action chunk with 20 recommended
-            // steps requests a refill with 80 future actions still buffered.
-            // This retains the entire learned trajectory instead of discarding
-            // actions 20..99, while leaving ample inference-latency headroom.
-            if policy.is_some() && actions.remaining() <= refill_threshold {
-                let state = policy_observation_state(&joint_names, robot)?;
+            let action_executed = if actions.remaining() > 0 {
+                let action = actions.pop()?;
+                let prepared = prepare_action_goals(&joint_names, &action)
+                    .map_err(|error| format!("stopped policy: {error}"))?;
+                if let Some(clamp) = prepared.clamps.first() {
+                    let additional = prepared.clamps.len().saturating_sub(1);
+                    let warning = if additional == 0 {
+                        format!(
+                            "Policy output for joint {:?} exceeded normalized [-1, 1]; the command was clamped to the limit.",
+                            clamp.joint
+                        )
+                    } else {
+                        format!(
+                            "Policy output for joint {:?} and {additional} other joint{} exceeded normalized [-1, 1]; the commands were clamped to the limits.",
+                            clamp.joint,
+                            if additional == 1 { "" } else { "s" }
+                        )
+                    };
+                    if lock(&self.coordinator).record_action_clamp_warning(session, warning)? {
+                        tracing::warn!(
+                            joint = %clamp.joint,
+                            index = clamp.index,
+                            requested = clamp.requested,
+                            applied = clamp.applied,
+                            additional_clamps = additional,
+                            "clamped policy action outside normalized range"
+                        );
+                    }
+                }
+
+                self.hardware
+                    .set_policy_goals(&request.robot, session, prepared.goals)
+                    .await?;
+                lock(&self.coordinator)
+                    .record_command(session, cycle_started.elapsed() > period)?;
+                true
+            } else {
+                // The independent hardware loop continues ramping toward the
+                // last accepted target while inference catches up.
+                false
+            };
+
+            // LeRobot executes the action first, records it as latest_action,
+            // and only then captures an observation carrying that timestep.
+            // Preserve that ordering and keep replacing the one-slot pending
+            // observation while the local policy worker is occupied.
+            let must_go = actions.remaining() == 0 && must_go_when_empty;
+            if must_go || (action_executed && actions.remaining() <= refill_threshold) {
+                let refreshed = self.hardware.state();
+                if let Some(outcome) = self.classify_control(session, &refreshed.mode)? {
+                    return Ok(outcome);
+                }
+                let refreshed_robot = policy_robot(&refreshed, &request.robot)?;
+                require_healthy_policy_robot(refreshed_robot)?;
+                require_fresh_cameras(&cameras)?;
+                let state = policy_observation_state(&joint_names, refreshed_robot)?;
+                let similarity_state = lerobot_similarity_state(&joint_names, refreshed_robot)?;
+                let latest_action = actions.latest_action_timestep()?;
                 let observation = capture_inference_observation(
                     state,
+                    similarity_state,
                     &cameras,
                     &specification.image_inputs,
-                    actions.next_timestep(),
-                    cycle_started,
+                    latest_action,
+                    Instant::now(),
                 )?;
+                if must_go
+                    || !observations_similar(
+                        &observation.similarity_state,
+                        &last_processed_similarity_state,
+                    )
+                {
+                    pending_observation.replace(observation);
+                }
+                if must_go {
+                    must_go_when_empty = false;
+                }
+            }
+            if policy.is_some()
+                && let Some(observation) = pending_observation.take()
+            {
+                last_processed_similarity_state.clone_from(&observation.similarity_state);
                 let next_policy = policy.take().expect("an idle policy is available");
                 debug_assert!(inference.is_none());
                 inference = Some(spawn_inference(next_policy, observation));
             }
-
-            let action = actions.pop()?;
-            let prepared = prepare_action_goals(&joint_names, &action)
-                .map_err(|error| format!("stopped policy: {error}"))?;
-            if let Some(clamp) = prepared.clamps.first() {
-                let additional = prepared.clamps.len().saturating_sub(1);
-                let warning = if additional == 0 {
-                    format!(
-                        "Policy output for joint {:?} exceeded normalized [-1, 1]; the command was clamped to the limit.",
-                        clamp.joint
-                    )
-                } else {
-                    format!(
-                        "Policy output for joint {:?} and {additional} other joint{} exceeded normalized [-1, 1]; the commands were clamped to the limits.",
-                        clamp.joint,
-                        if additional == 1 { "" } else { "s" }
-                    )
-                };
-                if lock(&self.coordinator).record_action_clamp_warning(session, warning)? {
-                    tracing::warn!(
-                        joint = %clamp.joint,
-                        index = clamp.index,
-                        requested = clamp.requested,
-                        applied = clamp.applied,
-                        additional_clamps = additional,
-                        "clamped policy action outside normalized range"
-                    );
-                }
-            }
-
-            self.hardware
-                .set_policy_goals(&request.robot, session, prepared.goals)
-                .await?;
-            lock(&self.coordinator).record_command(session, cycle_started.elapsed() > period)?;
         }
     }
 
@@ -984,8 +1063,42 @@ fn policy_observation_state(
     .map_err(|error| format!("stopped policy: {error}"))
 }
 
+/// Reconstruct the raw joint units used by LeRobot's SO-101 client solely for
+/// its near-duplicate observation filter. Center offsets do not affect the
+/// distance: body joints use degrees, while the gripper's RANGE_0_100 value is
+/// the affine equivalent of this runtime's centered-normalized position.
+fn lerobot_similarity_state(
+    joint_names: &[String],
+    robot: &RobotTelemetry,
+) -> Result<Vec<f32>, String> {
+    joint_names
+        .iter()
+        .map(|name| {
+            let joint = robot
+                .joints
+                .iter()
+                .find(|joint| joint.name == *name)
+                .ok_or_else(|| {
+                    format!("stopped policy: joint {name:?} disappeared from live telemetry")
+                })?;
+            let value = if name == "gripper" {
+                joint.normalized.map(|value| (value + 1.0) * 50.0)
+            } else {
+                joint.degrees
+            };
+            value
+                .filter(|value| value.is_finite())
+                .map(|value| value as f32)
+                .ok_or_else(|| {
+                    format!("stopped policy: joint {name:?} has no finite LeRobot-space telemetry")
+                })
+        })
+        .collect()
+}
+
 fn capture_inference_observation(
     state: Vec<f32>,
+    similarity_state: Vec<f32>,
     cameras: &[CameraInput],
     specifications: &[spiral_robotics_inference::ImageInputSpecification],
     requested_timestep: u64,
@@ -1029,6 +1142,7 @@ fn capture_inference_observation(
         .collect::<Result<Vec<_>, String>>()?;
     Ok(InferenceObservation {
         state,
+        similarity_state,
         images,
         requested_timestep,
         oldest_input_at,
@@ -1049,6 +1163,7 @@ fn infer_observation(
 ) -> Result<CompletedInference, String> {
     let InferenceObservation {
         state,
+        similarity_state: _,
         images,
         requested_timestep,
         oldest_input_at,
@@ -1133,9 +1248,9 @@ fn load_native_policy(
     artifact: ModelArtifact,
 ) -> spiral_robotics_inference::Result<(Box<dyn Policy>, &'static str)> {
     if !spiral_robotics_inference::act::metal_available() {
-        tracing::warn!("Metal rollout backend unavailable; using Accelerate CPU");
+        tracing::warn!("PyTorch MPS rollout backend unavailable; using LibTorch CPU");
         return spiral_robotics_inference::act::load_cpu_artifact(artifact)
-            .map(|policy| (Box::new(policy) as Box<dyn Policy>, "Accelerate CPU"));
+            .map(|policy| (Box::new(policy) as Box<dyn Policy>, "LibTorch CPU"));
     }
 
     // ModelArtifact clones share immutable bytes, so preserving the CPU
@@ -1145,16 +1260,16 @@ fn load_native_policy(
         spiral_robotics_inference::act::load_metal_artifact(artifact)
     }));
     match metal {
-        Ok(Ok(policy)) => Ok((Box::new(policy) as Box<dyn Policy>, "Metal")),
+        Ok(Ok(policy)) => Ok((Box::new(policy) as Box<dyn Policy>, "PyTorch MPS")),
         Ok(Err(error)) => {
-            tracing::warn!("Metal rollout backend unavailable ({error}); using Accelerate CPU");
+            tracing::warn!("PyTorch MPS rollout backend unavailable ({error}); using LibTorch CPU");
             spiral_robotics_inference::act::load_cpu_artifact(fallback)
-                .map(|policy| (Box::new(policy) as Box<dyn Policy>, "Accelerate CPU"))
+                .map(|policy| (Box::new(policy) as Box<dyn Policy>, "LibTorch CPU"))
         }
         Err(_) => {
-            tracing::warn!("Metal rollout backend panicked during discovery; using Accelerate CPU");
+            tracing::warn!("PyTorch MPS rollout discovery panicked; using LibTorch CPU");
             spiral_robotics_inference::act::load_cpu_artifact(fallback)
-                .map(|policy| (Box::new(policy) as Box<dyn Policy>, "Accelerate CPU"))
+                .map(|policy| (Box::new(policy) as Box<dyn Policy>, "LibTorch CPU"))
         }
     }
 }
@@ -1171,10 +1286,11 @@ fn load_native_policy(
 mod tests {
     use super::{
         ArtifactDataContract, ArtifactManifest, CameraInput, CompletedInference, INPUT_STALE_AFTER,
-        InferenceObservation, PolicyAdmission, TimedActionQueue, action_refill_threshold,
-        completed_inference_age, load_selected_checkpoint, publish_active_rollout,
-        require_fresh_cameras, resolve_inference, spawn_inference, stop_and_join_active,
-        take_active_rollout, validate_manifest, wait_for_policy_admission,
+        InferenceObservation, LatestObservationSlot, PolicyAdmission, TimedActionQueue,
+        action_refill_threshold, completed_inference_age, load_selected_checkpoint,
+        observations_similar, publish_active_rollout, require_fresh_cameras, resolve_inference,
+        spawn_inference, stop_and_join_active, take_active_rollout, validate_manifest,
+        wait_for_policy_admission,
     };
     use crate::backend::application::checkpoints::{
         CheckpointArtifact, CheckpointFuture, CheckpointKey, CheckpointPublication,
@@ -1263,9 +1379,11 @@ mod tests {
         )
         .unwrap();
         let mut queue = TimedActionQueue::from_initial_chunk(&initial).unwrap();
+        assert!(queue.latest_action_timestep().is_err());
         for expected in 0..35 {
             assert_eq!(queue.pop().unwrap(), vec![expected as f32]);
         }
+        assert_eq!(queue.latest_action_timestep().unwrap(), 34);
 
         // This observation was captured at timestep 20 and completed at 35,
         // so predictions 0..14 are stale. Timestep 35 overlaps the original
@@ -1288,21 +1406,49 @@ mod tests {
     }
 
     #[test]
-    fn async_action_queue_rejects_a_chunk_with_no_future_actions() {
+    fn async_action_queue_accepts_a_stale_chunk_as_empty_for_must_go_recovery() {
         let chunk =
             ActionChunk::try_new(vec![0.0; 100], 100, 1, InferenceStats::default()).unwrap();
         let mut queue = TimedActionQueue::from_initial_chunk(&chunk).unwrap();
         for _ in 0..100 {
             queue.pop().unwrap();
         }
-        assert!(queue.merge(0, &chunk).unwrap_err().contains("exhausted"));
+        queue.merge(0, &chunk).unwrap();
+        assert_eq!(queue.remaining(), 0);
+        assert_eq!(queue.latest_action_timestep().unwrap(), 99);
     }
 
     #[test]
-    fn action_queue_refills_at_the_checkpoint_stride_with_half_horizon_fallback() {
-        assert_eq!(action_refill_threshold(100, 20), 80);
-        assert_eq!(action_refill_threshold(100, 100), 50);
-        assert_eq!(action_refill_threshold(10, 10), 5);
+    fn action_queue_refills_at_lerobot_default_half_chunk_threshold() {
+        assert_eq!(action_refill_threshold(100), 50);
+        assert_eq!(action_refill_threshold(99), 49);
+        assert_eq!(action_refill_threshold(10), 5);
+    }
+
+    #[test]
+    fn pending_observation_slot_keeps_only_the_newest_timestep() {
+        let mut slot = LatestObservationSlot::default();
+        let observation = |requested_timestep| InferenceObservation {
+            state: vec![requested_timestep as f32],
+            similarity_state: vec![requested_timestep as f32],
+            images: Vec::new(),
+            requested_timestep,
+            oldest_input_at: Instant::now(),
+        };
+
+        slot.replace(observation(49));
+        slot.replace(observation(57));
+
+        let pending = slot.take().expect("the newest observation stays pending");
+        assert_eq!(pending.requested_timestep, 57);
+        assert!(slot.take().is_none());
+    }
+
+    #[test]
+    fn lerobot_observation_similarity_uses_strict_unit_l2_tolerance() {
+        assert!(observations_similar(&[0.5, 0.5], &[0.0, 0.0]));
+        assert!(!observations_similar(&[1.0, 0.0], &[0.0, 0.0]));
+        assert!(!observations_similar(&[0.0], &[0.0, 0.0]));
     }
 
     #[test]
@@ -1323,6 +1469,7 @@ mod tests {
         let now = Instant::now();
         let observation = InferenceObservation {
             state: vec![0.0],
+            similarity_state: vec![0.0],
             images: Vec::new(),
             requested_timestep: 0,
             oldest_input_at: now,
@@ -1429,6 +1576,14 @@ mod tests {
             self.loads.lock().unwrap().push(key);
             let artifact = self.artifact.clone();
             Box::pin(async move { Ok(artifact) })
+        }
+
+        fn delete_run_checkpoints(
+            &self,
+            _run_id: String,
+            _source: CheckpointSource,
+        ) -> CheckpointFuture<'_, ()> {
+            Box::pin(async { Err("rollout must not delete checkpoints".to_owned()) })
         }
     }
 

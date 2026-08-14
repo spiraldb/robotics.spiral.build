@@ -6,6 +6,7 @@ pub(super) fn router() -> Router<AppState> {
             "/training/runs",
             get(list_training_runs).post(start_training),
         )
+        .route("/training/runs/{id}", delete(delete_training))
         .route("/training/runs/{id}/stop", post(stop_training))
         .route("/rollout", get(get_rollout).post(start_rollout))
         .route("/rollout/stop", post(stop_rollout))
@@ -47,6 +48,12 @@ impl TrainingPort for TrainingManager {
 
     fn stop_training(&self, run_id: &str) -> Result<(), ApplicationError> {
         TrainingManager::stop(self, run_id).map_err(ApplicationError::conflict)
+    }
+
+    async fn delete_training(&self, run_id: String) -> Result<(), ApplicationError> {
+        TrainingManager::delete(self, &run_id)
+            .await
+            .map_err(ApplicationError::External)
     }
 }
 
@@ -457,6 +464,23 @@ async fn stop_training(
 ) -> Result<StatusCode, Failure> {
     training_application::stop_training(state.training.as_ref(), &id)?;
     Ok(StatusCode::ACCEPTED)
+}
+
+async fn delete_training(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, Failure> {
+    let rollout = RolloutManager::snapshot(state.rollout.as_ref());
+    let activity = TrainingRunActivity {
+        rollout: rollout.phase.active().then_some(rollout.run_id).flatten(),
+    };
+    training_application::delete_training(
+        state.training.as_ref(),
+        activity,
+        DeleteTrainingRunCommand { run_id: id },
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn get_rollout(State(state): State<AppState>) -> Json<RolloutSnapshot> {

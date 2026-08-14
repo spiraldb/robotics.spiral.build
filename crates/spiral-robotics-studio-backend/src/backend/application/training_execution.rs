@@ -1,4 +1,4 @@
-//! Application-owned execution workflow for native training.
+//! Application-owned execution workflow for an injected training backend.
 //!
 //! Concrete adapters resolve credentials, validate ADBC queries, persist run
 //! history, launch tasks, and publish checkpoint bytes. This module owns the
@@ -11,7 +11,7 @@ use crate::backend::application::training::{
     TrainingSource,
 };
 
-const STARTING_MESSAGE: &str = "Opening the Spiral ADBC stream and Burn runtime…";
+const STARTING_MESSAGE: &str = "Opening the Spiral ADBC stream and training backend…";
 const STOPPING_MESSAGE: &str =
     "Finishing the current Arrow read or optimizer step and publishing a final checkpoint…";
 const DRAINED_CHECKPOINT_ERROR: &str = "trainer completed before checkpoint publication";

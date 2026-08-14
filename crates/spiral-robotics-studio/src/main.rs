@@ -2,7 +2,10 @@
 
 #[cfg(feature = "server")]
 fn main() -> std::process::ExitCode {
-    spiral_robotics_studio_backend::run(spiral_robotics_studio::App)
+    spiral_robotics_studio_backend::run(
+        spiral_robotics_studio::App,
+        std::sync::Arc::new(spiral_robotics_training_pytorch::PyTorchTrainingBackend::new()),
+    )
 }
 
 #[cfg(all(not(feature = "server"), feature = "web"))]

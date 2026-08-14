@@ -673,6 +673,44 @@ impl StorageManager {
         .await
     }
 
+    async fn delete_checkpoint_artifacts(
+        &self,
+        run_id: String,
+        source: CheckpointSource,
+    ) -> Result<(), String> {
+        match lock(&self.training_sources).get(&run_id) {
+            Some(registered) if registered == &source => {}
+            Some(_) => {
+                return Err(format!(
+                    "training run {run_id:?} is bound to a different Spiral source"
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "training run {run_id:?} has no frozen checkpoint source"
+                ));
+            }
+        }
+        let settings = frozen_training_settings(&source)?;
+        let target = sql::relation(&source.namespace, Table::TrainingCheckpoints);
+        self.run_adbc(settings, move |connection| {
+            if !table_exists(connection, &target)? {
+                return Ok(());
+            }
+            let deleted =
+                execute_update_sql(connection, &sql::delete_training_run(&target, &run_id));
+            if let Err(error) = deleted
+                && !error.contains("finished without any affected rows")
+            {
+                return Err(format!(
+                    "deleting training run {run_id:?} checkpoints from {target}: {error}"
+                ));
+            }
+            Ok(())
+        })
+        .await
+    }
+
     fn training_checkpoint_lookup(
         &self,
         run_id: &str,
@@ -928,6 +966,14 @@ impl CheckpointRepository for StorageManager {
 
     fn load_checkpoint(&self, key: CheckpointKey) -> CheckpointFuture<'_, CheckpointArtifact> {
         Box::pin(async move { self.load_checkpoint_artifact(key).await })
+    }
+
+    fn delete_run_checkpoints(
+        &self,
+        run_id: String,
+        source: CheckpointSource,
+    ) -> CheckpointFuture<'_, ()> {
+        Box::pin(async move { self.delete_checkpoint_artifacts(run_id, source).await })
     }
 }
 
@@ -2419,7 +2465,7 @@ mod tests {
     /// mutates the selected project.
     #[test]
     #[ignore = "requires a running SpiralDB service with a published video episode"]
-    fn spiral_adbc_service_decodes_native_training_tensor() {
+    fn spiral_adbc_service_decodes_backend_neutral_training_batch() {
         let driver_path = PathBuf::from(std::env::var("SPIRALDB_ADBC_DRIVER").unwrap());
         let project_id = std::env::var("SPIRAL_ROBOTICS_SPIRAL_PROJECT").unwrap();
         let dataset = std::env::var("SPIRAL_ROBOTICS_SPIRAL_DATASET")
@@ -2524,29 +2570,9 @@ mod tests {
         assert_eq!(loaded.batch.images.len(), 3 * 32 * 32);
         assert_eq!(loaded.metrics.requested_frames, 1);
 
-        let training = spiral_robotics_inference::act::VisionActTrainingConfig {
-            state_dimensions: loader.state_dimensions(),
-            action_dimensions: loader.action_dimensions(),
-            camera_streams: vec![stream_id.to_owned()],
-            image_width: 32,
-            image_height: 32,
-            chunk_size: request.chunk_size,
-            hidden_dimensions: 64,
-            latent_dimensions: 8,
-            attention_heads: 8,
-            feedforward_dimensions: 128,
-            encoder_layers: 1,
-            vae_encoder_layers: 1,
-            decoder_layers: 1,
-            kl_weight: request.act.kl_weight,
-            learning_rate: request.learning_rate,
-            total_steps: 1,
-            seed: request.seed,
-        };
-        let mut trainer =
-            spiral_robotics_inference::act::NativeActTrainer::new(training, "cpu", None).unwrap();
-        let loss = trainer.train_step(loaded.batch, 1).unwrap();
-        assert!(loss.total.is_finite());
+        assert!(loaded.batch.states.iter().all(|value| value.is_finite()));
+        assert!(loaded.batch.images.iter().all(|value| value.is_finite()));
+        assert!(loaded.batch.actions.iter().all(|value| value.is_finite()));
     }
 
     /// Publishes one real, locally recorded episode to a running SpiralDB

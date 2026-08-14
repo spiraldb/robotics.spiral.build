@@ -112,10 +112,10 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
         if message.read {
             return None;
         }
-        match message.action.as_ref() {
-            Some(MessageAction::OpenEpisode(episode)) => Some((message.id, episode.clone())),
-            None => None,
-        }
+        message
+            .action
+            .as_ref()
+            .map(|MessageAction::OpenEpisode(episode)| (message.id, episode.clone()))
     });
     let mut center_was_open = use_signal(|| false);
     use_effect(use_reactive((&center_open,), move |(center_open,)| {

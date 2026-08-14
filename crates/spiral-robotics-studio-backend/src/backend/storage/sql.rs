@@ -49,6 +49,14 @@ pub(crate) fn delete_episode(relation: &str, episode_id: &str) -> String {
     )
 }
 
+pub(crate) fn delete_training_run(relation: &str, run_id: &str) -> String {
+    format!(
+        "DELETE FROM {relation} WHERE {} = {}",
+        column::RUN_ID,
+        string_literal(run_id)
+    )
+}
+
 pub(crate) fn trajectory(dataset: &str, episode_id: &str, stream_id: &str) -> String {
     let episodes = relation(dataset, Table::Episodes);
     let streams = relation(dataset, Table::EpisodeStreams);
@@ -215,6 +223,12 @@ mod tests {
     fn generated_values_are_escaped_in_one_place() {
         let sql = episode_exists("robot.episodes", "take-'one");
         assert!(sql.contains("'take-''one'"));
+
+        let sql = delete_training_run("robot.training_checkpoints", "run-'one");
+        assert_eq!(
+            sql,
+            "DELETE FROM robot.training_checkpoints WHERE run_id = 'run-''one'"
+        );
     }
 
     #[test]

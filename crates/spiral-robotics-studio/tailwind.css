@@ -842,12 +842,16 @@
     @apply bg-surface p-1;
   }
 
-  .training-history-row {
-    @apply grid min-h-9 w-full cursor-pointer grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-0.5 rounded px-2 py-1 text-left outline-none transition-colors hover:bg-hover focus-visible:ring-1 focus-visible:ring-accent;
+  .training-history-entry {
+    @apply grid grid-cols-[minmax(0,1fr)_2rem] overflow-hidden rounded transition-colors hover:bg-hover;
   }
 
-  .training-history-row-selected {
+  .training-history-entry-selected {
     background: var(--tone-selected);
+  }
+
+  .training-history-row {
+    @apply grid min-h-9 min-w-0 cursor-pointer grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-0.5 rounded bg-transparent px-2 py-1 text-left outline-none focus-visible:ring-1 focus-visible:ring-accent;
   }
 
   .training-history-name {
@@ -869,6 +873,30 @@
     @apply text-right font-mono text-[10px] tabular-nums text-ink-faint;
     grid-column: 2;
     grid-row: 2;
+  }
+
+  .training-history-delete {
+    @apply inline-flex min-h-9 w-8 shrink-0 cursor-pointer items-center justify-center border-l border-line
+      text-ink-faint outline-none transition-colors hover:bg-danger-soft hover:text-danger
+      focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-danger disabled:cursor-not-allowed
+      disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint;
+  }
+
+  .training-history-delete .ui-icon {
+    @apply h-3.5 w-3.5;
+  }
+
+  .training-history-delete-confirmation {
+    @apply col-span-2 flex flex-wrap items-center gap-1 border-t border-line bg-danger-soft px-2 py-1.5 text-[10px] leading-4 text-danger;
+  }
+
+  .training-history-delete-confirmation > span {
+    @apply min-w-0 basis-full;
+    overflow-wrap: anywhere;
+  }
+
+  .training-history-delete-confirmation strong {
+    @apply font-semibold;
   }
 
   .training-run-empty {
@@ -1143,7 +1171,7 @@
   }
 
   .training-resource-chart {
-    @apply mt-2 min-h-12 flex-1 w-full;
+    @apply mt-2 min-h-20 flex-1 w-full;
   }
 
   .resource-throughput {
@@ -1561,6 +1589,7 @@
   .training-start-button,
   .training-stop-button,
   .training-history-row,
+  .training-history-delete,
   .training-query-section > summary,
     .rollout-run-button,
     .rollout-stop-button {

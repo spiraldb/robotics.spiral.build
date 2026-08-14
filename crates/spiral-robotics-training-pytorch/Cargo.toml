@@ -1,0 +1,13 @@
+[package]
+name = "spiral-robotics-training-pytorch"
+version.workspace = true
+edition.workspace = true
+description = "PyTorch implementation of the Spiral Robotics training boundary"
+publish = false
+
+[dependencies]
+spiral-robotics-inference = { workspace = true, features = ["download"] }
+spiral-robotics-training.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+spiral-robotics-inference = { workspace = true, features = ["metal"] }

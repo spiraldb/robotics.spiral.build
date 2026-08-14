@@ -20,7 +20,7 @@ use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, body::Body};
 use bytes::{BufMut, Bytes, BytesMut};
 use futures_util::{Stream, StreamExt};
@@ -98,13 +98,13 @@ use crate::backend::application::rollout::{
     RolloutSnapshot as ApplicationRolloutSnapshot,
 };
 use crate::backend::application::training::{
-    self as training_application, ActTrainingSettings, StartTrainingCommand,
-    TrainingCheckpoint as ApplicationTrainingCheckpoint, TrainingCheckpointStatus,
-    TrainingMetric as ApplicationTrainingMetric, TrainingPolicy as ApplicationTrainingPolicy,
-    TrainingPort, TrainingReadiness as ApplicationTrainingReadiness,
-    TrainingRun as ApplicationTrainingRun, TrainingRunPhase as ApplicationTrainingRunPhase,
-    TrainingRunStatus, TrainingSnapshot as ApplicationTrainingSnapshot,
-    TrainingSource as ApplicationTrainingSource,
+    self as training_application, ActTrainingSettings, DeleteTrainingRunCommand,
+    StartTrainingCommand, TrainingCheckpoint as ApplicationTrainingCheckpoint,
+    TrainingCheckpointStatus, TrainingMetric as ApplicationTrainingMetric,
+    TrainingPolicy as ApplicationTrainingPolicy, TrainingPort,
+    TrainingReadiness as ApplicationTrainingReadiness, TrainingRun as ApplicationTrainingRun,
+    TrainingRunActivity, TrainingRunPhase as ApplicationTrainingRunPhase, TrainingRunStatus,
+    TrainingSnapshot as ApplicationTrainingSnapshot, TrainingSource as ApplicationTrainingSource,
 };
 use crate::backend::recording::dataset::{
     MAX_ARCHIVE_COMPRESSED_BYTES, PreparedDatasetExport, StagedDatasetImport as CodecStagedImport,
