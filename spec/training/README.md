@@ -1,0 +1,96 @@
+# Training
+
+## Outcome
+
+Training turns a selected SpiralDB dataset into inspectable policy runs and
+durable checkpoints without moving data ownership into the compute runtime.
+
+## User flow
+
+1. The user selects a dataset, policy, optional source checkpoint, run name, and
+   training parameters.
+2. Studio verifies SpiralDB data and the selected [policy runtime](runtime.md).
+3. Studio creates one run and streams prepared batches to the runtime.
+4. Studio shows learning, validation, throughput, resource, and transfer
+   evidence.
+5. Studio publishes checkpoints while training continues.
+6. The user may stop, inspect, resume from a checkpoint, or delete the run.
+
+## Run management
+
+- **TRAIN-001** Training must use SpiralDB data only.
+- **TRAIN-002** The user must select a dataset, policy, run name, and training
+  parameters before starting.
+- **TRAIN-003** Run names must distinguish concurrent and historical runs.
+- **TRAIN-004** New-run controls and run history must be separate panels or
+  regions.
+- **TRAIN-005** Selecting a run must open its results in a closable tab.
+- **TRAIN-006** The user must be able to stop an active run.
+- **TRAIN-007** The user must be able to delete a run and every checkpoint it
+  owns.
+- **TRAIN-008** The user must be able to start a compatible run from a
+  checkpoint.
+- **TRAIN-009** Checkpoints created during a run must appear before the run
+  finishes.
+- **TRAIN-010** Studio must persist run lifecycle, configuration, metrics, and
+  checkpoints in SpiralDB.
+
+## Training data
+
+- **TRAIN-011** The initial policy must be standard vision-conditioned ACT
+  aligned with LeRobot behavior.
+- **TRAIN-012** Training must use every camera role required by the dataset and
+  policy contract.
+- **TRAIN-013** Sampling must be uniform over eligible camera frames across the
+  training population, not uniform over episodes of different lengths.
+- **TRAIN-014** Each sample must contain camera images, joint state, an action
+  chunk, padding, and normalization required by the policy.
+- **TRAIN-015** Camera frame selection must use camera frame indices and stream
+  rates, not joint sample frequency.
+- **TRAIN-016** SpiralDB must perform supported frame selection, decode, and
+  Arrow tensor conversion.
+- **TRAIN-017** When ACT requires image resizing or normalization, the transform
+  must match LeRobot behavior.
+- **TRAIN-018** Studio should overlap data preparation with model compute without
+  weakening cancellation or memory bounds.
+- **TRAIN-019** Validation must use whole episodes excluded from training.
+
+## Evidence
+
+- **TRAIN-020** The selected run must show training and validation loss on the
+  same step axis.
+- **TRAIN-021** The selected run must show batch-aware sample throughput, data
+  preparation rate, CPU use, GPU use, GPU memory, and transfer time when
+  available.
+- **TRAIN-022** The interface must show the actual compute device and fallback.
+- **TRAIN-023** Throughput must count every sample in the batch.
+- **TRAIN-024** Related charts must use linear axes and shared or equivalent
+  data zoom.
+- **TRAIN-025** Temporary sleep, disconnection, or missing telemetry must not
+  erase earlier metric points.
+- **TRAIN-026** Primary UI labels must use user concepts such as dataset,
+  samples, cameras, and checkpoints instead of implementation history.
+
+## Checkpoint contract
+
+- **TRAIN-027** A checkpoint must contain SafeTensors and explicit format
+  metadata.
+- **TRAIN-028** A checkpoint must declare the exact model, cameras, joints,
+  normalization, sample rate, and action horizon.
+- **TRAIN-029** Studio must publish checkpoints to SpiralDB as the run
+  progresses.
+- **TRAIN-030** A runtime setting change must not retarget an active run.
+
+## Implementation ownership
+
+- Training feature policy:
+  [`backend/application/training.rs`](../../crates/spiral-robotics-studio-backend/src/backend/application/training.rs)
+  and
+  [`backend/application/training_execution.rs`](../../crates/spiral-robotics-studio-backend/src/backend/application/training_execution.rs)
+- SpiralDB batch preparation and runtime supervision:
+  [`backend/training`](../../crates/spiral-robotics-studio-backend/src/backend/training/)
+- Training UI:
+  [`frontend/screens/training`](../../crates/spiral-robotics-studio/src/frontend/screens/training/)
+- Framework-neutral contracts:
+  [`training/contracts`](../../training/contracts/)
+

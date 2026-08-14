@@ -1,0 +1,91 @@
+# Studio workspace
+
+## Outcome
+
+Studio gives an ML engineer one stable browser workspace for the complete robot
+learning loop. It keeps feature ownership clear while allowing visualization
+panels to be arranged spatially.
+
+## User flow
+
+1. The user selects Live, Data, Training, or Rollout from the activity rail.
+2. The selected feature route restores its own workspace.
+3. The user arranges the panels needed for the task.
+4. The status bar and notification center report global state without moving
+   the workspace.
+5. The user opens Settings from the bottom of the activity rail.
+
+## Routes and global shell
+
+- **STUDIO-001** Live, Data, Training, and Rollout must each have a stable URL.
+- **STUDIO-002** Each route must own its semantic state, panels, and layout.
+- **STUDIO-003** A route change must update every data-driven visualization to
+  the selected feature's source.
+- **STUDIO-004** A route change must not create empty tiles or move panels into
+  another feature.
+- **STUDIO-005** Settings must be at the bottom of the activity rail.
+- **STUDIO-006** Studio must not add a top menu or search bar without a confirmed
+  use.
+- **STUDIO-007** A thin status bar must show connection, mode, rate, active work,
+  and problems.
+- **STUDIO-008** Recoverable results and errors must use one notification center
+  connected to the status bar.
+
+## Panel workspace
+
+- **STUDIO-009** A user must be able to move, resize, split, tab, reorder, and
+  close supported panels.
+- **STUDIO-010** Dragging must show a stable docking preview.
+- **STUDIO-011** Live and Data must keep independent layouts.
+- **STUDIO-012** Browser-local panel layout persistence is allowed.
+- **STUDIO-013** The default desktop split should place a narrow workbench beside
+  a visualization area at about a one-to-two ratio.
+- **STUDIO-014** Resizing and conditional content must not cause layout shifts,
+  flicker, or playhead jumps.
+
+## Scene and visual presentation
+
+- **STUDIO-015** Studio must provide an interactive 3D Scene for supported arms.
+- **STUDIO-016** The Scene must support orbit, pan, zoom, framing, and robot
+  selection.
+- **STUDIO-017** Robot geometry, axes, and limits must come from URDF.
+- **STUDIO-018** The current URDF may be fixed to SO-ARM101 while the renderer
+  remains description-driven.
+- **STUDIO-019** Controls must look interactive and telemetry must not look
+  draggable.
+- **STUDIO-020** Repeated labels and implementation explanations must be removed
+  when the surrounding structure provides the meaning.
+- **STUDIO-021** Values must use the correct unit and only useful precision.
+- **STUDIO-022** Charts must use Charming/ECharts with linear axes unless a
+  metric requires another scale.
+- **STUDIO-023** Studio must load a pinned ECharts asset from a CDN instead of
+  vendoring the library.
+- **STUDIO-024** Long charts must provide data zoom. Related charts should share
+  the selected range.
+- **STUDIO-025** Empty, loading, unavailable, and error states must have stable
+  dimensions.
+
+## Feature relationships
+
+- Live composes [robot control](../robots/control.md) and
+  [recording](../recording/README.md).
+- Data composes the [episode catalog](../data/README.md),
+  [Timeline and replay](../data/timeline-and-replay.md), and
+  [SQL query](../data/query.md).
+- Training and Rollout share the [policy runtime](../training/runtime.md).
+
+## Implementation ownership
+
+- Routes and the global shell:
+  [`frontend/app`](../../crates/spiral-robotics-studio/src/frontend/app/)
+- Route-level composition:
+  [`frontend/screens`](../../crates/spiral-robotics-studio/src/frontend/screens/)
+- Scene, camera, and Timeline panels:
+  [`frontend/panels`](../../crates/spiral-robotics-studio/src/frontend/panels/)
+- Panel layout model:
+  [`spiral-robotics-panels`](../../crates/spiral-robotics-panels/)
+- URDF and rendering:
+  [`spiral-robotics-viewport`](../../crates/spiral-robotics-viewport/)
+
+Approved screenshots for this feature belong in [`assets/`](assets/README.md).
+
