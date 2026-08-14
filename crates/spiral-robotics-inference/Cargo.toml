@@ -16,3 +16,6 @@ serde.workspace = true
 sha2 = "0.10"
 tempfile = { workspace = true, optional = true }
 thiserror = "2"
+
+[dev-dependencies]
+tempfile.workspace = true

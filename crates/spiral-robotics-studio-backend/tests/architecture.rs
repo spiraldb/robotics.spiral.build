@@ -229,42 +229,19 @@ fn workspace_crate_dependencies_point_toward_policy() {
             &[][..],
         ),
         (
-            "spiral-robotics-inference-pytorch",
-            "crates/spiral-robotics-inference-pytorch/Cargo.toml",
-            &["spiral-robotics-inference"][..],
-        ),
-        (
             "spiral-robotics-panels",
             "crates/spiral-robotics-panels/Cargo.toml",
             &[][..],
         ),
         (
             "spiral-robotics-training",
-            "crates/spiral-robotics-training/Cargo.toml",
+            "training/contracts/Cargo.toml",
             &[][..],
         ),
         (
             "spiral-robotics-training-http",
-            "crates/spiral-robotics-training-http/Cargo.toml",
+            "training/http-client/Cargo.toml",
             &["spiral-robotics-inference", "spiral-robotics-training"][..],
-        ),
-        (
-            "spiral-robotics-training-pytorch",
-            "crates/spiral-robotics-training-pytorch/Cargo.toml",
-            &[
-                "spiral-robotics-inference-pytorch",
-                "spiral-robotics-training",
-            ][..],
-        ),
-        (
-            "spiral-robotics-training-runtime",
-            "crates/spiral-robotics-training-runtime/Cargo.toml",
-            &[
-                "spiral-robotics-inference",
-                "spiral-robotics-inference-pytorch",
-                "spiral-robotics-training-http",
-                "spiral-robotics-training-pytorch",
-            ][..],
         ),
         (
             "spiral-robotics-viewport",
@@ -313,7 +290,7 @@ fn workspace_crate_dependencies_point_toward_policy() {
 }
 
 #[test]
-fn studio_training_owns_only_the_backend_trait_boundary() {
+fn studio_training_owns_only_the_remote_backend_trait_boundary() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -341,13 +318,22 @@ fn studio_training_owns_only_the_backend_trait_boundary() {
         );
     }
 
-    let adapter =
-        fs::read_to_string(root.join("crates/spiral-robotics-training-pytorch/src/lib.rs"))
-            .expect("PyTorch training adapter source");
+    let adapter = fs::read_to_string(root.join("training/src/spiral_training_runtime/act.py"))
+        .expect("Python PyTorch training adapter source");
     assert!(
-        adapter.contains("impl TrainingBackend for PyTorchTrainingBackend"),
-        "PyTorch must enter through the public training boundary"
+        adapter.contains("ACTPolicy") && adapter.contains("torch.optim.AdamW"),
+        "the remote implementation must use the real PyTorch ACT policy and optimizer"
     );
+    for removed_native_crate in [
+        "crates/spiral-robotics-inference-pytorch",
+        "crates/spiral-robotics-training-pytorch",
+        "crates/spiral-robotics-training-runtime",
+    ] {
+        assert!(
+            !root.join(removed_native_crate).exists(),
+            "obsolete native training crate {removed_native_crate:?} must stay removed"
+        );
+    }
 }
 
 #[test]
@@ -367,7 +353,7 @@ fn studio_rollout_does_not_enable_or_call_the_pytorch_backend() {
     );
     assert!(
         !manifest.contains("spiral-robotics-inference-pytorch"),
-        "Studio must not depend on the PyTorch inference implementation"
+        "Studio must not depend on a native PyTorch inference implementation"
     );
     let inference_manifest =
         fs::read_to_string(root.join("crates/spiral-robotics-inference/Cargo.toml"))

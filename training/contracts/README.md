@@ -24,13 +24,12 @@ hand contiguous tensor storage to a native framework without another CPU copy.
 Calls run on Studio worker threads, so a remote implementation may use a
 blocking client without blocking the async control loop.
 
-The default model implementation lives in the separate
-`spiral-robotics-training-pytorch` leaf crate. The
-`spiral-robotics-training-http` crate exposes training and policy sessions
-through JSON lifecycle endpoints and Arrow IPC tensor uploads. Checkpoints are
-raw SafeTensors responses. The standalone `spiral-robotics-training-runtime`
-binary composes the transports with PyTorch; it owns only in-memory optimizer
-and rollout policy sessions and never opens Studio's database.
+The sibling `http-client/` crate exposes training and policy sessions through
+JSON lifecycle requests and Arrow IPC tensor uploads. The Python service in
+this top-level directory implements those sessions with LeRobot's PyTorch ACT
+policy. Checkpoints are raw SafeTensors responses. The service owns only
+in-memory optimizer and rollout policy sessions and never opens Studio's
+database.
 
 The versioned runtime API is deliberately small:
 

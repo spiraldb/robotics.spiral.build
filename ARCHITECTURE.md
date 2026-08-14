@@ -24,8 +24,8 @@ define them.
 - `spiral-robotics-contracts` contains delivery and persisted relation shapes.
   It may translate to and from core policy; core never imports it.
 - `spiral-robotics-inference` contains only framework-neutral policy and model
-  artifact contracts. `spiral-robotics-inference-pytorch` is an outer leaf used
-  by the remote compute runtime; Studio never depends on it.
+  artifact contracts. The top-level `training/` area owns the Rust HTTP client
+  and a separate Python/PyTorch runtime; Studio never links the framework.
 - `backend/application` contains one-action use cases and the ports they need.
   Commands and read projections are plain data and errors are transport-neutral.
   Read controllers delegate identity admission and selection (including bounded

@@ -1183,7 +1183,7 @@ fn checkpoint_manifest(
                 "device": trainer_info.device,
             },
             "transport": "adbc 0.24 / arrow 58.4",
-            "language": "rust",
+            "language": "python",
         },
         "normalization": "embedded_mean_std",
         "model_config": model_config,

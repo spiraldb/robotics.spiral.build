@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   checks:
-    name: Nix / Rust
+    name: Nix / Rust / Python
     runs-on: ubuntu-24.04
     timeout-minutes: 90
 
@@ -51,8 +51,17 @@ jobs:
           nix develop .#ci --command cargo test --workspace --no-fail-fast
           nix develop .#ci --command cargo test -p spiral-robotics-studio --features server --no-fail-fast
 
+      - name: Install locked Python runtime
+        run: nix develop .#ci --command uv sync --project training --frozen --extra dev
+
+      - name: Check Python runtime
+        run: |
+          nix develop .#ci --command uv run --project training ruff check training
+          nix develop .#ci --command uv run --project training ruff format --check training
+          nix develop .#ci --command uv run --project training pytest -q training/tests
+
       - name: Check web target
         run: nix develop .#ci --command cargo check -p spiral-robotics-studio --features web --target wasm32-unknown-unknown
 
-      - name: Validate native ACT backend
+      - name: Validate inference contracts
         run: nix develop .#ci --command cargo test -p spiral-robotics-inference --no-default-features

@@ -12,4 +12,9 @@ crates/spiral-robotics-studio/episodes
 /.agents
 /.impeccable
 __pycache__/
+.pytest_cache/
+.ruff_cache/
+.venv/
+.uv-tool/
+*.egg-info/
 node_modules/

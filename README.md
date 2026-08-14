@@ -25,12 +25,18 @@ cd crates/spiral-robotics-studio
 dx serve --release
 ```
 
-Start the policy compute runtime separately (on the same machine or a remote
-compute host). It owns PyTorch for both training and rollout inference:
+Start the Python policy compute runtime separately (on the same machine or a
+remote compute host). It owns PyTorch for both training and rollout inference:
 
 ```console
-cargo run -p spiral-robotics-training-runtime -- --bind 0.0.0.0:50051
+cd training
+uv sync --extra dev
+uv run spiral-training-runtime --host 0.0.0.0 --port 50051
 ```
+
+For a fresh Lambda Stack machine, clone the repository and run
+`./training/bootstrap-lambda.sh`. See [training/README.md](training/README.md)
+for the runtime and Lambda workflow.
 
 In Studio, open **Settings → Training**, enter the runtime's `http://` endpoint,
 and choose **Save and connect**. New training and rollout sessions use that

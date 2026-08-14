@@ -70,6 +70,8 @@
                 rustToolchain
                 pkgs.actionlint
                 pkgs.pkg-config
+                pkgs.python312
+                pkgs.uv
                 llvmPackages.llvm
               ]
               ++ linuxNativeBuildInputs
