@@ -57,7 +57,7 @@ pub fn DataIcon() -> Element {
     }
 }
 
-/// Local policy training activity: a curve passing through optimization steps.
+/// Policy training activity: a curve passing through optimization steps.
 #[component]
 pub fn TrainingIcon() -> Element {
     rsx! {

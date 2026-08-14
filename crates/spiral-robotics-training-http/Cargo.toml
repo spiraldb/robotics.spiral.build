@@ -2,10 +2,11 @@
 name = "spiral-robotics-training-http"
 version.workspace = true
 edition.workspace = true
-description = "HTTP and Arrow IPC transport for Spiral Robotics training runtimes"
+description = "HTTP and Arrow IPC transport for Spiral Robotics policy compute runtimes"
 publish = false
 
 [dependencies]
+spiral-robotics-inference.workspace = true
 spiral-robotics-training.workspace = true
 arrow-array = "58.4.0"
 arrow-ipc = "58.4.0"

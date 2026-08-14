@@ -1,4 +1,4 @@
-//! Native training and inference for robot policies.
+//! Framework-neutral inference contracts for robot policies.
 //!
 //! The public API intentionally contains no tensor-framework types. A caller
 //! supplies borrowed observations and receives an owned action chunk, making
@@ -9,13 +9,13 @@ mod artifact;
 mod error;
 mod interface;
 
-pub mod act;
-
 pub use artifact::{ModelArtifact, ModelFiles, ModelIdentity};
 #[cfg(feature = "download")]
-pub use artifact::{RemoteModel, download_remote_model, download_remote_model_to};
+pub use artifact::{
+    RemoteModel, download_remote_model, download_remote_model_to, download_verified_file,
+};
 pub use error::{Error, Result};
 pub use interface::{
     ActionChunk, ImageFormat, ImageInputSpecification, ImageView, InferenceInput, InferenceStats,
-    Policy, PolicyKind, PolicySpecification,
+    Policy, PolicyKind, PolicyLoader, PolicySpecification,
 };

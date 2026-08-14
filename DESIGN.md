@@ -894,14 +894,15 @@ Opening history never replaces or rewrites the new-run draft.
   first optimizer step. They never draw synthetic telemetry. Unavailable or
   locked actions remain visible and disabled beside the blocker or active-run
   context, while Stop remains reachable for the run in progress. Readiness is
-  the backend's combined Burn-runtime-and-hosted-Spiral probe, not an inference made
-  from settings in the browser. A failed run keeps its terminal reason and the
-  latest training log lines visible in its run tab.
-- **Owned data path:** The four stages shown are the actual boundaries: Rust
-  Spiral ADBC query, Arrow image/action buffers, Burn tensor/model compute, and
-  Rust checkpoint ingest. Tensor and optimizer throughput are measured values;
-  the Rust loader validates native Arrow tensor structs and packs fixed-shape
-  float32 buffers directly for Burn.
+  the backend's combined remote-compute-and-hosted-Spiral probe, not an
+  inference made from settings in the browser. A failed run keeps its terminal
+  reason and the latest training log lines visible in its run tab.
+- **Owned data path:** The stages shown are the actual boundaries: Rust Spiral
+  ADBC query, Arrow image/action buffers, HTTP/Arrow IPC transport, remote
+  PyTorch tensor/model compute, and Rust checkpoint ingest. Tensor and
+  optimizer throughput are measured values; the Rust loader validates native
+  Arrow tensor structs and streams fixed-shape float32 buffers to the selected
+  compute runtime.
 - **Terse operating copy:** Panel tabs name Training control, Training history,
   and each run; run content uses only the short evidence headers **Loss**,
   **Data path**, and **Throughput**. Configuration uses field labels, run state

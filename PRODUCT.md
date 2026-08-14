@@ -27,7 +27,7 @@ when the project is opened. See **Distribution** below.
 Spiral Robotics sets up, calibrates, and drives SO-ARM101 arms, records synchronized
 robot and camera data, publishes and queries episodes, trains policies, and
 safely replays actions on a follower. Operators use it from the browser or the
-terminal and connect Studio to a selectable policy-training runtime.
+terminal and connect Studio to a selectable policy compute runtime.
 
 The durable scope is the **full robot-learning loop**: connect → calibrate →
 teleoperate → record → inspect/query → publish/export → train → run a policy.
@@ -49,9 +49,10 @@ on real hardware without writing glue code or operating a second training stack.
   calibration, kinematics, server, run supervision, data contracts, and web
   interface are Rust. Studio's dedicated ADBC connection reads Arrow state,
   action, and Spiral-decoded image tensors, then streams Arrow IPC batches over
-  HTTP to a selected remote ACT/CVAE training runtime. Rust owns lifecycle,
+  HTTP to a selected remote ACT/CVAE compute runtime. The same runtime owns
+  PyTorch policy sessions for rollout inference. Rust owns lifecycle,
   cancellation, validation, remote telemetry, and SafeTensors checkpoint
-  publication.
+  publication without linking the Studio server to LibTorch.
 - **One arm is one robot instance is one JSON file.** Serial port, cameras,
   motors, and calibration live in one versioned file. There is no hidden
   calibration cache or second manifest to reconcile, and the Studio notices
@@ -83,9 +84,10 @@ Spiral Robotics backend
       ├── local episode recovery
       ├── SpiralDB ingest and read-only queries
       ├── policy-training supervision and checkpoint publication
-      ├── episode validation and follower replay
-      └── Arrow IPC / HTTP ──► selected training runtime
-                               └── in-memory model and optimizer session
+      ├── episode validation and bounded follower control
+      └── Arrow IPC / HTTP ──► selected compute runtime
+                               ├── in-memory model and optimizer session
+                               └── in-memory rollout policy session
 ```
 
 - **The browser can run anywhere.** It renders the interface, WebGL scene,
@@ -112,13 +114,14 @@ The physical scene matters: an operator may have one hand supporting an arm
 during calibration or teleoperation. Releasing torque lets an arm fall under
 its own weight, so controls and consequences must remain reachable and stable.
 
-Studio policy execution is backend-owned. Training exports the exact native ACT
-graph and normalization contract as SafeTensors; rollout loads that artifact
-from Spiral, warms the Burn backend, binds its ordered state and camera inputs,
-and admits one session-scoped policy mode to the bounded motor control thread.
-The backend stops the session on stale inputs, motor faults, mode changes,
-inference failures, or excessive observation-to-action latency. The browser
-selects and monitors a rollout but never becomes the motor-control runtime.
+Studio policy control is backend-owned while tensor execution is remote.
+Training exports the exact native ACT graph and normalization contract as
+SafeTensors; rollout sends that artifact and Arrow IPC observations to the
+selected compute runtime, then admits returned actions to one session-scoped,
+bounded motor control thread. The backend stops the session on stale inputs,
+motor faults, mode changes, inference failures, or excessive
+observation-to-action latency. The browser selects and monitors a rollout but
+never becomes the motor-control runtime.
 
 ## Capabilities and Constraints
 
@@ -182,28 +185,29 @@ selects and monitors a rollout but never becomes the motor-control runtime.
   managed per-episode MP4 datasets. Training derives the MP4 frame directly
   from sample index and the declared stream rates, then submits only finite
   frame manifests; Spiral performs frame selection, decode, resize,
-  normalization, and Arrow tensor conversion. Rust packs those contiguous
-  buffers into Burn tensors without materializing encoded video frames.
+  normalization, and Arrow tensor conversion. Rust streams those contiguous
+  buffers over Arrow IPC; the remote runtime borrows them into PyTorch tensors
+  without materializing encoded video frames.
   The Studio exposes row-limited, read-only query preview and video retrieval
   through the backend.
 - A `--simulate` mode with emulated motors allows calibration, teleoperation,
   recording, and replay without hardware.
 
-**Shipped with a safety boundary:** Studio-managed ACT execution from a durable
+**Shipped with a safety boundary:** Studio-managed ACT control from a durable
 Spiral checkpoint. The same control thread that bounds manual, teleoperation,
-and replay motion gates policy commands by an unguessable active session. On
-macOS rollout prefers Metal and falls back to Accelerate CPU; an inference that
-cannot meet the observation safety window is rejected before a new action is
-sent.
+and replay motion gates policy commands by an unguessable active session. The
+selected remote runtime chooses its PyTorch device; an inference that cannot
+meet the observation safety window is rejected before a new action is sent.
 
 **Constraints**
 
 - **Hardware:** SO-ARM101 only for now, with leader and follower roles. Live
   calibration supports Feetech protocol-0 motors such as the STS3215.
-- **One runtime per training run.** Studio reads samples through a dedicated
+- **One selected compute endpoint.** Studio reads samples through a dedicated
   read-only ADBC connection and sends Arrow IPC tensor batches to the configured
-  HTTP endpoint. The remote runtime holds model and optimizer state only;
-  Studio remains responsible for queries, run history, and checkpoint ingest.
+  HTTP endpoint. The remote runtime holds model, optimizer, and active rollout
+  policy state; Studio remains responsible for queries, run history, checkpoint
+  ingest, and bounded hardware control.
 - **Nix flake** provides the development environment and web toolchain (`dx`,
   Tailwind CLI, `wasm-bindgen`, and `wasm-opt`).
 - **Safety is enforced by the server.** Enabling torque first copies measured

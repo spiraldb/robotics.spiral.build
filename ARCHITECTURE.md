@@ -23,6 +23,9 @@ define them.
   database, web, async runtime, hardware, contracts, renderer, or parser dependency.
 - `spiral-robotics-contracts` contains delivery and persisted relation shapes.
   It may translate to and from core policy; core never imports it.
+- `spiral-robotics-inference` contains only framework-neutral policy and model
+  artifact contracts. `spiral-robotics-inference-pytorch` is an outer leaf used
+  by the remote compute runtime; Studio never depends on it.
 - `backend/application` contains one-action use cases and the ports they need.
   Commands and read projections are plain data and errors are transport-neutral.
   Read controllers delegate identity admission and selection (including bounded
@@ -58,8 +61,8 @@ define them.
   Settings changes cannot retarget publication or rollout lookup. The training
   execution coordinator owns readiness, query validation, identity, admission,
   launch/stop ordering, runtime-event acceptance, terminal classification, and
-  failure cleanup; the manager only performs filesystem, ADBC, Burn, Tokio,
-  contract-mapping, and checkpoint-publication effects.
+  failure cleanup; the manager only performs filesystem, ADBC, HTTP/Arrow,
+  Tokio, contract-mapping, and checkpoint-publication effects.
 - Training/checkpoint application models retain semantic project, namespace,
   dataset, run, and step identity only. Storage adapters derive relation names;
   contract presenters derive any table labels required by the wire format.

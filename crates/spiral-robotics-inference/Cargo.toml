@@ -2,33 +2,17 @@
 name = "spiral-robotics-inference"
 version.workspace = true
 edition.workspace = true
-description = "Native training and inference engine for robot policies"
+description = "Framework-neutral inference contracts and model artifacts"
 publish = false
 
 [features]
-default = ["cli"]
-# Retained as compatibility feature names for downstream build commands. The
-# direct LibTorch backend selects CPU or MPS at runtime.
-accelerate = []
-metal = []
+default = []
 download = ["dep:dirs", "dep:reqwest", "dep:tempfile"]
-cli = ["dep:clap", "dep:image", "download"]
 
 [dependencies]
-clap = { workspace = true, features = ["derive"], optional = true }
 dirs = { version = "6", optional = true }
-image = { workspace = true, optional = true }
 reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls"], optional = true }
-safetensors = "0.7"
 serde.workspace = true
-serde_json.workspace = true
 sha2 = "0.10"
 tempfile = { workspace = true, optional = true }
-tch = { version = "0.22.0", features = ["download-libtorch"] }
-torch-sys = "0.22.0"
 thiserror = "2"
-
-[[bin]]
-name = "spiral-robotics-infer"
-path = "src/bin/infer.rs"
-required-features = ["cli"]

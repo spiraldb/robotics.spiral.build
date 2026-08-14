@@ -3,6 +3,7 @@ members = [
     "crates/spiral-robotics-contracts",
     "crates/spiral-robotics-core",
     "crates/spiral-robotics-inference",
+    "crates/spiral-robotics-inference-pytorch",
     "crates/spiral-robotics-panels",
     "crates/spiral-robotics-studio",
     "crates/spiral-robotics-studio-backend",
@@ -24,6 +25,7 @@ spiral-robotics = { path = "." }
 spiral-robotics-contracts = { path = "crates/spiral-robotics-contracts" }
 spiral-robotics-core = { path = "crates/spiral-robotics-core" }
 spiral-robotics-inference = { path = "crates/spiral-robotics-inference", default-features = false }
+spiral-robotics-inference-pytorch = { path = "crates/spiral-robotics-inference-pytorch", default-features = false }
 spiral-robotics-panels = { path = "crates/spiral-robotics-panels" }
 spiral-robotics-studio-backend = { path = "crates/spiral-robotics-studio-backend" }
 spiral-robotics-training = { path = "crates/spiral-robotics-training" }

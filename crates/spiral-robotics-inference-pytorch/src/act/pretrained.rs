@@ -3,10 +3,22 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
-use crate::artifact::download_verified_file;
-use crate::error::IoResultExt;
 use crate::{Error, Result};
 use safetensors::tensor::{Dtype, TensorView, serialize};
+use spiral_robotics_inference::download_verified_file;
+
+trait IoResultExt<T> {
+    fn at(self, path: &std::path::Path) -> Result<T>;
+}
+
+impl<T> IoResultExt<T> for std::io::Result<T> {
+    fn at(self, path: &std::path::Path) -> Result<T> {
+        self.map_err(|source| Error::Io {
+            path: path.to_owned(),
+            source,
+        })
+    }
+}
 
 pub const IMAGENET_RESNET18_URL: &str = "https://huggingface.co/timm/resnet18.tv_in1k/resolve/a987fd6b60f845221bfff84b6f0191273ba56ead/model.safetensors?download=true";
 pub const IMAGENET_RESNET18_SHA256: &str =

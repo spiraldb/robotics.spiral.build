@@ -13,9 +13,9 @@ use crate::backend::application::rollout::RolloutRequest;
 /// optimizer state, and the hardware-control process itself.
 pub(crate) const MAX_TRAINING_IMAGE_BATCH_BYTES: usize = 256 * 1024 * 1024;
 
-/// Aggregate in-process ACT training budget. Studio trains beside the hardware
-/// control loop, so independently valid dimensions must not combine into a
-/// multi-gigabyte optimizer allocation that can terminate the whole backend.
+/// Aggregate ACT compute-session budget. Independently valid dimensions must
+/// not combine into a multi-gigabyte optimizer allocation that can terminate
+/// the selected remote runtime.
 const MAX_ACT_TRAINING_RESOURCE_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const ACT_NON_TRANSFORMER_RESOURCE_RESERVE_BYTES: usize = 256 * 1024 * 1024;
 const ACT_IMAGE_RUNTIME_MULTIPLIER: usize = 4;
@@ -474,7 +474,7 @@ fn estimate_act_training_resource_bytes(
 fn enforce_act_training_resource_budget(estimate: Option<usize>) -> Result<(), ApplicationError> {
     if estimate.is_none_or(|bytes| bytes > MAX_ACT_TRAINING_RESOURCE_BYTES) {
         return invalid(format!(
-            "ACT model and optimizer may not exceed the {MAX_ACT_TRAINING_RESOURCE_BYTES}-byte in-process training budget. Reduce hidden size, feed-forward size, layer count, batch size, cameras, or image dimensions."
+            "ACT model and optimizer may not exceed the {MAX_ACT_TRAINING_RESOURCE_BYTES}-byte remote compute-session budget. Reduce hidden size, feed-forward size, layer count, batch size, cameras, or image dimensions."
         ));
     }
     Ok(())

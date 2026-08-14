@@ -229,6 +229,11 @@ fn workspace_crate_dependencies_point_toward_policy() {
             &[][..],
         ),
         (
+            "spiral-robotics-inference-pytorch",
+            "crates/spiral-robotics-inference-pytorch/Cargo.toml",
+            &["spiral-robotics-inference"][..],
+        ),
+        (
             "spiral-robotics-panels",
             "crates/spiral-robotics-panels/Cargo.toml",
             &[][..],
@@ -241,17 +246,22 @@ fn workspace_crate_dependencies_point_toward_policy() {
         (
             "spiral-robotics-training-http",
             "crates/spiral-robotics-training-http/Cargo.toml",
-            &["spiral-robotics-training"][..],
+            &["spiral-robotics-inference", "spiral-robotics-training"][..],
         ),
         (
             "spiral-robotics-training-pytorch",
             "crates/spiral-robotics-training-pytorch/Cargo.toml",
-            &["spiral-robotics-inference", "spiral-robotics-training"][..],
+            &[
+                "spiral-robotics-inference-pytorch",
+                "spiral-robotics-training",
+            ][..],
         ),
         (
             "spiral-robotics-training-runtime",
             "crates/spiral-robotics-training-runtime/Cargo.toml",
             &[
+                "spiral-robotics-inference",
+                "spiral-robotics-inference-pytorch",
                 "spiral-robotics-training-http",
                 "spiral-robotics-training-pytorch",
             ][..],
@@ -338,6 +348,67 @@ fn studio_training_owns_only_the_backend_trait_boundary() {
         adapter.contains("impl TrainingBackend for PyTorchTrainingBackend"),
         "PyTorch must enter through the public training boundary"
     );
+}
+
+#[test]
+fn studio_rollout_does_not_enable_or_call_the_pytorch_backend() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("Studio lives under the workspace crates directory");
+    let manifest =
+        fs::read_to_string(root.join("crates/spiral-robotics-studio-backend/Cargo.toml"))
+            .expect("Studio backend manifest");
+    assert!(
+        manifest
+            .lines()
+            .any(|line| line.trim() == "spiral-robotics-inference.workspace = true"),
+        "Studio must consume only the featureless inference contract"
+    );
+    assert!(
+        !manifest.contains("spiral-robotics-inference-pytorch"),
+        "Studio must not depend on the PyTorch inference implementation"
+    );
+    let inference_manifest =
+        fs::read_to_string(root.join("crates/spiral-robotics-inference/Cargo.toml"))
+            .expect("framework-neutral inference manifest");
+    for native_dependency in ["tch", "torch-sys", "pytorch"] {
+        assert!(
+            !inference_manifest
+                .to_ascii_lowercase()
+                .contains(native_dependency),
+            "framework-neutral inference contains native dependency {native_dependency:?}"
+        );
+    }
+    for obsolete_build_script in [
+        "crates/spiral-robotics-studio/build.rs",
+        "crates/spiral-robotics-studio-backend/build.rs",
+    ] {
+        assert!(
+            !root.join(obsolete_build_script).exists(),
+            "Studio must not inject tensor-runtime linker settings"
+        );
+    }
+
+    let rollout = fs::read_to_string(
+        root.join("crates/spiral-robotics-studio-backend/src/backend/rollout/manager.rs"),
+    )
+    .expect("rollout manager source");
+    assert!(
+        rollout.contains("HttpPolicyLoader"),
+        "Studio rollout must load policy sessions through the remote runtime"
+    );
+    for local_backend in [
+        "spiral_robotics_inference::act",
+        "load_cpu_artifact",
+        "load_metal_artifact",
+        "LibTorch",
+    ] {
+        assert!(
+            !rollout.contains(local_backend),
+            "Studio rollout contains local tensor backend detail {local_backend:?}"
+        );
+    }
 }
 
 #[test]

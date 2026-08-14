@@ -25,16 +25,16 @@ cd crates/spiral-robotics-studio
 dx serve --release
 ```
 
-Start the policy-training runtime separately (on the same machine or a remote
-compute host):
+Start the policy compute runtime separately (on the same machine or a remote
+compute host). It owns PyTorch for both training and rollout inference:
 
 ```console
 cargo run -p spiral-robotics-training-runtime -- --bind 0.0.0.0:50051
 ```
 
 In Studio, open **Settings → Training**, enter the runtime's `http://` endpoint,
-and choose **Save and connect**. New training runs use that
-endpoint; an active run keeps its existing connection.
+and choose **Save and connect**. New training and rollout sessions use that
+endpoint; an active session keeps its existing connection.
 
 To connect Studio to a local SpiralDB stack:
 

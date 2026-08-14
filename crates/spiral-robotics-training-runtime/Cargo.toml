@@ -6,9 +6,15 @@ description = "Remote HTTP and Arrow IPC policy-training runtime for Spiral Robo
 publish = false
 
 [dependencies]
+spiral-robotics-inference.workspace = true
+spiral-robotics-inference-pytorch.workspace = true
 spiral-robotics-training-http.workspace = true
 spiral-robotics-training-pytorch.workspace = true
 clap.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+torch-sys = "0.22.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+spiral-robotics-inference-pytorch = { workspace = true, features = ["metal"] }

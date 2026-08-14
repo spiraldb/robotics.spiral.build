@@ -172,7 +172,7 @@ pub(crate) fn SettingsPanel(
                                 button { r#type: "button", class: "btn btn-outline", disabled: saving() || testing(), onclick: move |_| save(Some("/api/settings/data/test/spiral")), if testing() { "Testing…" } else { "Save and test connection" } }
                             },
                             SettingsSection::Training => rsx! {
-                                ProviderHeading { title: "Training runtime", description: "Send Arrow tensor batches to a remote policy-training process." }
+                                ProviderHeading { title: "Policy compute runtime", description: "Run training and rollout inference in a remote PyTorch process." }
                                 SettingsField {
                                     label: "Runtime endpoint",
                                     value: current().training.endpoint,
@@ -180,7 +180,7 @@ pub(crate) fn SettingsPanel(
                                     oninput: move |value| current.write().training.endpoint = value,
                                 }
                                 p { class: "settings-help",
-                                    "Studio uses Arrow IPC over HTTP. The selected endpoint applies to new runs; an active run keeps its current connection."
+                                    "Studio uses Arrow IPC over HTTP. The selected endpoint applies to new training and rollout sessions; an active session keeps its current connection."
                                 }
                                 button { r#type: "button", class: "btn btn-outline", disabled: saving() || testing(), onclick: move |_| save(Some("/api/settings/data/test/training")), if testing() { "Connecting…" } else { "Save and connect" } }
                             },

@@ -220,7 +220,17 @@ impl ModelArtifact {
         &self.identity
     }
 
-    pub(crate) fn into_parts(self) -> (Arc<[u8]>, Arc<[u8]>, String, ModelIdentity) {
+    pub fn config(&self) -> &[u8] {
+        &self.config
+    }
+
+    pub fn weights(&self) -> &[u8] {
+        &self.weights
+    }
+
+    /// Consume the artifact into immutable model buffers for a framework
+    /// implementation without exposing framework types at this boundary.
+    pub fn into_parts(self) -> (Arc<[u8]>, Arc<[u8]>, String, ModelIdentity) {
         (self.config, self.weights, self.weights_label, self.identity)
     }
 }
@@ -549,7 +559,8 @@ fn copy_with_limit(
 }
 
 #[cfg(feature = "download")]
-pub(crate) fn download_verified_file(url: &str, destination: &Path, sha256: &str) -> Result<()> {
+#[doc(hidden)]
+pub fn download_verified_file(url: &str, destination: &Path, sha256: &str) -> Result<()> {
     require_https_url(url, "artifact URL")?;
     require_hex(sha256, 64, "artifact SHA-256")?;
     let parent = destination

@@ -114,9 +114,9 @@ fn default_joint_selection(
 pub(crate) struct Studio {
     pub snapshot: Signal<StudioSnapshot>,
     pub telemetry: Signal<TelemetryFrame>,
-    /// Backend-owned lifecycle and metric history for local policy training.
+    /// Backend-owned lifecycle and metric history for remote policy training.
     pub training: Signal<TrainingSnapshot>,
-    /// Backend-owned native inference and motor-control lifecycle.
+    /// Backend-owned remote inference and motor-control lifecycle.
     pub rollout: Signal<RolloutSnapshot>,
     /// True while the event stream is connected.
     pub live: Signal<bool>,

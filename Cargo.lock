@@ -4728,17 +4728,27 @@ version = "0.1.0"
 name = "spiral-robotics-inference"
 version = "0.1.0"
 dependencies = [
+ "dirs",
+ "reqwest",
+ "serde",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "spiral-robotics-inference-pytorch"
+version = "0.1.0"
+dependencies = [
  "clap",
  "dirs",
  "image",
- "reqwest",
  "safetensors 0.7.0",
  "serde",
  "serde_json",
  "sha2",
+ "spiral-robotics-inference",
  "tch",
- "tempfile",
- "thiserror 2.0.19",
  "torch-sys",
 ]
 
@@ -4829,6 +4839,7 @@ dependencies = [
  "axum",
  "reqwest",
  "serde",
+ "spiral-robotics-inference",
  "spiral-robotics-training",
  "tokio",
 ]
@@ -4839,7 +4850,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "mach2 0.5.0",
- "spiral-robotics-inference",
+ "spiral-robotics-inference-pytorch",
  "spiral-robotics-training",
 ]
 
@@ -4848,9 +4859,12 @@ name = "spiral-robotics-training-runtime"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "spiral-robotics-inference",
+ "spiral-robotics-inference-pytorch",
  "spiral-robotics-training-http",
  "spiral-robotics-training-pytorch",
  "tokio",
+ "torch-sys",
  "tracing",
  "tracing-subscriber",
 ]

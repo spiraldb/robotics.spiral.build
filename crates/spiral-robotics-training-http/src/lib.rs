@@ -22,6 +22,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use spiral_robotics_inference::{
+    ActionChunk, ImageFormat, ImageView, InferenceInput, InferenceStats, ModelArtifact,
+    ModelIdentity, Policy, PolicyLoader, PolicySpecification,
+};
 use spiral_robotics_training::{
     TrainingBackend, TrainingBackendError, TrainingBackendInfo, TrainingBatch,
     TrainingCheckpointArtifact, TrainingCheckpointRequest, TrainingLoss, TrainingModelConfig,
@@ -29,10 +33,11 @@ use spiral_robotics_training::{
 };
 
 const ARROW_STREAM_CONTENT_TYPE: &str = "application/vnd.apache.arrow.stream";
+const POLICY_ARTIFACT_CONTENT_TYPE: &str = "application/vnd.spiral.policy-artifact";
 const CHECKPOINT_CONTENT_TYPE: &str = "application/octet-stream";
 const CHECKPOINT_FORMAT_HEADER: &str = "x-spiral-checkpoint-format";
 const CHECKPOINT_EXTENSION_HEADER: &str = "x-spiral-checkpoint-extension";
-const MAX_ARROW_REQUEST_BYTES: usize = 320 * 1024 * 1024;
+const MAX_REQUEST_BYTES: usize = 520 * 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const SHORT_REQUEST_TIMEOUT: Duration = Duration::from_secs(7);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -97,6 +102,128 @@ impl TrainingBackend for HttpTrainingBackend {
             last_learning_rate: 0.0,
             last_telemetry: None,
         }))
+    }
+}
+
+/// Framework-neutral client that materializes a policy on the selected HTTP
+/// runtime. Only the remote process links the tensor framework.
+#[derive(Clone, Debug)]
+pub struct HttpPolicyLoader {
+    endpoint: String,
+    client: reqwest::blocking::Client,
+}
+
+impl HttpPolicyLoader {
+    pub fn new(endpoint: impl Into<String>) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            client: reqwest::blocking::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(REQUEST_TIMEOUT)
+                .build()
+                .expect("HTTP policy client configuration is valid"),
+        }
+    }
+
+    fn url(&self, path: &str) -> spiral_robotics_inference::Result<String> {
+        let endpoint = self.endpoint.trim().trim_end_matches('/');
+        if endpoint.is_empty() {
+            return Err(inference_error("policy runtime endpoint is empty"));
+        }
+        Ok(format!("{endpoint}{path}"))
+    }
+}
+
+impl PolicyLoader for HttpPolicyLoader {
+    fn load(&self, artifact: ModelArtifact) -> spiral_robotics_inference::Result<Box<dyn Policy>> {
+        let identity = artifact.identity().clone();
+        let body = encode_policy_artifact(&artifact)?;
+        let response = self
+            .client
+            .post(self.url("/v1/policies")?)
+            .header(CONTENT_TYPE, POLICY_ARTIFACT_CONTENT_TYPE)
+            .body(body)
+            .send()
+            .map_err(|error| inference_error(format!("creating policy session: {error}")))?;
+        let response: CreatePolicyResponse =
+            decode_inference_json_response(response, "creating policy session")?;
+        Ok(Box::new(HttpPolicy {
+            backend: self.clone(),
+            session_id: response.session_id,
+            identity,
+            specification: response.specification,
+        }))
+    }
+}
+
+struct HttpPolicy {
+    backend: HttpPolicyLoader,
+    session_id: String,
+    identity: ModelIdentity,
+    specification: PolicySpecification,
+}
+
+impl HttpPolicy {
+    fn path(&self, suffix: &str) -> String {
+        format!("/v1/policies/{}{suffix}", self.session_id)
+    }
+}
+
+impl Policy for HttpPolicy {
+    fn identity(&self) -> &ModelIdentity {
+        &self.identity
+    }
+
+    fn specification(&self) -> &PolicySpecification {
+        &self.specification
+    }
+
+    fn warm_up(&mut self) -> spiral_robotics_inference::Result<InferenceStats> {
+        let path = self.path("/warm-up");
+        let response = self
+            .backend
+            .client
+            .post(self.backend.url(&path)?)
+            .send()
+            .map_err(|error| inference_error(format!("warming up policy: {error}")))?;
+        let response: InferenceStatsResponse =
+            decode_inference_json_response(response, "warming up policy")?;
+        response.into_stats()
+    }
+
+    fn infer(
+        &mut self,
+        input: InferenceInput<'_>,
+    ) -> spiral_robotics_inference::Result<ActionChunk> {
+        let body = encode_inference_input(input, &self.specification)?;
+        let path = self.path("/infer");
+        let response = self
+            .backend
+            .client
+            .post(self.backend.url(&path)?)
+            .header(CONTENT_TYPE, ARROW_STREAM_CONTENT_TYPE)
+            .body(body)
+            .send()
+            .map_err(|error| inference_error(format!("running policy inference: {error}")))?;
+        let response: InferenceResponse =
+            decode_inference_json_response(response, "running policy inference")?;
+        response.into_chunk()
+    }
+}
+
+impl Drop for HttpPolicy {
+    fn drop(&mut self) {
+        if let Ok(url) = self
+            .backend
+            .url(&format!("/v1/policies/{}", self.session_id))
+        {
+            let _ = self
+                .backend
+                .client
+                .delete(url)
+                .timeout(SHORT_REQUEST_TIMEOUT)
+                .send();
+        }
     }
 }
 
@@ -212,6 +339,9 @@ struct AppState {
     backend: Arc<dyn TrainingBackend>,
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<SessionState>>>>>,
     session_ids: Arc<AtomicU64>,
+    policy_loader: Arc<dyn PolicyLoader>,
+    policies: Arc<Mutex<HashMap<String, Arc<Mutex<PolicySessionState>>>>>,
+    policy_ids: Arc<AtomicU64>,
 }
 
 struct SessionState {
@@ -220,18 +350,25 @@ struct SessionState {
     last_train: Option<(u64, StepResponse)>,
 }
 
+struct PolicySessionState {
+    policy: Box<dyn Policy>,
+}
+
 #[derive(Clone)]
 struct TrainingHttpService {
     state: AppState,
 }
 
 impl TrainingHttpService {
-    fn new(backend: Arc<dyn TrainingBackend>) -> Self {
+    fn new(backend: Arc<dyn TrainingBackend>, policy_loader: Arc<dyn PolicyLoader>) -> Self {
         Self {
             state: AppState {
                 backend,
                 sessions: Arc::new(Mutex::new(HashMap::new())),
                 session_ids: Arc::new(AtomicU64::new(0)),
+                policy_loader,
+                policies: Arc::new(Mutex::new(HashMap::new())),
+                policy_ids: Arc::new(AtomicU64::new(0)),
             },
         }
     }
@@ -245,7 +382,11 @@ impl TrainingHttpService {
             .route("/v1/sessions/{id}/train", post(train))
             .route("/v1/sessions/{id}/validate", post(validate))
             .route("/v1/sessions/{id}/checkpoint", post(checkpoint))
-            .layer(DefaultBodyLimit::max(MAX_ARROW_REQUEST_BYTES))
+            .route("/v1/policies", post(create_policy))
+            .route("/v1/policies/{id}", delete(delete_policy))
+            .route("/v1/policies/{id}/warm-up", post(warm_up_policy))
+            .route("/v1/policies/{id}/infer", post(infer_policy))
+            .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
             .with_state(self.state)
     }
 }
@@ -253,9 +394,14 @@ impl TrainingHttpService {
 pub async fn serve(
     address: std::net::SocketAddr,
     backend: Arc<dyn TrainingBackend>,
+    policy_loader: Arc<dyn PolicyLoader>,
 ) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(address).await?;
-    axum::serve(listener, TrainingHttpService::new(backend).router()).await
+    axum::serve(
+        listener,
+        TrainingHttpService::new(backend, policy_loader).router(),
+    )
+    .await
 }
 
 async fn health(State(state): State<AppState>) -> Result<Json<TrainingBackendInfo>, ApiError> {
@@ -415,6 +561,90 @@ async fn checkpoint(
     checkpoint_response(artifact)
 }
 
+async fn create_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<(StatusCode, Json<CreatePolicyResponse>), ApiError> {
+    require_content_type(&headers, POLICY_ARTIFACT_CONTENT_TYPE, "policy artifacts")?;
+    let artifact = decode_policy_artifact(&body).map_err(ApiError::bad_request)?;
+    let loader = state.policy_loader.clone();
+    let policies = state.policies.clone();
+    let session_id = format!(
+        "policy-{}",
+        state.policy_ids.fetch_add(1, Ordering::Relaxed) + 1
+    );
+    let response_id = session_id.clone();
+    let response = tokio::task::spawn_blocking(move || {
+        let policy = loader.load(artifact).map_err(ApiError::unprocessable)?;
+        let specification = policy.specification().clone();
+        lock(&policies, "policy session registry")?.insert(
+            session_id,
+            Arc::new(Mutex::new(PolicySessionState { policy })),
+        );
+        Ok::<_, ApiError>(CreatePolicyResponse {
+            session_id: response_id,
+            specification,
+        })
+    })
+    .await
+    .map_err(task_error)??;
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+async fn delete_policy(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    lock(&state.policies, "policy session registry")?.remove(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn warm_up_policy(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<InferenceStatsResponse>, ApiError> {
+    let policy = find_policy(&state, &id)?;
+    let stats = tokio::task::spawn_blocking(move || {
+        lock(&policy, "policy session")?
+            .policy
+            .warm_up()
+            .map(InferenceStatsResponse::from_stats)
+            .map_err(ApiError::unprocessable)
+    })
+    .await
+    .map_err(task_error)??;
+    Ok(Json(stats))
+}
+
+async fn infer_policy(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<InferenceResponse>, ApiError> {
+    require_arrow_content_type(&headers)?;
+    let policy = find_policy(&state, &id)?;
+    let response = tokio::task::spawn_blocking(move || {
+        let record = decode_arrow_record(body).map_err(ApiError::bad_request)?;
+        let mut policy = lock(&policy, "policy session")?;
+        let specification = policy.policy.specification().clone();
+        let (observation, images) =
+            borrow_inference_parts(&record, &specification).map_err(ApiError::bad_request)?;
+        let chunk = policy
+            .policy
+            .infer(InferenceInput {
+                state: observation,
+                images: &images,
+            })
+            .map_err(ApiError::unprocessable)?;
+        Ok::<_, ApiError>(InferenceResponse::from_chunk(chunk))
+    })
+    .await
+    .map_err(task_error)??;
+    Ok(Json(response))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CreateSessionResponse {
     session_id: String,
@@ -426,6 +656,71 @@ struct StepResponse {
     loss: TrainingLoss,
     learning_rate: f64,
     telemetry: TrainingTelemetry,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CreatePolicyResponse {
+    session_id: String,
+    specification: PolicySpecification,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct InferenceStatsResponse {
+    preprocessing_ms: f64,
+    model_ms: f64,
+    postprocessing_ms: f64,
+    total_ms: f64,
+}
+
+impl InferenceStatsResponse {
+    fn from_stats(stats: InferenceStats) -> Self {
+        Self {
+            preprocessing_ms: duration_millis(stats.preprocessing),
+            model_ms: duration_millis(stats.model),
+            postprocessing_ms: duration_millis(stats.postprocessing),
+            total_ms: duration_millis(stats.total),
+        }
+    }
+
+    fn into_stats(self) -> spiral_robotics_inference::Result<InferenceStats> {
+        Ok(InferenceStats {
+            preprocessing: duration_from_millis(self.preprocessing_ms)?,
+            model: duration_from_millis(self.model_ms)?,
+            postprocessing: duration_from_millis(self.postprocessing_ms)?,
+            total: duration_from_millis(self.total_ms)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct InferenceResponse {
+    values: Vec<f32>,
+    steps: usize,
+    action_dimensions: usize,
+    stats: InferenceStatsResponse,
+}
+
+impl InferenceResponse {
+    fn from_chunk(chunk: ActionChunk) -> Self {
+        let steps = chunk.steps();
+        let action_dimensions = chunk.action_dimensions();
+        let stats = InferenceStatsResponse::from_stats(chunk.stats);
+        Self {
+            values: chunk.into_values(),
+            steps,
+            action_dimensions,
+            stats,
+        }
+    }
+
+    fn into_chunk(self) -> spiral_robotics_inference::Result<ActionChunk> {
+        ActionChunk::try_new(
+            self.values,
+            self.steps,
+            self.action_dimensions,
+            self.stats.into_stats()?,
+        )
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -470,6 +765,141 @@ impl BatchShape {
     }
 }
 
+fn encode_policy_artifact(artifact: &ModelArtifact) -> spiral_robotics_inference::Result<Vec<u8>> {
+    let config_len = u64::try_from(artifact.config().len())
+        .map_err(|_| inference_error("model config is too large for the HTTP envelope"))?;
+    let capacity = 8_usize
+        .checked_add(artifact.config().len())
+        .and_then(|size| size.checked_add(artifact.weights().len()))
+        .ok_or_else(|| inference_error("policy artifact size overflowed"))?;
+    let mut body = Vec::with_capacity(capacity);
+    body.extend_from_slice(&config_len.to_le_bytes());
+    body.extend_from_slice(artifact.config());
+    body.extend_from_slice(artifact.weights());
+    Ok(body)
+}
+
+fn decode_policy_artifact(body: &[u8]) -> Result<ModelArtifact, String> {
+    let prefix: [u8; 8] = body
+        .get(..8)
+        .ok_or_else(|| "policy artifact is missing its config length".to_owned())?
+        .try_into()
+        .map_err(|_| "policy artifact has an invalid config length".to_owned())?;
+    let config_len = usize::try_from(u64::from_le_bytes(prefix))
+        .map_err(|_| "policy config length does not fit this runtime".to_owned())?;
+    let config_end = 8_usize
+        .checked_add(config_len)
+        .ok_or_else(|| "policy config length overflowed".to_owned())?;
+    let config = body
+        .get(8..config_end)
+        .ok_or_else(|| "policy artifact ends before its config is complete".to_owned())?;
+    let weights = body
+        .get(config_end..)
+        .filter(|weights| !weights.is_empty())
+        .ok_or_else(|| "policy artifact contains no SafeTensors weights".to_owned())?;
+    ModelArtifact::from_bytes(config.to_vec(), weights.to_vec()).map_err(|error| error.to_string())
+}
+
+fn encode_inference_input(
+    input: InferenceInput<'_>,
+    specification: &PolicySpecification,
+) -> spiral_robotics_inference::Result<Vec<u8>> {
+    if input.state.len() != specification.state_dimensions {
+        return Err(spiral_robotics_inference::Error::Input(format!(
+            "policy state has {} values, expected {}",
+            input.state.len(),
+            specification.state_dimensions
+        )));
+    }
+    if input.images.len() != specification.image_inputs.len() {
+        return Err(spiral_robotics_inference::Error::Input(format!(
+            "policy input has {} images, expected {}",
+            input.images.len(),
+            specification.image_inputs.len()
+        )));
+    }
+    let mut arrays = Vec::<(String, ArrayRef)>::with_capacity(input.images.len() + 1);
+    arrays.push((
+        "state".to_owned(),
+        fixed_f32(input.state.to_vec(), 1, "state")
+            .map_err(|error| inference_error(error.to_string()))?,
+    ));
+    for (index, (image, expected)) in input
+        .images
+        .iter()
+        .zip(&specification.image_inputs)
+        .enumerate()
+    {
+        let packed_stride = expected
+            .width
+            .checked_mul(expected.channels)
+            .ok_or_else(|| inference_error("policy image row stride overflowed"))?;
+        let expected_len = packed_stride
+            .checked_mul(expected.height)
+            .ok_or_else(|| inference_error("policy image size overflowed"))?;
+        if image.name != expected.name
+            || image.width != expected.width
+            || image.height != expected.height
+            || image.format != ImageFormat::Rgb8
+            || expected.channels != 3
+            || image.row_stride != packed_stride
+            || image.data.len() != expected_len
+        {
+            return Err(spiral_robotics_inference::Error::Input(format!(
+                "image {:?} does not match policy input {:?} ({}x{} RGB8)",
+                image.name, expected.name, expected.width, expected.height
+            )));
+        }
+        arrays.push((
+            format!("image_{index}"),
+            fixed_u8(image.data.to_vec(), 1, &format!("image_{index}"))
+                .map_err(|error| inference_error(error.to_string()))?,
+        ));
+    }
+    let record = RecordBatch::try_from_iter(
+        arrays
+            .iter()
+            .map(|(name, array)| (name.as_str(), array.clone())),
+    )
+    .map_err(|error| inference_error(format!("building Arrow inference input: {error}")))?;
+    encode_arrow_record(&record).map_err(inference_error)
+}
+
+fn borrow_inference_parts<'a>(
+    batch: &'a RecordBatch,
+    specification: &'a PolicySpecification,
+) -> Result<(&'a [f32], Vec<ImageView<'a>>), String> {
+    if batch.num_rows() != 1 {
+        return Err(format!(
+            "Arrow inference input has {} rows, expected exactly one",
+            batch.num_rows()
+        ));
+    }
+    let state = f32_values(batch, "state", specification.state_dimensions)?;
+    let images = specification
+        .image_inputs
+        .iter()
+        .enumerate()
+        .map(|(index, expected)| {
+            if expected.channels != 3 {
+                return Err(format!(
+                    "policy image {:?} has {} channels; HTTP inference supports RGB8",
+                    expected.name, expected.channels
+                ));
+            }
+            let width = expected
+                .channels
+                .checked_mul(expected.height)
+                .and_then(|value| value.checked_mul(expected.width))
+                .ok_or_else(|| format!("policy image {:?} size overflowed", expected.name))?;
+            let data = u8_values(batch, &format!("image_{index}"), width)?;
+            ImageView::packed_rgb8(&expected.name, expected.width, expected.height, data)
+                .map_err(|error| error.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((state, images))
+}
+
 fn encode_training_batch(batch: TrainingBatch<'_>) -> Result<Vec<u8>, TrainingBackendError> {
     let TrainingBatch {
         batch_size,
@@ -498,17 +928,20 @@ fn encode_training_batch(batch: TrainingBatch<'_>) -> Result<Vec<u8>, TrainingBa
     ];
     let record = RecordBatch::try_from_iter(arrays)
         .map_err(|error| backend_error(format!("building Arrow training batch: {error}")))?;
+    encode_arrow_record(&record).map_err(backend_error)
+}
+
+fn encode_arrow_record(record: &RecordBatch) -> Result<Vec<u8>, String> {
     let mut body = Vec::new();
-    {
-        let mut writer = StreamWriter::try_new(&mut body, &record.schema())
-            .map_err(|error| backend_error(format!("starting Arrow IPC stream: {error}")))?;
-        writer
-            .write(&record)
-            .map_err(|error| backend_error(format!("writing Arrow IPC stream: {error}")))?;
-        writer
-            .finish()
-            .map_err(|error| backend_error(format!("finishing Arrow IPC stream: {error}")))?;
-    }
+    let mut writer = StreamWriter::try_new(&mut body, &record.schema())
+        .map_err(|error| format!("starting Arrow IPC stream: {error}"))?;
+    writer
+        .write(record)
+        .map_err(|error| format!("writing Arrow IPC stream: {error}"))?;
+    writer
+        .finish()
+        .map_err(|error| format!("finishing Arrow IPC stream: {error}"))?;
+    drop(writer);
     Ok(body)
 }
 
@@ -564,6 +997,10 @@ fn fixed_list(
 }
 
 fn decode_training_batch(body: Bytes) -> Result<RecordBatch, String> {
+    decode_arrow_record(body)
+}
+
+fn decode_arrow_record(body: Bytes) -> Result<RecordBatch, String> {
     let mut reader = StreamReader::try_new(Cursor::new(body), None)
         .map_err(|error| format!("invalid Arrow IPC stream: {error}"))?;
     let batch = reader
@@ -652,13 +1089,21 @@ fn fixed_column<'a>(
 }
 
 fn require_arrow_content_type(headers: &HeaderMap) -> Result<(), ApiError> {
+    require_content_type(headers, ARROW_STREAM_CONTENT_TYPE, "Arrow tensor requests")
+}
+
+fn require_content_type(
+    headers: &HeaderMap,
+    expected: &'static str,
+    label: &str,
+) -> Result<(), ApiError> {
     let content_type = headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    if !content_type.starts_with(ARROW_STREAM_CONTENT_TYPE) {
+    if !content_type.starts_with(expected) {
         return Err(ApiError::unsupported_media(format!(
-            "optimizer batches require Content-Type {ARROW_STREAM_CONTENT_TYPE}"
+            "{label} require Content-Type {expected}"
         )));
     }
     Ok(())
@@ -693,6 +1138,13 @@ fn find_session(state: &AppState, id: &str) -> Result<Arc<Mutex<SessionState>>, 
         .ok_or_else(|| ApiError::not_found(format!("training session {id:?} does not exist")))
 }
 
+fn find_policy(state: &AppState, id: &str) -> Result<Arc<Mutex<PolicySessionState>>, ApiError> {
+    lock(&state.policies, "policy session registry")?
+        .get(id)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found(format!("policy session {id:?} does not exist")))
+}
+
 fn lock<'a, T>(mutex: &'a Mutex<T>, name: &str) -> Result<MutexGuard<'a, T>, ApiError> {
     mutex
         .lock()
@@ -700,7 +1152,7 @@ fn lock<'a, T>(mutex: &'a Mutex<T>, name: &str) -> Result<MutexGuard<'a, T>, Api
 }
 
 fn task_error(error: tokio::task::JoinError) -> ApiError {
-    ApiError::internal(format!("training runtime task failed: {error}"))
+    ApiError::internal(format!("policy compute runtime task failed: {error}"))
 }
 
 fn header_value(value: &str, name: &str) -> Result<HeaderValue, ApiError> {
@@ -715,6 +1167,30 @@ fn decode_json_response<T: DeserializeOwned>(
     require_success(response, context)?
         .json()
         .map_err(|error| backend_error(format!("decoding {context} response: {error}")))
+}
+
+fn decode_inference_json_response<T: DeserializeOwned>(
+    response: reqwest::blocking::Response,
+    context: &str,
+) -> spiral_robotics_inference::Result<T> {
+    let response = require_inference_success(response, context)?;
+    response
+        .json()
+        .map_err(|error| inference_error(format!("decoding {context} response: {error}")))
+}
+
+fn require_inference_success(
+    response: reqwest::blocking::Response,
+    context: &str,
+) -> spiral_robotics_inference::Result<reqwest::blocking::Response> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    let message = response.text().unwrap_or_default();
+    Err(inference_error(format!(
+        "{context} failed with HTTP {status}: {message}"
+    )))
 }
 
 fn require_success(
@@ -746,6 +1222,19 @@ fn response_header(
 
 fn backend_error(message: impl Into<String>) -> TrainingBackendError {
     TrainingBackendError::new(message)
+}
+
+fn inference_error(message: impl Into<String>) -> spiral_robotics_inference::Error {
+    spiral_robotics_inference::Error::Inference(message.into())
+}
+
+fn duration_millis(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1_000.0
+}
+
+fn duration_from_millis(milliseconds: f64) -> spiral_robotics_inference::Result<Duration> {
+    Duration::try_from_secs_f64(milliseconds / 1_000.0)
+        .map_err(|error| inference_error(format!("invalid inference duration: {error}")))
 }
 
 #[derive(Serialize)]
@@ -813,6 +1302,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     use super::*;
+    use spiral_robotics_inference::{ImageInputSpecification, InferenceStats, PolicyKind};
     use spiral_robotics_training::{
         ActTrainingConfig, TRAINING_BACKEND_API_VERSION, TrainingInitialization,
     };
@@ -821,6 +1311,81 @@ mod tests {
         borrowed: Arc<AtomicBool>,
         train_count: Arc<AtomicUsize>,
         telemetry_count: Arc<AtomicUsize>,
+    }
+
+    struct FakePolicyLoader {
+        inferred: Arc<AtomicBool>,
+    }
+
+    impl PolicyLoader for FakePolicyLoader {
+        fn load(
+            &self,
+            artifact: ModelArtifact,
+        ) -> spiral_robotics_inference::Result<Box<dyn Policy>> {
+            Ok(Box::new(FakePolicy {
+                identity: artifact.identity().clone(),
+                specification: PolicySpecification {
+                    kind: PolicyKind::Act,
+                    state_dimensions: 1,
+                    image_inputs: vec![ImageInputSpecification {
+                        name: "camera".to_owned(),
+                        channels: 3,
+                        height: 1,
+                        width: 1,
+                    }],
+                    action_dimensions: 1,
+                    action_chunk_size: 2,
+                    recommended_action_steps: 1,
+                },
+                inferred: self.inferred.clone(),
+            }))
+        }
+    }
+
+    struct FakePolicy {
+        identity: ModelIdentity,
+        specification: PolicySpecification,
+        inferred: Arc<AtomicBool>,
+    }
+
+    impl Policy for FakePolicy {
+        fn identity(&self) -> &ModelIdentity {
+            &self.identity
+        }
+
+        fn specification(&self) -> &PolicySpecification {
+            &self.specification
+        }
+
+        fn warm_up(&mut self) -> spiral_robotics_inference::Result<InferenceStats> {
+            Ok(InferenceStats {
+                model: Duration::from_millis(2),
+                total: Duration::from_millis(3),
+                ..InferenceStats::default()
+            })
+        }
+
+        fn infer(
+            &mut self,
+            input: InferenceInput<'_>,
+        ) -> spiral_robotics_inference::Result<ActionChunk> {
+            self.inferred.store(
+                input.state == [0.25]
+                    && input.images.len() == 1
+                    && input.images[0].data == [1, 2, 3],
+                Ordering::Relaxed,
+            );
+            ActionChunk::try_new(
+                vec![0.5, 0.75],
+                2,
+                1,
+                InferenceStats {
+                    model: Duration::from_millis(4),
+                    total: Duration::from_millis(5),
+                    ..InferenceStats::default()
+                },
+            )
+        }
     }
 
     impl TrainingBackend for FakeBackend {
@@ -969,11 +1534,17 @@ mod tests {
         let borrowed = Arc::new(AtomicBool::new(false));
         let train_count = Arc::new(AtomicUsize::new(0));
         let telemetry_count = Arc::new(AtomicUsize::new(0));
-        let service = TrainingHttpService::new(Arc::new(FakeBackend {
-            borrowed: borrowed.clone(),
-            train_count: train_count.clone(),
-            telemetry_count: telemetry_count.clone(),
-        }));
+        let inferred = Arc::new(AtomicBool::new(false));
+        let service = TrainingHttpService::new(
+            Arc::new(FakeBackend {
+                borrowed: borrowed.clone(),
+                train_count: train_count.clone(),
+                telemetry_count: telemetry_count.clone(),
+            }),
+            Arc::new(FakePolicyLoader {
+                inferred: inferred.clone(),
+            }),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -1002,12 +1573,29 @@ mod tests {
                 .unwrap();
             assert_eq!(artifact.format, "safetensors");
             assert_eq!(artifact.payload, vec![1, 2, 3, 4]);
+
+            let loader = HttpPolicyLoader::new(format!("http://{address}"));
+            let artifact = ModelArtifact::from_bytes(b"{}".to_vec(), vec![9]).unwrap();
+            let mut policy = loader.load(artifact).unwrap();
+            assert_eq!(policy.specification().action_chunk_size, 2);
+            assert_eq!(policy.warm_up().unwrap().total, Duration::from_millis(3));
+            let pixels = [1, 2, 3];
+            let image = ImageView::packed_rgb8("camera", 1, 1, &pixels).unwrap();
+            let chunk = policy
+                .infer(InferenceInput {
+                    state: &[0.25],
+                    images: &[image],
+                })
+                .unwrap();
+            assert_eq!(chunk.as_slice(), &[0.5, 0.75]);
+            assert_eq!(chunk.stats.model, Duration::from_millis(4));
         })
         .await
         .unwrap();
         assert!(borrowed.load(Ordering::Relaxed));
         assert_eq!(train_count.load(Ordering::Relaxed), 1);
         assert_eq!(telemetry_count.load(Ordering::Relaxed), 2);
+        assert!(inferred.load(Ordering::Relaxed));
         server.abort();
     }
 }

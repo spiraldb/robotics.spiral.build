@@ -1,6 +1,8 @@
 use sha2::{Digest, Sha256};
-use spiral_robotics_inference::act::{REFERENCE_WEIGHTS_SHA256, load_cpu, reference_model_files};
 use spiral_robotics_inference::{ImageView, InferenceInput, Policy};
+use spiral_robotics_inference_pytorch::act::{
+    REFERENCE_WEIGHTS_SHA256, load_cpu, reference_model_files,
+};
 
 const EXPECTED_FIRST_ACTION: [f32; 14] = [
     -0.007_579_928_3,

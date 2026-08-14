@@ -1,4 +1,4 @@
-//! Backend-owned native policy lifecycle and deadline-aware motor loop.
+//! Backend-owned remote policy lifecycle and deadline-aware motor loop.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -13,7 +13,8 @@ use spiral_robotics_contracts::api::{
     RolloutPhase as ContractRolloutPhase, RolloutSnapshot as ContractRolloutSnapshot,
     StartRolloutRequest,
 };
-use spiral_robotics_inference::{ActionChunk, ImageView, InferenceInput, ModelArtifact, Policy};
+use spiral_robotics_inference::{ActionChunk, ImageView, InferenceInput, Policy, PolicyLoader};
+use spiral_robotics_training_http::HttpPolicyLoader;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
@@ -36,6 +37,7 @@ use crate::backend::application::rollout::{
 use crate::backend::robotics::cameras::{CameraManager, Frame};
 use crate::backend::robotics::hardware::{HardwareHandle, HardwareState};
 use crate::backend::robots::workspace::RobotWorkspace;
+use crate::backend::storage::settings::DataSettingsStore;
 
 const INPUT_STALE_AFTER: Duration = Duration::from_millis(350);
 const INITIAL_CAMERA_TIMEOUT: Duration = Duration::from_secs(5);
@@ -308,6 +310,7 @@ pub(crate) struct RolloutManager {
     hardware: Arc<HardwareHandle>,
     cameras: Arc<CameraManager>,
     workspace: Arc<RobotWorkspace>,
+    settings: Arc<DataSettingsStore>,
     clock: Arc<dyn Clock>,
     state: watch::Sender<ContractRolloutSnapshot>,
     coordinator: Mutex<RolloutCoordinator>,
@@ -320,6 +323,7 @@ impl RolloutManager {
         hardware: Arc<HardwareHandle>,
         cameras: Arc<CameraManager>,
         workspace: Arc<RobotWorkspace>,
+        settings: Arc<DataSettingsStore>,
     ) -> Arc<Self>
     where
         R: CheckpointRepository + 'static,
@@ -329,6 +333,7 @@ impl RolloutManager {
             hardware,
             cameras,
             workspace,
+            settings,
             Arc::new(SystemClock),
         )
     }
@@ -338,6 +343,7 @@ impl RolloutManager {
         hardware: Arc<HardwareHandle>,
         cameras: Arc<CameraManager>,
         workspace: Arc<RobotWorkspace>,
+        settings: Arc<DataSettingsStore>,
         clock: Arc<dyn Clock>,
     ) -> Arc<Self>
     where
@@ -353,6 +359,7 @@ impl RolloutManager {
             hardware,
             cameras,
             workspace,
+            settings,
             clock,
             state,
             coordinator: Mutex::new(RolloutCoordinator::new(events)),
@@ -472,13 +479,16 @@ impl RolloutManager {
         let artifact = artifact?;
         let manifest = parse_manifest(&artifact)?;
         validate_manifest(&manifest, request, &artifact.config_json)?;
-        let model_artifact = ModelArtifact::from_bytes(artifact.config_json, artifact.payload)
-            .map_err(|error| format!("checkpoint identity is invalid: {error}"))?;
-        let (policy, _backend): (Box<dyn Policy>, &'static str) =
-            tokio::task::spawn_blocking(move || load_native_policy(model_artifact))
-                .await
-                .map_err(|error| format!("policy loader stopped unexpectedly: {error}"))?
-                .map_err(|error| format!("checkpoint could not be loaded: {error}"))?;
+        let model_artifact = spiral_robotics_inference::ModelArtifact::from_bytes(
+            artifact.config_json,
+            artifact.payload,
+        )
+        .map_err(|error| format!("checkpoint identity is invalid: {error}"))?;
+        let policy_loader = HttpPolicyLoader::new(self.settings.get().training.endpoint);
+        let policy = tokio::task::spawn_blocking(move || policy_loader.load(model_artifact))
+            .await
+            .map_err(|error| format!("policy loader stopped unexpectedly: {error}"))?
+            .map_err(|error| format!("checkpoint could not be loaded remotely: {error}"))?;
         let specification = policy.specification().clone();
         let hardware_state = self.hardware.state();
         let record = self
@@ -755,7 +765,7 @@ impl RolloutManager {
             // LeRobot executes the action first, records it as latest_action,
             // and only then captures an observation carrying that timestep.
             // Preserve that ordering and keep replacing the one-slot pending
-            // observation while the local policy worker is occupied.
+            // observation while the remote policy worker is occupied.
             let must_go = actions.remaining() == 0 && must_go_when_empty;
             if must_go || (action_executed && actions.remaining() <= refill_threshold) {
                 let refreshed = self.hardware.state();
@@ -1241,45 +1251,6 @@ fn require_fresh_cameras(cameras: &[CameraInput]) -> Result<(), String> {
 
 fn duration_ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1_000.0
-}
-
-#[cfg(target_os = "macos")]
-fn load_native_policy(
-    artifact: ModelArtifact,
-) -> spiral_robotics_inference::Result<(Box<dyn Policy>, &'static str)> {
-    if !spiral_robotics_inference::act::metal_available() {
-        tracing::warn!("PyTorch MPS rollout backend unavailable; using LibTorch CPU");
-        return spiral_robotics_inference::act::load_cpu_artifact(artifact)
-            .map(|policy| (Box::new(policy) as Box<dyn Policy>, "LibTorch CPU"));
-    }
-
-    // ModelArtifact clones share immutable bytes, so preserving the CPU
-    // fallback does not duplicate the checkpoint allocation.
-    let fallback = artifact.clone();
-    let metal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        spiral_robotics_inference::act::load_metal_artifact(artifact)
-    }));
-    match metal {
-        Ok(Ok(policy)) => Ok((Box::new(policy) as Box<dyn Policy>, "PyTorch MPS")),
-        Ok(Err(error)) => {
-            tracing::warn!("PyTorch MPS rollout backend unavailable ({error}); using LibTorch CPU");
-            spiral_robotics_inference::act::load_cpu_artifact(fallback)
-                .map(|policy| (Box::new(policy) as Box<dyn Policy>, "LibTorch CPU"))
-        }
-        Err(_) => {
-            tracing::warn!("PyTorch MPS rollout discovery panicked; using LibTorch CPU");
-            spiral_robotics_inference::act::load_cpu_artifact(fallback)
-                .map(|policy| (Box::new(policy) as Box<dyn Policy>, "LibTorch CPU"))
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn load_native_policy(
-    artifact: ModelArtifact,
-) -> spiral_robotics_inference::Result<(Box<dyn Policy>, &'static str)> {
-    spiral_robotics_inference::act::load_cpu_artifact(artifact)
-        .map(|policy| (Box::new(policy) as Box<dyn Policy>, "CPU"))
 }
 
 #[cfg(test)]

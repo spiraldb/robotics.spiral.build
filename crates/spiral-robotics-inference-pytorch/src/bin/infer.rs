@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
-use spiral_robotics_inference::act::{
-    REFERENCE_CONFIG_URL, REFERENCE_REVISION, REFERENCE_SOURCE, REFERENCE_WEIGHTS_URL,
-    reference_remote_model,
-};
 use spiral_robotics_inference::{
     ImageView, InferenceInput, ModelFiles, Policy, RemoteModel, download_remote_model,
+};
+use spiral_robotics_inference_pytorch::act::{
+    REFERENCE_CONFIG_URL, REFERENCE_REVISION, REFERENCE_SOURCE, REFERENCE_WEIGHTS_URL,
+    reference_remote_model,
 };
 
 #[derive(Debug, Parser)]
@@ -135,9 +135,9 @@ fn run(
     };
 
     #[cfg(feature = "metal")]
-    let mut policy = spiral_robotics_inference::act::load_metal(&files)?;
+    let mut policy = spiral_robotics_inference_pytorch::act::load_metal(&files)?;
     #[cfg(not(feature = "metal"))]
-    let mut policy = spiral_robotics_inference::act::load_cpu(&files)?;
+    let mut policy = spiral_robotics_inference_pytorch::act::load_cpu(&files)?;
 
     if !cold {
         let warm_up = policy.warm_up()?;

@@ -1,4 +1,4 @@
-//! Pure lifecycle coordination for one native policy rollout.
+//! Pure lifecycle coordination for one remotely computed policy rollout.
 //!
 //! Runtime tasks, model formats, cameras, clocks, and motor actors remain
 //! adapters. This module owns which session may exist, what its semantic state

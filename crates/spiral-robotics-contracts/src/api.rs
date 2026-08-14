@@ -1102,7 +1102,7 @@ pub enum ModeSelection {
     /// which loads the episode server-side and hands the samples to the
     /// control thread directly.
     Replay { robot: String, episode: String },
-    /// A backend-owned native policy session commands one calibrated arm.
+    /// A backend-owned remote policy session commands one calibrated arm.
     Policy { robot: String, session: String },
 }
 

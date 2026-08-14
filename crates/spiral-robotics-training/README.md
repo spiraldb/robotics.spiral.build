@@ -26,16 +26,19 @@ blocking client without blocking the async control loop.
 
 The default model implementation lives in the separate
 `spiral-robotics-training-pytorch` leaf crate. The
-`spiral-robotics-training-http` crate exposes any implementation through JSON
-lifecycle endpoints and Arrow IPC tensor uploads. Checkpoints are raw
-SafeTensors responses. The standalone
-`spiral-robotics-training-runtime` binary composes the two; it owns only
-in-memory optimizer sessions and never opens Studio's database.
+`spiral-robotics-training-http` crate exposes training and policy sessions
+through JSON lifecycle endpoints and Arrow IPC tensor uploads. Checkpoints are
+raw SafeTensors responses. The standalone `spiral-robotics-training-runtime`
+binary composes the transports with PyTorch; it owns only in-memory optimizer
+and rollout policy sessions and never opens Studio's database.
 
 The versioned runtime API is deliberately small:
 
 - `GET /v1/health`
 - `POST /v1/sessions` and `DELETE /v1/sessions/{id}`
+- `POST /v1/policies` and `DELETE /v1/policies/{id}`
+- `POST /v1/policies/{id}/warm-up`
+- `POST /v1/policies/{id}/infer` with an Arrow IPC observation
 - `GET /v1/sessions/{id}/telemetry`
 - `POST /v1/sessions/{id}/train?step={step}`
 - `POST /v1/sessions/{id}/validate`

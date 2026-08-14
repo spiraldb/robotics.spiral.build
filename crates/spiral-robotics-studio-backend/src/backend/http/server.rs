@@ -206,6 +206,7 @@ async fn serve(
         hardware.clone(),
         cameras.clone(),
         workspace.clone(),
+        data_settings.clone(),
     );
 
     // Without permission a camera still enumerates and its stream still opens;

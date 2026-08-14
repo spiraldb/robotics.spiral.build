@@ -1,9 +1,12 @@
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 use crate::Result;
 
 /// Policy family implemented by an engine.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PolicyKind {
     Act,
 }
@@ -52,7 +55,7 @@ pub struct InferenceInput<'a> {
 
 /// Stable model contract that the integration layer can validate before any
 /// physical rollout starts.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PolicySpecification {
     pub kind: PolicyKind,
     pub state_dimensions: usize,
@@ -63,7 +66,7 @@ pub struct PolicySpecification {
     pub recommended_action_steps: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ImageInputSpecification {
     pub name: String,
     pub channels: usize,
@@ -158,6 +161,14 @@ pub trait Policy: Send {
     /// Clear policy-local episode state. Stateless chunk predictors need no
     /// work here, while future ensemble/streaming policies can override it.
     fn reset(&mut self) {}
+}
+
+/// Materializes one policy inside the process that owns the tensor framework.
+///
+/// HTTP transports depend only on this framework-neutral boundary. Studio can
+/// therefore use a remote policy without linking the loader implementation.
+pub trait PolicyLoader: Send + Sync {
+    fn load(&self, artifact: crate::ModelArtifact) -> Result<Box<dyn Policy>>;
 }
 
 #[cfg(test)]

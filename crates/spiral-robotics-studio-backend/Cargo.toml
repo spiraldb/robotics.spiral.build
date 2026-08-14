@@ -34,10 +34,4 @@ adbc_driver_manager = "0.24.0"
 safetensors = "0.7"
 image.workspace = true
 tempfile.workspace = true
-
-
-[target.'cfg(target_os = "macos")'.dependencies]
-spiral-robotics-inference = { workspace = true, features = ["metal", "accelerate", "download"] }
-
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-spiral-robotics-inference = { workspace = true, features = ["download"] }
+spiral-robotics-inference.workspace = true

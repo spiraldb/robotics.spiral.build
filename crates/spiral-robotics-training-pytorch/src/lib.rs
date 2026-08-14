@@ -4,7 +4,7 @@ mod resources;
 
 use std::sync::Mutex;
 
-use spiral_robotics_inference::act::{
+use spiral_robotics_inference_pytorch::act::{
     NativeActTrainer, VisionActBatch, VisionActCheckpoint, VisionActTrainingConfig,
     imagenet_resnet18_weights,
 };
@@ -28,7 +28,7 @@ impl TrainingBackend for PyTorchTrainingBackend {
     fn health(&self) -> Result<TrainingBackendInfo, TrainingBackendError> {
         let mut devices = vec!["CPU".to_owned()];
         #[cfg(target_os = "macos")]
-        if spiral_robotics_inference::act::metal_available() {
+        if spiral_robotics_inference_pytorch::act::metal_available() {
             devices.insert(0, "MPS".to_owned());
         }
         Ok(TrainingBackendInfo {
@@ -167,7 +167,7 @@ fn vision_batch(batch: TrainingBatch<'_>) -> VisionActBatch<'_> {
     }
 }
 
-fn training_loss(loss: spiral_robotics_inference::act::VisionActLoss) -> TrainingLoss {
+fn training_loss(loss: spiral_robotics_inference_pytorch::act::VisionActLoss) -> TrainingLoss {
     TrainingLoss {
         total: loss.total,
         l1: loss.l1,
