@@ -41,8 +41,8 @@
   --tone-danger-soft: rgb(190 66 61 / 0.1);
   --tone-caution: #7d6a41;
   --tone-caution-soft: #fbf3db;
-  --tone-good: #448361;
-  --tone-good-soft: rgb(68 131 97 / 0.1);
+  --tone-good: #3a7654;
+  --tone-good-soft: rgb(58 118 84 / 0.1);
   --tone-series-train: #2a78d6;
   --tone-series-validation: #d9572b;
   --tone-series-memory: #7a58a5;
@@ -81,7 +81,7 @@
   }
 
   .activity-rail-item {
-    @apply relative flex min-h-14 cursor-pointer flex-col items-center justify-center gap-1 text-[10px] text-ink-faint transition-colors hover:bg-hover hover:text-ink;
+    @apply relative flex min-h-14 flex-col items-center justify-center gap-1 rounded-none text-ink-faint;
   }
 
   .activity-rail-item::before {
@@ -89,19 +89,55 @@
     @apply absolute inset-y-1 left-0 w-0.5 rounded-r bg-transparent;
   }
 
-  .activity-rail-item-active {
-    @apply bg-surface text-accent;
-  }
-
   .activity-rail-item-active::before {
     background: var(--tone-accent);
   }
 
+  /* Two points larger than the label's own size. The icon is what the rail is
+     scanned by; at 16px it sat inside its caption rather than above it. */
   .activity-rail-item .ui-icon {
-    width: 1rem;
-    height: 1rem;
+    width: 1.125rem;
+    height: 1.125rem;
   }
 
+  /* The rail is sized for the longest activity name it has today. This is what
+     keeps the one after that from reaching the hairline. */
+  .activity-rail-item > span {
+    @apply max-w-full truncate;
+  }
+}
+
+/*
+  Unlayered on purpose, and the only block in this file that has to be.
+
+  `ui.css` ships as plain, unlayered CSS while everything above lives in
+  Tailwind's `components` layer, and an unlayered declaration beats a layered
+  one however specific the layered selector is. Geometry is the part of the
+  shared action the rail genuinely has to argue with: six pixels of inline
+  padding is right for a label sitting beside an icon, and wrong for one sitting
+  under an icon in a sixty-pixel column, where those twelve pixels were the
+  whole difference between "Settings" and "Setti…".
+
+  Colour and the selected wash stay with the primitive on purpose. The rail
+  reads them as the tinted current item every sidebar of this kind has, and one
+  more override here would be a second opinion about the same pixel.
+*/
+.studio-activity-rail .activity-rail-item {
+  padding-inline: 2px;
+  font-size: 10px;
+  /*
+    The layered `min-h-14` above never took: `.ui-action--compact` is unlayered
+    and set a 24px floor, so the items collapsed to the 32px their own contents
+    happened to occupy and the five activities stacked into a 160px block with
+    four pixels between an icon and the label under it. Fifty-six is the size
+    the rail was drawn for — an icon, its name, and room to tell one target from
+    the next.
+  */
+  min-height: 3.5rem;
+  gap: 5px;
+}
+
+@layer components {
   .live-save-confirmation {
     @apply fixed left-16 top-[4.25rem] z-[60] flex items-center gap-1.5 rounded border border-line bg-surface px-2 py-1.5 text-ink;
     box-shadow: 0 4px 16px rgb(0 0 0 / 0.14);
@@ -275,11 +311,7 @@
   }
 
   .live-robot-row {
-    @apply flex min-h-9 min-w-0 cursor-pointer items-center gap-2 rounded bg-surface px-2.5 text-left transition-colors hover:bg-hover;
-  }
-
-  .live-robot-row-selected {
-    @apply bg-selected;
+    @apply flex min-h-9 min-w-0 items-center gap-2 rounded px-2.5 text-left;
   }
 
   .live-robot-accent {
@@ -327,38 +359,12 @@
     @apply ml-auto text-[10px] text-ink-faint;
   }
 
-  .studio-button {
-    @apply inline-flex min-h-7 cursor-pointer items-center justify-center gap-1 bg-surface px-2 text-[11px] text-ink-soft transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-45;
-  }
-
-  .studio-button-danger {
-    color: var(--tone-danger);
-  }
-
-  .studio-button-danger {
-    background: var(--tone-danger-soft);
-  }
-
   .control-segmented {
-    @apply mx-3 mb-2 grid grid-cols-3 gap-px overflow-hidden rounded border border-line bg-line;
+    @apply mx-3 mb-2 grid grid-cols-3;
   }
 
   .control-segment {
-    @apply min-h-8 cursor-pointer bg-surface text-[11px] text-ink-soft transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-45;
-  }
-
-  .control-segment-active {
-    @apply text-accent-ink;
-    background: var(--tone-accent);
-  }
-
-  /* Torque engaged is a physical fact, not a selection. Role blue made Hold and
-     Teleop read exactly as calm as Release, so the only thing on screen saying
-     the arm was live was a 10px count in the far corner of the status bar.
-     DESIGN.md spends Brick Red on energized torque; this is where it lands. */
-  .control-segment-energized {
-    @apply text-accent-ink;
-    background: var(--tone-danger);
+    @apply w-full text-[11px];
   }
 
   .capture-destination {
@@ -383,14 +389,6 @@
 
   .capture-destination > p {
     @apply mt-1.5 text-[10px] leading-4 text-ink-faint;
-  }
-
-  .inline-safety-confirm {
-    @apply mx-3 mb-2 flex flex-wrap items-center gap-1 rounded bg-danger-soft px-2 py-1 text-[10px] text-danger;
-  }
-
-  .inline-safety-confirm > span {
-    @apply min-w-40 flex-1;
   }
 
   .camera-editor-content {
@@ -423,6 +421,12 @@
     backface-visibility: hidden;
     -webkit-backface-visibility: hidden;
     will-change: contents;
+    /* A stream that yields no frames is still an image element carrying an alt
+       string, and the browser will happily paint that string in its own type at
+       the corner of the mat. The alt stays for assistive technology; what it
+       must not do is draw itself. The panel's own report is the visible
+       answer. */
+    color: transparent;
   }
 
   .camera-live-error {
@@ -445,24 +449,59 @@
     @apply text-[12px] font-medium;
   }
 
+  /*
+    A backend failure arrives here as whatever the driver said, and a driver
+    says things like "sql parser error: Expected: end of statement, found:
+    episode_000052 at Line: 1, Column: 66 (sqlstate: 00000, vendor_code:
+    -2147483648)". Unbounded, that filled a camera panel top to bottom in a
+    column eleven words wide, in three panels at once, for one failure. Four
+    lines is enough to recognise the problem; the whole string stays on the
+    element's title, in the status bar, and in the notification centre.
+  */
   .editor-empty span {
     @apply max-w-[36ch] text-[11px] text-ink-faint;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+  }
+
+  .timeline-source-note {
+    @apply m-0 flex flex-wrap items-center gap-2 border-b border-line bg-caution-soft px-2 py-1 text-[11px] text-caution;
+  }
+
+  .timeline-source-note > span {
+    @apply min-w-0 flex-1;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    overflow-wrap: anywhere;
   }
 
   .studio-status-bar {
-    @apply relative z-40 flex min-h-5 shrink-0 items-center justify-between border-t border-line bg-surface px-2 text-[10px] text-ink-soft;
+    @apply relative z-40 flex min-h-5 shrink-0 items-center justify-between gap-3 border-t border-line bg-surface px-2 text-[10px] text-ink-soft;
   }
 
+  /* The left group carries context and the right group carries state, so when
+     the bar runs out of room the context is what gives way. Without this the
+     two groups met in the middle and ran their words together. */
   .status-bar-group {
-    @apply flex min-w-0 items-center;
+    @apply flex min-w-0 items-center overflow-hidden;
   }
 
   .status-bar-group-right {
-    @apply justify-end;
+    @apply shrink-0 justify-end;
   }
 
+  /*
+    Space, not rules. Six facts each fenced by a hairline turned a twenty-pixel
+    bar into a row of cells, and the bar's own top rule already separates it
+    from the workspace — the one boundary here that divides anything.
+  */
   .status-bar-item {
-    @apply inline-flex min-h-5 items-center gap-1 whitespace-nowrap border-r border-line px-2 first:pl-0 last:border-r-0 last:pr-0;
+    @apply inline-flex min-h-5 items-center gap-1 whitespace-nowrap px-2 first:pl-0 last:pr-0;
   }
 
   .status-bar-accent {
@@ -473,6 +512,12 @@
     color: var(--tone-danger);
   }
 
+  /* Something on the bench wants attention but nothing is failing yet: the
+     count only appears when it is non-zero, so it can afford to be coloured. */
+  .status-bar-caution {
+    color: var(--tone-caution);
+  }
+
   .status-bar-message {
     @apply inline-flex min-w-0 max-w-[32rem] items-center truncate border-l border-line px-2 text-[10px];
   }
@@ -481,16 +526,16 @@
   .status-bar-message.message-warning { color: var(--tone-caution); }
   .status-bar-message.message-error { color: var(--tone-danger); }
 
-  .status-bar-notifications {
-    @apply relative inline-flex min-h-5 min-w-6 shrink-0 cursor-pointer items-center justify-center gap-1 border-l border-line px-1.5 text-ink-soft outline-none hover:bg-hover hover:text-ink focus-visible:bg-hover focus-visible:text-ink;
+  .status-bar-mobile-state {
+    display: none;
   }
 
-  .status-bar-notifications[aria-expanded="true"] {
-    @apply bg-selected text-accent;
+  .status-bar-notifications {
+    @apply relative inline-flex min-h-5 min-w-6 shrink-0 items-center justify-center gap-1 border-l border-line px-1.5;
   }
 
   .status-bar-notifications > span {
-    @apply min-w-3 text-center font-mono text-[9px] tabular-nums;
+    @apply min-w-3 text-center font-mono text-[10px] tabular-nums;
   }
 
   .notification-center {
@@ -516,11 +561,11 @@
 
   .notification-center-action,
   .notification-primary-action {
-    @apply min-h-6 shrink-0 cursor-pointer rounded px-1.5 text-[10px] text-ink-soft outline-none hover:bg-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-accent;
+    @apply min-h-6 shrink-0 rounded px-1.5 text-[10px];
   }
 
   .notification-primary-action {
-    @apply bg-selected font-medium text-accent;
+    @apply font-medium;
   }
 
   .notification-list {
@@ -667,11 +712,6 @@
     color: var(--tone-caution);
   }
 
-  .training-inline-state-danger {
-    background: var(--tone-danger-soft);
-    color: var(--tone-danger);
-  }
-
   .training-active-run {
     @apply border-b border-line px-3 py-3;
     background: var(--tone-sunken);
@@ -711,14 +751,8 @@
     @apply mt-2 text-[10px] leading-4 text-ink-soft;
   }
 
-  .training-stop-button {
-    @apply mt-1.5 min-h-7 w-full cursor-pointer rounded border bg-transparent px-2 text-[11px] font-medium transition-colors disabled:cursor-wait disabled:opacity-45;
-    border-color: rgb(190 66 61 / 0.45);
-    color: var(--tone-danger);
-  }
-
-  .training-stop-button:hover:not(:disabled) {
-    background: var(--tone-danger-soft);
+  .training-stop-action {
+    @apply mt-1.5 w-full;
   }
 
   .training-form-section,
@@ -840,14 +874,9 @@
     @apply mt-2 grid grid-cols-2 gap-2;
   }
 
-  .training-start-button {
-    @apply mx-3 my-3 flex min-h-8 shrink-0 cursor-pointer items-center justify-center rounded px-3 text-[11px] font-semibold text-accent-ink transition-colors disabled:cursor-not-allowed disabled:opacity-45;
+  .training-start-action {
+    @apply mx-3 my-3 shrink-0;
     width: calc(100% - 1.5rem);
-    background: var(--tone-accent);
-  }
-
-  .training-start-button:hover:not(:disabled) {
-    filter: brightness(0.94);
   }
 
   .training-history-empty {
@@ -867,15 +896,11 @@
   }
 
   .training-history-entry {
-    @apply grid grid-cols-[minmax(0,1fr)_2rem] overflow-hidden rounded transition-colors hover:bg-hover;
-  }
-
-  .training-history-entry-selected {
-    background: var(--tone-selected);
+    @apply grid grid-cols-[minmax(0,1fr)_2rem] overflow-hidden rounded;
   }
 
   .training-history-row {
-    @apply grid min-h-9 min-w-0 cursor-pointer grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-0.5 rounded bg-transparent px-2 py-1 text-left outline-none focus-visible:ring-1 focus-visible:ring-accent;
+    @apply grid min-h-9 min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-0.5 rounded px-2 py-1 text-left;
   }
 
   .training-history-name {
@@ -900,10 +925,7 @@
   }
 
   .training-history-delete {
-    @apply inline-flex min-h-9 w-8 shrink-0 cursor-pointer items-center justify-center border-l border-line
-      text-ink-faint outline-none transition-colors hover:bg-danger-soft hover:text-danger
-      focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-danger disabled:cursor-not-allowed
-      disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-faint;
+    @apply inline-flex min-h-9 w-8 shrink-0 items-center justify-center border-l border-line;
   }
 
   .training-history-delete .ui-icon {
@@ -911,16 +933,7 @@
   }
 
   .training-history-delete-confirmation {
-    @apply col-span-2 flex flex-wrap items-center gap-1 border-t border-line bg-danger-soft px-2 py-1.5 text-[10px] leading-4 text-danger;
-  }
-
-  .training-history-delete-confirmation > span {
-    @apply min-w-0 basis-full;
-    overflow-wrap: anywhere;
-  }
-
-  .training-history-delete-confirmation strong {
-    @apply font-semibold;
+    @apply col-span-2 px-2;
   }
 
   .training-run-empty {
@@ -1405,8 +1418,16 @@
     @apply flex min-w-0 flex-col gap-0.5;
   }
 
+  /*
+    The phase and its explanation wrap rather than share one line. In a 27%
+    workbench "Safety limits and hold-on-stop are active." had 59px of the 165
+    it needs and arrived as "Safety limits …" — a sentence about what is holding
+    the arm, cut off before it says what that is. It takes its own line here
+    like the warning beneath it already does; both change on phase transitions
+    rather than with telemetry, so nothing unfolds under a moving number.
+  */
   .rollout-runtime-summary {
-    @apply flex min-w-0 items-baseline gap-2;
+    @apply flex min-w-0 flex-wrap items-baseline gap-x-2;
   }
 
   .rollout-runtime-note strong {
@@ -1414,7 +1435,8 @@
   }
 
   .rollout-runtime-note small {
-    @apply min-w-0 truncate text-ink-faint;
+    @apply min-w-0 text-ink-faint;
+    overflow-wrap: anywhere;
   }
 
   .rollout-runtime-note .rollout-runtime-warning {
@@ -1445,42 +1467,13 @@
     background: var(--tone-danger);
   }
 
-  .rollout-action-buttons {
+  .rollout-actions {
     @apply grid grid-cols-2 gap-2;
   }
 
-  .rollout-run-button,
-  .rollout-stop-button {
-    @apply flex min-h-8 min-w-0 cursor-pointer items-center justify-center rounded px-2 text-center text-[11px] font-semibold leading-4 transition-colors disabled:cursor-not-allowed disabled:opacity-45;
-  }
-
-  .rollout-run-button {
-    @apply text-accent-ink;
-    background: var(--tone-accent);
-  }
-
-  .rollout-run-button:hover:not(:disabled) {
-    filter: brightness(0.94);
-  }
-
-  .rollout-run-button:focus-visible {
-    outline: 2px solid var(--tone-accent);
-    outline-offset: 2px;
-  }
-
-  .rollout-stop-button {
-    @apply border bg-transparent;
-    border-color: color-mix(in srgb, var(--tone-danger) 45%, transparent);
-    color: var(--tone-danger);
-  }
-
-  .rollout-stop-button:hover:not(:disabled) {
-    background: var(--tone-danger-soft);
-  }
-
-  .rollout-stop-button:focus-visible {
-    outline: 2px solid var(--tone-danger);
-    outline-offset: 2px;
+  .rollout-run-action,
+  .rollout-stop-action {
+    @apply min-w-0;
   }
 
   .rollout-blocker {
@@ -1530,9 +1523,10 @@
 }
 
 @media (max-width: 980px) {
-  .studio-v2-body {
-    grid-template-columns: 3.25rem minmax(0, 1fr);
-  }
+  /* The rail keeps its full width here. Narrowing it to 3.25rem bought eight
+     pixels for the workspace and spent them on "Settings" and "Training",
+     which at 10px are 47px wide and were left with two pixels of air on each
+     side — the labels stopped reading as centred and started reading as cut. */
 
   .studio-status-bar {
     justify-content: flex-start;
@@ -1548,17 +1542,39 @@
 
 @media (max-width: 480px) {
   .studio-status-bar {
-    justify-content: flex-start;
-    overflow-x: auto;
+    justify-content: space-between;
+    overflow: hidden;
+    padding-left: 0.5rem;
+    padding-right: 0;
   }
 
   .status-bar-group {
-    max-width: none;
-    flex: 0 0 auto;
+    min-width: 0;
+    flex: 1 1 auto;
   }
 
   .status-bar-group-right {
-    max-width: none;
+    min-width: 0;
+    flex: 0 1 auto;
+    margin-left: auto;
+  }
+
+  .status-bar-group > .status-bar-item:not(:first-child),
+  .status-bar-group-right > .status-bar-item,
+  .status-bar-message {
+    display: none;
+  }
+
+  .status-bar-mobile-state {
+    display: inline-flex;
+    min-width: 0;
+    min-height: 44px;
+    max-width: min(42vw, 12rem);
+    align-items: center;
+    overflow: hidden;
+    padding-inline: 0.5rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .training-form-grid,
@@ -1610,13 +1626,13 @@
     font-size: 16px;
   }
 
-  .training-start-button,
-  .training-stop-button,
+  .training-start-action,
+  .training-stop-action,
   .training-history-row,
   .training-history-delete,
   .training-query-section > summary,
-    .rollout-run-button,
-    .rollout-stop-button {
+    .rollout-run-action,
+    .rollout-stop-action {
       min-height: 44px;
     }
 
@@ -1714,8 +1730,12 @@
   border-bottom-color: var(--tone-accent);
 }
 
+/* A share *and* a ceiling. On a tall panel 48% handed the table list eight rows
+   it did not need and took them from the editor, which is the half of this
+   panel with typing in it; on a short one the percentage alone left the editor
+   two lines. The list scrolls past sixteen rems either way. */
 .query-schema-browser {
-  max-height: 48%;
+  max-height: min(48%, 16rem);
   flex: 0 0 auto;
   overflow: auto;
   border-bottom: 1px solid var(--tone-line);
@@ -1753,18 +1773,12 @@
   display: grid;
   width: 100%;
   min-height: 2.5rem;
-  cursor: pointer;
   grid-template-columns: minmax(7rem, 0.8fr) minmax(0, 1.5fr);
   align-items: center;
   gap: 0.5rem;
   border-bottom: 1px solid var(--tone-line);
   padding: 0.375rem 0.5rem;
   text-align: left;
-}
-
-.query-schema-row:hover,
-.query-schema-row:focus-visible {
-  background: var(--tone-hover);
 }
 
 .query-schema-row > span {
@@ -1813,24 +1827,32 @@
   flex-direction: column;
 }
 
-.query-result-tab {
+.query-result-tab-item {
+  position: relative;
   display: flex;
   min-width: 7rem;
+  max-width: 16rem;
   min-height: 2rem;
   flex: 0 0 auto;
-  cursor: pointer;
+  align-items: stretch;
+  border-right: 1px solid var(--tone-line);
+}
+
+.query-result-tab-item-active {
+  background: var(--tone-surface);
+}
+
+.query-result-tab {
+  display: flex;
+  min-width: 0;
+  min-height: 2rem;
+  flex: 1 1 auto;
   align-items: center;
   gap: 0.375rem;
-  border-right: 1px solid var(--tone-line);
   padding: 0 0.5rem;
   color: var(--tone-ink-soft);
   font-size: 0.6875rem;
   white-space: nowrap;
-}
-
-.query-result-tab:focus-visible {
-  outline: 2px solid var(--tone-accent);
-  outline-offset: -2px;
 }
 
 .query-result-tab-active {
@@ -1839,21 +1861,15 @@
   box-shadow: inset 0 -1px 0 var(--tone-accent);
 }
 
-.query-active-tab-close {
-  display: inline-flex;
-  width: 1.5rem;
-  height: 1.5rem;
-  margin-left: auto;
-  cursor: pointer;
-  align-items: center;
-  justify-content: center;
-  color: var(--tone-ink-faint);
+.query-result-tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.query-active-tab-close:hover,
-.query-active-tab-close:focus-visible {
-  color: var(--tone-ink);
-  background: var(--tone-hover);
+.query-result-tab-close {
+  align-self: center;
+  flex: 0 0 24px;
 }
 
 .query-tab-state {
@@ -1912,6 +1928,34 @@
   margin-top: 0.375rem;
   color: var(--tone-danger);
   font-size: 0.6875rem;
+  overflow-wrap: anywhere;
+}
+
+/*
+  Unlayered, because it argues with `.ui-action`, which is unlayered too.
+
+  An episode is two lines: what it is and how long it ran, then how it was
+  captured and how much of it there is. The shared action is `inline-flex` with
+  `align-items: center`, so wrapping the row in it laid those two lines side by
+  side instead of stacking them — and the second line, asking for 164px in the
+  85px that were left, rendered "Teleoperation — leader → follower" as "T…".
+  Fifty-two rows of a single letter and an ellipsis.
+*/
+.data-episode-select {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 0;
+  white-space: normal;
+}
+
+/* The row is the target, so the row is what responds. */
+.data-episode-row:hover {
+  background-color: var(--tone-hover);
+}
+
+li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
+  background-color: var(--tone-selected);
 }
 
 .data-episode-actions {
@@ -1921,66 +1965,8 @@
   gap: 0.125rem;
 }
 
-.data-delete-action {
-  transition: opacity 120ms ease, background-color 120ms ease;
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .data-episode-row:not(:hover):not(:focus-within) .data-delete-action {
-    opacity: 0;
-  }
-}
-
 .data-delete-confirmation {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  gap: 0.25rem;
-  border-top: 1px solid var(--tone-line);
-  padding: 0.25rem 0.25rem 0;
-  color: var(--tone-danger);
-  font-size: 0.625rem;
-}
-
-.data-delete-confirmation > span {
-  min-width: 0;
-  flex: 1 1 auto;
-}
-
-.data-storage-state {
-  display: inline-flex;
-  min-height: 1rem;
-  flex: 0 0 auto;
-  align-items: center;
-  border-radius: 0.25rem;
-  padding: 0 0.25rem;
-  font-size: 0.625rem;
-  font-weight: 500;
-  line-height: 1rem;
-}
-
-.data-storage-local {
-  color: var(--tone-ink-soft);
-  background: var(--tone-hover);
-}
-
-.data-storage-active {
-  color: var(--tone-ink-soft);
-  background: var(--tone-line);
-}
-
-.data-storage-synced {
-  color: var(--tone-good);
-  background: var(--tone-good-soft);
-}
-
-.data-storage-failed {
-  color: var(--tone-danger);
-  background: var(--tone-danger-soft);
-}
-
-.data-push-action {
-  color: var(--tone-accent);
+  padding-inline: 0.25rem;
 }
 
 .query-table {
@@ -2018,17 +2004,12 @@
 
 .settings-field-row {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.5rem;
 }
 
-.settings-field-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-
 .settings-backdrop {
-  position: fixed;
-  inset: 0;
   z-index: 79;
-  background: rgb(55 53 47 / 0.32);
 }
 
 .data-settings-dialog {
@@ -2042,10 +2023,6 @@
   transform: translate(-50%, -50%);
   flex-direction: column;
   overflow: hidden;
-  border-radius: 0.375rem;
-  color: var(--tone-ink);
-  background: var(--tone-surface);
-  box-shadow: 0 18px 48px rgb(55 53 47 / 0.24);
 }
 
 .settings-layout {
@@ -2061,20 +2038,14 @@
   background: var(--tone-sunken);
 }
 
-.settings-nav button {
+.settings-nav .ui-action {
   display: block;
   width: 100%;
   min-height: 1.75rem;
   padding-inline: 0.5rem;
-  border-radius: 0.25rem;
-  color: var(--tone-ink-soft);
   text-align: left;
   font-size: 0.75rem;
-  cursor: pointer;
 }
-
-.settings-nav button:hover { background: var(--tone-hover); color: var(--tone-ink); }
-.settings-nav .settings-nav-active { color: var(--tone-accent); background: var(--tone-selected); }
 
 .settings-content {
   min-height: 0;
@@ -2097,21 +2068,6 @@
   font-weight: 600;
 }
 
-.toggle-field {
-  display: flex;
-  min-height: 2rem;
-  align-items: center;
-  gap: 0.5rem;
-  margin-bottom: 0.75rem;
-  font-size: 0.75rem;
-}
-
-.toggle-field input {
-  width: 0.875rem;
-  height: 0.875rem;
-  accent-color: var(--tone-accent);
-}
-
 .settings-field {
   display: block;
   margin-bottom: 0.75rem;
@@ -2123,6 +2079,22 @@
   line-height: 1.45;
 }
 
+.settings-project-transfer {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--tone-line);
+}
+
+.settings-project-transfer .provider-heading {
+  margin-bottom: 0.75rem;
+}
+
+.settings-transfer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
 .connection-test {
   margin-top: 0.75rem;
   padding: 0.5rem 0.625rem;
@@ -2132,6 +2104,7 @@
 }
 
 .connection-test-ok { color: var(--tone-good); }
+.connection-test-pending { color: var(--tone-caution); background: var(--tone-caution-soft); }
 .connection-test-failed { color: var(--tone-danger); background: var(--tone-danger-soft); }
 
 .settings-footer {
@@ -2176,7 +2149,7 @@
     border-right: 0;
     border-bottom: 1px solid var(--tone-line);
   }
-  .settings-nav button { width: auto; flex: 0 0 auto; }
+  .settings-nav .ui-action { width: auto; flex: 0 0 auto; }
   .settings-content { padding: 0.875rem; }
   .settings-field-row { grid-template-columns: 1fr; gap: 0; }
   .settings-footer > span { display: none; }
@@ -2188,7 +2161,7 @@
     min-height: 3.5rem;
   }
 
-  .data-episode-actions .btn {
+  .data-episode-actions .ui-action {
     min-height: 2.75rem;
   }
 }
@@ -2254,19 +2227,25 @@
     outline-offset: 1px;
   }
 
+  /*
+    The thumb was hairline grey on paper — about 1.2:1, which is a rule, not a
+    control. An episode list showing five of fifty-two then had nothing on it
+    that said the other forty-seven existed. Graphite at 22% stays quiet against
+    12px type and is still unmistakably a scrollbar; it darkens on hover the way
+    every other control here does.
+  */
   * {
-    scrollbar-color: var(--tone-line) transparent;
+    scrollbar-color: rgb(55 53 47 / 0.22) transparent;
     scrollbar-width: thin;
   }
 
+  *:hover {
+    scrollbar-color: rgb(55 53 47 / 0.34) transparent;
+  }
+
   @media (prefers-reduced-motion: reduce) {
-    *,
-    *::before,
-    *::after {
+    html {
       scroll-behavior: auto !important;
-      transition-duration: 0.01ms !important;
-      animation-duration: 0.01ms !important;
-      animation-iteration-count: 1 !important;
     }
 
     .live-save-confirmation {
@@ -2277,6 +2256,14 @@
       animation: none !important;
     }
 
+    .training-field input,
+    .training-field select,
+    .training-query-section textarea,
+    .rollout-field input,
+    .rollout-field select,
+    .joint-row {
+      transition: none;
+    }
   }
 }
 
@@ -2299,32 +2286,6 @@
 @layer components {
   .studio-shell {
     @apply flex h-screen flex-col overflow-hidden bg-canvas text-[12px] text-ink;
-  }
-
-  /* 24px square: the WCAG 2.5.8 minimum target, which is the floor a dense
-     operating surface is allowed to sit on rather than a size to beat. */
-  .icon-button {
-    @apply inline-flex min-h-6 min-w-6 cursor-pointer items-center justify-center rounded text-[12px]
-      text-ink-soft transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed
-      disabled:opacity-40;
-  }
-
-  .icon-button[aria-pressed="true"] {
-    @apply bg-selected text-accent;
-  }
-
-  .ui-icon {
-    width: 0.875rem;
-    height: 0.875rem;
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 1.35;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-  }
-
-  .chevron-open {
-    transform: rotate(90deg);
   }
 
   .status-dot {
@@ -2407,16 +2368,23 @@
     container-type: inline-size;
   }
 
-  .joint-row:hover,
+  /* Hover is the neutral wash, not the selection colour. Sharing one tint meant
+     running the pointer down the joint stack lit each row exactly as the chosen
+     one, so the selection appeared to follow the mouse. */
+  .joint-row:hover {
+    background: var(--tone-hover);
+  }
+
   .joint-row-selected {
     @apply bg-selected;
   }
 
-  /* Selection keeps its ring while a motor's condition takes the wash, so a hot
-     joint that is also the selected one still says both things. Ordered after
-     the selected rule on purpose: the background belongs to the hardware, the
-     ring belongs to the operator. */
-  .joint-row-selected {
+  /* Selection keeps its ring only where the wash is already spoken for: a hot or
+     faulted joint that is also the selected one still has to say both things,
+     and the ring is what is left. On a healthy row the accent wash has said it
+     on its own, and the extra outline was one more blue rectangle in a column
+     of six. */
+  .joint-row-selected:is(.joint-row-caution, .joint-row-fault) {
     box-shadow: inset 0 0 0 1px var(--tone-accent);
   }
 
@@ -2436,8 +2404,11 @@
     @apply text-danger;
   }
 
+  /* Wide enough for the longest joint this arm has. At 4.75rem the column cut
+     "Shoulder pan" to "Shoulder pa", which is not an abbreviation — it is the
+     name of the joint with its last letter missing. */
   .joint-label {
-    @apply inline-flex min-h-7 w-[4.75rem] shrink-0 cursor-pointer items-center truncate text-left text-[11px] text-ink-soft;
+    @apply inline-flex min-h-7 w-[5.5rem] shrink-0 items-center truncate text-left text-[11px] text-ink-soft;
   }
 
   /* The measured angle beside its slider: mono so the sign and the digits stay
@@ -2560,16 +2531,24 @@
     the cube it was stacked above, because both answer the same question about
     which way the scene is facing.
   */
+  /* The gesture line shares the bottom edge with the view cube, so it stops
+     before the cube starts. Left unbounded it ran underneath it and lost its
+     last gesture behind a solid panel — the reader could not tell whether the
+     sentence had ended or been covered. */
   .viewport-help {
-    @apply pointer-events-none absolute bottom-1.5 left-2 text-[10px];
+    @apply pointer-events-none absolute bottom-1.5 left-2 right-24 truncate text-[10px];
+  }
+
+  .scene-source-note {
+    @apply pointer-events-auto absolute left-1/2 top-2 z-20 max-w-[60%] -translate-x-1/2 truncate rounded-sm border border-line bg-surface px-2 py-1 text-[10px] text-ink-soft;
   }
 
   .viewport-controls {
     @apply absolute top-1.5 right-1.5 flex items-center gap-0.5;
   }
 
-  .viewport-button {
-    @apply inline-flex min-h-6 cursor-pointer items-center rounded px-1.5 text-[11px] transition-colors;
+  .viewport-action {
+    @apply inline-flex min-h-6 items-center rounded px-1.5 text-[11px];
   }
 
   .viewport-legend {
@@ -2577,7 +2556,7 @@
   }
 
   .viewport-legend-row {
-    @apply flex min-h-5 cursor-pointer items-center gap-1 rounded px-1 text-[11px] transition-colors;
+    @apply flex min-h-5 items-center gap-1 rounded px-1 text-[11px];
   }
 
   .view-cube {
@@ -2587,8 +2566,8 @@
   /* The faces spell their view out. Abbreviating them to `F` and `R` put a key
      cap reading `R` beside one reading `F` — and `F` really is a key, while `R`
      starts a recording on live hardware. */
-  .view-cube button {
-    @apply min-h-5 cursor-pointer transition-colors;
+  .view-cube .ui-action {
+    @apply min-h-5;
   }
 
   .view-cube-row {
@@ -2617,45 +2596,6 @@
   .technical-details code {
     @apply mt-0.5 block max-h-24 overflow-auto rounded bg-sunken p-1 font-mono text-[10px] leading-snug text-ink-soft;
     overflow-wrap: anywhere;
-  }
-
-  /*
-    Buttons are quiet by default: text on a hover tint, the way a Notion menu
-    item behaves. Weight is spent only where it carries meaning — one filled
-    accent for the action a panel exists to perform, and red for the one that
-    destroys something.
-  */
-  .btn {
-    @apply inline-flex cursor-pointer items-center justify-center gap-1 rounded border
-      min-h-6 border-transparent px-1.5 py-0 text-[12px] whitespace-nowrap text-ink transition-colors
-      hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent;
-  }
-
-  .btn-primary {
-    @apply bg-accent text-accent-ink hover:bg-accent hover:brightness-110
-      disabled:hover:brightness-100;
-  }
-
-  .btn-outline {
-    @apply border-line;
-  }
-
-  /* A button that stays on says so, in the same spelling the icon toggles use.
-     Without this the Manual control — which decides whether the sliders move a
-     real arm — looked identical on and off to anyone not using a screen reader. */
-  .btn[aria-pressed="true"] {
-    @apply border-accent text-accent;
-    background: var(--tone-selected);
-  }
-
-  .btn-danger {
-    @apply text-danger hover:bg-danger-soft;
-  }
-
-  /* A quiet text action: rescan, identify, remove. */
-  .link {
-    @apply inline-flex min-h-6 cursor-pointer items-center text-[11px] text-ink-soft transition-colors hover:text-ink
-      disabled:cursor-not-allowed disabled:text-ink-faint disabled:hover:text-ink-faint;
   }
 
   .field {
@@ -2717,13 +2657,6 @@
     overflow: hidden;
   }
 
-  /* No hover here, so the way to unassign a camera cannot wait for one. */
-  .device-camera-remove {
-    opacity: 1;
-    height: 1.75rem;
-    width: 1.75rem;
-  }
-
   .viewport-help {
     display: none;
   }
@@ -2742,23 +2675,40 @@
   .joint-row,
   .joint-label,
   .data-episode-select,
-  .btn,
-  .link,
   .field,
-  .icon-button,
+  .data-dataset-input,
+  .settings-nav .ui-action,
+  .device-chevron,
+  .device-main,
+  .device-camera-remove,
+  .query-result-tab,
+  .query-result-tab-close,
+  .query-schema-row,
+  .timeline-transport-action,
+  .take-action,
+  .viewport-action,
+  .viewport-legend-row,
+  .view-cube .ui-action,
   .notification-center-action,
   .notification-primary-action,
   .status-bar-notifications {
     min-height: 44px;
   }
 
-  .icon-button,
   .status-bar-notifications {
     min-width: 44px;
   }
 
+  .device-chevron,
+  .device-camera-remove,
+  .query-result-tab-close {
+    width: 44px;
+    min-width: 44px;
+  }
+
   .field,
-  .query-input {
+  .query-input,
+  .data-dataset-input {
     font-size: 16px;
   }
 
@@ -2767,14 +2717,7 @@
     min-height: 44px;
   }
 
-  .data-delete-confirmation {
-    flex-wrap: wrap;
-    padding-bottom: 0.25rem;
-  }
-
-  .data-delete-confirmation > span {
-    flex-basis: 100%;
-  }
+  .data-delete-confirmation { padding-bottom: 0.25rem; }
 }
 
 /*
@@ -2791,28 +2734,16 @@
     @apply text-ink-faint;
   }
 
-  .viewport-button {
-    @apply border border-transparent text-ink-soft hover:border-line hover:bg-surface hover:text-ink focus-visible:text-ink;
-  }
-
-  .viewport-button[aria-pressed="true"] {
-    @apply border-line bg-surface text-accent;
+  .viewport-action {
+    @apply border border-transparent;
   }
 
   .viewport-legend-row {
-    @apply text-ink-soft hover:bg-surface hover:text-ink;
-  }
-
-  .viewport-legend-selected {
-    @apply bg-surface text-ink ring-1 ring-line;
+    @apply text-ink-soft;
   }
 
   .view-cube {
     @apply border-line bg-surface/90 text-ink-soft backdrop-blur-none;
-  }
-
-  .view-cube button {
-    @apply hover:bg-hover hover:text-ink focus-visible:text-ink;
   }
 
   .view-cube-row {
@@ -2827,18 +2758,6 @@
 
   /* Device hierarchy: identity and readiness first, setup details second, file
      maintenance last. */
-  .device-panel-header {
-    @apply sticky top-0 z-10 flex min-h-6 items-center gap-1.5 border-b border-line bg-surface px-2;
-  }
-
-  .device-panel-header h2 {
-    @apply text-[12px] font-semibold tracking-[-0.01em];
-  }
-
-  .device-workspace {
-    @apply ml-auto max-w-28 truncate font-mono text-[10px] text-ink-faint;
-  }
-
   .device-entry {
     @apply border-b border-line;
   }
@@ -2851,16 +2770,7 @@
   }
 
   .device-list-action {
-    @apply flex min-h-6 cursor-pointer items-center rounded px-1 text-left text-[11px] text-ink-faint transition-colors hover:bg-hover hover:text-ink;
-  }
-
-  .device-list-action:focus-within {
-    outline: 2px solid var(--tone-accent);
-    outline-offset: -2px;
-  }
-
-  .device-list-action-busy {
-    @apply cursor-wait;
+    @apply flex min-h-6 items-center rounded px-1 text-left text-[11px];
   }
 
   /*
@@ -2870,19 +2780,15 @@
     below the fold.
   */
   .device-entry-row {
-    @apply flex min-h-6 items-center gap-1 pr-1.5 transition-colors hover:bg-hover;
-  }
-
-  .device-entry-selected {
-    @apply bg-selected;
+    @apply flex min-h-6 items-center gap-1 pr-1.5;
   }
 
   .device-chevron {
-    @apply flex min-h-6 w-5 shrink-0 cursor-pointer items-center justify-center text-ink-faint hover:text-ink;
+    @apply flex min-h-6 w-5 shrink-0 items-center justify-center;
   }
 
   .device-main {
-    @apply flex min-w-0 flex-1 cursor-pointer items-baseline gap-1.5 py-0 text-left;
+    @apply flex min-w-0 flex-1 items-baseline gap-1.5 py-0 text-left;
   }
 
   .device-accent {
@@ -2971,14 +2877,7 @@
      child to reveal it, so hiding it outright put the control beyond the reach
      of a keyboard entirely. */
   .device-camera-remove {
-    @apply inline-flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center rounded text-ink-faint opacity-0 transition-[color,background-color,opacity] hover:bg-danger-soft hover:text-danger;
-  }
-
-  /* `:focus` as well as `:focus-visible` — whatever put focus here, a control
-     that currently holds it has to be something the operator can see. */
-  .device-camera-row:hover .device-camera-remove,
-  .device-camera-remove:focus {
-    @apply text-danger opacity-100;
+    @apply shrink-0;
   }
 
   .device-camera-remove .ui-icon {
@@ -2986,10 +2885,10 @@
   }
 
   .device-file-row {
-    @apply flex min-h-6 items-center gap-1.5 pt-1;
+    @apply flex min-h-6 flex-wrap items-center gap-1.5 pt-1;
   }
 
-  .device-delete:hover {
-    @apply text-danger;
+  .device-delete-confirmation {
+    flex-basis: 100%;
   }
 }

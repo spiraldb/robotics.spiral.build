@@ -3,12 +3,13 @@
 Spiral Robotics is a Rust-native robotics toolkit and browser studio inspired by
 [LeRobot](https://github.com/huggingface/lerobot) and
 [Rerun](https://github.com/rerun-io/rerun). It sets up, calibrates, and operates
-SO-ARM101 arms; records synchronized robot and camera data; publishes and queries
-episodes through SpiralDB; trains vision-conditioned ACT policies; and safely
+SO-ARM101 arms; records synchronized robot and camera data directly in SpiralDB;
+queries that data; trains vision-conditioned ACT policies; and safely
 executes trained policies through the follower's bounded rollout path.
 
-Completed recordings publish to the configured SpiralDB destination
-automatically.
+SpiralDB is Studio's only persistent storage layer. Studio can transfer the
+complete active project from Settings as one `.spiral-project` file, while Data
+imports and exports the selected dataset's episodes as `.spiral-episodes`.
 
 ## Development
 
@@ -46,14 +47,24 @@ To connect Studio to a local SpiralDB stack:
 
 ```console
 SPIRALDB_ADBC_DRIVER=/absolute/path/to/libadbc_driver_spiraldb.dylib \
-SPIRAL__SERVER__URL=http://127.0.0.1:4279 \
-SPIRAL__SPFS__URL=http://127.0.0.1:4295 \
 SPIRAL__DEV=1 \
 dx serve
 ```
 
-To try the interface without hardware, pass server arguments through DX:
+On first launch, Studio opens **Settings → SpiralDB** so you can enter the
+Spiral API endpoint, SpFS endpoint, and project ID. The hosted services are the
+defaults; for the local stack use `http://127.0.0.1:4279` and
+`http://127.0.0.1:4295`. The backend remembers these three bootstrap pointers
+in one private JSON file. Project-only switches apply immediately while Studio
+is idle. A service-endpoint change is activated on the next Studio launch
+because the ADBC driver selects both endpoints when it starts.
+`--spiral-project` or `SPIRAL_PROJECT_ID` may still provide an initial project
+override.
+`SPIRAL_ROBOTICS_BACKEND_STATE` overrides the JSON file path for development
+and deployment isolation.
 
-```console
-dx serve --args "--simulate --no-cameras"
-```
+Studio currently has no product simulation mode. Use `--no-cameras` only when
+camera discovery is intentionally unavailable; configured robot connections
+remain physical. Settings may switch the SpiralDB project only while robots and
+project activity are stopped. The namespace remains fixed for the server
+lifetime; project-owned training and video preferences remain inside Spiral.

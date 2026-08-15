@@ -4,18 +4,22 @@
 //! query result stays mounted while an operator selects, replays, imports, or
 //! exports episodes; neither tool has to impersonate navigation for the other.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_contracts::api::{
-    EpisodeSummary, ImportResponse, PublicationStatus, SpiralQueryResponse,
-};
+use spiral_robotics_contracts::api::{EpisodeImportSummary, EpisodeSummary, SpiralQueryResponse};
 use spiral_robotics_contracts::spiral::{QueryPreset, Table};
+use spiral_robotics_ui::{
+    Action, ActionLink, ActionPurpose, ActionVariant, CloseIcon, FileAction, InlineConfirmation,
+    RefreshIcon, focus_after_render,
+};
 
 use crate::frontend::api::http as api;
 use crate::frontend::app::state::studio;
+use crate::frontend::format::format_clock;
 use crate::frontend::screens::data::state::data_controller;
+use crate::frontend::tasks::single_flight;
 
 pub(crate) const DEFAULT_QUERY_ROWS: usize = 100;
 const QUERY_ROW_OPTIONS: [usize; 5] = [25, 100, 250, 500, 1_000];
@@ -47,11 +51,11 @@ pub(crate) enum QueryState {
 
 /// Dataset navigation, transfer, and per-episode actions.
 #[component]
-pub(crate) fn EpisodesPanel(namespace: String, spiral_available: bool) -> Element {
+pub(crate) fn EpisodesPanel(namespace: String) -> Element {
     let mut studio = studio();
-    let controller = data_controller();
-    let mut importing = use_signal(|| false);
+    let importing = use_signal(|| false);
     let mut confirming_delete = use_signal(|| None::<String>);
+    let mut deleting_episode = use_signal(|| None::<String>);
 
     // Keep the shared selection inside the active dataset without creating a
     // panel-local copy that could drift from Scene, cameras, and Timeline.
@@ -84,26 +88,22 @@ pub(crate) fn EpisodesPanel(namespace: String, spiral_available: bool) -> Elemen
         .into_iter()
         .filter(|episode| episode.dataset_id == dataset_id)
         .collect::<Vec<_>>();
-    let exportable = episodes
-        .iter()
-        .filter(|episode| episode.usable() && !episode.discarded)
-        .count();
     let selected = studio.selected_episode.read().clone();
     let replaying = studio.replay();
-    let publications = controller
-        .publications()
-        .into_iter()
-        .map(|status| (status.episode_id.clone(), status))
-        .collect::<BTreeMap<_, _>>();
-    let publication_error = controller.publication_error();
+    let catalog_loading = studio.episodes_loading();
+    let catalog_loaded = studio.episodes_loaded();
+    let catalog_error = studio.episode_catalog_error();
+    let catalog_issues = studio.episode_catalog_issues();
+    let import_dataset_id = dataset_id.clone();
 
     rsx! {
         section {
             class: "flex h-full min-h-0 flex-col bg-surface text-ink",
             "aria-label": "Episodes",
 
-            header { class: "flex min-h-10 shrink-0 items-center gap-2 border-b border-line px-2",
-                div { class: "data-dataset-heading min-w-0 flex-1",
+            header { class: "shrink-0 border-b border-line",
+                div { class: "flex min-h-10 items-center gap-2 px-2",
+                    div { class: "data-dataset-heading min-w-0 flex-1",
                     label {
                         span { "Dataset" }
                         input {
@@ -119,90 +119,135 @@ pub(crate) fn EpisodesPanel(namespace: String, spiral_available: bool) -> Elemen
                     datalist { id: "data-dataset-options",
                         for id in dataset_ids { option { value: "{id}" } }
                     }
-                    if dataset_valid {
+                    if dataset_valid && !catalog_loaded {
                         p { class: "truncate text-[10px] text-ink-faint",
-                            "{episodes.len()} episodes · {exportable} exportable · {namespace}"
+                            if catalog_loading { "Loading episodes…" } else { "Episodes not loaded" }
+                            " · {namespace}"
+                        }
+                    } else if dataset_valid {
+                        p { class: "truncate text-[10px] text-ink-faint",
+                            "{episodes.len()} episodes · SpiralDB · {namespace}"
                         }
                     } else {
                         p { class: "truncate text-[10px] text-danger", role: "alert",
                             "Use 1–96 letters, numbers, '.', '_' or '-'."
                         }
                     }
+                    }
+                    Action {
+                        purpose: ActionPurpose::Refresh,
+                        variant: ActionVariant::Icon,
+                        aria_label: if catalog_loading { "Refreshing episodes" } else { "Refresh episodes" },
+                        title: "Refresh episodes and storage status",
+                        disabled: catalog_loading,
+                        aria_busy: catalog_loading,
+                        onclick: move |_| {
+                            studio.run_utility("", studio.refresh_episode_catalog());
+                        },
+                        RefreshIcon {}
+                    }
                 }
-                label {
-                    class: if importing() { "btn btn-outline cursor-wait text-ink-faint" } else { "btn btn-outline" },
-                    title: "Import a LeRobot v2 or v3 ZIP into this dataset",
-                    input {
-                        class: "sr-only",
-                        r#type: "file",
-                        accept: ".zip,application/zip",
+                // The scope note takes its own line rather than competing with two
+                // buttons for the width of one. Sharing the row left it 30px of
+                // the 105px it needs, so the caption on the transfer controls read
+                // "Sele…".
+                div { class: "flex min-h-9 flex-wrap items-center gap-x-2 gap-y-0.5 border-t border-line px-2 py-1",
+                    span { class: "order-last w-full text-[10px] text-ink-faint", "Selected dataset only" }
+                    FileAction {
+                        purpose: ActionPurpose::Import,
+                        variant: ActionVariant::Outline,
+                        title: "Import episodes into the selected dataset; existing episode IDs are never replaced",
+                        accept: ".spiral-episodes,application/vnd.spiral-robotics.episodes",
                         disabled: importing() || !dataset_valid,
-                        onchange: move |event| {
+                        aria_busy: importing(),
+                        onchange: move |event: Event<FormData>| {
                             let Some(file) = event.files().first().cloned() else { return };
-                            let dataset_id = dataset_id.clone();
-                            importing.set(true);
+                            let target_dataset = import_dataset_id.clone();
                             studio.run_utility("", async move {
-                                let outcome = async {
-                                    api::upload_file_json::<ImportResponse>(
-                                        &format!("/api/episodes/import?dataset_id={dataset_id}"),
-                                        &file,
-                                        "application/zip",
-                                    )
+                                let Some(outcome) = single_flight(importing, async {
+                                        let result = api::upload_file_json::<EpisodeImportSummary>(
+                                            &format!("/api/episodes/import?dataset_id={target_dataset}"),
+                                            &file,
+                                            "application/vnd.spiral-robotics.episodes",
+                                        )
+                                        .await?;
+                                        studio.refresh_episode_catalog().await?;
+                                        Ok::<_, String>(result)
+                                    })
                                     .await
-                                }
-                                .await;
-                                importing.set(false);
+                                else {
+                                    return Ok(());
+                                };
                                 match outcome {
                                     Ok(result) => {
-                                        if let Some(id) = result.first_episode {
-                                            studio.selected_episode.set(Some(id));
+                                        if let Some(episode) = result.first_episode {
+                                            studio.selected_episode.set(Some(episode));
                                         }
                                         studio.report_success(format!(
-                                            "Imported {} {} into {dataset_id} ({} frames).",
+                                            "Imported {} episodes into {} ({} rows).",
                                             result.episodes,
-                                            if result.episodes == 1 { "episode" } else { "episodes" },
-                                            result.frames,
+                                            result.dataset_id,
+                                            result.rows,
                                         ));
                                         Ok(())
                                     }
                                     Err(error) => Err(error),
                                 }
                             });
+                        },
+                        if importing() { "Importing…" } else { "Import episodes" }
+                    }
+                    if dataset_valid && !episodes.is_empty() {
+                        ActionLink {
+                            purpose: ActionPurpose::Export,
+                            variant: ActionVariant::Outline,
+                            href: "/api/episodes/export?dataset_id={dataset_id}",
+                            download: "{dataset_id}.spiral-episodes",
+                            title: "Export every episode and its streams, samples, and video from the selected dataset",
+                            "Export episodes"
                         }
-                    }
-                    if importing() { "Importing…" } else { "Import" }
-                }
-                if exportable == 0 || !dataset_valid {
-                    button {
-                        r#type: "button",
-                        class: "btn btn-outline",
-                        disabled: true,
-                        title: "Record or import a usable episode before exporting",
-                        "Export"
-                    }
-                } else {
-                    a {
-                        class: "btn btn-outline",
-                        href: format!("/api/episodes/export.zip?dataset_id={dataset_id}"),
-                        download: format!("{dataset_id}-lerobot-v3.zip"),
-                        title: "Download the exportable episodes as a LeRobot v3 ZIP",
-                        "Export"
+                    } else {
+                        Action {
+                            purpose: ActionPurpose::Export,
+                            variant: ActionVariant::Outline,
+                            class: "text-ink-faint",
+                            title: "The selected dataset has no episodes to export",
+                            disabled: true,
+                            "Export episodes"
+                        }
                     }
                 }
             }
 
             div { class: "min-h-0 flex-1 overflow-y-auto",
-                if let Some(error) = publication_error {
+                if let Some(error) = catalog_error {
                     div { class: "mx-2 mt-2 rounded bg-danger-soft px-2 py-1.5 text-[11px] text-danger", role: "alert",
-                        strong { class: "block font-medium", "Storage state unavailable" }
+                        strong { class: "block font-medium", "Episodes unavailable" }
                         span { "{error}" }
                     }
                 }
-                if episodes.is_empty() {
+                if !catalog_issues.is_empty() {
+                    div { class: "mx-2 mt-2 rounded bg-danger-soft px-2 py-1.5 text-[11px] text-danger", role: "alert",
+                        strong { class: "block font-medium", "Episode catalog issue" }
+                        for issue in catalog_issues {
+                            p { "{issue}" }
+                        }
+                    }
+                }
+                if !catalog_loaded {
+                    div { class: "px-3 py-8 text-center", "aria-live": "polite",
+                        strong { class: "block text-[12px] font-medium text-ink",
+                            if catalog_loading { "Loading episodes…" } else { "Episodes not loaded" }
+                        }
+                        if !catalog_loading {
+                            p { class: "mt-1 text-[11px] text-ink-faint", "Use Refresh to try again." }
+                        }
+                    }
+                } else if episodes.is_empty() {
                     div { class: "px-3 py-8 text-center",
                         strong { class: "block text-[12px] font-medium text-ink", "No episodes yet" }
                         p { class: "mt-1 text-[11px] text-ink-faint",
-                            "Record in Live mode or import a LeRobot dataset."
+                            "Record in Live mode or import an episode bundle."
                         }
                     }
                 } else {
@@ -215,27 +260,35 @@ pub(crate) fn EpisodesPanel(namespace: String, spiral_available: bool) -> Elemen
                             EpisodeRow {
                                 key: "{episode.id}",
                                 episode: episode.clone(),
-                                storage_status: publications.get(&episode.id).cloned(),
-                                spiral_available,
                                 selected: selected.as_deref() == Some(episode.id.as_str()),
                                 playing: replaying.as_ref().is_some_and(|progress| progress.episode == episode.id),
                                 confirming_delete: confirming_delete.read().as_deref() == Some(episode.id.as_str()),
+                                deleting: deleting_episode.read().as_deref() == Some(episode.id.as_str()),
+                                delete_disabled: deleting_episode.read().is_some(),
                                 on_select: move |chosen: EpisodeSummary| {
-                                    confirming_delete.set(None);
+                                    if deleting_episode.peek().is_none() {
+                                        confirming_delete.set(None);
+                                    }
                                     if studio.selected_episode.peek().as_deref() != Some(chosen.id.as_str()) {
                                         studio.selected_episode.set(Some(chosen.id));
                                     }
                                 },
                                 on_delete: move |id: String| {
                                     if confirming_delete.read().as_deref() == Some(id.as_str()) {
-                                        confirming_delete.set(None);
-                                        delete_episode(studio, id);
+                                        if deleting_episode.peek().is_none() {
+                                            deleting_episode.set(Some(id.clone()));
+                                            delete_episode(
+                                                studio,
+                                                id,
+                                                deleting_episode,
+                                                confirming_delete,
+                                            );
+                                        }
                                     } else {
                                         confirming_delete.set(Some(id));
                                     }
                                 },
                                 on_cancel_delete: move |_| confirming_delete.set(None),
-                                on_push: move |id: String| controller.push_to_spiral(studio, id),
                             }
                         }
                     }
@@ -269,22 +322,13 @@ pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available:
                     span { "Open Settings and configure a Spiral catalog, project, and namespace." }
                 }
             }
-            div { class: "flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-line px-2 py-1",
-                span { class: "text-[10px] text-ink-faint", "Examples" }
-                for preset in QueryPreset::ALL {
-                    button {
-                        key: "{preset.label()}",
-                        r#type: "button",
-                        class: "link min-h-6",
-                        onclick: {
-                            let namespace = namespace.clone();
-                            let dataset_id = dataset_id.clone();
-                            move |_| controller.set_sql(preset_sql(&namespace, &dataset_id, preset))
-                        },
-                        "{preset.label()}"
-                    }
-                }
-            }
+            // The row of "Examples" links that used to sit here wrote exactly the
+            // same SQL as the schema browser below it: `table_preset` is an
+            // identity map from all ten relations onto all ten presets, so every
+            // link had a twin one row down that also named the table, described
+            // it, and listed its columns. Eleven wrapped links cost four lines of
+            // a 270px column and left the SQL editor 37px to live in, which is
+            // how the editor came to overflow its own panel.
             details { class: "query-schema-browser",
                 summary {
                     span { "Database tables" }
@@ -292,9 +336,10 @@ pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available:
                 }
                 div { class: "query-schema-list",
                     for table in Table::ALL {
-                        button {
+                        Action {
                             key: "{table.name()}",
-                            r#type: "button",
+                            purpose: ActionPurpose::Apply,
+                            variant: ActionVariant::Row,
                             class: "query-schema-row",
                             onclick: {
                                 let namespace = namespace.clone();
@@ -314,10 +359,14 @@ pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available:
                     }
                 }
             }
-            label { class: "flex min-h-0 flex-1 flex-col px-2 pt-2",
+            label { class: "flex min-h-0 flex-1 flex-col overflow-hidden px-2 pt-2",
                 span { class: "label", "Read-only SQL" }
+                // `min-h-0`, not `min-h-32`. A 112px floor on a box whose parent
+                // is free to shrink to 37px does not make the box taller — it
+                // makes it hang 75px out of the bottom of its own panel, with
+                // the Max rows select and Run query drawn on top of the SQL.
                 textarea {
-                    class: "query-input min-h-32 flex-1 resize-none",
+                    class: "query-input min-h-0 flex-1 resize-none",
                     spellcheck: "false",
                     value: controller.sql(),
                     oninput: move |event| controller.set_sql(event.value()),
@@ -351,16 +400,16 @@ pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available:
                     span { class: "block whitespace-nowrap", "⌘/Ctrl Enter" }
                 }
                 if query_running {
-                    button {
-                        r#type: "button",
-                        class: "btn btn-outline",
+                    Action {
+                        purpose: ActionPurpose::Cancel,
+                        variant: ActionVariant::Outline,
                         onclick: move |_| controller.cancel_query(),
                         "Cancel query"
                     }
                 } else {
-                    button {
-                        r#type: "button",
-                        class: "btn btn-primary",
+                    Action {
+                        purpose: ActionPurpose::Start,
+                        variant: ActionVariant::Solid,
                         disabled: !can_query || controller.sql().trim().is_empty(),
                         onclick: move |_| run_query(),
                         "Run query"
@@ -374,15 +423,14 @@ pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available:
 #[component]
 fn EpisodeRow(
     episode: EpisodeSummary,
-    storage_status: Option<PublicationStatus>,
-    spiral_available: bool,
     selected: bool,
     playing: bool,
     confirming_delete: bool,
+    deleting: bool,
+    delete_disabled: bool,
     on_select: EventHandler<EpisodeSummary>,
     on_delete: EventHandler<String>,
     on_cancel_delete: EventHandler<()>,
-    on_push: EventHandler<String>,
 ) -> Element {
     let state = if playing {
         "Replaying"
@@ -393,36 +441,17 @@ fn EpisodeRow(
     } else {
         "Recorded"
     };
-    let storage_state = episode_storage_state(storage_status.as_ref());
-    let storage_class = storage_state.class_name();
-    let storage_title = if storage_state == EpisodeStorageState::Local && spiral_available {
-        "Waiting for automatic SpiralDB sync".to_owned()
-    } else {
-        episode_storage_title(storage_status.as_ref())
-    };
-    let can_retry = episode.usable() && !episode.discarded;
-    let retry_disabled = !spiral_available || !can_retry;
-    let retry_title = if !spiral_available {
-        "Configure SpiralDB in Settings; this episode will sync automatically"
-    } else if !can_retry {
-        "Only complete, kept episodes can be synced to SpiralDB"
-    } else {
-        "Retry the failed automatic SpiralDB sync"
-    };
-    let delete_title = if storage_state == EpisodeStorageState::Synced {
-        "Remove this computer's copy; the SpiralDB copy is kept"
-    } else {
-        "Delete this local episode"
-    };
+    let delete_title = "Delete this episode from SpiralDB";
 
     rsx! {
         li {
-            class: if selected { "bg-selected" } else { "bg-surface hover:bg-hover" },
-            article { class: "data-episode-row flex min-h-12 flex-wrap items-center gap-1 px-1.5 py-1",
-                button {
-                    r#type: "button",
-                    class: "data-episode-select min-w-0 flex-1 rounded px-1 py-0.5 text-left focus-visible:outline-offset-0",
-                    "aria-pressed": selected,
+            class: "bg-surface",
+            article { class: "data-episode-row ui-hover-action-host flex min-h-12 flex-wrap items-center gap-1 px-1.5 py-1",
+                Action {
+                    purpose: ActionPurpose::Select,
+                    variant: ActionVariant::Row,
+                    class: "data-episode-select ui-action--bare min-w-0 flex-1 rounded px-1 py-0.5 text-left focus-visible:outline-offset-0",
+                    aria_pressed: selected,
                     onclick: {
                         let episode = episode.clone();
                         move |_| on_select.call(episode.clone())
@@ -430,57 +459,45 @@ fn EpisodeRow(
                     span { class: "flex items-baseline gap-1.5",
                         strong { class: "truncate font-mono text-[11px] font-medium text-ink", "{short_id(&episode.id)}" }
                         span { class: if playing { "text-[10px] text-accent" } else { "text-[10px] text-ink-faint" }, "{state}" }
-                        span { class: "data-storage-state {storage_class}", title: "{storage_title}", "{storage_state.label()}" }
-                        span { class: "ml-auto shrink-0 font-mono text-[10px] text-ink-soft", "{format_duration(episode.duration_seconds)}" }
+                        // No storage badge. SpiralDB is the only persistent path
+                        // this product has, so the chip was green on every row of
+                        // every catalog and could never have read otherwise; the
+                        // panel header already names the store once. A tag that
+                        // cannot report an exception is not reporting anything.
+                        span { class: "ml-auto shrink-0 font-mono text-[10px] text-ink-soft", "{format_clock(episode.duration_seconds)}" }
                     }
                     span { class: "mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] text-ink-faint",
-                        span { class: "truncate", "{episode.source}" }
+                        span { class: "truncate", title: "{episode.source}", "{episode.source}" }
                         span { class: "ml-auto shrink-0 font-mono", "{episode.frames}f · {episode.sample_hz:.0}Hz" }
                     }
                 }
                 if confirming_delete {
-                    div { class: "data-delete-confirmation", role: "alert",
-                        span {
-                            if storage_state == EpisodeStorageState::Synced {
-                                "Remove the local copy? The SpiralDB copy stays."
-                            } else {
-                                "Delete this local episode permanently?"
-                            }
-                        }
-                        button {
-                            r#type: "button",
-                            class: "btn btn-danger bg-danger-soft",
-                            onclick: {
-                                let id = episode.id.clone();
-                                move |_| on_delete.call(id.clone())
-                            },
-                            "Confirm"
-                        }
-                        button {
-                            r#type: "button",
-                            class: "btn btn-outline",
-                            onclick: move |_| on_cancel_delete.call(()),
-                            "Cancel"
-                        }
+                    InlineConfirmation {
+                        id: "delete-episode-confirmation-{episode.id}",
+                        class: "data-delete-confirmation",
+                        message: format!(
+                            "Delete episode {}? Its streams and video will be permanently removed from SpiralDB.",
+                            short_id(&episode.id),
+                        ),
+                        confirm_label: if deleting { "Deleting…" } else { "Delete episode" },
+                        cancel_label: "Keep episode",
+                        purpose: ActionPurpose::Delete,
+                        pending: deleting,
+                        return_focus_id: "delete-episode-{episode.id}",
+                        on_confirm: {
+                            let id = episode.id.clone();
+                            move |_| on_delete.call(id.clone())
+                        },
+                        on_cancel: move |_| on_cancel_delete.call(()),
                     }
                 } else {
                     div { class: "data-episode-actions",
-                        if storage_state == EpisodeStorageState::Failed {
-                            button {
-                                r#type: "button",
-                                class: "btn data-push-action",
-                                disabled: retry_disabled,
-                                title: retry_title,
-                                onclick: {
-                                    let id = episode.id.clone();
-                                    move |_| on_push.call(id.clone())
-                                },
-                                "Retry"
-                            }
-                        }
-                        button {
-                            r#type: "button",
-                            class: "btn btn-danger data-delete-action",
+                        Action {
+                            id: "delete-episode-{episode.id}",
+                            purpose: ActionPurpose::Delete,
+                            variant: ActionVariant::Link,
+                            class: "data-delete-action ui-hover-action",
+                            disabled: delete_disabled,
                             title: delete_title,
                             onclick: {
                                 let id = episode.id.clone();
@@ -492,67 +509,6 @@ fn EpisodeRow(
                 }
             }
         }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum EpisodeStorageState {
-    Local,
-    Queued,
-    Pushing,
-    Synced,
-    Failed,
-}
-
-impl EpisodeStorageState {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Local => "Local",
-            Self::Queued => "Queued",
-            Self::Pushing => "Pushing…",
-            Self::Synced => "Synced",
-            Self::Failed => "Failed",
-        }
-    }
-
-    const fn class_name(self) -> &'static str {
-        match self {
-            Self::Local => "data-storage-local",
-            Self::Queued | Self::Pushing => "data-storage-active",
-            Self::Synced => "data-storage-synced",
-            Self::Failed => "data-storage-failed",
-        }
-    }
-}
-
-fn episode_storage_state(status: Option<&PublicationStatus>) -> EpisodeStorageState {
-    let Some(status) = status else {
-        return EpisodeStorageState::Local;
-    };
-    match status.spiral.as_deref() {
-        Some("queued") => EpisodeStorageState::Queued,
-        Some("publishing") => EpisodeStorageState::Pushing,
-        Some("published") => EpisodeStorageState::Synced,
-        Some(value) if value.starts_with("failed:") => EpisodeStorageState::Failed,
-        _ => EpisodeStorageState::Local,
-    }
-}
-
-fn episode_storage_title(status: Option<&PublicationStatus>) -> String {
-    match episode_storage_state(status) {
-        EpisodeStorageState::Local => {
-            "Saved locally; it will sync automatically when SpiralDB is configured".to_owned()
-        }
-        EpisodeStorageState::Queued => "Waiting to push to SpiralDB".to_owned(),
-        EpisodeStorageState::Pushing => "Pushing this episode to SpiralDB".to_owned(),
-        EpisodeStorageState::Synced => "Stored in SpiralDB".to_owned(),
-        EpisodeStorageState::Failed => status
-            .and_then(|status| status.spiral.as_deref())
-            .and_then(|value| value.strip_prefix("failed:"))
-            .map(str::trim)
-            .filter(|message| !message.is_empty())
-            .unwrap_or("Could not save to SpiralDB. Check the connection and retry.")
-            .to_owned(),
     }
 }
 
@@ -572,43 +528,67 @@ pub(crate) fn QueryResultView() -> Element {
             if !tabs.is_empty() {
                 div { class: "query-result-tabs", role: "tablist", "aria-label": "Query results",
                     for tab in tabs.iter() {
-                        button {
-                            id: "query-tab-{tab.id}",
-                            class: if active_id == Some(tab.id) { "query-result-tab query-result-tab-active" } else { "query-result-tab" },
-                            r#type: "button",
-                            role: "tab",
-                            tabindex: if active_id == Some(tab.id) { "0" } else { "-1" },
-                            "aria-selected": active_id == Some(tab.id),
-                            "aria-controls": "query-panel-{tab.id}",
-                            onclick: {
-                                let id = tab.id;
-                                move |_| controller.select_query(id)
-                            },
-                            onkeydown: {
-                                let ids = tab_ids.clone();
-                                let id = tab.id;
-                                move |event| {
-                                    let target = match event.key() {
-                                        Key::ArrowLeft => query_tab_neighbor(&ids, id, false),
-                                        Key::ArrowRight => query_tab_neighbor(&ids, id, true),
-                                        Key::Home => ids.first().copied(),
-                                        Key::End => ids.last().copied(),
-                                        Key::Delete => {
-                                            let target = query_tab_neighbor_after_close(&ids, id);
-                                            controller.close_query(id);
-                                            target
+                        div {
+                            class: if active_id == Some(tab.id) { "query-result-tab-item query-result-tab-item-active ui-hover-action-host" } else { "query-result-tab-item ui-hover-action-host" },
+                            Action {
+                                id: "query-tab-{tab.id}",
+                                purpose: ActionPurpose::Select,
+                                variant: ActionVariant::Tab,
+                                class: if active_id == Some(tab.id) { "query-result-tab query-result-tab-active" } else { "query-result-tab" },
+                                role: "tab",
+                                tabindex: if active_id == Some(tab.id) { "0" } else { "-1" },
+                                aria_selected: active_id == Some(tab.id),
+                                aria_controls: "query-panel-{tab.id}",
+                                onclick: {
+                                    let id = tab.id;
+                                    move |_| controller.select_query(id)
+                                },
+                                onkeydown: {
+                                    let ids = tab_ids.clone();
+                                    let id = tab.id;
+                                    move |event: KeyboardEvent| {
+                                        let target = match event.key() {
+                                            Key::ArrowLeft => query_tab_neighbor(&ids, id, false),
+                                            Key::ArrowRight => query_tab_neighbor(&ids, id, true),
+                                            Key::Home => ids.first().copied(),
+                                            Key::End => ids.last().copied(),
+                                            Key::Delete => {
+                                                let target = query_tab_neighbor_after_close(&ids, id);
+                                                controller.close_query(id);
+                                                target
+                                            }
+                                            _ => return,
+                                        };
+                                        event.prevent_default();
+                                        if let Some(target) = target {
+                                            controller.select_query(target);
+                                            focus_query_tab(target);
                                         }
-                                        _ => return,
-                                    };
-                                    event.prevent_default();
-                                    if let Some(target) = target {
-                                        controller.select_query(target);
-                                        focus_query_tab(target);
                                     }
-                                }
-                            },
-                            span { class: query_tab_state_class(&tab.model.state), "aria-hidden": "true" }
-                            "{tab.title}"
+                                },
+                                span { class: query_tab_state_class(&tab.model.state), "aria-hidden": "true" }
+                                span { class: "query-result-tab-label", "{tab.title}" }
+                            }
+                            Action {
+                                purpose: ActionPurpose::Close,
+                                variant: ActionVariant::Icon,
+                                class: "query-result-tab-close ui-hover-action",
+                                aria_label: "Close {tab.title}",
+                                title: "Close {tab.title}",
+                                onclick: {
+                                    let ids = tab_ids.clone();
+                                    let id = tab.id;
+                                    move |_| {
+                                        let target = query_tab_neighbor_after_close(&ids, id);
+                                        controller.close_query(id);
+                                        if let Some(target) = target {
+                                            controller.select_query(target);
+                                            focus_query_tab(target);
+                                        }
+                                    }
+                                },
+                                CloseIcon {}
+                            }
                         }
                     }
                 }
@@ -625,25 +605,6 @@ pub(crate) fn QueryResultView() -> Element {
                         details {
                             summary { "SQL" }
                             code { "{tab.model.sql}" }
-                        }
-                        button {
-                            r#type: "button",
-                            class: "query-active-tab-close",
-                            "aria-label": "Close {tab.title}",
-                            onclick: {
-                                let ids = tab_ids.clone();
-                                let id = tab.id;
-                                move |_| {
-                                    let target = query_tab_neighbor_after_close(&ids, id);
-                                    controller.close_query(id);
-                                    if let Some(target) = target {
-                                        focus_query_tab(target);
-                                    }
-                                }
-                            },
-                            svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
-                                path { d: "M4.5 4.5l7 7m0-7l-7 7", fill: "none", stroke: "currentColor", stroke_width: "1.5", stroke_linecap: "round" }
-                            }
                         }
                         if let QueryState::Ready(result) = &tab.model.state {
                             span { class: "font-mono tabular-nums", role: "status", "{result.rows.len()} rows · {result.elapsed_ms} ms" }
@@ -685,22 +646,9 @@ fn query_tab_neighbor_after_close(ids: &[u64], current: u64) -> Option<u64> {
         .copied()
 }
 
-#[cfg(feature = "web")]
 fn focus_query_tab(id: u64) {
-    use wasm_bindgen::JsCast as _;
-
-    let Some(element) = web_sys::window()
-        .and_then(|window| window.document())
-        .and_then(|document| document.get_element_by_id(&format!("query-tab-{id}")))
-        .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
-    else {
-        return;
-    };
-    let _ = element.focus();
+    focus_after_render(format!("query-tab-{id}"));
 }
-
-#[cfg(not(feature = "web"))]
-fn focus_query_tab(_id: u64) {}
 
 fn render_query_result(model: &QueryViewModel) -> Element {
     rsx! {
@@ -785,7 +733,11 @@ fn preset_sql(namespace: &str, dataset_id: &str, preset: QueryPreset) -> String 
         QueryPreset::VideoAssets => format!(
             "SELECT v.episode_id, v.stream_id, v.camera_id, v.byte_size, v.width, v.height, v.fps, v.frames FROM {relation} AS v JOIN {episodes} AS e ON e.episode_id = v.episode_id WHERE e.dataset_id = '{dataset_id}' ORDER BY v.episode_id DESC, v.stream_id LIMIT 100"
         ),
-        QueryPreset::TrainingCheckpoints => preset.sql(namespace),
+        QueryPreset::TrainingCheckpoints
+        | QueryPreset::Robots
+        | QueryPreset::StudioSettings
+        | QueryPreset::TrainingRuns
+        | QueryPreset::RolloutRuns => preset.sql(namespace),
     }
 }
 
@@ -801,6 +753,10 @@ fn table_preset(table: Table) -> QueryPreset {
         Table::JointSamples => QueryPreset::JointSamples,
         Table::VideoAssets => QueryPreset::VideoAssets,
         Table::TrainingCheckpoints => QueryPreset::TrainingCheckpoints,
+        Table::Robots => QueryPreset::Robots,
+        Table::StudioSettings => QueryPreset::StudioSettings,
+        Table::TrainingRuns => QueryPreset::TrainingRuns,
+        Table::RolloutRuns => QueryPreset::RolloutRuns,
     }
 }
 
@@ -812,6 +768,10 @@ fn table_description(table: Table) -> &'static str {
         Table::JointSamples => "Synchronized state and action samples",
         Table::VideoAssets => "Recorded MP4 segments and media metadata",
         Table::TrainingCheckpoints => "Saved checkpoints by training run",
+        Table::Robots => "Robot configuration and hardware assignments",
+        Table::StudioSettings => "Persistent Studio preferences",
+        Table::TrainingRuns => "Training lifecycle and metric history",
+        Table::RolloutRuns => "Policy rollout lifecycle and outcomes",
     }
 }
 
@@ -833,18 +793,28 @@ fn reconciled_episode_selection(
         .or_else(|| preferred_episode(episodes).map(|episode| episode.id.clone()))
 }
 
-fn delete_episode(studio: crate::frontend::app::state::Studio, id: String) {
+fn delete_episode(
+    studio: crate::frontend::app::state::Studio,
+    id: String,
+    mut deleting_episode: Signal<Option<String>>,
+    mut confirming_delete: Signal<Option<String>>,
+) {
     let mut selected = studio.selected_episode;
     let path = format!("/api/episodes/{id}");
     let deleted_id = id.clone();
     studio.run_utility(format!("Deleted {id}."), async move {
-        api::send::<()>(Method::DELETE, &path, None).await?;
-        // A slower deletion must not clear a newer choice made while the
-        // request was in flight.
-        if selected.peek().as_deref() == Some(deleted_id.as_str()) {
-            selected.set(None);
+        let result = api::send::<()>(Method::DELETE, &path, None).await;
+        deleting_episode.set(None);
+        if result.is_ok() {
+            confirming_delete.set(None);
+            studio.remove_episode(&deleted_id);
+            // A slower deletion must not clear a newer choice made while the
+            // request was in flight.
+            if selected.peek().as_deref() == Some(deleted_id.as_str()) {
+                selected.set(None);
+            }
         }
-        Ok(())
+        result
     });
 }
 
@@ -853,15 +823,6 @@ pub(crate) fn short_id(id: &str) -> String {
         .and_then(|number| number.parse::<u64>().ok())
         .map(|number| format!("#{number}"))
         .unwrap_or_else(|| id.to_owned())
-}
-
-fn format_duration(seconds: f64) -> String {
-    if !seconds.is_finite() || seconds <= 0.0 {
-        return "0:00.0".to_owned();
-    }
-    let minutes = (seconds / 60.0).floor() as u64;
-    let remainder = seconds - minutes as f64 * 60.0;
-    format!("{minutes}:{remainder:04.1}")
 }
 
 fn query_cell(value: Option<&serde_json::Value>) -> String {
@@ -886,7 +847,6 @@ mod tests {
         EpisodeSummary {
             dataset_id: "default".to_owned(),
             id: id.to_owned(),
-            file: format!("{id}.jsonl"),
             arms: Vec::new(),
             frames: 1,
             duration_seconds: 1.0,
@@ -944,53 +904,5 @@ mod tests {
     fn generated_episode_ids_read_as_take_numbers() {
         assert_eq!(short_id("episode_000024"), "#24");
         assert_eq!(short_id("imported-pass"), "imported-pass");
-    }
-
-    #[test]
-    fn spiral_storage_state_keeps_episode_order_independent_from_location() {
-        let status = |state: &str, spiral: Option<&str>| PublicationStatus {
-            episode_id: "episode_000024".to_owned(),
-            state: state.to_owned(),
-            spiral: spiral.map(str::to_owned),
-            ..PublicationStatus::default()
-        };
-
-        assert_eq!(episode_storage_state(None), EpisodeStorageState::Local);
-        assert_eq!(
-            episode_storage_state(Some(&status("queued", Some("queued")))),
-            EpisodeStorageState::Queued
-        );
-        assert_eq!(
-            episode_storage_state(Some(&status("publishing", Some("publishing")))),
-            EpisodeStorageState::Pushing
-        );
-        assert_eq!(
-            episode_storage_state(Some(&status("published", Some("published")))),
-            EpisodeStorageState::Synced
-        );
-        assert_eq!(
-            episode_storage_state(Some(&status("failed", Some("failed: unavailable")))),
-            EpisodeStorageState::Failed
-        );
-        // A success at a different configured destination must not claim the
-        // episode is present in SpiralDB.
-        assert_eq!(
-            episode_storage_state(Some(&status("published", None))),
-            EpisodeStorageState::Local
-        );
-    }
-
-    #[test]
-    fn failed_spiral_status_explains_the_retry() {
-        let status = PublicationStatus {
-            episode_id: "episode_000024".to_owned(),
-            state: "failed".to_owned(),
-            spiral: Some("failed: destination unavailable".to_owned()),
-            ..PublicationStatus::default()
-        };
-        assert_eq!(
-            episode_storage_title(Some(&status)),
-            "destination unavailable"
-        );
     }
 }

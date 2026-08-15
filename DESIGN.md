@@ -20,8 +20,8 @@ colors:
   danger-soft: "rgb(190 66 61 / 0.1)"
   caution: "#7d6a41"
   caution-soft: "#fbf3db"
-  good: "#448361"
-  good-soft: "rgb(68 131 97 / 0.1)"
+  good: "#3a7654"
+  good-soft: "rgb(58 118 84 / 0.1)"
   arm-1: "#4a90d9"
   arm-2: "#9a6dd7"
   arm-3: "#4dab9a"
@@ -87,39 +87,39 @@ spacing:
   target-transport: "28px"
   target-touch: "44px"
 components:
-  button:
+  action:
     backgroundColor: "transparent"
     textColor: "{colors.ink}"
     typography: "{typography.body}"
     rounded: "{rounded.sm}"
     padding: "0 6px"
     height: "{spacing.target}"
-  button-primary:
+  action-solid:
     backgroundColor: "{colors.accent}"
     textColor: "{colors.accent-ink}"
     typography: "{typography.body}"
     rounded: "{rounded.sm}"
     padding: "0 6px"
     height: "{spacing.target}"
-  button-danger:
+  action-danger:
     backgroundColor: "transparent"
     textColor: "{colors.danger}"
     rounded: "{rounded.sm}"
     padding: "0 6px"
     height: "{spacing.target}"
-  button-link:
+  action-link:
     backgroundColor: "transparent"
     textColor: "{colors.ink-soft}"
     typography: "{typography.label}"
     rounded: "{rounded.sm}"
     padding: "0"
     height: "{spacing.target}"
-  icon-button:
+  action-icon:
     backgroundColor: "transparent"
     textColor: "{colors.ink-soft}"
     rounded: "{rounded.sm}"
     size: "{spacing.target}"
-  icon-button-pressed:
+  action-selected:
     backgroundColor: "{colors.selected}"
     textColor: "{colors.accent}"
   field:
@@ -153,7 +153,7 @@ components:
   readout-cell-caution:
     backgroundColor: "{colors.caution-soft}"
     textColor: "{colors.caution}"
-  record-button:
+  take-action:
     backgroundColor: "{colors.accent}"
     textColor: "{colors.accent-ink}"
     typography: "{typography.action}"
@@ -247,7 +247,7 @@ put reads as a bench tool.
   Timeline, settings, and status bar; camera pixels alone use the dark mat.
 - Live, Data, Training, and Rollout are the primary activities; independent
   content registers as panels instead of growing one-off shell regions.
-- A persisted tab-and-tile workspace supports docking, tabbing, splitting,
+- A session-owned tab-and-tile workspace supports docking, tabbing, splitting,
   resizing, keyboard operation, and hot-plugged panel reconciliation.
 - The default Live/Data desktop composition is one-third workbench and
   two-thirds visualization, with Timeline in the lower 42% and each camera
@@ -340,6 +340,11 @@ semantic training-series roles. The panel crate maps its `--rp-*` roles to
 those tokens. Renderer-owned arm and signal colours remain centralized with
 the code that paints them; components do not restate their literals.
 
+**The One-Action-Language Rule.** Product surfaces choose a typed action verb
+from `spiral-robotics-ui`. The shared layer owns interaction state,
+confirmation, focus movement, and target sizing; a feature owns only placement
+and domain-specific content.
+
 ## Typography
 
 **Display Font:** None; this is an operating surface, not a presentation.
@@ -357,7 +362,7 @@ functional: it stabilizes changing values and lets IDs and rates scan as data.
 - **Readout** (500, 16px mono, 1): Elapsed episode time and nothing else.
 - **Title** (600, 12px, -0.01em): Wordmark, panel-empty headings, selected robot
   identity, and compact region titles.
-- **Body** (400, 12px): Buttons, fields, ordinary values, and sentences.
+- **Body** (400, 12px): Actions, fields, ordinary values, and sentences.
   **Action** uses the same size at weight 500.
 - **Label** (400–500, 11px): Panel tabs, status, section names, blockers,
   control labels, table headers, and supporting copy.
@@ -392,8 +397,8 @@ The first viewport is a full-height application shell:
 - transient notices floating above the shell rather than inserting a new row.
 
 Live, Data, Training, and Rollout are activity changes, not panel tabs. Each
-activity registers its own panel set and uses an independent versioned
-persistence key. Switching activity therefore changes both the operating
+activity registers its own panel set and uses an independent session layout
+scope. Switching activity therefore changes both the operating
 content and its visualization without moving Live camera tabs into Data, or
 vice versa.
 
@@ -413,13 +418,13 @@ the named camera tile takes one third. This is a starting composition, not a
 fixed semantic order. Every registered panel may be attached to another tile
 as a tab or docked to an edge to create a horizontal or vertical split.
 Splitters are 8px pointer targets that render as one-pixel hairlines; they clamp
-ratios so neither side collapses. Split buttons may create an explicit empty
+ratios so neither side collapses. Split actions may create an explicit empty
 tile as a truthful drop target.
 
-Panel identity is durable and unique. A panel cannot appear in two tiles.
+Panel identity is stable and unique. A panel cannot appear in two tiles.
 Camera panels reconcile by named home when cameras are assigned, removed, or
 loaded asynchronously. Content remains keyed by panel ID so moving or tabbing a
-camera does not restart an unrelated feed. Layout mechanics, persistence,
+camera does not restart an unrelated feed. Layout mechanics, session state,
 keyboard behavior, previews, and chrome belong to `spiral-robotics-panels`; the Studio
 owns panel titles, content, safety, and domain state.
 
@@ -435,7 +440,8 @@ switcher. There is no selected-arm toolbar beneath it. Setup is global Settings
 → Robots rather than a collapsible section in Live.
 
 Data states `Dataset → Episodes` explicitly. Episodes owns select, replay, and
-delete. Query is a peer tool within Data; its result joins the selected
+delete, plus lossless episode import/export scoped to the selected dataset.
+Query is a peer tool within Data; its result joins the selected
 episode's Scene as a sibling tab and never unregisters that Scene. The Timeline
 keeps the same layout contract. Recorded camera panels come from the selected
 episode’s media streams, not the currently connected camera assignments.
@@ -443,7 +449,7 @@ episode’s media streams, not the currently connected camera assignments.
 Training is curve-first: its first-open composition gives the learning curve
 the dominant visualization area, keeps the literal data path beside it, and
 places resource lanes below. The run builder remains a peer panel at left, and
-the whole activity persists through the same tab-and-tile workspace mechanics
+the whole activity uses the same session-owned tab-and-tile workspace mechanics
 as Live and Data.
 
 Rollout is a compact physical-policy bench, not an ML dashboard. Its first-open
@@ -521,8 +527,8 @@ StudioShell
 `StudioShell` owns the application frame. `ActivityRail` chooses the active
 activity and owns the bottom-anchored Settings entry. `PanelWorkspace` owns
 tabs, docking, splits, resizing, mobile panel switching, reconciliation, and
-persistence. It does not know what an episode, camera, robot, query, or
-playhead means.
+session layout state. It does not know what an episode, camera, robot, query,
+or playhead means.
 
 The workbench, primary visualization, camera panels, and evidence panel are
 peers in the panel registry even when the default layout places the workbench
@@ -745,18 +751,60 @@ islands.
 
 ## Components
 
-### Buttons
+### Actions
 
-- **Shape:** Compact rectangle, 4px radius, 24px minimum height, and 6px
-  horizontal padding. Record is the single 28px exception.
+Every interactive action is an `Action`, `ActionLink`, `FileAction`,
+`ModeAction`, or `Toggle` from `spiral-robotics-ui`. Product code declares the
+verb first; visual presentation never changes the verb.
+
+- **Shape:** Compact rectangle, 4px radius, 24px desktop target, and 6px
+  horizontal padding. Prominent transport actions use 32px. Every touch target
+  is at least 44×44px.
+- **Presentation:** Quiet, Outline, Solid, Link, Icon, Row, Tab, and Segment are
+  presentation variants. A local surface may own geometry but not restate
+  hover, focus, selected, disabled, pending, or destructive state.
 - **Primary:** Role-blue fill with white text, once per local purpose: Record,
-  Replay, Run query, Connect, or Save.
-- **Danger:** Red text on transparent with a soft wash on hover. Delete and
-  Release consequences confirm inline rather than becoming a filled red CTA.
-- **Link:** Quiet 11px text action for Rescan, Identify, Export, Delete, and
-  Dismiss.
+  Run query, Connect, Save, Run training, or Run policy.
+- **Danger:** Delete, Discard, Replace, Release, and Stop use the shared red
+  treatment. Their consequence determines the confirmation level; the visual
+  variant does not.
+- **Selected:** `aria-pressed`, `aria-selected`, `aria-checked`,
+  `aria-expanded`, and `aria-current` all use the same inset blue state.
 - **Focus:** The global accent focus ring remains visible inside dense chrome.
-  Disabled consequential actions show a reason beside them.
+  A confirmation focuses its safe action, Escape cancels, and dismissal returns
+  focus to the originating action.
+- **Pending:** The initiating action stays in place, names the work in progress,
+  exposes `aria-busy`, disables repeat submission, and preserves a failed form
+  or confirmation for correction.
+
+#### Action grammar
+
+- **Create** makes a durable entity; **Assign** creates a relationship.
+- **Connect** and **Disconnect** change a live device connection.
+- **Remove** or **Unassign** detaches a reversible relationship.
+- **Close** dismisses a view while preserving its data.
+- **Delete** permanently removes a durable entity.
+- **Discard** abandons uncommitted work; **Replace** overwrites an existing
+  scope.
+- **Apply** commits configuration or calibration; **Release** turns off motor
+  torque and always states the physical consequence.
+- **Sync** reconciles clocks or state; **Retry** repeats failed work. Start,
+  Stop, Cancel, Import, Export, Refresh, Navigate, Select, Toggle, Hold, and
+  Teleoperate retain their literal meanings. Panel reordering is a workspace
+  gesture with pointer and keyboard paths, not a product action purpose.
+
+#### Placement and confirmation
+
+- View controls live in the panel or dialog header. Collection-wide actions
+  live in the collection toolbar. Row-local actions stay at the trailing edge.
+  Save and Cancel live in the editor footer. Physical-safety actions stay in
+  the safety region.
+- Recoverable actions happen immediately. Local permanent actions use the
+  shared inline confirmation. Scope-wide replacement and physical consequences
+  use the shared blocking alert dialog. Native browser confirmation is not part
+  of the language.
+- Hover may reveal a quiet trailing action only when the same action remains
+  keyboard-reachable and is always visible on touch.
 
 ### Chips
 
@@ -941,7 +989,7 @@ follower camera, and inference evidence remain the visual authority.
   Run policy. Run is the single filled action and its region bottom-anchors on
   tall workbenches. A failed hardware precondition keeps one specific blocker
   adjacent instead of restating every passing check.
-- **Current truth boundary:** Training publishes the native ACT tensor namespace,
+- **Current truth boundary:** Training stores the native ACT tensor namespace,
   model configuration, normalization buffers, joint order, camera order, and
   robot type in one SafeTensors artifact. Rollout state and metrics come only
   from the backend-owned native session. Loading and warm-up precede policy
@@ -978,31 +1026,47 @@ ambient browser selection—decides whether execution may begin.
 
 ### Data, Episodes, and Query
 
-- **Hierarchy:** Dataset owns Episodes. Dataset-level actions include Import and
-  Export; episode-level actions are Select, Replay, and Delete.
-- **Local staging:** Episodes remain one newest-first ledger; storage location
-  never creates a second grouping or navigation mode. Every row states its
-  SpiralDB status as Local, Queued, Pushing, Synced, or Failed beside the
-  recording state.
-- **Publication semantics:** Complete episodes enter the configured SpiralDB
-  queue automatically without a browser session. Failed attempts expose Retry;
-  Synced rows need no redundant action. Removing a Synced row deletes only its
-  local copy and leaves the persisted SpiralDB episode intact.
+- **Hierarchy:** Dataset owns Episodes. The Episodes header imports or exports
+  only the selected dataset's episode-owned relations; episode-level actions
+  are Select, Replay, and Delete. Whole-project transfer belongs to Settings →
+  SpiralDB.
+- **One storage layer:** Episodes remain one newest-first SpiralDB ledger. No
+  location grouping, publication badge, Push action, retry queue, or local
+  fallback appears because there is no second durable store to reconcile.
+- **Episode transfer:** Data exports a versioned `.spiral-episodes` file for the
+  selected dataset. Import merges into the selected target dataset and refuses
+  episode-ID collisions rather than replacing an existing episode.
+- **Catalog refresh:** Episodes load once when the browser starts. Known
+  recording, deletion, and import results update the browser-owned catalog;
+  one compact Refresh action in the Episodes header explicitly reloads the
+  catalog and catalog issues in one request. None uses
+  polling or the live event stream.
 - **Form decision:** This is an incumbent-surface extension, exempt from a
   concept roll because the operator explicitly retained the existing ordered
   episode list and rejected location grouping or a new transfer composition.
 - **Query:** A guarded read-only SQL editor with presets and a row limit in the
   Data workbench. Results render as the active sibling tab beside the preserved
   Scene and may synchronize the selected episode/playhead.
-- **Destination state:** SpiralDB becomes active when its required configuration
-  is complete; do not add a redundant enable switch.
+- **Destination state:** Settings selects the Spiral API endpoint, SpFS
+  endpoint, and project; first launch opens this section when no project is
+  selected. The backend remembers only those bootstrap pointers in its private
+  JSON file. A project switch requires an idle system and replaces the shared
+  repository connection pool atomically. Changing either service endpoint is
+  saved as the complete next destination and requires a process restart because
+  the ADBC driver has no per-database endpoint options; Studio does not write
+  project preferences to the still-active old destination. Namespace remains
+  process configuration, and Settings offers no second storage choice or
+  redundant enable switch. Domain operations and saved training runs do not
+  carry alternate destination objects.
 
 ### Settings
 
 Settings is one Codex-style modal: category navigation at left, ordinary forms
 at right, header and footer fixed. Robots is the default section, followed by
-SpiralDB and Video. Test results and configuration blockers are rendered beside
-the responsible section.
+SpiralDB and Video. SpiralDB owns complete-project backup and destructive
+restore as a distinct `.spiral-project` transfer; restore requires explicit
+confirmation and replaces all Studio-managed relations. Test results and
+configuration blockers are rendered beside the responsible section.
 
 ### Inputs / Fields
 
@@ -1037,6 +1101,11 @@ it is the only focusable action in its row.
 
 **The Expiring-Notice Rule.** A notice cannot be raised without a deadline; the
 deadline belongs to the notice value, not the component that draws it.
+
+**The One-Implementation Rule.** Cross-surface icons, modal geometry, focus
+movement, pending-request guards, and value formatting each have one shared
+owner. Product components own domain behavior and placement; they do not wrap
+another component only to rename it or copy shared mechanics.
 
 ## Do's and Don'ts
 
@@ -1086,6 +1155,8 @@ deadline belongs to the notice value, not the component that draws it.
   every blocked or stopped session.
 - **Do** keep `tailwind_input` and `tailwind_output` in `Dioxus.toml`; DX owns
   stylesheet compilation for serve, build, and bundle.
+- **Do** remove a component, property, selector, token, or dependency feature
+  when its last real consumer disappears.
 
 ### Don't:
 
@@ -1094,6 +1165,9 @@ deadline belongs to the notice value, not the component that draws it.
 - **Don't** add fixed one-off panel arrangements in the Studio; extend
   `spiral-robotics-panels` when the mechanic is generic and register domain content in
   the Studio.
+- **Don't** name product components or local CSS classes after native
+  presentation such as `Button`; name the action's domain intent or the layout
+  responsibility.
 - **Don't** turn every tool into primary navigation. Live, Data, Training, and
   Rollout are activities; panel tabs are spatial grouping inside them.
 - **Don't** let a Data action mutate Live camera tabs, or derive recorded camera

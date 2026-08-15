@@ -1,59 +1,45 @@
-//! The directory of robot files the Studio reads and writes.
-//!
-//! One arm is one robot instance is one JSON file, exactly as the calibration
-//! CLI stores it. The studio keeps the parsed documents in memory so building a
-//! state snapshot never touches the disk, and every write goes through
-//! [`RobotConfig`]'s atomic, compare-and-swap save.
+//! Robot configuration repository backed directly by SpiralDB.
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use adbc_core::{Connection as _, Statement as _};
+use arrow_array::{
+    ArrayRef, Int64Array, LargeStringArray, RecordBatch, StringArray, StringViewArray,
+};
+use arrow_schema::{DataType, Field, Schema};
 use serde_json::{Map, Value};
 use spiral_robotics::calibration_codec;
 use spiral_robotics::robot_config::{ConfigError, RobotConfig};
 use spiral_robotics_contracts::api::{
     CameraBinding, ConnectionStatus, MotorLimits, MotorSummary, PortSettings, RobotSummary,
 };
+use spiral_robotics_contracts::spiral::{Table, column as db};
 use spiral_robotics_core::arm;
 use spiral_robotics_core::calibration::{
     Calibration, MotorSpec, validate_calibration_for_motors, validate_motor_specs,
 };
 
-/// Default robot type given to a newly created instance.
+use crate::backend::storage::manager::{
+    ensure_dataset_namespace, execute_delete_sql, execute_update_sql, ingest_batch, table_exists,
+};
+use crate::backend::storage::repository::SpiralRepository;
+use crate::backend::storage::sql;
+
 pub(crate) const DEFAULT_ROBOT_TYPE: &str = "so101_follower";
-
-/// Default motor-bus baud rate for SO-101 arms.
 pub(crate) const DEFAULT_BAUD_RATE: u32 = 1_000_000;
-
-/// Longest robot ID accepted, which is also the longest file stem written.
 const MAX_ROBOT_ID_LENGTH: usize = 64;
-
-/// Longest human-visible label stored in a robot file.
 const MAX_LABEL_LENGTH: usize = 64;
 
-/// Something went wrong reading or writing the robot workspace.
 #[derive(Debug)]
 pub(crate) enum WorkspaceError {
-    /// The requested ID could not be used as a file name.
     InvalidId(String),
-    /// No robot with that ID exists.
     NotFound(String),
-    /// A robot with that ID already exists.
     AlreadyExists(String),
-    /// The stored document is present but does not describe a usable robot.
     Invalid(String),
-    /// The file changed underneath the studio.
-    Conflict(String),
-    /// The filesystem or JSON layer failed.
     Config(ConfigError),
-    /// A directory operation failed.
-    Io {
-        path: PathBuf,
-        source: std::io::Error,
-    },
 }
 
 impl fmt::Display for WorkspaceError {
@@ -66,11 +52,7 @@ impl fmt::Display for WorkspaceError {
             Self::NotFound(id) => write!(formatter, "no robot named {id:?}"),
             Self::AlreadyExists(id) => write!(formatter, "a robot named {id:?} already exists"),
             Self::Invalid(detail) => formatter.write_str(detail),
-            Self::Conflict(detail) => formatter.write_str(detail),
             Self::Config(source) => source.fmt(formatter),
-            Self::Io { path, source } => {
-                write!(formatter, "failed to access '{}': {source}", path.display())
-            }
         }
     }
 }
@@ -83,16 +65,13 @@ impl From<ConfigError> for WorkspaceError {
     }
 }
 
-/// One robot instance, as stored on disk.
 #[derive(Clone, Debug)]
 pub(crate) struct RobotRecord {
     pub id: String,
-    pub path: PathBuf,
     pub config: RobotConfig,
 }
 
 impl RobotRecord {
-    /// The robot's declared hardware profile.
     pub(crate) fn robot_type(&self) -> Option<String> {
         self.config
             .root()
@@ -101,7 +80,6 @@ impl RobotRecord {
             .map(ToOwned::to_owned)
     }
 
-    /// The robot's motor-bus settings, when it has been assigned a port.
     pub(crate) fn port(&self) -> Option<PortSettings> {
         let port = self.config.root().get("port")?.as_object()?;
         let path = port.get("path")?.as_str()?;
@@ -119,8 +97,6 @@ impl RobotRecord {
         })
     }
 
-    /// The raw `cameras` object, so updates can preserve fields this build does
-    /// not understand.
     pub(crate) fn camera_object(&self) -> Map<String, Value> {
         self.config
             .root()
@@ -130,16 +106,12 @@ impl RobotRecord {
             .unwrap_or_default()
     }
 
-    /// Cameras assigned to this robot, by role name.
     pub(crate) fn cameras(&self) -> Vec<CameraBinding> {
         self.camera_object()
             .into_iter()
             .filter_map(|(name, value)| {
                 let fields = value.as_object()?;
                 let id = fields.get("id")?.as_str()?.to_owned();
-                // A mount that does not parse is a mount the studio does not
-                // have, not a reason to drop the camera: the feed still works
-                // and the property card still belongs on the panel.
                 let mount = fields
                     .get("mount")
                     .cloned()
@@ -149,7 +121,6 @@ impl RobotRecord {
             .collect()
     }
 
-    /// The robot's motors, or a description of why they cannot be read.
     pub(crate) fn motors(&self) -> Result<BTreeMap<String, MotorSpec>, WorkspaceError> {
         let motors = self
             .config
@@ -164,8 +135,6 @@ impl RobotRecord {
         Ok(motors)
     }
 
-    /// The robot's stored calibration, or a description of why it cannot be
-    /// read.
     pub(crate) fn calibration(&self) -> Result<Option<Calibration>, WorkspaceError> {
         self.config
             .calibration()
@@ -181,11 +150,6 @@ impl RobotRecord {
             .transpose()
     }
 
-    /// Build the UI-facing summary, folding in live connection state.
-    ///
-    /// A file that parses but does not describe a usable robot still produces a
-    /// summary — with `problem` explaining what is wrong, because a card that
-    /// renders as an empty robot tells the operator nothing.
     pub(crate) fn summary(&self, connection: ConnectionStatus) -> RobotSummary {
         let motors_result = self.motors();
         let calibration_result = self.calibration();
@@ -206,7 +170,6 @@ impl RobotRecord {
             ));
         }
         let calibrated = calibration.is_some() && problem.is_none();
-
         let mut motors = motors
             .into_iter()
             .map(|(name, spec)| MotorSummary {
@@ -216,28 +179,17 @@ impl RobotRecord {
                 calibration: calibration
                     .as_ref()
                     .and_then(|calibration| calibration.motors.get(&name).copied()),
-                // The file does not record what a motor will fault at; the
-                // motor does. A connected robot's limits are folded in where
-                // the snapshot is assembled.
                 limits: MotorLimits::default(),
                 name,
             })
             .collect::<Vec<_>>();
-        // Bus-ID order, which for an SO-101 is also the order the joints appear
-        // along the arm and the order the UI shows them in.
         motors.sort_by(|left, right| {
             left.id
                 .cmp(&right.id)
                 .then_with(|| left.name.cmp(&right.name))
         });
-
         RobotSummary {
             id: self.id.clone(),
-            file: self
-                .path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| format!("{}.json", self.id)),
             robot_type: self.robot_type(),
             port: self.port(),
             motors,
@@ -249,154 +201,44 @@ impl RobotRecord {
     }
 }
 
-/// A directory of robot files, cached in memory.
-#[derive(Debug)]
 pub(crate) struct RobotWorkspace {
-    directory: PathBuf,
-    state: Mutex<WorkspaceState>,
+    repository: Arc<SpiralRepository>,
+    last_issue: Mutex<Option<String>>,
 }
-
-#[derive(Debug, Default)]
-struct WorkspaceState {
-    robots: BTreeMap<String, RobotRecord>,
-    /// Files that look like robot files but could not be read.
-    issues: Vec<String>,
-    /// What the directory looked like when it was last read.
-    fingerprint: DirectoryFingerprint,
-}
-
-/// Enough of each robot file's metadata to notice an outside edit.
-///
-/// The workspace is shared with the command-line tools and with the operator's
-/// editor, so the cache cannot assume it is the only writer.
-type DirectoryFingerprint = Vec<(PathBuf, u64, Option<std::time::SystemTime>)>;
 
 impl RobotWorkspace {
-    /// Open `directory`, creating it if necessary, and load every robot file.
-    pub(crate) fn open(directory: PathBuf) -> Result<Self, WorkspaceError> {
-        fs::create_dir_all(&directory).map_err(|source| WorkspaceError::Io {
-            path: directory.clone(),
-            source,
-        })?;
-        let workspace = Self {
-            directory,
-            state: Mutex::new(WorkspaceState::default()),
-        };
-        workspace.reload()?;
-        Ok(workspace)
-    }
-
-    /// The directory being managed.
-    pub(crate) fn directory(&self) -> &Path {
-        &self.directory
-    }
-
-    /// Re-read the directory only when something in it has changed.
-    ///
-    /// The studio is not the only writer: `spiral-robotics-calibrate` edits the same
-    /// files, and an operator may drop one in by hand. Polling the metadata is
-    /// cheap for a handful of small files and keeps the cache honest without
-    /// making every reader touch the disk.
-    pub(crate) fn reload_if_changed(&self) -> Result<bool, WorkspaceError> {
-        let fingerprint = self.fingerprint()?;
-        if fingerprint == self.lock().fingerprint {
-            return Ok(false);
+    pub(crate) fn new(repository: Arc<SpiralRepository>) -> Self {
+        Self {
+            repository,
+            last_issue: Mutex::new(None),
         }
-        self.reload()?;
-        Ok(true)
     }
 
-    /// Re-read every robot file from disk.
-    pub(crate) fn reload(&self) -> Result<(), WorkspaceError> {
-        let fingerprint = self.fingerprint()?;
-        let mut loaded = WorkspaceState {
-            fingerprint,
-            ..WorkspaceState::default()
-        };
-
-        for (path, _, _) in loaded.fingerprint.clone() {
-            let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
-                continue;
-            };
-            if validate_robot_id(id).is_err() {
-                loaded.issues.push(format!(
-                    "ignoring '{}': its name is not a valid robot id",
-                    path.display()
-                ));
-                continue;
-            }
-
-            match RobotConfig::load(&path) {
-                Ok(config) => {
-                    loaded.robots.insert(
-                        id.to_owned(),
-                        RobotRecord {
-                            id: id.to_owned(),
-                            path: path.clone(),
-                            config,
-                        },
-                    );
-                }
-                Err(source) => loaded
-                    .issues
-                    .push(format!("ignoring '{}': {source}", path.display())),
-            }
-        }
-
-        *self.lock() = loaded;
-        Ok(())
-    }
-
-    /// List the workspace's `.json` files with the metadata a change shows up
-    /// in, in a stable order.
-    fn fingerprint(&self) -> Result<DirectoryFingerprint, WorkspaceError> {
-        let entries = fs::read_dir(&self.directory).map_err(|source| WorkspaceError::Io {
-            path: self.directory.clone(),
-            source,
-        })?;
-
-        let mut fingerprint = DirectoryFingerprint::new();
-        for entry in entries {
-            let entry = entry.map_err(|source| WorkspaceError::Io {
-                path: self.directory.clone(),
-                source,
-            })?;
-            let path = entry.path();
-            if path.extension().is_none_or(|extension| extension != "json") {
-                continue;
-            }
-            // A file that cannot be inspected still has to appear, so that it
-            // becomes a reported issue rather than vanishing from the listing.
-            let (length, modified) = entry.metadata().map_or((0, None), |metadata| {
-                (metadata.len(), metadata.modified().ok())
-            });
-            fingerprint.push((path, length, modified));
-        }
-
-        fingerprint.sort();
-        Ok(fingerprint)
-    }
-
-    /// Every robot, in ID order.
     pub(crate) fn list(&self) -> Vec<RobotRecord> {
-        self.lock().robots.values().cloned().collect()
+        match self.try_list() {
+            Ok(records) => {
+                *lock(&self.last_issue) = None;
+                records
+            }
+            Err(error) => {
+                *lock(&self.last_issue) = Some(error.to_string());
+                Vec::new()
+            }
+        }
     }
 
-    /// Problems found the last time the directory was read.
     pub(crate) fn issues(&self) -> Vec<String> {
-        self.lock().issues.clone()
+        lock(&self.last_issue).iter().cloned().collect()
     }
 
-    /// One robot by ID.
     pub(crate) fn get(&self, id: &str) -> Result<RobotRecord, WorkspaceError> {
-        self.lock()
-            .robots
-            .get(id)
-            .cloned()
+        validate_robot_id(id)?;
+        self.try_list()?
+            .into_iter()
+            .find(|record| record.id == id)
             .ok_or_else(|| WorkspaceError::NotFound(id.to_owned()))
     }
 
-    /// Create a robot file pre-populated with the stock SO-101 motor map.
     pub(crate) fn create(
         &self,
         id: &str,
@@ -405,11 +247,11 @@ impl RobotWorkspace {
         baud_rate: Option<u32>,
     ) -> Result<RobotRecord, WorkspaceError> {
         validate_robot_id(id)?;
-        let path = self.path_for(id);
-        if self.lock().robots.contains_key(id) || path.exists() {
-            return Err(WorkspaceError::AlreadyExists(id.to_owned()));
+        match self.get(id) {
+            Ok(_) => return Err(WorkspaceError::AlreadyExists(id.to_owned())),
+            Err(WorkspaceError::NotFound(_)) => {}
+            Err(error) => return Err(error),
         }
-
         let robot_type = clean_label("robot_type", robot_type.unwrap_or(DEFAULT_ROBOT_TYPE))?;
         let mut root = Map::new();
         root.insert("robot_id".to_owned(), Value::String(id.to_owned()));
@@ -423,23 +265,9 @@ impl RobotWorkspace {
                 .encode_motor_specs(&arm::so101_motor_specs())
                 .expect("stock motor specs encode"),
         );
-
-        let config = RobotConfig::from_value(Value::Object(root))?;
-        config.save_atomic(&path)?;
-
-        let record = RobotRecord {
-            id: id.to_owned(),
-            path,
-            config,
-        };
-        self.lock().robots.insert(id.to_owned(), record.clone());
-        Ok(record)
+        self.persist(id, RobotConfig::from_value(Value::Object(root))?)
     }
 
-    /// Import one complete robot configuration without overwriting an existing
-    /// instance. The document's `robot_id` is the file name and stable API ID;
-    /// requiring it keeps a browser upload independent of the user's local
-    /// download name.
     pub(crate) fn import_configuration(&self, bytes: &[u8]) -> Result<RobotRecord, WorkspaceError> {
         let config = RobotConfig::from_slice(bytes).map_err(|source| {
             WorkspaceError::Invalid(format!("the configuration is not valid JSON: {source}"))
@@ -455,26 +283,14 @@ impl RobotWorkspace {
             })?
             .to_owned();
         validate_robot_id(&id)?;
-
-        let path = self.path_for(&id);
-        if self.lock().robots.contains_key(&id) || path.exists() {
-            return Err(WorkspaceError::AlreadyExists(id));
+        match self.get(&id) {
+            Ok(_) => return Err(WorkspaceError::AlreadyExists(id)),
+            Err(WorkspaceError::NotFound(_)) => {}
+            Err(error) => return Err(error),
         }
-
-        config.save_atomic(&path)?;
-        let record = RobotRecord {
-            id: id.clone(),
-            path,
-            config,
-        };
-        self.lock().robots.insert(id, record.clone());
-        Ok(record)
+        self.persist(&id, config)
     }
 
-    /// Replace a robot's type, port, and camera assignments.
-    ///
-    /// Every other field, including ones this build does not understand, is
-    /// preserved exactly.
     pub(crate) fn update(
         &self,
         id: &str,
@@ -484,7 +300,6 @@ impl RobotWorkspace {
     ) -> Result<RobotRecord, WorkspaceError> {
         let record = self.get(id)?;
         let mut root = record.config.root().clone();
-
         if let Some(robot_type) = robot_type {
             root.insert(
                 "robot_type".to_owned(),
@@ -492,10 +307,11 @@ impl RobotWorkspace {
             );
         }
         if let Some(port) = port {
-            let mut fields = match root.get("port") {
-                Some(Value::Object(fields)) => fields.clone(),
-                _ => Map::new(),
-            };
+            let mut fields = root
+                .get("port")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
             fields.insert("path".to_owned(), Value::String(port.path.clone()));
             fields.insert("baud_rate".to_owned(), Value::from(port.baud_rate));
             root.insert("port".to_owned(), Value::Object(fields));
@@ -503,11 +319,9 @@ impl RobotWorkspace {
         if let Some(cameras) = cameras {
             root.insert("cameras".to_owned(), Value::Object(cameras));
         }
-
-        self.commit(record, Value::Object(root))
+        self.persist(id, RobotConfig::from_value(Value::Object(root))?)
     }
 
-    /// Store a completed calibration alongside the motors it was measured for.
     pub(crate) fn save_calibration(
         &self,
         id: &str,
@@ -529,60 +343,106 @@ impl RobotWorkspace {
                 WorkspaceError::Invalid(format!("calibration could not be serialized: {source}"))
             })?,
         )?;
-
-        self.commit(record, merged.into_value())
+        self.persist(id, merged)
     }
 
-    /// Delete a robot file and forget the instance.
     pub(crate) fn delete(&self, id: &str) -> Result<(), WorkspaceError> {
-        let record = self.get(id)?;
-        fs::remove_file(&record.path).map_err(|source| WorkspaceError::Io {
-            path: record.path.clone(),
-            source,
-        })?;
-        // The companion lock only has meaning while the robot file exists.
-        let _ = fs::remove_file(record.path.with_extension("json.lock"));
-        self.lock().robots.remove(id);
-        Ok(())
+        self.get(id)?;
+        let relation = sql::relation(self.repository.namespace(), Table::Robots);
+        let id = sql::string_literal(id);
+        self.repository
+            .run_blocking(move |connection| {
+                if table_exists(connection, &relation)? {
+                    execute_update_sql(
+                        connection,
+                        &format!("DELETE FROM {relation} WHERE {} = {id}", db::ROBOT_ID),
+                    )?;
+                }
+                Ok(())
+            })
+            .map_err(WorkspaceError::Invalid)
     }
 
-    /// Write `value` over `record`, refusing to clobber an outside edit.
-    fn commit(&self, record: RobotRecord, value: Value) -> Result<RobotRecord, WorkspaceError> {
-        let updated = RobotConfig::from_value(value)?;
-        match updated.save_atomic_if_unchanged(&record.path, &record.config) {
-            Ok(()) => {}
-            Err(ConfigError::ConcurrentModification { .. }) => {
-                // Someone edited the file behind us; re-read so the next
-                // attempt starts from what is actually on disk.
-                self.reload()?;
-                return Err(WorkspaceError::Conflict(format!(
-                    "'{}' changed outside the studio and was reloaded; review it and try again",
-                    record.path.display()
-                )));
-            }
-            Err(source) => return Err(source.into()),
-        }
-
-        let record = RobotRecord {
-            config: updated,
-            ..record
-        };
-        self.lock().robots.insert(record.id.clone(), record.clone());
-        Ok(record)
+    fn try_list(&self) -> Result<Vec<RobotRecord>, WorkspaceError> {
+        let relation = sql::relation(self.repository.namespace(), Table::Robots);
+        self.repository
+            .run_blocking(move |connection| {
+                if !table_exists(connection, &relation)? {
+                    return Ok(Vec::new());
+                }
+                let mut statement = connection
+                    .new_statement()
+                    .map_err(|error| error.to_string())?;
+                statement
+                    .set_sql_query(format!(
+                        "SELECT {}, {} FROM {relation} ORDER BY {}",
+                        db::ROBOT_ID,
+                        db::CONFIG_JSON,
+                        db::ROBOT_ID
+                    ))
+                    .map_err(|error| error.to_string())?;
+                let reader = statement.execute().map_err(|error| error.to_string())?;
+                let mut records = Vec::new();
+                for batch in reader {
+                    let batch = batch.map_err(|error| error.to_string())?;
+                    let ids = batch
+                        .column_by_name(db::ROBOT_ID)
+                        .ok_or_else(|| "robots result has no robot_id".to_owned())?;
+                    let configs = batch
+                        .column_by_name(db::CONFIG_JSON)
+                        .ok_or_else(|| "robots result has no config_json".to_owned())?;
+                    for row in 0..batch.num_rows() {
+                        let id = text_value(ids.as_ref(), row)?;
+                        let config =
+                            RobotConfig::from_slice(text_value(configs.as_ref(), row)?.as_bytes())
+                                .map_err(|error| error.to_string())?;
+                        records.push(RobotRecord { id, config });
+                    }
+                }
+                Ok(records)
+            })
+            .map_err(WorkspaceError::Invalid)
     }
 
-    fn path_for(&self, id: &str) -> PathBuf {
-        self.directory.join(format!("{id}.json"))
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, WorkspaceState> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    fn persist(&self, id: &str, config: RobotConfig) -> Result<RobotRecord, WorkspaceError> {
+        let namespace = self.repository.namespace().to_owned();
+        let relation = sql::relation(&namespace, Table::Robots);
+        let config_json = config.to_pretty_json()?;
+        let id_owned = id.to_owned();
+        let id_sql = sql::string_literal(id);
+        self.repository
+            .run_blocking(move |connection| {
+                ensure_dataset_namespace(connection, &namespace)?;
+                if table_exists(connection, &relation)? {
+                    execute_delete_sql(
+                        connection,
+                        &format!("DELETE FROM {relation} WHERE {} = {id_sql}", db::ROBOT_ID),
+                    )?;
+                }
+                let schema = Arc::new(Schema::new(vec![
+                    Field::new(db::ROBOT_ID, DataType::Utf8, false),
+                    Field::new(db::CONFIG_JSON, DataType::Utf8, false),
+                    Field::new(db::UPDATED_MS, DataType::Int64, false),
+                ]));
+                let batch = RecordBatch::try_new(
+                    schema,
+                    vec![
+                        Arc::new(StringArray::from(vec![id_owned])) as ArrayRef,
+                        Arc::new(StringArray::from(vec![config_json])) as ArrayRef,
+                        Arc::new(Int64Array::from(vec![unix_millis()])) as ArrayRef,
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+                ingest_batch(connection, &relation, batch)
+            })
+            .map_err(WorkspaceError::Invalid)?;
+        Ok(RobotRecord {
+            id: id.to_owned(),
+            config,
+        })
     }
 }
 
-/// Build the JSON value stored under a robot's `port` key.
 fn port_value(path: &str, baud_rate: Option<u32>) -> Value {
     let mut fields = Map::new();
     fields.insert("path".to_owned(), Value::String(path.to_owned()));
@@ -597,24 +457,19 @@ fn port_value(path: &str, baud_rate: Option<u32>) -> Value {
     Value::Object(fields)
 }
 
-/// Reject robot IDs that would escape the workspace or confuse the filesystem.
 pub(crate) fn validate_robot_id(id: &str) -> Result<(), WorkspaceError> {
-    if is_plain_name(id, MAX_ROBOT_ID_LENGTH) {
+    if !id.is_empty()
+        && id.len() <= MAX_ROBOT_ID_LENGTH
+        && id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
         Ok(())
     } else {
         Err(WorkspaceError::InvalidId(id.to_owned()))
     }
 }
 
-fn is_plain_name(value: &str, maximum: usize) -> bool {
-    !value.is_empty()
-        && value.len() <= maximum
-        && value.chars().all(|character| {
-            character.is_ascii_alphanumeric() || character == '-' || character == '_'
-        })
-}
-
-/// Trim and check a free-text label such as a robot type.
 fn clean_label(field: &str, value: &str) -> Result<String, WorkspaceError> {
     let trimmed = value.trim();
     if trimmed.is_empty()
@@ -628,448 +483,30 @@ fn clean_label(field: &str, value: &str) -> Result<String, WorkspaceError> {
     Ok(trimmed.to_owned())
 }
 
-#[cfg(test)]
-mod tests {
-    use spiral_robotics_core::calibration::{CalibrationInput, MotorReading, build_calibration};
-    use tempfile::TempDir;
-
-    use super::*;
-
-    fn workspace() -> (TempDir, RobotWorkspace) {
-        let directory = TempDir::new().expect("temporary directory");
-        let workspace =
-            RobotWorkspace::open(directory.path().to_path_buf()).expect("open workspace");
-        (directory, workspace)
+fn text_value(array: &dyn arrow_array::Array, row: usize) -> Result<String, String> {
+    if array.is_null(row) {
+        return Err("unexpected null text value".to_owned());
     }
-
-    #[test]
-    fn a_file_written_by_another_tool_is_picked_up() {
-        let (directory, workspace) = workspace();
-        assert!(workspace.list().is_empty());
-
-        // The calibration CLI writes to this same directory, so the studio
-        // cannot treat its in-memory cache as the whole truth.
-        fs::write(
-            directory.path().join("outside.json"),
-            r#"{"schema_version":1,"robot_id":"outside","motors":{"joint":{"id":1}}}"#,
-        )
-        .expect("write robot file");
-
-        assert!(workspace.reload_if_changed().expect("reload"));
-        assert_eq!(
-            workspace
-                .list()
-                .iter()
-                .map(|r| r.id.clone())
-                .collect::<Vec<_>>(),
-            ["outside"]
-        );
-        assert!(
-            !workspace.reload_if_changed().expect("second reload"),
-            "an unchanged directory must not be re-read"
-        );
-
-        fs::remove_file(directory.path().join("outside.json")).expect("remove");
-        assert!(workspace.reload_if_changed().expect("reload after delete"));
-        assert!(workspace.list().is_empty());
+    if let Some(array) = array.as_any().downcast_ref::<StringArray>() {
+        return Ok(array.value(row).to_owned());
     }
-
-    #[test]
-    fn an_edit_to_an_existing_file_is_noticed() {
-        let (directory, workspace) = workspace();
-        workspace.create("arm", None, None, None).expect("create");
-        workspace.reload_if_changed().expect("settle");
-
-        let path = directory.path().join("arm.json");
-        let mut document: Value =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        document["robot_type"] = Value::String("so101_leader".to_owned());
-        // A different length as well as a different mtime, so the test does not
-        // depend on filesystem timestamp resolution.
-        fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
-
-        assert!(workspace.reload_if_changed().expect("reload"));
-        assert_eq!(
-            workspace.get("arm").unwrap().robot_type().as_deref(),
-            Some("so101_leader")
-        );
+    if let Some(array) = array.as_any().downcast_ref::<StringViewArray>() {
+        return Ok(array.value(row).to_owned());
     }
-
-    #[test]
-    fn a_structurally_invalid_robot_explains_itself_instead_of_looking_empty() {
-        let (directory, workspace) = workspace();
-        fs::write(
-            directory.path().join("clash.json"),
-            r#"{"schema_version":1,"motors":{"a":{"id":1},"b":{"id":1}}}"#,
-        )
-        .expect("write robot file");
-        workspace.reload().expect("reload");
-
-        let summary = workspace
-            .get("clash")
-            .expect("the robot is listed")
-            .summary(ConnectionStatus::default());
-
-        assert!(!summary.calibrated);
-        let problem = summary.problem.expect("the reason is carried to the UI");
-        assert!(problem.contains("invalid motors"), "{problem}");
-        assert!(problem.contains("ID 1"), "{problem}");
+    if let Some(array) = array.as_any().downcast_ref::<LargeStringArray>() {
+        return Ok(array.value(row).to_owned());
     }
+    Err(format!("expected UTF-8 text, got {}", array.data_type()))
+}
 
-    #[test]
-    fn labels_are_trimmed_and_control_characters_refused() {
-        let (_directory, workspace) = workspace();
-
-        workspace
-            .create("padded", Some("  so101_leader  "), None, None)
-            .expect("create");
-        assert_eq!(
-            workspace.get("padded").unwrap().robot_type().as_deref(),
-            Some("so101_leader"),
-            "surrounding whitespace never belongs in stored data"
-        );
-
-        assert!(
-            workspace
-                .create("bad", Some("so101\nleader"), None, None)
-                .is_err()
-        );
-        assert!(workspace.create("blank", Some("   "), None, None).is_err());
-    }
-
-    #[test]
-    fn robot_ids_that_could_escape_the_directory_are_refused() {
-        for id in [
-            "",
-            "..",
-            "../evil",
-            "a/b",
-            "a.b",
-            "with space",
-            "sym~link",
-            &"x".repeat(65),
-        ] {
-            assert!(validate_robot_id(id).is_err(), "accepted {id:?}");
-        }
-        for id in ["arm", "left_leader", "SO-101-1", &"x".repeat(64)] {
-            assert!(validate_robot_id(id).is_ok(), "rejected {id:?}");
-        }
-    }
-
-    #[test]
-    fn a_new_robot_gets_the_stock_so101_motor_map() {
-        let (_directory, workspace) = workspace();
-
-        let record = workspace
-            .create("left_follower", None, Some("/dev/ttyACM0"), None)
-            .expect("create robot");
-
-        assert_eq!(record.robot_type().as_deref(), Some(DEFAULT_ROBOT_TYPE));
-        assert_eq!(
-            record.port(),
-            Some(PortSettings {
-                path: "/dev/ttyACM0".to_owned(),
-                baud_rate: DEFAULT_BAUD_RATE
-            })
-        );
-        let motors = record.motors().expect("motors");
-        assert_eq!(motors.len(), 6);
-        assert_eq!(motors["gripper"].id, 6);
-        assert!(record.path.is_file());
-
-        let summary = record.summary(ConnectionStatus::default());
-        assert!(!summary.calibrated);
-        assert_eq!(summary.file, "left_follower.json");
-        assert_eq!(summary.motors.len(), 6);
-    }
-
-    #[test]
-    fn importing_a_configuration_preserves_the_complete_document() {
-        let (directory, workspace) = workspace();
-        let motors = RobotConfig::default()
-            .encode_motor_specs(&spiral_robotics_core::arm::so101_motor_specs())
-            .unwrap();
-        let source = serde_json::json!({
-            "schema_version": 1,
-            "robot_id": "imported_leader",
-            "robot_type": "so101_leader",
-            "motors": motors,
-            "extension": { "keep": true }
-        });
-
-        let record = workspace
-            .import_configuration(&serde_json::to_vec(&source).unwrap())
-            .expect("import configuration");
-
-        assert_eq!(record.id, "imported_leader");
-        assert_eq!(record.config.root()["extension"]["keep"], true);
-        assert!(directory.path().join("imported_leader.json").is_file());
-        assert_eq!(
-            RobotConfig::load(directory.path().join("imported_leader.json")).unwrap(),
-            record.config
-        );
-    }
-
-    #[test]
-    fn importing_never_overwrites_an_existing_robot() {
-        let (_directory, workspace) = workspace();
-        let record = workspace.create("arm", None, None, None).expect("create");
-        let bytes = record.config.to_pretty_json().unwrap();
-
-        let error = workspace
-            .import_configuration(bytes.as_bytes())
-            .expect_err("duplicate import");
-
-        assert!(matches!(error, WorkspaceError::AlreadyExists(id) if id == "arm"));
-    }
-
-    #[test]
-    fn importing_requires_valid_json_with_a_robot_id() {
-        let (_directory, workspace) = workspace();
-
-        assert!(workspace.import_configuration(b"not json").is_err());
-        assert!(
-            workspace
-                .import_configuration(br#"{"schema_version":1}"#)
-                .is_err()
-        );
-        assert!(
-            workspace
-                .import_configuration(br#"{"robot_id":"../escape"}"#)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn creating_a_duplicate_robot_is_refused() {
-        let (_directory, workspace) = workspace();
-        workspace.create("arm", None, None, None).expect("create");
-
-        assert!(matches!(
-            workspace.create("arm", None, None, None),
-            Err(WorkspaceError::AlreadyExists(_))
-        ));
-        assert!(matches!(
-            workspace.create("../escape", None, None, None),
-            Err(WorkspaceError::InvalidId(_))
-        ));
-    }
-
-    #[test]
-    fn updates_preserve_unrelated_and_unknown_fields() {
-        let (directory, workspace) = workspace();
-        workspace
-            .create("arm", None, Some("/dev/old"), Some(57_600))
-            .expect("create");
-        // Simulate a field written by a future version of the tool.
-        let path = directory.path().join("arm.json");
-        let mut value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        value["experimental"] = serde_json::json!({"keep": true});
-        fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
-        workspace.reload().expect("reload");
-
-        let cameras = Map::from_iter([(
-            "wrist".to_owned(),
-            serde_json::json!({"type": "opencv", "id": "/dev/video0"}),
-        )]);
-        let record = workspace
-            .update(
-                "arm",
-                Some("so101_leader"),
-                Some(&PortSettings {
-                    path: "/dev/new".to_owned(),
-                    baud_rate: 1_000_000,
-                }),
-                Some(cameras),
-            )
-            .expect("update");
-
-        assert_eq!(record.robot_type().as_deref(), Some("so101_leader"));
-        assert_eq!(record.port().unwrap().path, "/dev/new");
-        assert_eq!(record.port().unwrap().baud_rate, 1_000_000);
-        assert_eq!(
-            record.cameras(),
-            [CameraBinding {
-                name: "wrist".to_owned(),
-                id: "/dev/video0".to_owned(),
-                mount: None,
-            }]
-        );
-        assert_eq!(record.config.root()["experimental"]["keep"], true);
-        assert_eq!(record.motors().expect("motors").len(), 6);
-    }
-
-    #[test]
-    fn saving_a_calibration_marks_the_robot_calibrated() {
-        let (directory, workspace) = workspace();
-        workspace.create("arm", None, None, None).expect("create");
-        let path = directory.path().join("arm.json");
-        let mut raw: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        raw["motors"]["gripper"]["future_adapter"] = serde_json::json!({"registers": [7, 8, 9]});
-        RobotConfig::from_value(raw)
-            .unwrap()
-            .save_atomic(&path)
-            .unwrap();
-        workspace.reload().unwrap();
-        let record = workspace.get("arm").unwrap();
-        let motors = record.motors().expect("motors");
-        let input = CalibrationInput::Direct {
-            motors: motors
-                .keys()
-                .map(|name| {
-                    (
-                        name.clone(),
-                        MotorReading {
-                            center: 2048,
-                            range_min: 1000,
-                            range_max: 3000,
-                        },
-                    )
-                })
-                .collect(),
-        };
-        let calibration = build_calibration(&motors, &input).expect("calibration");
-
-        let record = workspace
-            .save_calibration("arm", &motors, &calibration)
-            .expect("save calibration");
-
-        assert!(record.summary(ConnectionStatus::default()).calibrated);
-        assert_eq!(
-            record.calibration().unwrap().unwrap().motors["gripper"].center,
-            2048
-        );
-        assert_eq!(
-            record.config.root()["motors"]["gripper"]["future_adapter"]["registers"],
-            serde_json::json!([7, 8, 9]),
-            "a Studio calibration save must preserve unknown per-motor data"
-        );
-        // The saved document is what a fresh reader sees.
-        workspace.reload().expect("reload");
-        assert!(
-            workspace
-                .get("arm")
-                .unwrap()
-                .summary(ConnectionStatus::default())
-                .calibrated
-        );
-    }
-
-    #[test]
-    fn stale_calibration_is_reported_and_cannot_be_saved() {
-        let (_directory, workspace) = workspace();
-        let motors = arm::so101_motor_specs();
-        let input = CalibrationInput::Direct {
-            motors: motors
-                .keys()
-                .map(|name| {
-                    (
-                        name.clone(),
-                        MotorReading {
-                            center: 2048,
-                            range_min: 1000,
-                            range_max: 3000,
-                        },
-                    )
-                })
-                .collect(),
-        };
-        let mut stale = build_calibration(&motors, &input).expect("calibration");
-        stale.motors.get_mut("gripper").unwrap().id = 99;
-        let config = RobotConfig::from_value(serde_json::json!({
-            "schema_version": 1,
-            "robot_id": "stale",
-            "robot_type": "so101_follower",
-        }))
-        .unwrap();
-        let document = config
-            .merged(
-                None,
-                None,
-                None,
-                config.encode_motor_specs(&motors).unwrap(),
-                calibration_codec::encode_calibration(&stale).unwrap(),
-            )
-            .unwrap()
-            .into_value();
-        let record = workspace
-            .import_configuration(&serde_json::to_vec(&document).unwrap())
-            .expect("structurally valid robot is still listed for repair");
-
-        let summary = record.summary(ConnectionStatus::default());
-        assert!(!summary.calibrated);
-        let problem = summary.problem.expect("mismatch is visible");
-        assert!(problem.contains("does not match"), "{problem}");
-        assert!(problem.contains("gripper"), "{problem}");
-
-        assert!(
-            workspace
-                .save_calibration("stale", &record.motors().unwrap(), &stale)
-                .expect_err("stale calibration must not be persisted")
-                .to_string()
-                .contains("does not match")
-        );
-    }
-
-    #[test]
-    fn deleting_a_robot_removes_its_file_and_lock() {
-        let (directory, workspace) = workspace();
-        let record = workspace.create("arm", None, None, None).expect("create");
-        assert!(directory.path().join("arm.json.lock").is_file());
-
-        workspace.delete("arm").expect("delete");
-
-        assert!(!record.path.exists());
-        assert!(!directory.path().join("arm.json.lock").exists());
-        assert!(matches!(
-            workspace.get("arm"),
-            Err(WorkspaceError::NotFound(_))
-        ));
-    }
-
-    #[test]
-    fn unreadable_files_are_reported_rather_than_hidden() {
-        let (directory, workspace) = workspace();
-        fs::write(directory.path().join("broken.json"), "{ not json").unwrap();
-        fs::write(directory.path().join("not a robot.json"), "{}").unwrap();
-        fs::write(directory.path().join("notes.txt"), "ignored").unwrap();
-
-        workspace.reload().expect("reload");
-
-        let issues = workspace.issues();
-        assert_eq!(issues.len(), 2, "{issues:?}");
-        assert!(issues.iter().any(|issue| issue.contains("broken.json")));
-        assert!(
-            issues
-                .iter()
-                .any(|issue| issue.contains("not a robot.json"))
-        );
-        assert!(workspace.list().is_empty());
-    }
-
-    #[test]
-    fn an_outside_edit_is_reported_instead_of_being_overwritten() {
-        let (directory, workspace) = workspace();
-        workspace.create("arm", None, None, None).expect("create");
-
-        // Another process rewrites the file after the studio cached it.
-        let path = directory.path().join("arm.json");
-        let mut value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        value["robot_type"] = Value::String("edited_elsewhere".to_owned());
-        RobotConfig::from_value(value)
-            .unwrap()
-            .save_atomic(&path)
-            .unwrap();
-
-        let error = workspace
-            .update("arm", Some("studio_wins"), None, None)
-            .expect_err("a stale write must be refused");
-
-        assert!(matches!(error, WorkspaceError::Conflict(_)));
-        assert_eq!(
-            workspace.get("arm").unwrap().robot_type().as_deref(),
-            Some("edited_elsewhere"),
-            "the outside edit survives and is reloaded"
-        );
-    }
+fn unix_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

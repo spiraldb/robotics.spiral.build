@@ -1,0 +1,117 @@
+# Studio interaction language
+
+## Outcome
+
+Studio uses one interaction language across the shell, docked panels, Live,
+Data, Training, Rollout, and Settings. A user can predict an action's meaning,
+location, state, confirmation, and focus behavior from its verb.
+
+## Action grammar
+
+| Verb | Meaning |
+| --- | --- |
+| Create | Make a durable entity. |
+| Assign | Create a relationship between existing entities. |
+| Connect / Disconnect | Change a live device connection. |
+| Remove / Unassign | Detach a reversible relationship. |
+| Close | Dismiss a view while preserving its data. |
+| Delete | Permanently remove a durable entity. |
+| Discard | Abandon uncommitted work. |
+| Apply | Commit configuration or calibration. |
+| Replace | Overwrite an existing scope. |
+| Hold / Teleoperate / Release | Change physical motor control; Release turns torque off. |
+| Sync | Reconcile clocks or state. |
+| Retry / Refresh | Repeat failed work or reload current state. |
+
+Start, Stop, Cancel, Import, Export, Navigate, Select, and Toggle keep their
+literal meanings. A visible label may be more specific, such as **Run query**,
+while its typed purpose remains Start.
+
+Panel reordering is a workspace gesture with pointer and keyboard paths, not a
+product `Action` purpose.
+
+## Placement
+
+| Scope | Placement |
+| --- | --- |
+| View | Panel, dialog, or view header. |
+| Collection | Collection toolbar or list footer. |
+| Row or item | Trailing edge of that row or item. |
+| Editor commit | Editor or dialog footer. |
+| Physical safety | The control region that owns the physical mode. |
+
+An uncommon action may use overflow when the surface has one. Moving an action
+into overflow must not change its verb or confirmation level.
+
+## Confirmation levels
+
+- **Immediate:** Recoverable actions run without confirmation.
+- **Local destructive:** A permanent item-level action uses the shared inline
+  confirmation at the item's location.
+- **Blocking:** A scope-wide replacement or physical-safety consequence uses
+  the shared modal alert dialog.
+
+Every destructive confirmation names the action, target, and consequence. The
+safe action receives initial focus. Escape cancels when no request is pending.
+Cancel returns focus to the initiating action. Studio must not use native
+browser confirmation dialogs.
+
+## Requirements
+
+- **STUDIO-027** Every product action must use a typed primitive from
+  `spiral-robotics-ui` and declare its semantic purpose.
+- **STUDIO-028** A visual variant must not change an action's verb.
+- **STUDIO-029** A feature may define action placement and layout but must not
+  redefine shared hover, focus, selected, disabled, pending, or destructive
+  states.
+- **STUDIO-030** Close, Remove, Unassign, Delete, Discard, and Replace must be
+  used according to the action grammar.
+- **STUDIO-031** Local permanent deletion must use the shared inline
+  confirmation.
+- **STUDIO-032** Scope-wide replacement and motor Release must use the shared
+  blocking confirmation.
+- **STUDIO-033** A confirmation must keep its target and consequence visible
+  while pending, block duplicate submission, and remain available after a
+  failure.
+- **STUDIO-034** Selection, toggle, expanded, and mode state must be exposed
+  semantically and must not depend on color alone.
+- **STUDIO-035** A mutually exclusive physical mode must use radio-group
+  semantics and support arrow-key selection.
+- **STUDIO-036** Hover may reveal a quiet trailing action only when keyboard
+  focus also reveals it and touch always shows it.
+- **STUDIO-037** Desktop controls must preserve the compact target scale.
+  Touch controls must provide at least a 44×44px target.
+- **STUDIO-038** Panel reordering and docking must work with pointer drag and
+  the documented keyboard alternatives.
+- **STUDIO-039** At mobile width, the status bar must keep connection, the most
+  consequential active state, and notifications visible without horizontal
+  page overflow.
+- **STUDIO-040** Readiness language must never claim Ready when a blocker or
+  missing dependency prevents the action.
+- **STUDIO-041** Pending actions must expose `aria-busy`, remain in place, and
+  prevent repeat submission.
+- **STUDIO-042** Reduced-motion mode must remove decorative movement without
+  collapsing meaningful state changes to near-zero animation durations.
+- **STUDIO-043** Automated checks must reject raw product buttons, raw file
+  pickers, native browser confirms, and retired action classes.
+- **STUDIO-044** Product components and local CSS classes must be named for
+  domain intent or layout responsibility, not their native presentation.
+- **STUDIO-045** Cross-surface icons, dialog surfaces, focus movement,
+  single-flight pending behavior, and value formatting must have one shared
+  owner rather than feature-local copies.
+- **STUDIO-046** Unused components, properties, variants, selectors, tokens,
+  and dependency features must be removed when their final consumer is removed.
+
+## Implementation ownership
+
+- Typed actions, toggles, modes, confirmations, focus behavior, and shared
+  states: [`spiral-robotics-ui`](../../crates/spiral-robotics-ui/)
+- Product placement and domain content:
+  [`frontend`](../../crates/spiral-robotics-studio/src/frontend/)
+- Shared product formatting and single-flight request behavior:
+  [`format.rs`](../../crates/spiral-robotics-studio/src/frontend/format.rs) and
+  [`tasks.rs`](../../crates/spiral-robotics-studio/src/frontend/tasks.rs)
+- Docking, tab reordering, and panel keyboard behavior:
+  [`spiral-robotics-panels`](../../crates/spiral-robotics-panels/)
+- Migration guard:
+  [`interaction_language.rs`](../../crates/spiral-robotics-studio/tests/interaction_language.rs)

@@ -2,16 +2,19 @@
 
 use dioxus::prelude::*;
 use spiral_robotics_contracts::api::DataSettings;
+use spiral_robotics_ui::focus_after_render;
 
 use crate::frontend::api::http as api;
 use crate::frontend::app::activity::Activity;
 use crate::frontend::app::navigation::{ShellAction, use_shell_controller};
 use crate::frontend::app::shell::{ActivityRail, StatusBar};
+use crate::frontend::app::workspace::EpisodeWorkspace;
 use crate::frontend::panels::timeline::state::use_timeline_controller;
 use crate::frontend::screens::data::state::use_data_controller;
 use crate::frontend::screens::rollout::state::use_rollout_controller;
 use crate::frontend::screens::settings::panel::SettingsPanel;
 use crate::frontend::screens::training::state::use_training_controller;
+use crate::frontend::screens::training::workspace::TrainingWorkspace;
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
 const ECHARTS_RUNTIME: &str = "https://cdn.jsdelivr.net/npm/echarts@6.1.0/dist/echarts.min.js";
@@ -99,14 +102,12 @@ fn StudioShell() -> Element {
     let configuration = StudioConfiguration {
         dataset: loaded_settings
             .as_ref()
-            .map(|settings| settings.spiral.dataset.clone())
+            .map(|settings| settings.spiral.namespace.clone())
             .filter(|dataset| !dataset.trim().is_empty())
             .unwrap_or_else(|| "spiral_robotics".to_owned()),
-        spiral_query_available: loaded_settings.as_ref().is_some_and(|settings| {
-            settings.spiral.enabled
-                && (settings.spiral.uri == "spiral:memory:"
-                    || !settings.spiral.project_id.trim().is_empty())
-        }),
+        spiral_query_available: loaded_settings
+            .as_ref()
+            .is_some_and(|settings| !settings.spiral.project_id.trim().is_empty()),
     };
     let mut configuration_signal = use_signal(StudioConfiguration::default);
     use_context_provider(|| configuration_signal);
@@ -127,13 +128,21 @@ fn StudioShell() -> Element {
     let timeline = use_timeline_controller();
     let settings_open = shell.settings_open();
     let mut settings_was_open = use_signal(|| false);
+    let mut project_setup_prompted = use_signal(|| false);
+    use_effect(use_reactive((&loaded_settings,), move |(settings,)| {
+        if settings
+            .as_ref()
+            .is_some_and(|settings| settings.spiral.project_id.trim().is_empty())
+            && !project_setup_prompted()
+        {
+            project_setup_prompted.set(true);
+            shell.dispatch(ShellAction::OpenSettings);
+        }
+    }));
     use_effect(use_reactive((&settings_open,), move |(settings_open,)| {
         let was_open = settings_was_open();
         if !settings_open && was_open {
-            spawn(async {
-                gloo_timers::future::TimeoutFuture::new(0).await;
-                focus_settings_trigger();
-            });
+            focus_after_render("settings-rail-trigger".to_owned());
         }
         if was_open != settings_open {
             settings_was_open.set(settings_open);
@@ -164,7 +173,12 @@ fn StudioShell() -> Element {
                             shell.dispatch(ShellAction::CloseSettings);
                         }
                     },
-                    on_saved: move |_| settings.restart(),
+                    on_saved: move |_| {
+                        settings.restart();
+                        spawn(async move {
+                            let _ = studio.refresh_episode_catalog().await;
+                        });
+                    },
                     on_busy_change: move |busy| settings_busy.set(busy),
                 }
             }
@@ -196,41 +210,24 @@ fn StudioShell() -> Element {
     }
 }
 
-#[cfg(feature = "web")]
-fn focus_settings_trigger() {
-    use wasm_bindgen::JsCast as _;
-
-    let Some(trigger) = web_sys::window()
-        .and_then(|window| window.document())
-        .and_then(|document| document.get_element_by_id("settings-rail-trigger"))
-        .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
-    else {
-        return;
-    };
-    let _ = trigger.focus();
-}
-
-#[cfg(not(feature = "web"))]
-fn focus_settings_trigger() {}
-
 #[component]
 fn Live() -> Element {
-    rsx! { crate::frontend::screens::live::screen::LiveScreen {} }
+    rsx! { EpisodeWorkspace { activity: Activity::Live } }
 }
 
 #[component]
 fn Data() -> Element {
-    rsx! { crate::frontend::screens::data::screen::DataScreen {} }
+    rsx! { EpisodeWorkspace { activity: Activity::Data } }
 }
 
 #[component]
 fn Training() -> Element {
-    rsx! { crate::frontend::screens::training::screen::TrainingScreen {} }
+    rsx! { TrainingWorkspace {} }
 }
 
 #[component]
 fn Rollout() -> Element {
-    rsx! { crate::frontend::screens::rollout::screen::RolloutScreen {} }
+    rsx! { EpisodeWorkspace { activity: Activity::Rollout } }
 }
 
 #[cfg(test)]

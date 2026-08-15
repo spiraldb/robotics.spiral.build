@@ -13,6 +13,7 @@ use spiral_robotics_contracts::api::{
 
 use crate::frontend::api::http as api;
 use crate::frontend::app::state::Studio;
+use crate::frontend::format::format_clock;
 
 pub(crate) fn recording_blocker(studio: Studio) -> Option<String> {
     if !spiral_robotics_contracts::spiral::is_dataset_id(studio.selected_dataset.read().trim()) {
@@ -96,13 +97,14 @@ pub(crate) fn stop_recording(
             Some(&request),
         )
         .await?;
+        studio.upsert_episode(summary.clone());
         if keep {
             studio.report_episode_success(
                 format!(
                     "Episode {} saved to Data · {} — {}, {} frames.",
                     crate::frontend::screens::data::workbench::short_id(&summary.id),
                     summary.dataset_id,
-                    format_take_duration(summary.duration_seconds),
+                    format_clock(summary.duration_seconds),
                     summary.frames
                 ),
                 summary.id.clone(),
@@ -111,16 +113,6 @@ pub(crate) fn stop_recording(
         on_completed.call(summary);
         Ok(())
     });
-}
-
-/// Minutes and tenths, matching the Timeline clock the operator just watched.
-fn format_take_duration(seconds: f64) -> String {
-    if !seconds.is_finite() || seconds <= 0.0 {
-        return "0:00.0".to_owned();
-    }
-    let minutes = (seconds / 60.0).floor() as u64;
-    let remainder = seconds - minutes as f64 * 60.0;
-    format!("{minutes}:{remainder:04.1}")
 }
 
 pub(crate) fn replay_target(

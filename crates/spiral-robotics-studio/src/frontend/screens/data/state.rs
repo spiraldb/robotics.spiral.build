@@ -6,7 +6,7 @@
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_contracts::api::{PublicationStatus, SpiralQueryRequest};
+use spiral_robotics_contracts::api::SpiralQueryRequest;
 
 use crate::frontend::api::http as api;
 use crate::frontend::app::notifications::MessageSource;
@@ -42,8 +42,6 @@ pub(crate) struct DataController {
     active_query: Signal<Option<u64>>,
     active_request: Signal<Option<ActiveQuery>>,
     next_query_id: Signal<u64>,
-    publications: Signal<Vec<PublicationStatus>>,
-    publication_error: Signal<Option<String>>,
 }
 
 /// Create the Data controller once at the shell boundary and publish it to the
@@ -59,8 +57,6 @@ pub(crate) fn use_data_controller(namespace: &str, dataset_id: &str) -> DataCont
         active_query: use_signal(|| None),
         active_request: use_signal(|| None),
         next_query_id: use_signal(|| 1),
-        publications: use_signal(Vec::new),
-        publication_error: use_signal(|| None),
     };
     let namespace_dependency = namespace.to_owned();
     let dataset_dependency = dataset_id.to_owned();
@@ -68,16 +64,6 @@ pub(crate) fn use_data_controller(namespace: &str, dataset_id: &str) -> DataCont
         (&namespace_dependency, &dataset_dependency),
         move |(namespace, dataset_id)| controller.sync_dataset(&namespace, &dataset_id),
     ));
-    #[cfg(all(feature = "web", target_arch = "wasm32"))]
-    {
-        let mut publication_controller = controller;
-        use_future(move || async move {
-            loop {
-                publication_controller.refresh_publications().await;
-                gloo_timers::future::TimeoutFuture::new(1_000).await;
-            }
-        });
-    }
     use_context_provider(|| controller)
 }
 
@@ -142,44 +128,6 @@ impl DataController {
         }
         self.query_tabs.set(tabs);
         self.active_query.set(active);
-    }
-
-    pub(crate) fn publications(&self) -> Vec<PublicationStatus> {
-        self.publications.read().clone()
-    }
-
-    pub(crate) fn publication_error(&self) -> Option<String> {
-        self.publication_error.read().clone()
-    }
-
-    pub(crate) fn push_to_spiral(mut self, studio: Studio, episode_id: String) {
-        self.upsert_publication(PublicationStatus {
-            episode_id: episode_id.clone(),
-            state: "queued".to_owned(),
-            spiral: Some("queued".to_owned()),
-            updated_ms: 0,
-        });
-        dioxus::dioxus_core::spawn_forever(async move {
-            let path = format!("/api/spiral/publications/{episode_id}");
-            match api::post(&path).await {
-                Ok(()) => studio.report_success_from(
-                    MessageSource::Data,
-                    format!("Retrying the SpiralDB sync for {episode_id}."),
-                ),
-                Err(error) => {
-                    self.upsert_publication(PublicationStatus {
-                        episode_id: episode_id.clone(),
-                        state: "failed".to_owned(),
-                        spiral: Some(format!("failed: {error}")),
-                        updated_ms: 0,
-                    });
-                    studio.report_from(
-                        MessageSource::Data,
-                        format!("Could not push {episode_id} to SpiralDB: {error}"),
-                    );
-                }
-            }
-        });
     }
 
     pub(crate) fn set_sql(mut self, sql: String) {
@@ -293,30 +241,6 @@ impl DataController {
             tab.model.state = QueryState::Failed("Cancelled by operator.".to_owned());
             self.query_tabs.set(tabs);
         }
-    }
-
-    #[cfg(all(feature = "web", target_arch = "wasm32"))]
-    async fn refresh_publications(&mut self) {
-        match api::get::<Vec<PublicationStatus>>("/api/publications").await {
-            Ok(publications) => {
-                self.publications.set(publications);
-                self.publication_error.set(None);
-            }
-            Err(error) => self.publication_error.set(Some(error)),
-        }
-    }
-
-    fn upsert_publication(&mut self, status: PublicationStatus) {
-        let mut publications = self.publications.peek().clone();
-        if let Some(existing) = publications
-            .iter_mut()
-            .find(|existing| existing.episode_id == status.episode_id)
-        {
-            *existing = status;
-        } else {
-            publications.push(status);
-        }
-        self.publications.set(publications);
     }
 }
 

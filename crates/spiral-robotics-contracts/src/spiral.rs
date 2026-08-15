@@ -7,7 +7,7 @@
 use std::fmt;
 
 /// Schema version written into every completed episode row.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// Marker used to distinguish Spiral Robotics' managed dataset namespace resource.
 pub const DATASET_NAMESPACE_MARKER: &str = "_spiral_robotics_dataset_key_v1";
@@ -21,17 +21,25 @@ pub enum Table {
     JointSamples,
     VideoAssets,
     TrainingCheckpoints,
+    Robots,
+    StudioSettings,
+    TrainingRuns,
+    RolloutRuns,
 }
 
 impl Table {
     /// Relations shown in the Data schema browser.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 10] = [
         Self::Datasets,
         Self::Episodes,
         Self::EpisodeStreams,
         Self::JointSamples,
         Self::VideoAssets,
         Self::TrainingCheckpoints,
+        Self::Robots,
+        Self::StudioSettings,
+        Self::TrainingRuns,
+        Self::RolloutRuns,
     ];
 
     /// Relations published for each episode, in safe deletion order.
@@ -50,6 +58,10 @@ impl Table {
             Self::JointSamples => "joint_samples",
             Self::VideoAssets => "video_assets",
             Self::TrainingCheckpoints => "training_checkpoints",
+            Self::Robots => "robots",
+            Self::StudioSettings => "studio_settings",
+            Self::TrainingRuns => "training_runs",
+            Self::RolloutRuns => "rollout_runs",
         }
     }
 
@@ -74,6 +86,7 @@ impl Table {
                 column::DURATION_NS,
                 column::MAX_FOLLOW_ERROR_DEGREES,
                 column::DISCARDED,
+                column::METADATA_JSON,
             ],
             Self::EpisodeStreams => &[
                 column::EPISODE_ID,
@@ -124,6 +137,11 @@ impl Table {
                 column::CONFIG_JSON,
                 column::CHECKPOINT,
             ],
+            Self::Robots => &[column::ROBOT_ID, column::CONFIG_JSON, column::UPDATED_MS],
+            Self::StudioSettings => &[column::KEY, column::VALUE_JSON, column::UPDATED_MS],
+            Self::TrainingRuns | Self::RolloutRuns => {
+                &[column::RUN_ID, column::SNAPSHOT_JSON, column::UPDATED_MS]
+            }
         }
     }
 }
@@ -158,6 +176,7 @@ pub mod column {
     pub const HEIGHT: &str = "height";
     pub const JOINT_NAMES: &str = "joint_names";
     pub const MAX_FOLLOW_ERROR_DEGREES: &str = "max_follow_error_degrees";
+    pub const METADATA_JSON: &str = "metadata_json";
     pub const MEDIA_RELATION: &str = "media_relation";
     pub const MODALITY: &str = "modality";
     pub const NAME: &str = "name";
@@ -166,6 +185,7 @@ pub mod column {
     pub const POLICY: &str = "policy";
     pub const RAW_POSITION: &str = "raw_position";
     pub const ROBOT_TYPE: &str = "robot_type";
+    pub const ROBOT_ID: &str = "robot_id";
     pub const REPLAY_POSITION: &str = "replay_position";
     pub const RUN_ID: &str = "run_id";
     pub const RUN_NAME: &str = "run_name";
@@ -175,6 +195,7 @@ pub mod column {
     pub const SEGMENT_INDEX: &str = "segment_index";
     pub const SOURCE: &str = "source";
     pub const STARTED_MS: &str = "started_ms";
+    pub const SNAPSHOT_JSON: &str = "snapshot_json";
     pub const STATE: &str = "state";
     pub const STATE_VALID: &str = "state_valid";
     pub const STATE_POSITION: &str = "state_position";
@@ -182,8 +203,11 @@ pub mod column {
     pub const STREAM_ID: &str = "stream_id";
     pub const TIMELINE_OFFSET_NS: &str = "timeline_offset_ns";
     pub const VALIDATION_LOSS: &str = "validation_loss";
+    pub const VALUE_JSON: &str = "value_json";
     pub const VELOCITY: &str = "velocity";
     pub const WIDTH: &str = "width";
+    pub const KEY: &str = "key";
+    pub const UPDATED_MS: &str = "updated_ms";
 }
 
 /// Built-in read-only queries shown by the Data workbench.
@@ -195,16 +219,24 @@ pub enum QueryPreset {
     JointSamples,
     VideoAssets,
     TrainingCheckpoints,
+    Robots,
+    StudioSettings,
+    TrainingRuns,
+    RolloutRuns,
 }
 
 impl QueryPreset {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 10] = [
         Self::Datasets,
         Self::Episodes,
         Self::EpisodeStreams,
         Self::JointSamples,
         Self::VideoAssets,
         Self::TrainingCheckpoints,
+        Self::Robots,
+        Self::StudioSettings,
+        Self::TrainingRuns,
+        Self::RolloutRuns,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -215,6 +247,10 @@ impl QueryPreset {
             Self::JointSamples => "Joint samples",
             Self::VideoAssets => "Video assets",
             Self::TrainingCheckpoints => "Checkpoints",
+            Self::Robots => "Robots",
+            Self::StudioSettings => "Studio settings",
+            Self::TrainingRuns => "Training runs",
+            Self::RolloutRuns => "Rollout runs",
         }
     }
 
@@ -226,6 +262,10 @@ impl QueryPreset {
             Self::JointSamples => Table::JointSamples,
             Self::VideoAssets => Table::VideoAssets,
             Self::TrainingCheckpoints => Table::TrainingCheckpoints,
+            Self::Robots => Table::Robots,
+            Self::StudioSettings => Table::StudioSettings,
+            Self::TrainingRuns => Table::TrainingRuns,
+            Self::RolloutRuns => Table::RolloutRuns,
         }
     }
 
@@ -273,6 +313,18 @@ impl QueryPreset {
                 column::CREATED_MS,
                 column::VALIDATION_LOSS,
                 column::CREATED_MS,
+            ),
+            Self::Robots => format!(
+                "SELECT * FROM {relation} ORDER BY {} LIMIT 100",
+                column::ROBOT_ID,
+            ),
+            Self::StudioSettings => format!(
+                "SELECT * FROM {relation} ORDER BY {} LIMIT 100",
+                column::KEY,
+            ),
+            Self::TrainingRuns | Self::RolloutRuns => format!(
+                "SELECT * FROM {relation} ORDER BY {} DESC LIMIT 100",
+                column::UPDATED_MS,
             ),
         }
     }

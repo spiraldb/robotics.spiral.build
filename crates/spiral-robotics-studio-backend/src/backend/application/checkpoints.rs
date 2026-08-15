@@ -9,14 +9,6 @@ pub(crate) const MAX_CHECKPOINT_ARTIFACT_BYTES: usize = 240 * 1024 * 1024;
 /// Configuration is small JSON policy metadata, never a second weight blob.
 pub(crate) const MAX_CHECKPOINT_CONFIG_BYTES: usize = 1024 * 1024;
 
-/// Credential-free destination frozen when a training run starts.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CheckpointSource {
-    pub project: String,
-    pub namespace: String,
-    pub dataset_id: String,
-}
-
 /// Identity selected by the rollout use case.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CheckpointKey {
@@ -24,9 +16,8 @@ pub(crate) struct CheckpointKey {
     pub step: u64,
 }
 
-/// Trainer-produced artifact and metadata ready for durable publication.
-pub(crate) struct CheckpointPublication {
-    pub source: CheckpointSource,
+/// Trainer-produced artifact and metadata ready for a durable write.
+pub(crate) struct CheckpointWrite {
     pub run_id: String,
     pub run_name: String,
     pub policy: String,
@@ -69,22 +60,14 @@ pub(crate) fn validate_checkpoint_artifact_size(
 pub(crate) type CheckpointFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
 
-/// Persistence boundary owned by training and rollout application policy.
-///
-/// Implementations may use a database, files, or a remote service. Callers see
-/// only immutable source identity, publication metadata, and opaque bytes.
+/// Checkpoint operations used by training and rollout policy. The concrete
+/// Studio implementation always addresses its one process-owned Spiral project.
 pub(crate) trait CheckpointRepository: Send + Sync {
-    fn register_run_source(&self, run_id: &str, source: CheckpointSource) -> Result<(), String>;
-
-    fn publish_checkpoint(&self, publication: CheckpointPublication) -> CheckpointFuture<'_, ()>;
+    fn save_checkpoint(&self, write: CheckpointWrite) -> CheckpointFuture<'_, ()>;
 
     fn load_checkpoint(&self, key: CheckpointKey) -> CheckpointFuture<'_, CheckpointArtifact>;
 
-    fn delete_run_checkpoints(
-        &self,
-        run_id: String,
-        source: CheckpointSource,
-    ) -> CheckpointFuture<'_, ()>;
+    fn delete_run_checkpoints(&self, run_id: String) -> CheckpointFuture<'_, ()>;
 }
 
 #[cfg(test)]

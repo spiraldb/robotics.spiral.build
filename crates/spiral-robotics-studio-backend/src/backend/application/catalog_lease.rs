@@ -1,6 +1,6 @@
-//! Exclusive, owner-scoped admission for episode-catalog publication.
+//! Exclusive, owner-scoped admission for episode-catalog mutation.
 //!
-//! Recording start and dataset import allocate identities in the same catalog.
+//! Recording and calibration can mutate the same catalog.
 //! A boolean cannot express who owns that exclusion, so an unrelated stop can
 //! accidentally release somebody else's mutation. This lease uses an opaque
 //! generation token: only the exact acquisition may bind, claim, or release
@@ -11,8 +11,10 @@ use std::sync::{Mutex, MutexGuard};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CatalogLeaseOwner {
     Recording,
-    DatasetImport,
     CalibrationReapply,
+    EpisodeImport,
+    ProjectImport,
+    ProjectSwitch,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,7 +66,7 @@ impl CatalogMutationLease {
     }
 
     /// Associate the identity allocated by a successful recording start with
-    /// its still-held publication lease.
+    /// its still-held catalog lease.
     pub(crate) fn bind_recording(&self, token: CatalogLeaseToken, episode: String) -> bool {
         let mut state = lock(&self.state);
         let Some(holder) = state.holder.as_mut() else {
@@ -82,7 +84,7 @@ impl CatalogMutationLease {
     }
 
     /// Claim finalization exactly once while keeping the exclusion held until
-    /// durable staging calls [`release`](Self::release).
+    /// durable commit calls [`release`](Self::release).
     pub(crate) fn claim_recording(&self) -> Option<ClaimedRecordingLease> {
         let mut state = lock(&self.state);
         let holder = state.holder.as_mut()?;
@@ -114,6 +116,7 @@ impl CatalogMutationLease {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn is_held(&self) -> bool {
         lock(&self.state).holder.is_some()
     }
@@ -153,13 +156,13 @@ mod tests {
             .expect("recording acquires the empty catalog");
         assert!(
             lease
-                .try_acquire(CatalogLeaseOwner::DatasetImport)
+                .try_acquire(CatalogLeaseOwner::CalibrationReapply)
                 .is_none()
         );
         assert!(lease.release(recording));
 
         let dataset = lease
-            .try_acquire(CatalogLeaseOwner::DatasetImport)
+            .try_acquire(CatalogLeaseOwner::CalibrationReapply)
             .expect("dataset acquires after recording releases");
         assert!(
             !lease.release(recording),
@@ -187,7 +190,7 @@ mod tests {
             lease.claim_recording().is_none(),
             "finalization is exact once"
         );
-        assert!(lease.is_held(), "claim retains exclusion through staging");
+        assert!(lease.is_held(), "claim retains exclusion through commit");
         assert!(lease.release(claimed.token));
         assert!(!lease.release(claimed.token));
     }

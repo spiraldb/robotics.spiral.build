@@ -1,8 +1,9 @@
-//! Framework-neutral data settings, publication, query, and remote replay actions.
+//! Framework-neutral data settings, query, and remote replay actions.
 
 use std::collections::BTreeMap;
 
 use spiral_robotics_core::query::{ReadOnlyMode, ensure_read_only};
+use url::Url;
 
 use super::error::ApplicationError;
 
@@ -10,14 +11,18 @@ const MAX_QUERY_ROWS: usize = 1_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SpiralDestinationSettings {
-    pub uri: String,
+    pub endpoint: String,
+    pub spfs_endpoint: String,
     pub project_id: String,
     pub namespace: String,
+    pub endpoint_restart_required: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct UpdateDataSettingsCommand {
-    pub spiral: SpiralDestinationSettings,
+    pub spiral_endpoint: String,
+    pub spiral_spfs_endpoint: String,
+    pub project_id: String,
     pub training_endpoint: String,
     pub video_enabled: bool,
 }
@@ -25,7 +30,6 @@ pub(crate) struct UpdateDataSettingsCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DataSettingsView {
     pub spiral: SpiralDestinationSettings,
-    pub spiral_configured: bool,
     pub training_endpoint: String,
     pub video_enabled: bool,
 }
@@ -34,14 +38,6 @@ pub(crate) struct DataSettingsView {
 pub(crate) struct ConnectionCheck {
     pub ok: bool,
     pub message: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PublicationView {
-    pub episode_id: String,
-    pub state: String,
-    pub spiral: Option<String>,
-    pub updated_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -107,8 +103,6 @@ pub(crate) trait DataCatalogPort: Send + Sync {
     async fn refresh_training_readiness(&self);
 
     async fn test_connection(&self) -> ConnectionCheck;
-    fn publications(&self) -> Vec<PublicationView>;
-    fn sync_existing_episode(&self, episode: String) -> Result<(), ApplicationError>;
     async fn query(&self, command: QueryCommand) -> Result<QueryResult, ApplicationError>;
     async fn load_replay_trajectory(
         &self,
@@ -147,25 +141,14 @@ pub(crate) async fn update_settings<P: DataCatalogPort + ?Sized>(
 ) -> Result<DataSettingsView, ApplicationError> {
     let command = validate_settings(command)?;
     let settings = port.update_settings(command)?;
-    // Training readiness is derived from the saved destination, so publishing
-    // the settings must happen before rebuilding the readiness snapshot.
+    // Training readiness depends on the selected runtime endpoint, so publish
+    // preferences before rebuilding it.
     port.refresh_training_readiness().await;
     Ok(settings)
 }
 
 pub(crate) async fn test_connection<P: DataCatalogPort + ?Sized>(port: &P) -> ConnectionCheck {
     port.test_connection().await
-}
-
-pub(crate) fn list_publications<P: DataCatalogPort + ?Sized>(port: &P) -> Vec<PublicationView> {
-    port.publications()
-}
-
-pub(crate) fn sync_existing_episode<P: DataCatalogPort + ?Sized>(
-    port: &P,
-    episode: String,
-) -> Result<(), ApplicationError> {
-    port.sync_existing_episode(episode)
 }
 
 pub(crate) async fn query<P: DataCatalogPort + ?Sized>(
@@ -244,10 +227,23 @@ fn validate_replay_trajectory(trajectory: &ReplayTrajectory) -> Result<(), Appli
 fn validate_settings(
     mut command: UpdateDataSettingsCommand,
 ) -> Result<UpdateDataSettingsCommand, ApplicationError> {
-    command.spiral.uri = command.spiral.uri.trim().to_owned();
-    command.spiral.project_id = command.spiral.project_id.trim().to_owned();
-    command.spiral.namespace = command.spiral.namespace.trim().to_owned();
+    command.spiral_endpoint =
+        normalize_spiral_endpoint(&command.spiral_endpoint, "Spiral API endpoint")?;
+    command.spiral_spfs_endpoint =
+        normalize_spiral_endpoint(&command.spiral_spfs_endpoint, "Spiral SpFS endpoint")?;
+    command.project_id = command.project_id.trim().to_owned();
     command.training_endpoint = command.training_endpoint.trim().to_owned();
+
+    if command.project_id.is_empty()
+        || !command
+            .project_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(ApplicationError::InvalidInput(
+            "Spiral project must contain only letters, numbers, '_' or '-'".to_owned(),
+        ));
+    }
 
     if !command.training_endpoint.starts_with("http://")
         || command.training_endpoint.len() <= "http://".len()
@@ -257,41 +253,31 @@ fn validate_settings(
         ));
     }
 
-    if !matches!(
-        command.spiral.uri.as_str(),
-        "spiraldb://" | "spiral:memory:"
-    ) {
-        return Err(ApplicationError::InvalidInput(
-            "Spiral ADBC URI must be 'spiraldb://' or 'spiral:memory:'".to_owned(),
-        ));
-    }
-    let configured =
-        command.spiral.uri == "spiral:memory:" || !command.spiral.project_id.is_empty();
-    if configured {
-        if command.spiral.uri != "spiral:memory:"
-            && !command
-                .spiral
-                .project_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        {
-            return Err(ApplicationError::InvalidInput(
-                "Spiral project must contain only letters, numbers, '_' or '-'".to_owned(),
-            ));
-        }
-        let mut namespace = command.spiral.namespace.bytes();
-        if !namespace
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
-            || !namespace.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        {
-            return Err(ApplicationError::InvalidInput(
-                "Spiral namespace must start with a letter or '_' and contain only letters, numbers, or '_'"
-                    .to_owned(),
-            ));
-        }
-    }
     Ok(command)
+}
+
+fn normalize_spiral_endpoint(endpoint: &str, label: &str) -> Result<String, ApplicationError> {
+    let parsed = Url::parse(endpoint.trim()).map_err(|error| {
+        ApplicationError::InvalidInput(format!(
+            "{label} must be an http:// or https:// URL: {error}"
+        ))
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(ApplicationError::InvalidInput(format!(
+            "{label} must be an http:// or https:// URL with a host"
+        )));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ApplicationError::InvalidInput(format!(
+            "{label} must not contain embedded credentials"
+        )));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(ApplicationError::InvalidInput(format!(
+            "{label} must not contain a query string or fragment"
+        )));
+    }
+    Ok(parsed.as_str().trim_end_matches('/').to_owned())
 }
 
 #[cfg(test)]
@@ -335,8 +321,12 @@ mod tests {
             command: UpdateDataSettingsCommand,
         ) -> Result<DataSettingsView, ApplicationError> {
             self.events.lock().unwrap().push(format!(
-                "update:{}:{}:{}",
-                command.spiral.uri, command.spiral.project_id, command.spiral.namespace
+                "update:{}:{}:{}:{}:{}",
+                command.spiral_endpoint,
+                command.spiral_spfs_endpoint,
+                command.project_id,
+                command.training_endpoint,
+                command.video_enabled
             ));
             self.update_error
                 .clone()
@@ -352,20 +342,6 @@ mod tests {
                 ok: true,
                 message: "connected".to_owned(),
             }
-        }
-
-        fn publications(&self) -> Vec<PublicationView> {
-            vec![PublicationView {
-                episode_id: "episode".to_owned(),
-                state: "published".to_owned(),
-                spiral: None,
-                updated_ms: 1,
-            }]
-        }
-
-        fn sync_existing_episode(&self, episode: String) -> Result<(), ApplicationError> {
-            self.events.lock().unwrap().push(format!("sync:{episode}"));
-            Ok(())
         }
 
         async fn query(&self, command: QueryCommand) -> Result<QueryResult, ApplicationError> {
@@ -448,11 +424,12 @@ mod tests {
     fn settings_view(project: &str) -> DataSettingsView {
         DataSettingsView {
             spiral: SpiralDestinationSettings {
-                uri: "spiral:memory:".to_owned(),
+                endpoint: "https://api.spiraldb.dev".to_owned(),
+                spfs_endpoint: "https://spfs.spiraldb.dev".to_owned(),
                 project_id: project.to_owned(),
                 namespace: "dataset".to_owned(),
+                endpoint_restart_required: false,
             },
-            spiral_configured: true,
             training_endpoint: "http://127.0.0.1:50051".to_owned(),
             video_enabled: true,
         }
@@ -482,11 +459,9 @@ mod tests {
 
     fn settings() -> UpdateDataSettingsCommand {
         UpdateDataSettingsCommand {
-            spiral: SpiralDestinationSettings {
-                uri: " spiraldb:// ".to_owned(),
-                project_id: " project-1 ".to_owned(),
-                namespace: " robot_data ".to_owned(),
-            },
+            spiral_endpoint: " https://api.spiraldb.dev/ ".to_owned(),
+            spiral_spfs_endpoint: " https://spfs.spiraldb.dev/ ".to_owned(),
+            project_id: " project ".to_owned(),
             training_endpoint: " http://127.0.0.1:50051 ".to_owned(),
             video_enabled: true,
         }
@@ -509,7 +484,10 @@ mod tests {
         );
         assert_eq!(
             *data.events.lock().unwrap(),
-            ["update:spiraldb://:project-1:robot_data", "refresh"]
+            [
+                "update:https://api.spiraldb.dev:https://spfs.spiraldb.dev:project:http://127.0.0.1:50051:true",
+                "refresh"
+            ]
         );
     }
 
@@ -517,7 +495,31 @@ mod tests {
     async fn invalid_or_unsaved_settings_never_refresh_training() {
         let data = FakeData::new();
         let mut invalid = settings();
-        invalid.spiral.namespace = "robot-data".to_owned();
+        invalid.project_id = "not/a/project".to_owned();
+        assert!(matches!(
+            update_settings(&data, invalid).await,
+            Err(ApplicationError::InvalidInput(_))
+        ));
+        assert!(data.events.lock().unwrap().is_empty());
+
+        let mut invalid = settings();
+        invalid.spiral_endpoint = "file:///tmp/spiral".to_owned();
+        assert!(matches!(
+            update_settings(&data, invalid).await,
+            Err(ApplicationError::InvalidInput(_))
+        ));
+        assert!(data.events.lock().unwrap().is_empty());
+
+        let mut invalid = settings();
+        invalid.spiral_spfs_endpoint = "file:///tmp/spfs".to_owned();
+        assert!(matches!(
+            update_settings(&data, invalid).await,
+            Err(ApplicationError::InvalidInput(_))
+        ));
+        assert!(data.events.lock().unwrap().is_empty());
+
+        let mut invalid = settings();
+        invalid.training_endpoint = "https://runtime.example".to_owned();
         assert!(matches!(
             update_settings(&data, invalid).await,
             Err(ApplicationError::InvalidInput(_))
@@ -525,10 +527,10 @@ mod tests {
         assert!(data.events.lock().unwrap().is_empty());
 
         let mut data = FakeData::new();
-        data.update_error = Some(ApplicationError::Internal("disk full".to_owned()));
+        data.update_error = Some(ApplicationError::Internal("Spiral unavailable".to_owned()));
         assert_eq!(
             update_settings(&data, settings()).await,
-            Err(ApplicationError::Internal("disk full".to_owned()))
+            Err(ApplicationError::Internal("Spiral unavailable".to_owned()))
         );
         assert_eq!(data.events.lock().unwrap().len(), 1);
     }

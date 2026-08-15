@@ -1,9 +1,8 @@
 //! Columnar episode rows at the Spiral Robotics → Spiral boundary.
 //!
-//! This module deliberately stops at Arrow record batches. Connection,
-//! authentication, retries, and publication belong to the eventual Spiral
-//! writer worker; the hardware loop only needs a deterministic conversion from
-//! its native samples into stable relational keys.
+//! This module deliberately stops at Arrow record batches. The shared Spiral
+//! repository owns connections while the hardware loop only needs a
+//! deterministic conversion from native samples into stable relational keys.
 
 use std::sync::Arc;
 
@@ -157,6 +156,7 @@ pub(crate) fn episodes_schema() -> SchemaRef {
         Field::new(db::DURATION_NS, DataType::UInt64, false),
         Field::new(db::MAX_FOLLOW_ERROR_DEGREES, DataType::Float64, true),
         Field::new(db::DISCARDED, DataType::Boolean, false),
+        Field::new(db::METADATA_JSON, DataType::Utf8, false),
     ]))
 }
 
@@ -167,6 +167,8 @@ pub(crate) fn episode_completion_batch(
     frames: u64,
 ) -> Result<RecordBatch, EpisodeError> {
     let duration_ns = seconds_to_ns(completion.duration_seconds, "episode duration")?;
+    let metadata = serde_json::to_string(&(start, completion))
+        .map_err(|error| invalid(format!("encoding episode metadata: {error}")))?;
     let columns: Vec<ArrayRef> = vec![
         Arc::new(StringArray::from(vec![start.id.as_str()])),
         Arc::new(StringArray::from(vec![start.dataset_id.as_str()])),
@@ -181,6 +183,7 @@ pub(crate) fn episode_completion_batch(
             completion.max_follow_error_degrees,
         ])),
         Arc::new(BooleanArray::from(vec![completion.discarded])),
+        Arc::new(StringArray::from(vec![metadata])),
     ];
     RecordBatch::try_new(episodes_schema(), columns)
         .map_err(|error| invalid(format!("building Spiral episode batch: {error}")))

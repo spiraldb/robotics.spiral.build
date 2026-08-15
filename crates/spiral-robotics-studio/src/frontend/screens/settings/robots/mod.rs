@@ -1,7 +1,7 @@
 //! Creating robot instances and getting them ready to move.
 //!
-//! One arm is one robot instance is one JSON file. Everything on this panel —
-//! the port, the cameras, the calibration — ends up in that single file.
+//! One arm is one robot instance in SpiralDB. Everything on this panel—the
+//! port, cameras, motors, and calibration—is one durable configuration row.
 //!
 //! The panel lives in Settings as the durable owner of ports, camera
 //! assignments, and calibration. Live consumes that configuration without
@@ -10,19 +10,22 @@
 use dioxus::prelude::*;
 use gloo_net::http::Method;
 use spiral_robotics_contracts::api::{
-    CameraBinding, CameraStatus, CreateRobotRequest, IdentifyPortRequest, IdentifyPortResponse,
-    PortSettings, RobotSummary, SerialPortSummary, UpdateRobotRequest,
+    CameraBinding, CreateRobotRequest, IdentifyPortRequest, IdentifyPortResponse, PortSettings,
+    RobotSummary, SerialPortSummary, UpdateRobotRequest,
+};
+use spiral_robotics_ui::{
+    Action, ActionLink, ActionPurpose, ActionVariant, ChevronIcon, FileAction, UnassignIcon,
 };
 
 use crate::frontend::api::http as api;
 use crate::frontend::app::state::{Selection, Studio, studio};
-use crate::frontend::components::icons::{Chevron, Trash};
 use crate::frontend::panels::scene::accent_css;
+use crate::frontend::tasks::single_flight;
 
 mod calibration;
 mod delete;
 use calibration::CalibrationSection;
-use delete::DeleteButton;
+use delete::DeleteRobotAction;
 
 /// Robot types offered when creating an instance.
 const ROBOT_TYPES: [(&str, &str); 2] = [
@@ -31,34 +34,13 @@ const ROBOT_TYPES: [(&str, &str); 2] = [
 ];
 
 #[component]
-pub fn RobotPanel(heading: bool) -> Element {
+pub(super) fn RobotPanel() -> Element {
     let studio = studio();
     let robots = studio.snapshot.read().robots.clone();
-    let workspace = studio.snapshot.read().workspace.clone();
-    let workspace_name = workspace
-        .rsplit(['/', '\\'])
-        .find(|part| !part.is_empty())
-        .unwrap_or(&workspace)
-        .to_owned();
     let focused = studio.focused();
 
     rsx! {
         div { class: "flex flex-col",
-            // No count badge: the list is directly underneath and two rows long
-            // on the bench this is built for. The directory earns its place
-            // because it is the only thing on the panel that says where these
-            // files live.
-            if heading {
-                header { class: "device-panel-header",
-                    h2 { "Robots" }
-                    span {
-                        class: "device-workspace",
-                        title: "Robot files are read and written in {workspace}",
-                        "{workspace_name}"
-                    }
-                }
-            }
-
             ul { class: "flex flex-col",
                 for (index, robot) in robots.iter().cloned().enumerate() {
                     RobotEntry {
@@ -110,19 +92,22 @@ fn RobotEntry(robot: RobotSummary, focused: bool, accent: &'static str) -> Eleme
     rsx! {
         li { class: "device-entry",
             div {
-                class: if focused { "device-entry-row device-entry-selected" } else { "device-entry-row" },
-                button {
-                    r#type: "button",
+                class: "device-entry-row",
+                Action {
+                    purpose: ActionPurpose::Toggle,
+                    variant: ActionVariant::Icon,
                     class: "device-chevron",
-                    "aria-expanded": open(),
-                    "aria-label": if open() { "Hide setup for {robot.id}" } else { "Show setup for {robot.id}" },
+                    aria_expanded: open(),
+                    aria_label: if open() { "Hide setup for {robot.id}" } else { "Show setup for {robot.id}" },
                     title: if open() { "Hide this arm's setup" } else { "Show this arm's setup" },
                     onclick: move |_| open.toggle(),
-                    Chevron { open: open() }
+                    ChevronIcon { open: open() }
                 }
-                button {
-                    r#type: "button",
+                Action {
+                    purpose: ActionPurpose::Select,
+                    variant: ActionVariant::Row,
                     class: "device-main",
+                    aria_pressed: focused,
                     title: "Show {robot.id} in the joints panel",
                     onclick: move |_| chosen.set(Some(Selection::Robot(id.clone()))),
                     span {
@@ -160,8 +145,12 @@ fn NewRobotForm() -> Element {
     let mut open = use_signal(|| false);
     let mut id = use_signal(String::new);
     let mut robot_type = use_signal(|| ROBOT_TYPES[0].0.to_owned());
+    let creating = use_signal(|| false);
 
     let create = move || {
+        if creating.peek().to_owned() {
+            return;
+        }
         let name = id.read().trim().to_owned();
         if name.is_empty() {
             studio.report("Give the arm a name first.");
@@ -174,7 +163,15 @@ fn NewRobotForm() -> Element {
         };
         let selected_name = name.clone();
         studio.run_utility(format!("Created {name}."), async move {
-            api::send(Method::POST, "/api/robots", Some(&request)).await?;
+            let Some(result) = single_flight(
+                creating,
+                api::send(Method::POST, "/api/robots", Some(&request)),
+            )
+            .await
+            else {
+                return Ok(());
+            };
+            result?;
             // Only clear and close after the server accepts the new robot. A
             // rejected name or configuration stays in place for correction.
             id.set(String::new());
@@ -186,8 +183,9 @@ fn NewRobotForm() -> Element {
 
     if !open() {
         return rsx! {
-            button {
-                r#type: "button",
+            Action {
+                purpose: ActionPurpose::Create,
+                variant: ActionVariant::Row,
                 class: "device-list-action",
                 onclick: move |_| open.set(true),
                 "+ Add an arm"
@@ -202,6 +200,7 @@ fn NewRobotForm() -> Element {
                 "aria-label": "New arm name",
                 placeholder: "left_follower",
                 autofocus: true,
+                disabled: creating(),
                 value: "{id}",
                 oninput: move |event| id.set(event.value()),
                 // Naming an arm and pressing Enter is the whole interaction;
@@ -217,21 +216,24 @@ fn NewRobotForm() -> Element {
             select {
                 class: "field",
                 "aria-label": "New arm type",
+                disabled: creating(),
                 onchange: move |event| robot_type.set(event.value()),
                 for (value, label) in ROBOT_TYPES {
                     option { key: "{value}", value: "{value}", selected: robot_type() == value, "{label}" }
                 }
             }
             div { class: "flex gap-1",
-                button {
-                    r#type: "button",
-                    class: "btn btn-primary",
+                Action {
+                    purpose: ActionPurpose::Create,
+                    variant: ActionVariant::Solid,
+                    disabled: creating(),
+                    aria_busy: creating(),
                     onclick: move |_| create(),
-                    "Add"
+                    if creating() { "Adding…" } else { "Add" }
                 }
-                button {
-                    r#type: "button",
-                    class: "btn",
+                Action {
+                    purpose: ActionPurpose::Cancel,
+                    disabled: creating(),
                     onclick: move |_| {
                         id.set(String::new());
                         open.set(false);
@@ -247,23 +249,22 @@ fn NewRobotForm() -> Element {
 #[component]
 fn ImportRobotConfiguration() -> Element {
     let studio = studio();
-    let mut importing = use_signal(|| false);
+    let importing = use_signal(|| false);
     let mut chosen = studio.selected;
 
     rsx! {
-        label {
-            class: if importing() { "device-list-action device-list-action-busy" } else { "device-list-action" },
+        FileAction {
+            purpose: ActionPurpose::Import,
+            variant: ActionVariant::Row,
+            class: "device-list-action",
             title: "Import a unified Spiral Robotics JSON configuration",
-            input {
-                class: "sr-only",
-                r#type: "file",
-                accept: ".json,application/json",
-                disabled: importing(),
-                onchange: move |event| {
-                    let Some(file) = event.files().first().cloned() else { return };
-                    importing.set(true);
-                    studio.run_utility("", async move {
-                        let result = async {
+            accept: ".json,application/json",
+            disabled: importing(),
+            aria_busy: importing(),
+            onchange: move |event: Event<FormData>| {
+                let Some(file) = event.files().first().cloned() else { return };
+                studio.run_utility("", async move {
+                    let Some(result) = single_flight(importing, async {
                             let bytes = file
                                 .read_bytes()
                                 .await
@@ -274,26 +275,27 @@ fn ImportRobotConfiguration() -> Element {
                                 "application/json",
                             )
                             .await
+                        })
+                        .await
+                    else {
+                        return Ok(());
+                    };
+                    match result {
+                        Ok(robot) => {
+                            chosen.set(Some(Selection::Robot(robot.id.clone())));
+                            studio.report_success(format!("Imported {}.", robot.id));
+                            Ok(())
                         }
-                        .await;
-                        importing.set(false);
-                        match result {
-                            Ok(robot) => {
-                                chosen.set(Some(Selection::Robot(robot.id.clone())));
-                                studio.report_success(format!("Imported {}.", robot.id));
-                                Ok(())
-                            }
-                            Err(error) => Err(error),
-                        }
-                    });
-                }
-            }
+                        Err(error) => Err(error),
+                    }
+                });
+            },
             if importing() { "Importing…" } else { "Import configuration" }
         }
     }
 }
 
-/// Everything about one arm that ends up in its file.
+/// Everything about one arm stored in its SpiralDB configuration row.
 #[component]
 fn RobotSetup(robot: RobotSummary) -> Element {
     let studio = studio();
@@ -353,15 +355,16 @@ fn RobotSetup(robot: RobotSummary) -> Element {
                 CalibrationSection { robot: robot.clone(), connected, progress }
             }
             div { class: "device-file-row",
-                span { class: "min-w-0 flex-1 truncate font-mono text-[10px] text-ink-faint", "{robot.file}" }
-                a {
-                    class: "link",
+                span { class: "min-w-0 flex-1 truncate text-[10px] text-ink-faint", "Stored in SpiralDB" }
+                ActionLink {
+                    purpose: ActionPurpose::Export,
+                    variant: ActionVariant::Link,
                     href: "/api/robots/{robot.id}/configuration",
                     download: "{robot.id}.json",
                     title: "Download the complete configuration for {robot.id}",
                     "Export"
                 }
-                DeleteButton { robot: robot.clone() }
+                DeleteRobotAction { robot: robot.clone() }
             }
         }
     }
@@ -392,8 +395,9 @@ fn friendly_connection_error(error: &str) -> &'static str {
 type PortScan = Option<Result<Vec<SerialPortSummary>, String>>;
 
 #[component]
-fn ConnectButton(robot: RobotSummary, sweeping: bool) -> Element {
+fn ConnectionAction(robot: RobotSummary, sweeping: bool) -> Element {
     let studio = studio();
+    let pending = use_signal(|| false);
     let id = robot.id.clone();
     let connected = robot.connection.connected;
     // Disconnecting mid-sweep throws the sweep away, so make the operator
@@ -402,7 +406,7 @@ fn ConnectButton(robot: RobotSummary, sweeping: bool) -> Element {
     let reason = if robot.port.is_none() {
         "Assign a serial port first"
     } else if robot.problem.is_some() {
-        "Fix this arm's file first"
+        "Fix this arm's configuration first"
     } else if connected && sweeping {
         "Finish or cancel calibration first"
     } else {
@@ -410,17 +414,25 @@ fn ConnectButton(robot: RobotSummary, sweeping: bool) -> Element {
     };
 
     rsx! {
-        button {
-            r#type: "button",
-            class: if connected { "btn btn-outline" } else { "btn btn-primary" },
-            disabled: blocked,
+        Action {
+            purpose: if connected { ActionPurpose::Disconnect } else { ActionPurpose::Connect },
+            variant: if connected { ActionVariant::Outline } else { ActionVariant::Solid },
+            disabled: blocked || pending(),
+            aria_busy: pending(),
             title: "{reason}",
             onclick: move |_| {
+                if pending.peek().to_owned() {
+                    return;
+                }
                 let id = id.clone();
                 let action = if connected { "disconnect" } else { "connect" };
-                studio.run("", async move { api::post(&format!("/api/robots/{id}/{action}")).await });
+                studio.run("", async move {
+                    single_flight(pending, api::post(&format!("/api/robots/{id}/{action}")))
+                        .await
+                        .unwrap_or(Ok(()))
+                });
             },
-            {if connected { "Disconnect" } else { "Connect" }}
+            {if pending() { if connected { "Disconnecting…" } else { "Connecting…" } } else if connected { "Disconnect" } else { "Connect" }}
         }
     }
 }
@@ -434,12 +446,14 @@ fn PortSection(
 ) -> Element {
     let studio = studio();
     let mut identify_step = use_signal(|| IdentifyStep::Idle);
+    let starting_identify = use_signal(|| false);
     let current = robot.port.clone().map(|port| port.path).unwrap_or_default();
     let baud = robot.port.as_ref().map_or(1_000_000, |port| port.baud_rate);
     let id = robot.id.clone();
     // The port belongs to the open bus once connected; changing it would make
-    // the file disagree with the hardware, so the server refuses it too.
+    // the durable configuration disagree with the hardware, so the server refuses it too.
     let locked = robot.connection.connected;
+    let scanning = scan.is_none();
     let found = match &scan {
         Some(Ok(list)) => list.clone(),
         _ => Vec::new(),
@@ -452,17 +466,24 @@ fn PortSection(
         section { class: "device-section-content",
             div { class: "device-section-head",
                 h3 { class: "label mb-0", "Motor bus" }
-                button {
-                    r#type: "button",
-                    class: "link ml-auto",
+                Action {
+                    purpose: ActionPurpose::Refresh,
+                    variant: ActionVariant::Link,
+                    class: "ml-auto",
+                    disabled: scanning,
+                    aria_busy: scanning,
                     onclick: move |_| on_rescan.call(()),
-                    "Rescan"
+                    if scanning { "Scanning…" } else { "Rescan" }
                 }
-                button {
-                    r#type: "button",
-                    class: "link",
-                    disabled: locked,
-                    title: if locked { "Disconnect this arm before changing its port" } else { "Find the port by unplugging the cable" },
+                Action {
+                    purpose: ActionPurpose::Start,
+                    variant: ActionVariant::Link,
+                    disabled: locked || scanning || starting_identify(),
+                    aria_busy: starting_identify(),
+                    // Names the action the button performs. Borrowing the port
+                    // field's wording told an operator hovering "Identify" why
+                    // some other control was unavailable.
+                    title: if locked { "Disconnect this arm before identifying its port" } else { "Find the port by unplugging the cable" },
                     onclick: move |_| {
                         identify_step.set(IdentifyStep::Idle);
                         if !studio.controls_available() {
@@ -470,7 +491,15 @@ fn PortSection(
                             return;
                         }
                         spawn(async move {
-                            match api::get::<Vec<SerialPortSummary>>("/api/ports").await {
+                            let Some(result) = single_flight(
+                                starting_identify,
+                                api::get::<Vec<SerialPortSummary>>("/api/ports"),
+                            )
+                            .await
+                            else {
+                                return;
+                            };
+                            match result {
                                 Ok(list) => identify_step.set(IdentifyStep::AwaitingUnplug(
                                     list.into_iter().map(|port| port.path).collect(),
                                 )),
@@ -478,7 +507,7 @@ fn PortSection(
                             }
                         });
                     },
-                    "Identify"
+                    if starting_identify() { "Starting…" } else { "Identify" }
                 }
             }
             // The port and the button that opens it share a line: choosing one
@@ -518,7 +547,7 @@ fn PortSection(
                         option { disabled: true, "Scanning…" }
                     }
                 }
-                ConnectButton { robot: robot.clone(), sweeping }
+                ConnectionAction { robot: robot.clone(), sweeping }
             }
             if let Some(Err(error)) = &scan {
                 p { class: "mt-0.5 text-[11px] text-danger", "{error}" }
@@ -587,6 +616,7 @@ fn IdentifyPort(
 ) -> Element {
     let studio = studio();
     let mut step = step;
+    let checking = use_signal(|| false);
 
     match step().clone() {
         IdentifyStep::Idle => rsx! {},
@@ -598,9 +628,11 @@ fn IdentifyPort(
                     ", then continue. Leave every other device connected."
                 }
                 div { class: "flex gap-1",
-                    button {
-                        r#type: "button",
-                        class: "btn btn-primary",
+                    Action {
+                        purpose: ActionPurpose::Apply,
+                        variant: ActionVariant::Solid,
+                        disabled: checking(),
+                        aria_busy: checking(),
                         onclick: move |_| {
                             if !studio.controls_available() {
                                 studio.report("Controls are paused because telemetry is unavailable or delayed.");
@@ -608,9 +640,17 @@ fn IdentifyPort(
                             }
                             let request = IdentifyPortRequest { before: before.clone() };
                             spawn(async move {
-                                match api::send_json::<_, IdentifyPortResponse>(
-                                    Method::POST, "/api/ports/identify", Some(&request)
-                                ).await {
+                                let Some(result) = single_flight(
+                                    checking,
+                                    api::send_json::<_, IdentifyPortResponse>(
+                                        Method::POST, "/api/ports/identify", Some(&request)
+                                    ),
+                                )
+                                .await
+                                else {
+                                    return;
+                                };
+                                match result {
                                     Ok(response) => match response.port {
                                         Some(port) => {
                                             on_found.call(port.clone());
@@ -622,11 +662,11 @@ fn IdentifyPort(
                                 }
                             });
                         },
-                        "I unplugged it"
+                        if checking() { "Checking…" } else { "I unplugged it" }
                     }
-                    button {
-                        r#type: "button",
-                        class: "btn",
+                    Action {
+                        purpose: ActionPurpose::Cancel,
+                        disabled: checking(),
                         onclick: move |_| step.set(IdentifyStep::Idle),
                         "Cancel"
                     }
@@ -636,9 +676,9 @@ fn IdentifyPort(
         IdentifyStep::Finished(message) => rsx! {
             div { class: "mt-1 flex items-start gap-1.5 rounded border border-line bg-sunken p-1.5 text-[11px]",
                 span { class: "flex-1", "{message}" }
-                button {
-                    r#type: "button",
-                    class: "link",
+                Action {
+                    purpose: ActionPurpose::Close,
+                    variant: ActionVariant::Link,
                     onclick: move |_| step.set(IdentifyStep::Idle),
                     "Done"
                 }
@@ -653,13 +693,14 @@ fn CameraSection(robot: RobotSummary) -> Element {
     let available = studio.snapshot.read().cameras.clone();
     let mut role = use_signal(|| "wrist".to_owned());
     let mut device = use_signal(String::new);
+    let saving_cameras = use_signal(|| false);
     let id = robot.id.clone();
     let chosen = available
         .iter()
         .find(|camera| camera.id == device())
         .cloned();
 
-    let mut scanning = use_signal(|| false);
+    let scanning = use_signal(|| false);
     let taken = robot
         .cameras
         .iter()
@@ -677,22 +718,26 @@ fn CameraSection(robot: RobotSummary) -> Element {
         section { class: "device-section-content",
             div { class: "device-section-head",
                 h3 { class: "label mb-0 flex-1", "Cameras" }
-                button {
-                    r#type: "button",
-                    class: "link",
+                Action {
+                    purpose: ActionPurpose::Refresh,
+                    variant: ActionVariant::Link,
                     disabled: scanning(),
+                    aria_busy: scanning(),
                     title: "Look for cameras that have been plugged in or moved",
                     onclick: move |_| {
                         if !studio.controls_available() {
                             studio.report("Controls are paused because telemetry is unavailable or delayed.");
                             return;
                         }
-                        scanning.set(true);
                         spawn(async move {
-                            if let Err(error) = api::post("/api/cameras/refresh").await {
-                                studio.report(error);
+                            if let Some(Err(error)) = single_flight(
+                                scanning,
+                                api::post("/api/cameras/refresh"),
+                            )
+                            .await
+                            {
+                                studio.report(error)
                             }
-                            scanning.set(false);
                         });
                     },
                     {if scanning() { "Scanning…" } else { "Rescan" }}
@@ -704,15 +749,18 @@ fn CameraSection(robot: RobotSummary) -> Element {
             // stays visible on touch, where there is no hover to reveal it.
             ul { class: "mb-1 flex flex-col gap-0.5",
                 for binding in robot.cameras.clone() {
-                    li { key: "{binding.name}", class: "device-camera-row",
+                    li { key: "{binding.name}", class: "device-camera-row ui-hover-action-host",
                         span { class: "shrink-0", "{binding.name}" }
                         span { class: "min-w-0 flex-1 truncate font-mono text-[10px] text-ink-faint",
                             "{binding.id}"
                         }
-                        button {
-                            r#type: "button",
-                            class: "device-camera-remove",
-                            "aria-label": "Unassign the {binding.name} camera",
+                        Action {
+                            purpose: ActionPurpose::Remove,
+                            variant: ActionVariant::Icon,
+                            class: "device-camera-remove ui-hover-action",
+                            disabled: saving_cameras(),
+                            aria_busy: saving_cameras(),
+                            aria_label: "Unassign the {binding.name} camera",
                             title: "Unassign the {binding.name} camera",
                             onclick: {
                                 let id = id.clone();
@@ -720,9 +768,9 @@ fn CameraSection(robot: RobotSummary) -> Element {
                                     .filter(|camera| camera.name != binding.name)
                                     .cloned()
                                     .collect::<Vec<_>>();
-                                move |_| save_cameras(studio, id.clone(), remaining.clone())
+                                move |_| save_cameras(studio, id.clone(), remaining.clone(), saving_cameras)
                             },
-                            Trash {}
+                            UnassignIcon {}
                         }
                     }
                 }
@@ -733,10 +781,16 @@ fn CameraSection(robot: RobotSummary) -> Element {
                 select {
                     class: "field",
                     "aria-label": "Camera device",
+                    disabled: saving_cameras(),
                     onchange: move |event| device.set(event.value()),
                     option { value: "", selected: device().is_empty(), "Add a camera…" }
                     for camera in available.clone() {
-                        CameraOption { key: "{camera.id}", selected: device() == camera.id, camera }
+                        option {
+                            key: "{camera.id}",
+                            value: "{camera.id}",
+                            selected: device() == camera.id,
+                            "{camera.name} — {camera.width}×{camera.height} @ {camera.fps} fps"
+                        }
                     }
                 }
             }
@@ -758,12 +812,16 @@ fn CameraSection(robot: RobotSummary) -> Element {
                             class: "field",
                             "aria-label": "Camera role",
                             placeholder: "role, such as wrist",
+                            disabled: saving_cameras(),
                             value: "{role}",
                             oninput: move |event| role.set(event.value()),
                         }
-                        button {
-                            r#type: "button",
-                            class: "btn btn-primary shrink-0",
+                        Action {
+                            purpose: ActionPurpose::Assign,
+                            variant: ActionVariant::Solid,
+                            class: "shrink-0",
+                            disabled: saving_cameras(),
+                            aria_busy: saving_cameras(),
                             // A role names one viewpoint on the arm, so reusing
                             // one takes the camera off whatever held it. That is
                             // often what is wanted — but the button has to say
@@ -783,10 +841,10 @@ fn CameraSection(robot: RobotSummary) -> Element {
                                         .cloned()
                                         .collect::<Vec<_>>();
                                     bindings.push(CameraBinding { name, id: device_id, mount: None });
-                                    save_cameras(studio, id.clone(), bindings);
+                                    save_cameras(studio, id.clone(), bindings, saving_cameras);
                                 }
                             },
-                            {if taken { "Replace" } else { "Add" }}
+                            {if saving_cameras() { "Saving…" } else if taken { "Reassign" } else { "Assign" }}
                         }
                     }
                 }
@@ -796,21 +854,20 @@ fn CameraSection(robot: RobotSummary) -> Element {
 }
 
 /// Replace a robot's camera assignments.
-fn save_cameras(studio: Studio, id: String, bindings: Vec<CameraBinding>) {
+fn save_cameras(studio: Studio, id: String, bindings: Vec<CameraBinding>, saving: Signal<bool>) {
+    if saving.peek().to_owned() {
+        return;
+    }
     let request = UpdateRobotRequest {
         cameras: Some(bindings),
         ..UpdateRobotRequest::default()
     };
     studio.run("", async move {
-        api::send(Method::PATCH, &format!("/api/robots/{id}"), Some(&request)).await
+        single_flight(
+            saving,
+            api::send(Method::PATCH, &format!("/api/robots/{id}"), Some(&request)),
+        )
+        .await
+        .unwrap_or(Ok(()))
     });
-}
-
-#[component]
-fn CameraOption(camera: CameraStatus, selected: bool) -> Element {
-    rsx! {
-        option { value: "{camera.id}", selected,
-            "{camera.name} — {camera.width}×{camera.height} @ {camera.fps} fps"
-        }
-    }
 }

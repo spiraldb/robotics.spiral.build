@@ -16,7 +16,11 @@ use crate::backend::robotics::video::VideoEncoderSettings;
 use crate::backend::robots::workspace::RobotWorkspace;
 use crate::backend::rollout::manager::RolloutManager;
 use crate::backend::storage::manager::StorageManager;
-use crate::backend::storage::settings::DataSettingsStore;
+use crate::backend::storage::repository::SpiralRepository;
+use crate::backend::storage::settings::{
+    BackendStateStore, StudioPreferencesStore, environment_spiral_endpoint,
+    environment_spiral_spfs_endpoint, normalize_spiral_endpoint, normalize_spiral_spfs_endpoint,
+};
 use crate::backend::training::manager::TrainingManager;
 use crate::backend::training::remote::ConfiguredHttpTrainingBackend;
 use clap::Parser;
@@ -25,8 +29,6 @@ use tracing_subscriber::EnvFilter;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// How often the workspace directory is checked for outside changes.
-const WORKSPACE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 /// Browser event streams are intentionally long lived, so graceful draining
 /// gets a short deadline instead of being allowed to hold process exit open.
 const SERVER_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
@@ -40,24 +42,12 @@ const RESOURCE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from
 #[command(
     version,
     about = "Set up, calibrate, and drive SO-ARM101 arms from a browser",
-    long_about = "Serves the Spiral Robotics Studio web UI and owns the hardware behind it. Each arm is one robot instance stored as one JSON file in the workspace directory, holding its port, cameras, motors, and calibration."
+    long_about = "Serves the Spiral Robotics Studio web UI, owns the hardware behind it, and stores all durable Studio data directly in SpiralDB."
 )]
 struct Args {
-    /// Directory holding one JSON file per robot instance.
-    #[arg(long, default_value = "robots", value_name = "PATH")]
-    workspace: PathBuf,
-
-    /// Directory holding one file per recorded episode.
-    #[arg(long, default_value = "episodes", value_name = "PATH")]
-    episodes: PathBuf,
-
     /// Address the web UI is served on.
     #[arg(long, value_name = "ADDR:PORT")]
     bind: Option<SocketAddr>,
-
-    /// Drive simulated motors instead of opening serial ports.
-    #[arg(long)]
-    simulate: bool,
 
     /// Skip camera discovery entirely.
     #[arg(long)]
@@ -75,6 +65,15 @@ struct Args {
     /// SPIRALDB_ADBC_DRIVER is used when this option is omitted.
     #[arg(long, value_name = "PATH")]
     spiral_adbc_driver: Option<PathBuf>,
+
+    /// Optional initial Spiral project. Settings and the backend state file are
+    /// used when this and SPIRAL_PROJECT_ID are omitted.
+    #[arg(long, value_name = "PROJECT")]
+    spiral_project: Option<String>,
+
+    /// Namespace containing every Studio-owned relation.
+    #[arg(long, default_value = "spiral_robotics", value_name = "NAMESPACE")]
+    spiral_namespace: String,
 
     /// Largest change, in encoder counts, applied to a joint per control cycle.
     #[arg(long, default_value_t = DEFAULT_MAX_STEP_COUNTS, value_name = "COUNTS")]
@@ -129,6 +128,37 @@ pub fn run(app: fn() -> dioxus::prelude::Element) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    let backend_state = match BackendStateStore::open_default() {
+        Ok(state) => Arc::new(state),
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let spiral_endpoint = match normalize_spiral_endpoint(
+        &backend_state
+            .spiral_endpoint()
+            .unwrap_or_else(environment_spiral_endpoint),
+    ) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let spiral_spfs_endpoint = match normalize_spiral_spfs_endpoint(
+        &backend_state
+            .spiral_spfs_endpoint()
+            .unwrap_or_else(environment_spiral_spfs_endpoint),
+    ) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    install_process_spiral_endpoints(&spiral_endpoint, &spiral_spfs_endpoint);
+
     // On macOS this puts up the system camera prompt, which has to happen on
     // the main thread before any runtime starts.
     let camera_access = if args.no_cameras {
@@ -151,7 +181,14 @@ pub fn run(app: fn() -> dioxus::prelude::Element) -> ExitCode {
         }
     };
 
-    match runtime.block_on(serve(args, camera_access.err(), app)) {
+    match runtime.block_on(serve(
+        args,
+        camera_access.err(),
+        backend_state,
+        spiral_endpoint,
+        spiral_spfs_endpoint,
+        app,
+    )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
@@ -163,6 +200,9 @@ pub fn run(app: fn() -> dioxus::prelude::Element) -> ExitCode {
 async fn serve(
     args: Args,
     camera_access_error: Option<String>,
+    backend_state: Arc<BackendStateStore>,
+    spiral_endpoint: String,
+    spiral_spfs_endpoint: String,
     app: fn() -> dioxus::prelude::Element,
 ) -> Result<()> {
     // `dx serve` publishes its chosen address through the standard fullstack
@@ -170,25 +210,43 @@ async fn serve(
     let bind = args
         .bind
         .unwrap_or_else(dioxus::cli_config::fullstack_address_or_localhost);
-    let workspace = Arc::new(RobotWorkspace::open(args.workspace.clone())?);
-    let episodes = Arc::new(EpisodeStore::open(args.episodes.clone())?);
-    let data_settings =
-        Arc::new(DataSettingsStore::open(episodes.directory()).map_err(std::io::Error::other)?);
+    let spiral_project = args
+        .spiral_project
+        .clone()
+        .or_else(|| std::env::var("SPIRAL_PROJECT_ID").ok())
+        .filter(|project| !project.trim().is_empty())
+        .or_else(|| backend_state.project_id());
+    if !spiral_robotics_contracts::spiral::is_identifier(args.spiral_namespace.trim()) {
+        return Err(std::io::Error::other(
+            "Spiral namespace must start with a letter or '_' and contain only letters, numbers, or '_'",
+        )
+        .into());
+    }
+    let namespace = args.spiral_namespace.trim().to_owned();
     let spiral_adbc_driver = args
         .spiral_adbc_driver
         .clone()
         .or_else(|| std::env::var_os("SPIRALDB_ADBC_DRIVER").map(PathBuf::from));
-    let training_root = episodes.directory().join("training-runs");
-    std::fs::create_dir_all(&training_root)?;
-    let storage = Arc::new(
-        StorageManager::new(data_settings.clone(), episodes.clone(), spiral_adbc_driver)
-            .map_err(std::io::Error::other)?,
+    let repository = Arc::new(
+        SpiralRepository::new(spiral_adbc_driver.clone().ok_or_else(|| {
+            std::io::Error::other(
+                "Spiral ADBC driver is required; use --spiral-adbc-driver or SPIRALDB_ADBC_DRIVER",
+            )
+        })?, spiral_endpoint, spiral_spfs_endpoint, spiral_project, namespace)
+        .map_err(std::io::Error::other)?,
     );
+    let workspace = Arc::new(RobotWorkspace::new(repository.clone()));
+    let episodes = Arc::new(EpisodeStore::new(repository.clone()));
+    let storage = Arc::new(StorageManager::new(repository));
+    let loaded_preferences = storage.load_studio_preferences().unwrap_or_else(|error| {
+        tracing::warn!("could not load Spiral Studio preferences during startup: {error}");
+        Default::default()
+    });
+    let preferences = Arc::new(StudioPreferencesStore::new(loaded_preferences));
     let training = Arc::new(
         TrainingManager::open(
-            training_root,
             storage.clone(),
-            Arc::new(ConfiguredHttpTrainingBackend::new(data_settings.clone())),
+            Arc::new(ConfiguredHttpTrainingBackend::new(preferences.clone())),
             args.ffmpeg.clone(),
         )
         .await
@@ -197,7 +255,6 @@ async fn serve(
     let hardware = Arc::new(HardwareHandle::spawn(ControlSettings {
         max_step_counts: args.max_step,
         teleop_max_step_counts: args.teleop_max_step,
-        simulated: args.simulate,
         ..ControlSettings::default()
     }));
     let cameras = Arc::new(CameraManager::new());
@@ -206,8 +263,9 @@ async fn serve(
         hardware.clone(),
         cameras.clone(),
         workspace.clone(),
-        data_settings.clone(),
-    );
+        preferences.clone(),
+    )
+    .map_err(std::io::Error::other)?;
 
     // Without permission a camera still enumerates and its stream still opens;
     // it just never delivers a frame. Say so instead of showing a blank box.
@@ -220,47 +278,13 @@ async fn serve(
         tokio::task::spawn_blocking(move || discovery.refresh_blocking()).await?;
     }
 
-    // The workspace and the episode directory are both shared with the
-    // command-line tools, so the studio has to re-read them rather than assume
-    // it is the only writer.
-    tokio::spawn({
-        let workspace = workspace.clone();
-        let episodes = episodes.clone();
-        async move {
-            let mut ticker = tokio::time::interval(WORKSPACE_POLL_INTERVAL);
-            loop {
-                ticker.tick().await;
-                let workspace = workspace.clone();
-                let reloaded =
-                    tokio::task::spawn_blocking(move || workspace.reload_if_changed()).await;
-                match reloaded {
-                    Ok(Ok(true)) => tracing::info!("robot workspace changed on disk; reloaded"),
-                    Ok(Ok(false)) => {}
-                    Ok(Err(error)) => tracing::warn!("could not re-read the workspace: {error}"),
-                    Err(error) => tracing::warn!("workspace reload task failed: {error}"),
-                }
-
-                let episodes = episodes.clone();
-                let reloaded =
-                    tokio::task::spawn_blocking(move || episodes.reload_if_changed()).await;
-                match reloaded {
-                    Ok(Ok(true)) => tracing::info!("episode directory changed on disk; reloaded"),
-                    Ok(Ok(false)) => {}
-                    Ok(Err(error)) => {
-                        tracing::warn!("could not re-read the episode directory: {error}")
-                    }
-                    Err(error) => tracing::warn!("episode reload task failed: {error}"),
-                }
-            }
-        }
-    });
-
     let state = AppState {
         workspace: workspace.clone(),
         episodes: episodes.clone(),
         hardware: hardware.clone(),
         cameras: cameras.clone(),
-        data_settings,
+        backend_state,
+        preferences,
         storage,
         training: training.clone(),
         rollout: rollout.clone(),
@@ -272,11 +296,9 @@ async fn serve(
             executable: args.ffmpeg.clone(),
             codec: args.video_codec.clone(),
         },
-        simulated: args.simulate,
     };
     tokio::spawn(routes::auto_connect_saved_robots(state.clone()));
     let video_monitor = tokio::spawn(routes::monitor_video_recording(state.clone()));
-    let spiral_sync = tokio::spawn(routes::auto_sync_episodes(state.storage.clone()));
     let cleanup_state = state.clone();
     let app = dioxus::server::router(app)
         .nest("/api", routes::api_router(state))
@@ -285,11 +307,6 @@ async fn serve(
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let address = listener.local_addr()?;
 
-    tracing::info!("robot workspace: {}", workspace.directory().display());
-    tracing::info!("episode directory: {}", episodes.directory().display());
-    if args.simulate {
-        tracing::warn!("simulation mode: motors are emulated, no serial port is opened");
-    }
     println!("Spiral Robotics Studio is running at http://{address}");
 
     // Both the server and this task observe the same edge. The server begins
@@ -340,12 +357,23 @@ async fn serve(
         tracing::warn!("resource cleanup timed out; the operating system will release devices");
     }
     video_monitor.abort();
-    spiral_sync.abort();
     signal_task.abort();
     if let Some(result) = server_result {
         result?;
     }
     Ok(())
+}
+
+/// The current Spiral ADBC driver reads both service endpoints from the process
+/// environment while constructing a database. Install the saved values before
+/// camera discovery or the Tokio runtime can create another thread.
+fn install_process_spiral_endpoints(api_endpoint: &str, spfs_endpoint: &str) {
+    // SAFETY: `run` calls this during single-threaded process bootstrap, before
+    // camera initialization and before constructing the multi-threaded runtime.
+    unsafe {
+        std::env::set_var("SPIRAL__SERVER__URL", api_endpoint);
+        std::env::set_var("SPIRAL__SPFS__URL", spfs_endpoint);
+    }
 }
 
 /// Resolve only Dioxus's declared public-directory contract. This is a guard

@@ -22,11 +22,12 @@ flowchart LR
 ## Features
 
 - [Studio workspace](studio/README.md) — navigation, panels, Scene, charts,
-  status, and notifications.
+  status, notifications, and the shared
+  [interaction language](studio/interaction-language.md).
 - [Robots](robots/README.md) — robot instances, setup, camera assignment,
   calibration, connection, and motion control.
 - [Recording](recording/README.md) — teleoperation recording, pause, stop,
-  discard, episode completion, and automatic publication.
+  discard, episode completion, and direct SpiralDB persistence.
 - [Data](data/README.md) — datasets, episode catalog, Timeline, replay, SQL,
   import/export, and SpiralDB persistence.
 - [Training](training/README.md) — dataset selection, ACT training, metrics,

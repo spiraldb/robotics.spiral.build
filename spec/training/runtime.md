@@ -20,7 +20,7 @@ flowchart LR
 ## Ownership
 
 - **RUNTIME-001** Studio must select datasets, construct batches, own run
-  history, publish checkpoints, and admit motion.
+  history, persist checkpoints, and admit motion.
 - **RUNTIME-002** The runtime must own only in-memory model, optimizer, training,
   and inference sessions.
 - **RUNTIME-003** The runtime must not open SpiralDB.

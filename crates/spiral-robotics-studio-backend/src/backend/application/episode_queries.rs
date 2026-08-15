@@ -24,7 +24,6 @@ pub(crate) struct RecordingGapView {
 pub(crate) struct EpisodeView {
     pub id: String,
     pub dataset_id: String,
-    pub file: String,
     pub arms: Vec<EpisodeArmView>,
     pub frames: u64,
     pub duration_seconds: f64,

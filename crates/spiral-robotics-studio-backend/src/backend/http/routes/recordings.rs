@@ -9,12 +9,6 @@ pub(super) fn router() -> Router<AppState> {
         .route("/episodes/record/stop", post(stop_recording))
         .route("/episodes/replay", post(start_replay))
         .route("/episodes/replay/pause", post(set_replay_paused))
-        .route("/episodes/export", post(export_episodes))
-        .route("/episodes/export.zip", get(download_episodes))
-        .route(
-            "/episodes/import",
-            post(import_episodes).layer(DefaultBodyLimit::max(256 * 1024 * 1024)),
-        )
         .route("/episodes/{id}", axum::routing::delete(delete_episode))
         .route("/episodes/{id}/judge", post(judge_episode))
         .route("/episodes/{id}/trace", get(episode_trace))
@@ -210,7 +204,7 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
         Ok(result)
     }
 
-    async fn publish_recording_media(&self, capture: Option<Self::MediaCapture>) {
+    async fn retain_recording_media(&self, capture: Option<Self::MediaCapture>) {
         *self.state.recording_video.lock().await = capture;
     }
 
@@ -253,21 +247,19 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
         Vec::new()
     }
 
-    fn reload_episodes(&self) -> Result<(), ApplicationError> {
-        self.state
-            .episodes
-            .reload()
-            .map_err(episode_application_error)
-    }
-
-    fn stage_recording(
+    fn commit_recording(
         &self,
         episode: String,
         media: Self::MediaOutput,
     ) -> Result<(), ApplicationError> {
+        let completed = self
+            .state
+            .episodes
+            .completed(&episode)
+            .map_err(episode_application_error)?;
         self.state
             .storage
-            .stage_local(episode, media)
+            .commit_episode_blocking(&completed, &media)
             .map_err(ApplicationError::Internal)
     }
 
@@ -286,12 +278,33 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     }
 
     async fn finish_media_pause(&self) {
-        if let Some(capture) = self.state.recording_video.lock().await.as_mut() {
+        let checkpoint = if let Some(capture) = self.state.recording_video.lock().await.as_mut() {
             for failure in capture.finish_pause().await {
                 self.state
                     .cameras
                     .note_issue(format!("paused episode video was not saved: {failure}"));
             }
+            Some((capture.episode_id().to_owned(), capture.completed_assets()))
+        } else {
+            None
+        };
+        let Some((episode, media)) = checkpoint else {
+            return;
+        };
+        let episodes = self.state.episodes.clone();
+        let storage = self.state.storage.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let completed = episodes
+                .completed(&episode)
+                .map_err(|error| error.to_string())?;
+            storage.commit_episode_blocking(&completed, &media)
+        })
+        .await
+        .unwrap_or_else(|error| Err(format!("video checkpoint task stopped: {error}")));
+        if let Err(error) = outcome {
+            self.state.cameras.note_issue(format!(
+                "paused episode video was not saved to SpiralDB: {error}"
+            ));
         }
     }
 
@@ -365,28 +378,14 @@ impl ReplayPort for RecordingHttpAdapter<'_> {
     }
 }
 
-/// Filesystem and control-state adapter for episode catalog actions.
-///
-/// Application policy selects and admits the mutation first. Blocking JSONL
-/// work and best-effort video sidecar cleanup remain at this outer boundary.
+/// SpiralDB and control-state adapter for episode catalog actions.
 pub(super) struct EpisodeHttpAdapter<'a> {
     state: &'a AppState,
-    export_destination: Option<std::path::PathBuf>,
 }
 
 impl<'a> EpisodeHttpAdapter<'a> {
     pub(super) fn catalog(state: &'a AppState) -> Self {
-        Self {
-            state,
-            export_destination: None,
-        }
-    }
-
-    fn export(state: &'a AppState, destination: std::path::PathBuf) -> Self {
-        Self {
-            state,
-            export_destination: Some(destination),
-        }
+        Self { state }
     }
 }
 
@@ -405,23 +404,6 @@ impl EpisodeCatalogPort for EpisodeHttpAdapter<'_> {
         }
     }
 
-    fn export_candidates(&self) -> Result<Vec<ExportCandidate>, ApplicationError> {
-        Ok(self
-            .state
-            .episodes
-            .list()
-            .into_iter()
-            .map(|episode| {
-                let usable = episode.usable();
-                ExportCandidate {
-                    id: episode.id,
-                    usable,
-                    discarded: episode.discarded,
-                }
-            })
-            .collect())
-    }
-
     async fn judge_episode(
         &self,
         episode: String,
@@ -438,49 +420,13 @@ impl EpisodeCatalogPort for EpisodeHttpAdapter<'_> {
     }
 
     async fn delete_episode(&self, episode: String) -> Result<(), ApplicationError> {
-        let video_directory = self
-            .state
-            .episodes
-            .directory()
-            .join("videos")
-            .join(&episode);
         let episodes = self.state.episodes.clone();
         tokio::task::spawn_blocking(move || episodes.delete(&episode))
             .await
             .map_err(|error| ApplicationError::Internal(error.to_string()))?
             .map_err(episode_application_error)?;
 
-        // The JSONL entry is authoritative. A stale media sidecar must not
-        // resurrect it or turn a successful catalog deletion into a failure.
-        if let Err(error) = tokio::fs::remove_dir_all(&video_directory).await
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(
-                video_directory = %video_directory.display(),
-                "episode JSONL was deleted but its video sidecar could not be removed: {error}"
-            );
-        }
         Ok(())
-    }
-
-    async fn export_episodes(
-        &self,
-        selected: Vec<String>,
-    ) -> Result<ExportEpisodesResult, ApplicationError> {
-        let destination = self.export_destination.clone().ok_or_else(|| {
-            ApplicationError::Internal("episode export adapter has no destination".to_owned())
-        })?;
-        let episodes = self.state.episodes.clone();
-        let response =
-            tokio::task::spawn_blocking(move || episodes.export_selected(&destination, &selected))
-                .await
-                .map_err(|error| ApplicationError::Internal(error.to_string()))?
-                .map_err(episode_application_error)?;
-        Ok(ExportEpisodesResult {
-            episodes: response.episodes,
-            frames: response.frames,
-            skipped: response.skipped,
-        })
     }
 }
 
@@ -536,10 +482,12 @@ impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
             .episodes
             .get(&episode)
             .map_err(episode_application_error)?;
-        let videos = load_assets(self.state.episodes.directory(), &episode)
-            .map_err(ApplicationError::Internal)?
-            .iter()
-            .map(VideoAsset::metadata)
+        let videos = self
+            .state
+            .episodes
+            .video_metadata(&episode)
+            .map_err(episode_application_error)?
+            .into_iter()
             .map(application_video_asset)
             .collect();
         Ok(EpisodeTimelineView {
@@ -570,7 +518,6 @@ fn application_episode(episode: EpisodeSummary) -> EpisodeView {
     EpisodeView {
         id: episode.id,
         dataset_id: episode.dataset_id,
-        file: episode.file,
         arms: episode
             .arms
             .into_iter()
@@ -603,7 +550,6 @@ pub(super) fn contract_episode(episode: EpisodeView) -> EpisodeSummary {
     EpisodeSummary {
         id: episode.id,
         dataset_id: episode.dataset_id,
-        file: episode.file,
         arms: episode
             .arms
             .into_iter()
@@ -772,244 +718,6 @@ fn contract_timeline_traces(traces: TimelineTracesView) -> TimelineTraces {
     }
 }
 
-struct DatasetDownload {
-    temporary: tempfile::NamedTempFile,
-    length: u64,
-}
-
-/// Archive and catalog adapter for application-owned dataset interchange.
-///
-/// An import source is captured by the adapter so the application command
-/// contains only business input. Its staged value remains opaque until the use
-/// case authorizes the all-or-none commit.
-struct DatasetHttpAdapter<'a> {
-    state: &'a AppState,
-    import_source: Option<std::sync::Mutex<Option<(tempfile::NamedTempFile, std::fs::File)>>>,
-    export_artifact: Option<std::sync::Mutex<Option<DatasetDownload>>>,
-}
-
-impl<'a> DatasetHttpAdapter<'a> {
-    fn export(state: &'a AppState) -> Self {
-        Self {
-            state,
-            import_source: None,
-            export_artifact: Some(std::sync::Mutex::new(None)),
-        }
-    }
-
-    fn import(
-        state: &'a AppState,
-        temporary: tempfile::NamedTempFile,
-        source: std::fs::File,
-    ) -> Self {
-        Self {
-            state,
-            import_source: Some(std::sync::Mutex::new(Some((temporary, source)))),
-            export_artifact: None,
-        }
-    }
-
-    fn take_export_artifact(&self) -> Result<DatasetDownload, ApplicationError> {
-        self.export_artifact
-            .as_ref()
-            .ok_or_else(|| ApplicationError::Internal("missing dataset export sink".to_owned()))?
-            .lock()
-            .map_err(|_| ApplicationError::Internal("dataset export sink poisoned".to_owned()))?
-            .take()
-            .ok_or_else(|| {
-                ApplicationError::Internal("dataset export produced no artifact".to_owned())
-            })
-    }
-}
-
-impl DatasetPort for DatasetHttpAdapter<'_> {
-    type PreparedExport = PreparedDatasetExport;
-    type StagedImport = CodecStagedImport;
-
-    fn reserve_catalog_mutation(&self) -> Option<CatalogLeaseToken> {
-        self.state
-            .catalog_lease
-            .try_acquire(CatalogLeaseOwner::DatasetImport)
-    }
-
-    fn release_catalog_mutation(&self, token: CatalogLeaseToken) {
-        let released = self.state.catalog_lease.release(token);
-        debug_assert!(
-            released,
-            "dataset import releases its exact catalog lease once"
-        );
-    }
-
-    fn activity(&self) -> DatasetActivity {
-        DatasetActivity {
-            recording: self
-                .state
-                .hardware
-                .state()
-                .telemetry
-                .recording
-                .map(|recording| recording.episode),
-            catalog_mutation_active: self.state.catalog_lease.is_held(),
-        }
-    }
-
-    fn export_candidates(&self) -> Result<Vec<DatasetCandidate>, ApplicationError> {
-        Ok(self
-            .state
-            .episodes
-            .list()
-            .into_iter()
-            .map(|episode| {
-                let usable = episode.usable();
-                DatasetCandidate {
-                    id: episode.id,
-                    dataset_id: episode.dataset_id,
-                    usable,
-                    discarded: episode.discarded,
-                }
-            })
-            .collect())
-    }
-
-    async fn inspect_export(
-        &self,
-        episode_ids: Vec<String>,
-    ) -> Result<InspectedDatasetExport<Self::PreparedExport>, ApplicationError> {
-        let episodes = self.state.episodes.clone();
-        let prepared =
-            tokio::task::spawn_blocking(move || prepare_lerobot_export(&episodes, &episode_ids))
-                .await
-                .map_err(|error| ApplicationError::Internal(error.to_string()))?
-                .map_err(episode_application_error)?;
-        let inspections = prepared
-            .inspections()
-            .iter()
-            .map(|episode| ExportEpisodeInspection {
-                id: episode.id.clone(),
-                frames: episode.frames,
-                joints: episode.joints.clone(),
-                sample_hz: episode.sample_hz,
-                complete_observations: episode.complete_observations,
-                complete_actions: episode.complete_actions,
-                complete_velocity: episode.complete_velocity,
-                complete_effort: episode.complete_effort,
-            })
-            .collect();
-        Ok(InspectedDatasetExport {
-            prepared,
-            episodes: inspections,
-        })
-    }
-
-    async fn write_export(
-        &self,
-        prepared: Self::PreparedExport,
-        plan: ExportCompatibilityPlan,
-    ) -> Result<(), ApplicationError> {
-        let inspected_ids = prepared
-            .inspections()
-            .iter()
-            .map(|episode| episode.id.clone())
-            .collect::<Vec<_>>();
-        if inspected_ids != plan.episode_ids
-            || prepared
-                .inspections()
-                .iter()
-                .any(|episode| episode.joints != plan.joints)
-        {
-            return Err(ApplicationError::Conflict(
-                "the authorized export plan no longer matches its prepared takes".to_owned(),
-            ));
-        }
-        let artifact = tokio::task::spawn_blocking(move || {
-            let temporary = tempfile::NamedTempFile::new().map_err(|error| {
-                ApplicationError::Internal(format!(
-                    "could not create a temporary export file: {error}"
-                ))
-            })?;
-            let destination = temporary.reopen().map_err(|error| {
-                ApplicationError::Internal(format!(
-                    "could not open the temporary export file: {error}"
-                ))
-            })?;
-            export_prepared_lerobot_to_file(
-                prepared,
-                destination,
-                plan.fps,
-                plan.include_proprioception,
-            )
-            .map_err(episode_application_error)?;
-            let length = temporary
-                .as_file()
-                .metadata()
-                .map_err(|error| {
-                    ApplicationError::Internal(format!(
-                        "could not inspect the temporary export file: {error}"
-                    ))
-                })?
-                .len();
-            Ok(DatasetDownload { temporary, length })
-        })
-        .await
-        .map_err(|error| ApplicationError::Internal(error.to_string()))??;
-        let sink = self
-            .export_artifact
-            .as_ref()
-            .ok_or_else(|| ApplicationError::Internal("missing dataset export sink".to_owned()))?;
-        *sink
-            .lock()
-            .map_err(|_| ApplicationError::Internal("dataset export sink poisoned".to_owned()))? =
-            Some(artifact);
-        Ok(())
-    }
-
-    async fn stage_import(
-        &self,
-        dataset_id: String,
-    ) -> Result<StagedDatasetImport<Self::StagedImport>, ApplicationError> {
-        let source = self
-            .import_source
-            .as_ref()
-            .ok_or_else(|| ApplicationError::Internal("missing dataset import source".to_owned()))?
-            .lock()
-            .map_err(|_| {
-                ApplicationError::Internal("dataset import source lock failed".to_owned())
-            })?
-            .take()
-            .ok_or_else(|| {
-                ApplicationError::Conflict(
-                    "the dataset import source was already consumed".to_owned(),
-                )
-            })?;
-        let episodes = self.state.episodes.clone();
-        let staged = tokio::task::spawn_blocking(move || {
-            let (_temporary, source) = source;
-            stage_lerobot_archive_file_into_dataset(&episodes, source, &dataset_id)
-        })
-        .await
-        .map_err(|error| ApplicationError::Internal(error.to_string()))?
-        .map_err(episode_application_error)?;
-        let summary = staged.summary();
-        Ok(StagedDatasetImport {
-            summary: DatasetImportSummary {
-                episodes: summary.episodes,
-                frames: summary.frames,
-                first_episode: summary.first_episode.clone(),
-            },
-            staged,
-        })
-    }
-
-    async fn commit_import(&self, staged: Self::StagedImport) -> Result<(), ApplicationError> {
-        let episodes = self.state.episodes.clone();
-        tokio::task::spawn_blocking(move || commit_staged_lerobot_import(&episodes, staged))
-            .await
-            .map_err(|error| ApplicationError::Internal(error.to_string()))?
-            .map(|_| ())
-            .map_err(episode_application_error)
-    }
-}
-
 /// Adapter for historical physical seeks. The current-ticket check and motor
 /// handoff share the store's serialization gate, so a coalesced result proves
 /// no stale pose reached hardware.
@@ -1059,7 +767,7 @@ impl PhysicalSeekPort for SeekHttpAdapter<'_> {
                 arms: summary.arms.into_iter().map(|arm| arm.id).collect(),
                 sample_hz: summary.sample_hz,
                 problem: summary.problem,
-                unfinished: summary.file.ends_with(".jsonl.part"),
+                unfinished: false,
             })
             .map_err(episode_application_error)
     }
@@ -1111,13 +819,24 @@ impl PhysicalSeekPort for SeekHttpAdapter<'_> {
     }
 }
 
-async fn list_episodes(State(state): State<AppState>) -> Json<Vec<EpisodeSummary>> {
-    Json(
-        episode_queries::list(&EpisodeHttpAdapter::catalog(&state))
-            .into_iter()
-            .map(contract_episode)
-            .collect(),
-    )
+async fn list_episodes(State(state): State<AppState>) -> Json<EpisodeCatalogResponse> {
+    // A paused take has a readable SpiralDB checkpoint. Hide its catalog row
+    // here because live recording state is delivered through telemetry.
+    let recording = state
+        .hardware
+        .state()
+        .telemetry
+        .recording
+        .map(|progress| progress.episode);
+    let episodes = episode_queries::list(&EpisodeHttpAdapter::catalog(&state))
+        .into_iter()
+        .filter(|episode| Some(&episode.id) != recording.as_ref())
+        .map(contract_episode)
+        .collect();
+    Json(EpisodeCatalogResponse {
+        episodes,
+        issues: state.episodes.issues(),
+    })
 }
 
 /// Begin a take.
@@ -1249,7 +968,6 @@ fn create_recording_draft(
     let summary = EpisodeSummary {
         id,
         dataset_id: command.dataset_id,
-        file: String::new(),
         arms: arms.clone(),
         frames: 0,
         duration_seconds: 0.0,
@@ -1274,7 +992,7 @@ async fn start_recording_media_at_edge(
     episode: &str,
     wanted: &[String],
 ) -> Result<Option<VideoCapture>, ApplicationError> {
-    let video_settings = state.data_settings.get().video;
+    let video_settings = state.preferences.get().video;
     if video_settings.enabled {
         let snapshot = build_snapshot(state);
         let camera_status = snapshot
@@ -1307,7 +1025,6 @@ async fn start_recording_media_at_edge(
         }
         VideoCapture::start(
             state.cameras.clone(),
-            state.episodes.directory(),
             episode,
             cameras,
             &state.video_encoder.executable,
@@ -1333,11 +1050,10 @@ async fn stop_recording(
 /// Suspend or resume capture without closing the episode writer.
 ///
 /// Pause acknowledges only after every accepted sample has crossed the writer
-/// flush barrier and the partial file has been indexed. That makes timeline
-/// reads deterministic while the operator scrubs, without blocking the motor
-/// thread on filesystem I/O. Hardware owns restoring the exact control mode on
-/// resume; the route brackets it with video capture so paused camera frames are
-/// omitted as well.
+/// checkpoint barrier and the episode has been committed to SpiralDB. That
+/// makes timeline reads deterministic while the operator scrubs. Hardware owns
+/// restoring the exact control mode on resume; the route brackets it with video
+/// capture so paused camera frames are omitted as well.
 async fn set_recording_paused(
     State(state): State<AppState>,
     Json(request): Json<SetRecordingPausedRequest>,
@@ -1505,7 +1221,7 @@ struct HistoricalSeekResponse {
 /// This is intentionally distinct from visual sampling. The controller still
 /// owns torque, calibration, joint compatibility, bounded ramping, obstruction
 /// timeout, and disconnect handling. A ticket drops stale requests that finish
-/// disk I/O after a newer scrub; the one remaining pose enters the controller
+/// a SpiralDB read after a newer scrub; the one remaining pose enters the controller
 /// as a one-frame replay, so no route can bypass those protections.
 async fn seek_episode(
     State(state): State<AppState>,
@@ -1554,40 +1270,15 @@ async fn episode_video(
     Query(query): Query<LocalVideoQuery>,
     headers: HeaderMap,
 ) -> Result<Response, Failure> {
-    // Looking up the episode first validates the path component and prevents an
-    // orphaned sidecar from becoming an independent file-serving namespace.
+    // Looking up the episode first prevents an orphaned media row from becoming
+    // an independent serving namespace.
     episode_queries::authorize_asset(&EpisodeHttpAdapter::catalog(&state), id.clone())?;
-    let assets = load_assets(state.episodes.directory(), &id)
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
-    let asset = assets
-        .into_iter()
-        .filter(|asset| asset.stream_id == stream)
-        .filter(|asset| {
-            query
-                .segment
-                .is_none_or(|segment| asset.segment_index == segment)
-        })
-        .min_by_key(|asset| asset.segment_index)
-        .ok_or_else(|| {
-            Failure(
-                StatusCode::NOT_FOUND,
-                format!(
-                    "take {id:?} has no recorded video stream {stream:?}{}",
-                    query
-                        .segment
-                        .map(|segment| format!(" segment {segment}"))
-                        .unwrap_or_default()
-                ),
-            )
-        })?;
-    let mut file = tokio::fs::File::open(&asset.path)
+    let payload = state
+        .storage
+        .video_asset(&id, &stream, query.segment)
         .await
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    let length = file
-        .metadata()
-        .await
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
-        .len();
+        .map_err(|error| Failure(StatusCode::NOT_FOUND, error))?;
+    let length = payload.len() as u64;
     let requested_range = match headers.get(header::RANGE) {
         None => None,
         Some(value) => match value
@@ -1603,38 +1294,15 @@ async fn episode_video(
         start: 0,
         end: length.saturating_sub(1),
     });
-    if range.start > 0 {
-        file.seek(std::io::SeekFrom::Start(range.start))
-            .await
-            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    }
     let content_length = if length == 0 {
         0
     } else {
         range.end - range.start + 1
     };
-    let stream = async_stream::stream! {
-        let mut remaining = content_length;
-        let mut buffer = vec![0_u8; 64 * 1024];
-        while remaining > 0 {
-            let wanted = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
-            let read = match file.read(&mut buffer[..wanted]).await {
-                Ok(read) => read,
-                Err(error) => {
-                    yield Err::<Bytes, std::io::Error>(error);
-                    break;
-                }
-            };
-            if read == 0 {
-                yield Err::<Bytes, std::io::Error>(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "recorded video ended before its advertised length",
-                ));
-                break;
-            }
-            remaining -= read as u64;
-            yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(&buffer[..read]));
-        }
+    let body = if content_length == 0 {
+        Bytes::new()
+    } else {
+        Bytes::copy_from_slice(&payload[range.start as usize..=range.end as usize])
     };
     let mut response = Response::builder()
         .status(if requested_range.is_some() {
@@ -1653,8 +1321,8 @@ async fn episode_video(
         );
     }
     Ok(response
-        .body(Body::from_stream(stream))
-        .expect("valid local video response"))
+        .body(Body::from(body))
+        .expect("valid Spiral video response"))
 }
 
 pub(super) fn parse_byte_range(value: &str, length: u64) -> Option<ByteRange> {
@@ -1726,222 +1394,4 @@ async fn set_replay_paused(
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-async fn export_episodes(
-    State(state): State<AppState>,
-    Json(request): Json<ExportRequest>,
-) -> Result<Json<ExportResponse>, Failure> {
-    let destination = resolve_export_directory(state.episodes.directory(), &request.directory)?;
-    let directory = destination.display().to_string();
-    let result = episode_catalog::export(
-        &EpisodeHttpAdapter::export(&state, destination),
-        ExportEpisodesCommand,
-    )
-    .await?;
-    Ok(Json(ExportResponse {
-        directory,
-        episodes: result.episodes,
-        frames: result.frames,
-        skipped: result.skipped,
-    }))
-}
-
-/// Build a current LeRobot v3 dataset and let the browser download it as one file.
-#[derive(Debug, Deserialize)]
-struct DatasetQuery {
-    dataset_id: Option<String>,
-}
-
-async fn download_episodes(
-    State(state): State<AppState>,
-    Query(query): Query<DatasetQuery>,
-) -> Result<Response, Failure> {
-    let adapter = DatasetHttpAdapter::export(&state);
-    let summary = dataset_application::export(
-        &adapter,
-        ExportDatasetCommand {
-            dataset_id: query.dataset_id,
-        },
-    )
-    .await?;
-    let DatasetDownload { temporary, length } = adapter.take_export_artifact()?;
-    let file = tokio::fs::File::open(temporary.path())
-        .await
-        .map_err(|error| {
-            Failure(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("could not stream the temporary export file: {error}"),
-            )
-        })?;
-    let stream = async_stream::stream! {
-        // The named file removes itself only after the response body finishes
-        // or is dropped by a disconnected browser.
-        let _temporary = temporary;
-        let mut file = file;
-        let mut buffer = vec![0_u8; 64 * 1024];
-        loop {
-            match file.read(&mut buffer).await {
-                Ok(0) => break,
-                Ok(read) => yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(&buffer[..read])),
-                Err(error) => {
-                    yield Err::<Bytes, std::io::Error>(error);
-                    break;
-                }
-            }
-        }
-    };
-    let mut response = Body::from_stream(stream).into_response();
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        header::HeaderValue::from_static("application/zip"),
-    );
-    response.headers_mut().insert(
-        header::CONTENT_DISPOSITION,
-        header::HeaderValue::from_static(
-            "attachment; filename=\"spiral-robotics-lerobot-v3-dataset.zip\"",
-        ),
-    );
-    response.headers_mut().insert(
-        header::CONTENT_LENGTH,
-        header::HeaderValue::from_str(&length.to_string())
-            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
-    );
-    response.headers_mut().insert(
-        header::HeaderName::from_static("x-spiral-robotics-episodes"),
-        header::HeaderValue::from_str(&summary.episodes.to_string())
-            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
-    );
-    response.headers_mut().insert(
-        header::HeaderName::from_static("x-spiral-robotics-frames"),
-        header::HeaderValue::from_str(&summary.frames.to_string())
-            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
-    );
-    response.headers_mut().insert(
-        header::HeaderName::from_static("x-spiral-robotics-skipped"),
-        header::HeaderValue::from_str(&summary.skipped.to_string())
-            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
-    );
-    // How many takes cost the whole dataset its velocity and effort columns.
-    // The dataset card says this too, because that is what travels with the
-    // file; the header is for a client that wants it without opening the ZIP.
-    response.headers_mut().insert(
-        header::HeaderName::from_static("x-spiral-robotics-without-proprioception"),
-        header::HeaderValue::from_str(&summary.without_proprioception.to_string())
-            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
-    );
-    Ok(response)
-}
-
-/// Convert a browser-uploaded LeRobot ZIP into replayable local episodes.
-async fn import_episodes(
-    State(state): State<AppState>,
-    Query(query): Query<DatasetQuery>,
-    body: Body,
-) -> Result<Json<ImportResponse>, Failure> {
-    let temporary = tempfile::NamedTempFile::new().map_err(|error| {
-        Failure(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("could not create a temporary import file: {error}"),
-        )
-    })?;
-    let output = temporary.reopen().map_err(|error| {
-        Failure(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("could not open the temporary import file: {error}"),
-        )
-    })?;
-    let mut output = tokio::fs::File::from_std(output);
-    let mut stream = body.into_data_stream();
-    let mut written = 0_usize;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| {
-            Failure::bad_request(format!("could not read the uploaded ZIP: {error}"))
-        })?;
-        written = written.checked_add(chunk.len()).ok_or_else(|| {
-            Failure(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "uploaded ZIP is too large".to_owned(),
-            )
-        })?;
-        if written > MAX_ARCHIVE_COMPRESSED_BYTES {
-            return Err(Failure(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!(
-                    "the uploaded ZIP exceeds the supported {} MiB limit",
-                    MAX_ARCHIVE_COMPRESSED_BYTES / (1024 * 1024)
-                ),
-            ));
-        }
-        output.write_all(&chunk).await.map_err(|error| {
-            Failure(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("could not spool the uploaded ZIP: {error}"),
-            )
-        })?;
-    }
-    output.flush().await.map_err(|error| {
-        Failure(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("could not finish the uploaded ZIP: {error}"),
-        )
-    })?;
-    drop(output);
-    if written == 0 {
-        return Err(Failure::bad_request(
-            "choose a LeRobot dataset ZIP to import",
-        ));
-    }
-    let source = temporary.reopen().map_err(|error| {
-        Failure(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("could not reopen the uploaded ZIP: {error}"),
-        )
-    })?;
-    let summary = dataset_application::import(
-        &DatasetHttpAdapter::import(&state, temporary, source),
-        ImportDatasetCommand {
-            dataset_id: query.dataset_id.unwrap_or_else(|| "default".to_owned()),
-        },
-    )
-    .await?;
-    state.storage.sync_pending();
-    Ok(Json(ImportResponse {
-        episodes: summary.episodes,
-        frames: summary.frames,
-        first_episode: summary.first_episode,
-    }))
-}
-
-/// Resolve an export destination, refusing anything that escapes the workspace.
-///
-/// A relative path lands beside the episode directory, which is where a dataset
-/// belongs. An absolute path is the operator saying exactly where they want it,
-/// and is taken at its word; what is refused is the shape that looks relative
-/// and is not — a `..` that walks out of the directory it appears to be under.
-pub(super) fn resolve_export_directory(
-    episode_directory: &std::path::Path,
-    requested: &str,
-) -> Result<std::path::PathBuf, Failure> {
-    let requested = requested.trim();
-    if requested.is_empty() {
-        return Err(Failure::bad_request("name a directory to export into"));
-    }
-    let path = std::path::Path::new(requested);
-    if path
-        .components()
-        .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        return Err(Failure::bad_request(
-            "an export directory cannot contain '..'; give a name or an absolute path",
-        ));
-    }
-    if path.is_absolute() {
-        return Ok(path.to_path_buf());
-    }
-    let parent = episode_directory
-        .parent()
-        .unwrap_or(episode_directory)
-        .to_path_buf();
-    Ok(parent.join(path))
 }

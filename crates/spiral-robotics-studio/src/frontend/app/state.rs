@@ -5,13 +5,15 @@ use std::rc::Rc;
 
 use dioxus::prelude::*;
 use spiral_robotics_contracts::api::{
-    EpisodeSummary, ModeSelection, RecordingProgress, ReplayProgress, RobotSummary, RobotTelemetry,
-    RolloutSnapshot, StudioSnapshot, TelemetryFrame, TrainingSnapshot,
+    EpisodeCatalogResponse, EpisodeSummary, ModeSelection, RecordingProgress, ReplayProgress,
+    RobotSummary, RobotTelemetry, RolloutSnapshot, StudioSnapshot, TelemetryFrame,
+    TrainingSnapshot,
 };
 use spiral_robotics_viewport::{SO101_URDF, Urdf, UrdfError};
 
+use crate::frontend::api::http as api;
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
-use crate::frontend::api::http::{self as api, StudioEvent};
+use crate::frontend::api::http::StudioEvent;
 use crate::frontend::app::notifications::{
     MessageAction, MessageSeverity, MessageSource, NotificationCenterState,
 };
@@ -109,7 +111,17 @@ fn default_joint_selection(
     })
 }
 
-/// Everything the screens read, published by the server's event stream.
+#[derive(Clone, Debug, Default)]
+struct EpisodeCatalogState {
+    episodes: Vec<EpisodeSummary>,
+    issues: Vec<String>,
+    loading: bool,
+    loaded: bool,
+    error: Option<String>,
+}
+
+/// Shared frontend state. Live state follows the server event stream; the
+/// episode catalog is an explicit HTTP resource owned by the browser session.
 #[derive(Clone, Copy)]
 pub(crate) struct Studio {
     pub snapshot: Signal<StudioSnapshot>,
@@ -144,6 +156,7 @@ pub(crate) struct Studio {
     /// Dataset row used by capture, import, Data filtering, and new Training
     /// runs. This is distinct from the configured Spiral namespace.
     pub selected_dataset: Signal<String>,
+    episode_catalog: Signal<EpisodeCatalogState>,
     /// Joint angles for the take being recorded, or the last one recorded.
     ///
     /// Filled from the event stream rather than from the panel that draws it:
@@ -154,7 +167,7 @@ pub(crate) struct Studio {
 }
 
 impl Studio {
-    /// Create the shared state and start following the server.
+    /// Create the shared state, load the episode catalog, and follow live state.
     pub(crate) fn use_studio() -> Self {
         // Hooks own the lifetime of every signal. The context publishes only
         // their handles; it does not construct unscoped reactive state inside
@@ -171,6 +184,7 @@ impl Studio {
         let pointed = use_signal(|| None);
         let selected_episode = use_signal(|| None);
         let selected_dataset = use_signal(|| "default".to_owned());
+        let episode_catalog = use_signal(EpisodeCatalogState::default);
         let recording_signals = use_signal(SignalStore::default);
         let studio = use_context_provider(|| Self {
             snapshot,
@@ -187,6 +201,7 @@ impl Studio {
             pointed,
             selected_episode,
             selected_dataset,
+            episode_catalog,
             recording_signals,
         });
         let mut default_selection = studio.selected;
@@ -202,6 +217,14 @@ impl Studio {
         });
         #[cfg(all(feature = "web", target_arch = "wasm32"))]
         let mut studio = studio;
+
+        // Catalog data is fetched once for the browser session. Known episode
+        // mutations update this local state; the Episodes panel owns the only
+        // explicit refetch control.
+        #[cfg(all(feature = "web", target_arch = "wasm32"))]
+        use_future(move || async move {
+            let _ = studio.refresh_episode_catalog().await;
+        });
 
         // One long-lived task owns the connection and reconnects if the server
         // restarts, so the page recovers without a manual refresh.
@@ -314,7 +337,7 @@ impl Studio {
     /// Which accent slot an arm owns.
     ///
     /// Derived from the arm's own role and name, never from its position in the
-    /// directory: taking it from the list index meant that adding, renaming, or
+    /// catalog: taking it from the list index meant that adding, renaming, or
     /// removing one arm silently repainted every other one, and "blue is the
     /// follower" is a thing an operator learns in the first minute and relies on
     /// while looking at the bench rather than the screen.
@@ -345,7 +368,72 @@ impl Studio {
 
     /// Every recorded take, oldest first.
     pub(crate) fn episodes(&self) -> Vec<EpisodeSummary> {
-        self.snapshot.read().episodes.clone()
+        self.episode_catalog.read().episodes.clone()
+    }
+
+    pub(crate) fn episodes_loading(&self) -> bool {
+        self.episode_catalog.read().loading
+    }
+
+    pub(crate) fn episodes_loaded(&self) -> bool {
+        self.episode_catalog.read().loaded
+    }
+
+    pub(crate) fn episode_catalog_error(&self) -> Option<String> {
+        self.episode_catalog.read().error.clone()
+    }
+
+    pub(crate) fn episode_catalog_issues(&self) -> Vec<String> {
+        self.episode_catalog.read().issues.clone()
+    }
+
+    /// Replace the browser's episode catalog in one request.
+    pub(crate) async fn refresh_episode_catalog(mut self) -> Result<(), String> {
+        {
+            let mut catalog = self.episode_catalog.write();
+            catalog.loading = true;
+            catalog.error = None;
+        }
+        match api::get::<EpisodeCatalogResponse>("/api/episodes").await {
+            Ok(response) => {
+                let mut catalog = self.episode_catalog.write();
+                catalog.episodes = response.episodes;
+                catalog.issues = response.issues;
+                catalog.loading = false;
+                catalog.loaded = true;
+                Ok(())
+            }
+            Err(error) => {
+                let mut catalog = self.episode_catalog.write();
+                catalog.loading = false;
+                catalog.error = Some(error.clone());
+                Err(format!("Could not refresh the episode catalog: {error}"))
+            }
+        }
+    }
+
+    /// Apply the authoritative response from a known episode mutation.
+    pub(crate) fn upsert_episode(mut self, episode: EpisodeSummary) {
+        let mut catalog = self.episode_catalog.write();
+        if let Some(existing) = catalog
+            .episodes
+            .iter_mut()
+            .find(|existing| existing.id == episode.id)
+        {
+            *existing = episode;
+        } else {
+            catalog.episodes.push(episode);
+        }
+        catalog.episodes.sort_by(|left, right| {
+            left.started_ms
+                .cmp(&right.started_ms)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+    }
+
+    pub(crate) fn remove_episode(mut self, episode: &str) {
+        let mut catalog = self.episode_catalog.write();
+        catalog.episodes.retain(|existing| existing.id != episode);
     }
 
     /// The take being captured right now.
@@ -364,7 +452,7 @@ impl Studio {
 
     /// The take the timeline is showing, when it still exists.
     pub(crate) fn focused_episode(&self) -> Option<EpisodeSummary> {
-        let episodes = self.snapshot.read();
+        let episodes = self.episode_catalog.read();
         let chosen = self.selected_episode.read();
         chosen
             .as_ref()
@@ -423,7 +511,7 @@ impl Studio {
         self.run_inner(success, future);
     }
 
-    /// Run a file or workspace operation that does not command live hardware.
+    /// Run a data or configuration operation that does not command live hardware.
     /// These remain useful while telemetry is reconnecting.
     pub(crate) fn run_utility<F>(&self, success: impl Into<String>, future: F)
     where
@@ -521,7 +609,6 @@ mod tests {
     fn robot(id: &str, motors: &[&str]) -> RobotSummary {
         RobotSummary {
             id: id.to_owned(),
-            file: format!("{id}.json"),
             robot_type: None,
             port: None,
             motors: motors

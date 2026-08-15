@@ -6,8 +6,8 @@
 //! buffers for the injected training backend.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::io::Write as _;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -30,6 +30,7 @@ use crate::backend::application::training_population::{
     NormalizationStats, PopulationRow, SampleRange, StreamContract, StreamContractRow,
     TrainingPopulation, flatten_action_chunks, normalize_vectors,
 };
+use crate::backend::storage::sql;
 
 const MAX_MANIFEST_ROWS: usize = 8_192;
 
@@ -96,8 +97,6 @@ pub(crate) struct SpiralActLoader<'a> {
     validation_anchors: AnchorIndex,
     video_segments: BTreeMap<(String, String), Vec<VideoSegment>>,
     raw_video_segments: BTreeSet<(String, String, u32)>,
-    raw_video_files: BTreeMap<(String, String, u32), PathBuf>,
-    raw_video_directory: tempfile::TempDir,
     train_random: SplitMix64,
     validation_random: SplitMix64,
     pub stats: NormalizationStats,
@@ -123,8 +122,6 @@ impl<'a> SpiralActLoader<'a> {
                 "training query, columns, or dataset contain an invalid identifier".to_owned(),
             );
         }
-        let raw_video_directory = tempfile::tempdir()
-            .map_err(|error| format!("could not create the training video cache: {error}"))?;
         let mut loader = Self {
             connection,
             base_sql,
@@ -144,8 +141,6 @@ impl<'a> SpiralActLoader<'a> {
             validation_anchors: AnchorIndex::default(),
             video_segments: BTreeMap::new(),
             raw_video_segments: BTreeSet::new(),
-            raw_video_files: BTreeMap::new(),
-            raw_video_directory,
             train_random: SplitMix64::new(request.seed),
             validation_random: SplitMix64::new(request.seed ^ 0xA17C_9E3D),
             stats: NormalizationStats::identity(1, 1),
@@ -229,11 +224,6 @@ impl<'a> SpiralActLoader<'a> {
 
     pub(crate) fn camera_streams(&self) -> &[String] {
         &self.camera_streams
-    }
-
-    #[cfg(test)]
-    pub(crate) fn raw_video_fallback_count(&self) -> usize {
-        self.raw_video_segments.len()
     }
 
     pub(crate) fn has_validation(&self) -> bool {
@@ -343,7 +333,7 @@ impl<'a> SpiralActLoader<'a> {
             let cameras = self
                 .camera_streams
                 .iter()
-                .map(|camera| sql_string(camera))
+                .map(|camera| sql::string_literal(camera))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(" WHERE stream_id IN ({cameras})")
@@ -477,8 +467,8 @@ impl<'a> SpiralActLoader<'a> {
             self.base_sql,
             self.state_column,
             self.action_column,
-            sql_string(&range.episode_id),
-            sql_string(&range.stream_id),
+            sql::string_literal(&range.episode_id),
+            sql::string_literal(&range.stream_id),
             sample_index
         );
         let batches = query_batches(self.connection, &query)?;
@@ -582,8 +572,8 @@ impl<'a> SpiralActLoader<'a> {
                 )?;
                 request_rows.push(format!(
                     "({request}, {offset}, {}, {}, {sample_index})",
-                    sql_string(&anchor.episode_id),
-                    sql_string(&anchor.stream_id),
+                    sql::string_literal(&anchor.episode_id),
+                    sql::string_literal(&anchor.stream_id),
                 ));
             }
         }
@@ -783,10 +773,10 @@ impl<'a> SpiralActLoader<'a> {
         &mut self,
         group: &FrameGroup,
     ) -> Result<BTreeMap<u64, Vec<f32>>, String> {
-        let path = self.raw_video_path(group)?;
+        let payload = self.raw_video_payload(group)?;
         decode_video_frames(
             &self.ffmpeg,
-            &path,
+            &payload,
             &group.frame_indices,
             self.image_width,
             self.image_height,
@@ -794,21 +784,13 @@ impl<'a> SpiralActLoader<'a> {
         )
     }
 
-    fn raw_video_path(&mut self, group: &FrameGroup) -> Result<PathBuf, String> {
-        let key = (
-            group.episode_id.clone(),
-            group.camera_stream_id.clone(),
-            group.segment_index,
-        );
-        if let Some(path) = self.raw_video_files.get(&key) {
-            return Ok(path.clone());
-        }
+    fn raw_video_payload(&mut self, group: &FrameGroup) -> Result<Vec<u8>, String> {
         let query = format!(
             "SELECT payload FROM {}.video_assets WHERE episode_id = {} \
              AND stream_id = {} AND segment_index = {}",
             self.dataset,
-            sql_string(&group.episode_id),
-            sql_string(&group.camera_stream_id),
+            sql::string_literal(&group.episode_id),
+            sql::string_literal(&group.camera_stream_id),
             group.segment_index,
         );
         let batches = query_batches(self.connection, &query)?;
@@ -821,15 +803,7 @@ impl<'a> SpiralActLoader<'a> {
                 payload = Some(binary_value(required(batch, "payload")?, row)?.to_vec());
             }
         }
-        let payload = payload.ok_or_else(|| "Spiral returned no raw video asset".to_owned())?;
-        let path = self
-            .raw_video_directory
-            .path()
-            .join(format!("video-{}.mp4", self.raw_video_files.len()));
-        std::fs::write(&path, payload)
-            .map_err(|error| format!("could not cache raw training video: {error}"))?;
-        self.raw_video_files.insert(key, path.clone());
-        Ok(path)
+        payload.ok_or_else(|| "Spiral returned no raw video asset".to_owned())
     }
 
     fn image_coordinates(&self, anchors: &[Anchor]) -> Result<Vec<ImageCoordinate>, String> {
@@ -1162,10 +1136,6 @@ fn clean_query(sql: &str) -> Result<String, String> {
     }
 }
 
-fn sql_string(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
 fn validate_relation(value: &str) -> Result<(), String> {
     if value.split('.').all(spiral::is_identifier) {
         Ok(())
@@ -1177,7 +1147,7 @@ fn validate_relation(value: &str) -> Result<(), String> {
 fn training_image_expression(video_decoder: &str, frame_expression: &str, resize: bool) -> String {
     let decoded = format!(
         "spql.video.decode({frame_expression}, {})",
-        sql_string(video_decoder)
+        sql::string_literal(video_decoder)
     );
     if resize {
         format!(
@@ -1197,8 +1167,8 @@ fn indexed_image_query(group: &FrameGroup, image_expression: &str, indices: &str
          spql.video.frames(a.media, spql.video.frame_indices(ARRAY[{indices}])) AS f \
          ORDER BY f.request_index",
         group.media_relation,
-        sql_string(&group.episode_id),
-        sql_string(&group.camera_stream_id),
+        sql::string_literal(&group.episode_id),
+        sql::string_literal(&group.camera_stream_id),
         group.segment_index,
     )
 }
@@ -1210,7 +1180,7 @@ fn is_unusable_video_index_error(error: &str) -> bool {
 
 fn decode_video_frames(
     ffmpeg: &str,
-    path: &Path,
+    payload: &[u8],
     frame_indices: &[u64],
     width: usize,
     height: usize,
@@ -1229,9 +1199,8 @@ fn decode_video_frames(
     if resize {
         filters.push(format!("scale={width}:{height}:flags=bilinear"));
     }
-    let output = Command::new(ffmpeg)
-        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
-        .arg(path)
+    let mut child = Command::new(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-i", "pipe:0"])
         .args([
             "-an",
             "-sn",
@@ -1247,8 +1216,20 @@ fn decode_video_frames(
             "rgb24",
             "pipe:1",
         ])
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("could not start {ffmpeg:?}: {error}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "FFmpeg did not open its input pipe".to_owned())?
+        .write_all(payload)
+        .map_err(|error| format!("could not send Spiral video to FFmpeg: {error}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("could not wait for {ffmpeg:?}: {error}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
@@ -1280,18 +1261,6 @@ fn decode_video_frames(
         );
     }
     Ok(decoded)
-}
-
-#[cfg(test)]
-pub(crate) fn decode_video_frames_for_test(
-    ffmpeg: &str,
-    path: &Path,
-    frame_indices: &[u64],
-    width: usize,
-    height: usize,
-    resize: bool,
-) -> Result<BTreeMap<u64, Vec<f32>>, String> {
-    decode_video_frames(ffmpeg, path, frame_indices, width, height, resize)
 }
 
 fn imagenet_chw(rgb: &[u8], width: usize, height: usize) -> Vec<f32> {

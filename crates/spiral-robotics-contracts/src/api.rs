@@ -13,13 +13,15 @@ use spiral_robotics_core::calibration::{Direction, MotorCalibration};
 pub use spiral_robotics_core::operation::{
     CAUTION_FOLLOW_ERROR_DEGREES, CAUTION_LIMIT_FRACTION, CAUTION_VOLTAGE_MARGIN_VOLTS,
 };
+
+pub const DEFAULT_SPIRAL_ENDPOINT: &str = "https://api.spiraldb.dev";
+pub const DEFAULT_SPIRAL_SPFS_ENDPOINT: &str = "https://spfs.spiraldb.dev";
 use spiral_robotics_core::operation::{
     Lifecycle, MotorHealth, MotorHealthLimits, MotorHealthReadings, RobotCandidate,
     assess_motor_health, choose_teleoperation_pair, episode_is_usable,
 };
 
-/// Server-owned data destinations. Secret values are intentionally absent:
-/// the browser can replace or clear them but can never read them back.
+/// The immutable Spiral destination plus project-owned Studio preferences.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DataSettings {
     pub spiral: SpiralSettings,
@@ -44,20 +46,25 @@ impl Default for TrainingRuntimeSettings {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SpiralSettings {
-    pub enabled: bool,
-    /// ADBC database URI, such as `spiraldb://` or `spiral:memory:`.
-    pub uri: String,
+    /// Spiral control-plane API endpoint.
+    pub endpoint: String,
+    /// Spiral File System endpoint used for relation and binary payloads.
+    #[serde(default = "default_spiral_spfs_endpoint")]
+    pub spfs_endpoint: String,
     pub project_id: String,
-    pub dataset: String,
+    pub namespace: String,
+    #[serde(default)]
+    pub endpoint_restart_required: bool,
 }
 
 impl Default for SpiralSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
-            uri: "spiraldb://".to_owned(),
+            endpoint: DEFAULT_SPIRAL_ENDPOINT.to_owned(),
+            spfs_endpoint: DEFAULT_SPIRAL_SPFS_ENDPOINT.to_owned(),
             project_id: String::new(),
-            dataset: "spiral_robotics".to_owned(),
+            namespace: "spiral_robotics".to_owned(),
+            endpoint_restart_required: false,
         }
     }
 }
@@ -74,27 +81,47 @@ impl Default for VideoSettings {
 }
 
 /// Update from the settings screen.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UpdateDataSettingsRequest {
-    pub spiral: SpiralSettings,
+    /// Backend-local bootstrap pointer for the Spiral control-plane API.
+    #[serde(default = "default_spiral_endpoint")]
+    pub spiral_endpoint: String,
+    /// Backend-local bootstrap pointer for Spiral File System payloads.
+    #[serde(default = "default_spiral_spfs_endpoint")]
+    pub spiral_spfs_endpoint: String,
+    /// Backend-local bootstrap pointer used to select the one active Spiral
+    /// project before project-owned settings can be read.
+    #[serde(default)]
+    pub project_id: String,
     #[serde(default)]
     pub training: TrainingRuntimeSettings,
     pub video: VideoSettings,
+}
+
+impl Default for UpdateDataSettingsRequest {
+    fn default() -> Self {
+        Self {
+            spiral_endpoint: default_spiral_endpoint(),
+            spiral_spfs_endpoint: default_spiral_spfs_endpoint(),
+            project_id: String::new(),
+            training: TrainingRuntimeSettings::default(),
+            video: VideoSettings::default(),
+        }
+    }
+}
+
+fn default_spiral_endpoint() -> String {
+    DEFAULT_SPIRAL_ENDPOINT.to_owned()
+}
+
+fn default_spiral_spfs_endpoint() -> String {
+    DEFAULT_SPIRAL_SPFS_ENDPOINT.to_owned()
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ConnectionTestResponse {
     pub ok: bool,
     pub message: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct PublicationStatus {
-    pub episode_id: String,
-    /// `queued`, `publishing`, `published`, `failed`, or `local`.
-    pub state: String,
-    pub spiral: Option<String>,
-    pub updated_ms: i64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -415,7 +442,6 @@ pub struct TrainingCheckpoint {
     pub step: u64,
     pub created_ms: i64,
     pub validation_loss: Option<f64>,
-    pub spiral_table: String,
     pub byte_size: u64,
     /// Old run-history entries default to false and cannot be selected for rollout.
     #[serde(default)]
@@ -428,19 +454,13 @@ pub struct TrainingCheckpoint {
     pub sample_hz: f64,
 }
 
-/// Immutable Spiral identity captured when a run starts.
-///
-/// The browser can show where samples and checkpoints belong without learning
-/// credentials or depending on mutable Settings state.
+/// Dataset selection captured when a run starts. Project and namespace come
+/// from Studio's one process-owned Spiral destination.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TrainingSource {
-    pub project: String,
-    /// Configured Spiral namespace containing the managed relations.
-    pub dataset: String,
     /// Relational dataset row whose episodes supplied this run.
     #[serde(default = "default_dataset_id")]
     pub dataset_id: String,
-    pub checkpoint_table: String,
 }
 
 /// Result of checking every dependency needed before a native run can start.
@@ -794,7 +814,7 @@ fn training_metric_value(point: &TrainingMetricPoint, series: usize) -> Option<f
     }
 }
 
-/// Replay a trajectory fetched from Spiral instead of the local recovery file.
+/// Replay a trajectory fetched directly from SpiralDB.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StartSpiralReplayRequest {
     pub episode: String,
@@ -808,44 +828,32 @@ pub struct StartSpiralReplayRequest {
 /// connect and then whenever it actually differs.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct StudioSnapshot {
-    /// Directory the server reads and writes robot files in.
-    pub workspace: String,
-    /// True when the server is driving simulated motors instead of hardware.
-    pub simulated: bool,
-    /// Every robot file found in the workspace, by ID.
+    /// Human-readable name of the active persistent store.
+    pub storage: String,
+    /// Every robot configuration found in SpiralDB, by ID.
     pub robots: Vec<RobotSummary>,
     /// Cameras the server has discovered.
     pub cameras: Vec<CameraStatus>,
     /// The currently selected operating mode.
     pub mode: ModeStatus,
-    /// Every episode found in the episode directory, oldest first.
-    ///
-    /// Takes live here rather than in telemetry because the list only changes
-    /// when a recording finishes or a take is judged, while the counters of a
-    /// take in progress change sixty times a second.
-    pub episodes: Vec<EpisodeSummary>,
-    /// Directory the server reads and writes episode files in.
-    pub episode_directory: String,
-    /// Problems worth showing the operator: unreadable robot files, cameras
+    /// Problems worth showing the operator: invalid robot configurations, cameras
     /// that failed to probe, and similar non-fatal trouble.
     pub issues: Vec<String>,
 }
 
-/// One robot instance: exactly one arm, stored in exactly one JSON file.
+/// One robot instance: exactly one arm, stored in SpiralDB.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct RobotSummary {
     pub id: String,
-    /// Name of the robot's JSON file inside the workspace.
-    pub file: String,
     pub robot_type: Option<String>,
     pub port: Option<PortSettings>,
     pub motors: Vec<MotorSummary>,
     pub cameras: Vec<CameraBinding>,
     /// True when every motor has a stored calibration.
     pub calibrated: bool,
-    /// Why this robot cannot be used, when its file is structurally wrong.
+    /// Why this robot cannot be used, when its configuration is structurally wrong.
     ///
-    /// A file that parses as JSON can still describe an unusable robot — two
+    /// A configuration can still describe an unusable robot — two
     /// motors sharing a bus ID, for instance. Carrying the reason here keeps
     /// the card from silently rendering as an empty robot.
     pub problem: Option<String>,
@@ -859,7 +867,6 @@ pub struct CalibrationReapplyResponse {
     pub frames_updated: u64,
     pub episodes_unchanged: u64,
     pub episodes_skipped: u64,
-    pub spiral_syncs_queued: u64,
     pub warnings: Vec<String>,
 }
 
@@ -1316,7 +1323,7 @@ impl CalibrationJointProgress {
     }
 }
 
-/// One recorded episode, as summarised from its file.
+/// One recorded episode, as summarised from SpiralDB.
 ///
 /// An episode is one take: the operator arms the recorder, performs the task
 /// once, and stops. Raw observations and actions are immutable; the operator's
@@ -1324,14 +1331,12 @@ impl CalibrationJointProgress {
 /// raw counts after the originating arm is recalibrated.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeSummary {
-    /// Stable identifier, also the file's stem.
+    /// Stable identifier for the episode and all of its related rows.
     pub id: String,
     /// Dataset row this episode belongs to. Streams and samples reference the
     /// episode; only the episode row carries dataset membership.
     #[serde(default = "default_dataset_id")]
     pub dataset_id: String,
-    /// Name of the episode's file inside the episode directory.
-    pub file: String,
     /// Arms sampled in this take, in the order their joints appear in a frame.
     pub arms: Vec<EpisodeArm>,
     pub frames: u64,
@@ -1358,14 +1363,10 @@ pub struct EpisodeSummary {
     pub max_follow_error_degrees: Option<f64>,
     /// True once the operator has judged this take unusable.
     ///
-    /// A discarded take is kept on disk and excluded from an export, because
-    /// the judgement is the operator's and deleting on their behalf is not.
+    /// A discarded take remains in SpiralDB and is excluded from training,
+    /// because the judgement is the operator's and deleting on their behalf is not.
     pub discarded: bool,
-    /// Why this take cannot be replayed or exported.
-    ///
-    /// A take whose recording never finished — the server was killed mid-take,
-    /// say — is still listed, with the reason attached, rather than silently
-    /// omitted or silently offered as if it were whole.
+    /// Why this committed take cannot currently be replayed or trained.
     pub problem: Option<String>,
 }
 
@@ -1379,6 +1380,15 @@ impl EpisodeSummary {
     pub fn arm(&self, id: &str) -> Option<&EpisodeArm> {
         self.arms.iter().find(|arm| arm.id == id)
     }
+}
+
+/// Browser-owned episode catalog loaded on startup or explicit refresh.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct EpisodeCatalogResponse {
+    /// Every stored episode, oldest first.
+    pub episodes: Vec<EpisodeSummary>,
+    /// Catalog rows that could not be decoded.
+    pub issues: Vec<String>,
 }
 
 /// One arm's presence in a take.
@@ -1559,36 +1569,23 @@ pub struct StartReplayRequest {
     pub start_seconds: f64,
 }
 
-/// Write the kept takes out as a dataset.
+/// What replacing the active SpiralDB project from a portable snapshot imported.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ExportRequest {
-    /// Directory to write. Relative paths resolve against the episode
-    /// directory's parent; an existing directory is refused rather than merged
-    /// into, so an export is always exactly one session's decision.
-    pub directory: String,
+pub struct ProjectImportSummary {
+    pub relations: u64,
+    pub rows: u64,
 }
 
-/// What an export produced.
+/// What merging a portable episode bundle into one dataset imported.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ExportResponse {
-    /// Absolute path actually written.
-    pub directory: String,
+pub struct EpisodeImportSummary {
+    pub dataset_id: String,
     pub episodes: u64,
-    pub frames: u64,
-    /// Takes left out because the operator discarded them or they are unusable.
-    pub skipped: u64,
-}
-
-/// What importing a LeRobot dataset added to the local episode workspace.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ImportResponse {
-    pub episodes: u64,
-    pub frames: u64,
-    /// Imported episodes are assigned fresh local IDs; this is the first one.
+    pub rows: u64,
     pub first_episode: Option<String>,
 }
 
-/// Create a new robot instance and its JSON file.
+/// Create a new robot instance in SpiralDB.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CreateRobotRequest {
     pub id: String,
@@ -1603,8 +1600,8 @@ pub struct CreateRobotRequest {
 
 /// Change a robot's port or camera assignments.
 ///
-/// Omitted fields are left exactly as they are on disk, including fields this
-/// build does not understand.
+/// Omitted fields are left exactly as they are in the stored configuration,
+/// including fields this build does not understand.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct UpdateRobotRequest {
     #[serde(default)]
@@ -1725,7 +1722,6 @@ mod tests {
     fn robot(id: &str, robot_type: Option<&str>) -> RobotSummary {
         RobotSummary {
             id: id.to_owned(),
-            file: format!("{id}.json"),
             robot_type: robot_type.map(str::to_owned),
             port: None,
             motors: vec![MotorSummary {
@@ -1839,16 +1835,12 @@ mod tests {
 
         let settings: UpdateDataSettingsRequest = serde_json::from_str(
             r#"{
-                "spiral": {
-                    "enabled": false,
-                    "uri": "spiraldb://",
-                    "project_id": "",
-                    "dataset": "spiral_robotics"
-                },
                 "video": { "enabled": true }
             }"#,
         )
         .unwrap();
+        assert_eq!(settings.spiral_endpoint, DEFAULT_SPIRAL_ENDPOINT);
+        assert_eq!(settings.spiral_spfs_endpoint, DEFAULT_SPIRAL_SPFS_ENDPOINT);
         assert_eq!(settings.training, TrainingRuntimeSettings::default());
     }
 
@@ -1876,7 +1868,6 @@ mod tests {
         let mut episode = EpisodeSummary {
             id: "episode_000001".to_owned(),
             dataset_id: "default".to_owned(),
-            file: "episode_000001.jsonl".to_owned(),
             arms: vec![EpisodeArm {
                 id: "follower".to_owned(),
                 robot_type: Some("so101_follower".to_owned()),

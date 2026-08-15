@@ -48,19 +48,19 @@ use historical::{attach_historical_trace_failure, attach_historical_traces};
 pub(crate) struct ScreenWorkspaceDefinition {
     panels: Vec<(Panel, PanelRole)>,
     pub(crate) initial_layout: PanelLayout,
-    storage_key: String,
+    layout_scope: String,
 }
 
 impl ScreenWorkspaceDefinition {
     pub(crate) fn new(
         panels: Vec<(Panel, PanelRole)>,
         initial_layout: PanelLayout,
-        storage_key: impl Into<String>,
+        layout_scope: impl Into<String>,
     ) -> Self {
         Self {
             panels,
             initial_layout,
-            storage_key: storage_key.into(),
+            layout_scope: layout_scope.into(),
         }
     }
 }
@@ -249,24 +249,21 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
     let projected_recorded_identity = match &projection.timeline {
         TimelineSubject::Recording(recording) if recording.paused => Some((
             recording.episode.clone(),
-            "recording-open".to_owned(),
+            recording.frames,
             recording.elapsed_seconds,
         )),
-        TimelineSubject::Episode { episode, .. } => {
-            Some((episode.id.clone(), episode.file.clone(), 0.0))
-        }
+        TimelineSubject::Episode { episode, .. } => Some((episode.id.clone(), episode.frames, 0.0)),
         TimelineSubject::Empty { .. } | TimelineSubject::Recording(_) => None,
     };
     use_effect(use_reactive(
         (&projected_recorded_identity,),
         move |(identity,)| {
-            let Some((episode, _source_file, seconds)) = identity else {
+            let Some((episode, _source_frames, seconds)) = identity else {
                 return;
             };
-            // The stable episode ID survives finalization, but its source file
-            // changes from `.part` to `.jsonl`. Treat that durable identity as
-            // a new source even when the selected episode itself did not
-            // change, including server-driven recording stops.
+            // The stable episode ID survives checkpoints and finalization.
+            // Treat a new persisted frame count as a new source even when the
+            // selected episode itself did not change.
             let next_revision = historical_revision.peek().wrapping_add(1);
             historical_revision.set(next_revision);
             historical_state.set(None);
@@ -623,7 +620,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                 "episodes",
                 "Episodes",
                 "episodes",
-                rsx! { EpisodesPanel { namespace: dataset.clone(), spiral_available: spiral_query_available } },
+                rsx! { EpisodesPanel { namespace: dataset.clone() } },
             )
             .with_class("episodes-workbench-editor");
             let query = Panel::new(
@@ -677,7 +674,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
         .map(|(panel, _)| panel)
         .collect::<Vec<_>>();
     let initial_panel_layout = definition.initial_layout;
-    let panel_storage_key = definition.storage_key;
+    let panel_layout_scope = definition.layout_scope;
 
     rsx! {
         div {
@@ -748,7 +745,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                 key: "{projection.activity.label()}",
                 panels: workspace_panels,
                 initial_layout: initial_panel_layout,
-                storage_key: Some(panel_storage_key),
+                layout_scope: Some(panel_layout_scope),
                 on_layout_change: move |_layout: PanelLayout| {},
                 on_resize: move |_| {
                     let next = split_resize_revision.peek().wrapping_add(1);
@@ -955,7 +952,6 @@ mod tests {
                 episode: EpisodeSummary {
                     dataset_id: "default".to_owned(),
                     id: "take-1".to_owned(),
-                    file: "take-1.jsonl".to_owned(),
                     arms: Vec::new(),
                     frames: 600,
                     duration_seconds: 10.0,
@@ -1192,7 +1188,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_trace_results_cannot_cross_episode_file_generations() {
+    fn stale_trace_results_cannot_cross_episode_revisions() {
         let mut source = Some(RecordedSource {
             episode: "take-1".to_owned(),
             seconds: 0.0,
@@ -1203,7 +1199,7 @@ mod tests {
         assert!(!attach_historical_traces(
             &mut source,
             "take-1",
-            "take-1.jsonl.part",
+            599,
             &traces,
         ));
         assert!(
@@ -1216,7 +1212,7 @@ mod tests {
         assert!(attach_historical_traces(
             &mut source,
             "take-1",
-            "take-1.jsonl",
+            600,
             &traces,
         ));
         assert!(
@@ -1236,7 +1232,7 @@ mod tests {
         assert!(attach_historical_traces(
             &mut in_flight_sample,
             "take-1",
-            "take-1.jsonl",
+            600,
             &traces,
         ));
         assert!(
@@ -1255,19 +1251,19 @@ mod tests {
             state: LoadState::Ready(preview(0.0, Vec::new())),
         });
 
-        // A failure from a different file generation belongs to a take that is
+        // A failure from a different persisted revision belongs to a take that is
         // no longer on the clock.
         assert!(!attach_historical_trace_failure(
             &mut source,
             "take-1",
-            "take-1.jsonl.part",
+            599,
             "The signal traces did not answer within 15s.",
         ));
 
         assert!(attach_historical_trace_failure(
             &mut source,
             "take-1",
-            "take-1.jsonl",
+            600,
             "The signal traces did not answer within 15s.",
         ));
         let failed = source
@@ -1288,12 +1284,12 @@ mod tests {
             seconds: 0.0,
             state: LoadState::Ready(preview(0.0, Vec::new())),
         });
-        attach_historical_trace_failure(&mut source, "take-1", "take-1.jsonl", "timed out");
+        attach_historical_trace_failure(&mut source, "take-1", 600, "timed out");
 
         assert!(attach_historical_traces(
             &mut source,
             "take-1",
-            "take-1.jsonl",
+            600,
             &RecordedTimelineTraces::default(),
         ));
         let recovered = source
@@ -1308,7 +1304,7 @@ mod tests {
         assert!(!attach_historical_trace_failure(
             &mut source,
             "take-1",
-            "take-1.jsonl",
+            600,
             "timed out",
         ));
         assert_eq!(

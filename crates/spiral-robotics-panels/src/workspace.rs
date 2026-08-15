@@ -1,4 +1,7 @@
 use dioxus::prelude::*;
+use spiral_robotics_ui::{
+    Action, ActionPurpose, ActionVariant, CloseIcon, UiStyles, focus_element,
+};
 
 use crate::{
     DockZone, LayoutNode, PanelId, PanelLayout, PanelPlacement, SplitAxis, SplitId, Tile, TileId,
@@ -55,7 +58,7 @@ impl Panel {
     }
 
     /// Split a newly registered panel beside its occupied home instead of
-    /// hiding it as another tab. Persisted user placement still wins.
+    /// hiding it as another tab. Current session placement still wins.
     pub fn with_home_zone(mut self, zone: DockZone) -> Self {
         self.home_zone = zone;
         self
@@ -91,14 +94,13 @@ struct RenderContext {
     dragging: Signal<Option<PanelId>>,
     drop_preview: Signal<Option<DropPreview>>,
     resizing: Signal<Option<ResizeDrag>>,
-    storage_key: Option<String>,
     on_layout_change: EventHandler<PanelLayout>,
     on_panel_activate: EventHandler<PanelId>,
     on_panel_close: EventHandler<PanelId>,
     on_resize: EventHandler<()>,
 }
 
-/// Render a persisted tree of tabbed panels and resizable splits.
+/// Render a session-owned tree of tabbed panels and resizable splits.
 ///
 /// The application owns panel content and the initial tree. The workspace owns
 /// subsequent layout mutation. Drag a tab onto the center of a tile to attach
@@ -109,7 +111,7 @@ struct RenderContext {
 pub fn PanelWorkspace(
     panels: Vec<Panel>,
     initial_layout: PanelLayout,
-    storage_key: Option<String>,
+    layout_scope: Option<String>,
     #[props(default)] active_panel: Option<PanelId>,
     on_layout_change: EventHandler<PanelLayout>,
     on_panel_activate: EventHandler<PanelId>,
@@ -118,18 +120,11 @@ pub fn PanelWorkspace(
 ) -> Element {
     let placements = panels.iter().map(Panel::placement).collect::<Vec<_>>();
     let first_mobile_panel = panels.first().map(|panel| panel.id.clone());
-    let initial_key = storage_key.clone();
     let initial_placements = placements.clone();
     let initial_fallback = initial_layout.clone();
-    let mut layout = use_signal(move || {
-        layout_for_registry(
-            initial_key.as_deref(),
-            initial_fallback,
-            &initial_placements,
-        )
-    });
-    let initial_scope = storage_key.clone();
-    let mut layout_scope = use_signal(move || initial_scope);
+    let mut layout = use_signal(move || layout_for_registry(initial_fallback, &initial_placements));
+    let initial_scope = layout_scope.clone();
+    let mut current_layout_scope = use_signal(move || initial_scope);
     let mut mobile_panel = use_signal(move || first_mobile_panel);
     let mut dragging = use_signal(|| None::<PanelId>);
     let mut drop_preview = use_signal(|| None::<DropPreview>);
@@ -137,24 +132,17 @@ pub fn PanelWorkspace(
 
     // A workspace component may remain mounted while its host changes from
     // Live to Data. Component keys are a rendering hint, not an ownership
-    // boundary, so explicitly reload the layout for the new storage scope.
-    // Without this, the new registry could be painted from a reconciled copy
-    // of the previous mode while mutations and persistence still targeted the
-    // previous tree.
-    let scope_dependency = storage_key.clone();
+    // boundary, so explicitly reload the session layout for the new scope.
+    let scope_dependency = layout_scope.clone();
     let next_fallback = initial_layout.clone();
     let next_placements = placements.clone();
     let next_mobile_panel = panels.first().map(|panel| panel.id.clone());
     use_effect(use_reactive((&scope_dependency,), move |(next_scope,)| {
-        if layout_scope.peek().as_ref() == next_scope.as_ref() {
+        if current_layout_scope.peek().as_ref() == next_scope.as_ref() {
             return;
         }
-        let next = layout_for_registry(
-            next_scope.as_deref(),
-            next_fallback.clone(),
-            &next_placements,
-        );
-        layout_scope.set(next_scope.clone());
+        let next = layout_for_registry(next_fallback.clone(), &next_placements);
+        current_layout_scope.set(next_scope.clone());
         layout.set(next);
         mobile_panel.set(next_mobile_panel.clone());
         dragging.set(None);
@@ -164,10 +152,9 @@ pub fn PanelWorkspace(
 
     // Consumers such as run histories can open a registered panel directly.
     // Keep the workspace as the owner of tab state so pointer, keyboard, and
-    // programmatic activation all converge on the same persisted layout.
+    // programmatic activation all converge on the same session layout.
     let requested_panel = active_panel.clone();
     let requested_registry = placements.clone();
-    let requested_storage_key = storage_key.clone();
     let requested_layout_change = on_layout_change;
     let requested_resize = on_resize;
     use_effect(use_reactive(
@@ -183,7 +170,6 @@ pub fn PanelWorkspace(
             let mut next = layout();
             next.reconcile(&requested_registry);
             if next.activate(&panel) {
-                store_if_requested(requested_storage_key.as_deref(), &next);
                 layout.set(next.clone());
                 requested_layout_change.call(next);
                 requested_resize.call(());
@@ -203,7 +189,6 @@ pub fn PanelWorkspace(
         dragging,
         drop_preview,
         resizing,
-        storage_key: storage_key.clone(),
         on_layout_change,
         on_panel_activate,
         on_panel_close,
@@ -220,6 +205,7 @@ pub fn PanelWorkspace(
     let mobile_tabs = context.panels.clone();
 
     rsx! {
+        UiStyles {}
         document::Stylesheet { href: PANEL_STYLES }
         section {
             class: "rp-workspace",
@@ -244,7 +230,6 @@ pub fn PanelWorkspace(
                 if resizing().is_some() {
                     resizing.set(None);
                     let next = layout();
-                    store_if_requested(release_context.storage_key.as_deref(), &next);
                     release_context.on_layout_change.call(next);
                     release_context.on_resize.call(());
                 }
@@ -279,10 +264,11 @@ pub fn PanelWorkspace(
                         };
                         rsx! {
                             div { key: "mobile-{panel.id}", id: "{mobile_tab_dom_id(&panel.id)}", class: "{item_class}",
-                            button {
-                                r#type: "button",
+                            Action {
+                                purpose: ActionPurpose::Select,
+                                variant: ActionVariant::Tab,
                                 class: if is_active { "rp-mobile-tab rp-mobile-tab-active" } else { "rp-mobile-tab" },
-                                "aria-pressed": is_active,
+                                aria_pressed: is_active,
                                 onclick: move |_| {
                                     mobile_panel.set(Some(panel_id.clone()));
                                     mutate_layout(activate_context.clone(), |layout| layout.activate(&activate_id));
@@ -291,10 +277,11 @@ pub fn PanelWorkspace(
                                 "{panel.title}"
                             }
                             if panel.closable {
-                                button {
-                                    r#type: "button",
+                                Action {
+                                    purpose: ActionPurpose::Close,
+                                    variant: ActionVariant::Icon,
                                     class: "rp-mobile-tab-close",
-                                    "aria-label": "Close {panel.title}",
+                                    aria_label: "Close {panel.title}",
                                     title: "Close {panel.title}",
                                     onclick: move |_| close_context.on_panel_close.call(close_id.clone()),
                                     CloseIcon {}
@@ -444,7 +431,7 @@ fn render_tile(tile: Tile, context: RenderContext) -> Element {
 
     rsx! {
         section { key: "{tile.id}", class: "{tile_class}", "data-tile-id": "{tile.id}",
-            header { class: "rp-tab-bar",
+            header { class: "rp-tab-bar ui-hover-action-host",
                 div { class: "rp-tabs", role: "tablist", "aria-label": "Panel group",
                     for panel_id in &tile.panels {
                         if let Some(panel) = context.panels.iter().find(|panel| &panel.id == panel_id) {
@@ -470,29 +457,30 @@ fn render_tile(tile: Tile, context: RenderContext) -> Element {
                                 let keyboard_tile = tile.id.clone();
                                 let tab_order = tile.panels.clone();
                                 rsx! {
-                                    div { key: "{panel_id}", class: "{tab_item_class}",
-                                    button {
+                                    div { key: "{panel_id}", class: "{tab_item_class} ui-hover-action-host",
+                                    Action {
+                                        purpose: ActionPurpose::Select,
+                                        variant: ActionVariant::Tab,
                                         id: "{tab_id}",
-                                        r#type: "button",
                                         class: "{tab_class}",
                                         role: "tab",
                                         draggable: "true",
                                         tabindex: "{tab_index}",
-                                        "aria-selected": is_active,
-                                        "aria-controls": "{controlled_panel_id}",
+                                        aria_selected: is_active,
+                                        aria_controls: "{controlled_panel_id}",
                                         title: "{title}. Drag to dock; Alt+Shift+Arrow splits; Alt+Shift+Page Up or Down moves between groups.",
                                         onclick: move |_| {
                                             mutate_layout(activate_context.clone(), |layout| layout.activate(&activate_id));
                                             activate_context.on_panel_activate.call(activate_id.clone());
                                         },
-                                        ondragstart: move |_| {
+                                        ondragstart: move |_: DragEvent| {
                                             drag_signal.set(Some(drag_id.clone()));
                                             drag_preview_signal.set(Some(DropPreview {
                                                 tile: drag_tile.clone(),
                                                 zone: DockZone::Center,
                                             }));
                                         },
-                                        onkeydown: move |event| {
+                                        onkeydown: move |event: KeyboardEvent| {
                                             if event.modifiers().alt() && event.modifiers().shift() {
                                                 let action = match event.key() {
                                                     Key::ArrowLeft => Some(KeyboardDock::Split(DockZone::Left)),
@@ -533,10 +521,11 @@ fn render_tile(tile: Tile, context: RenderContext) -> Element {
                                         span { class: "rp-tab-label", "{title}" }
                                     }
                                     if panel.closable {
-                                        button {
-                                            r#type: "button",
-                                            class: "rp-tab-close",
-                                            "aria-label": "Close {title}",
+                                        Action {
+                                            purpose: ActionPurpose::Close,
+                                            variant: ActionVariant::Icon,
+                                            class: "rp-tab-close ui-hover-action",
+                                            aria_label: "Close {title}",
                                             title: "Close {title}",
                                             onclick: move |_| close_context.on_panel_close.call(close_id.clone()),
                                             CloseIcon {}
@@ -552,10 +541,11 @@ fn render_tile(tile: Tile, context: RenderContext) -> Element {
                     }
                 }
                 div { class: "rp-tile-actions",
-                    button {
-                        r#type: "button",
-                        class: "rp-tile-action",
-                        "aria-label": "Split panel group right",
+                    Action {
+                        purpose: ActionPurpose::Create,
+                        variant: ActionVariant::Icon,
+                        class: "rp-tile-action ui-hover-action",
+                        aria_label: "Split panel group right",
                         title: "Split right (Alt+Shift+Right)",
                         onclick: move |_| {
                             mutate_layout(right_context.clone(), |layout| {
@@ -564,10 +554,11 @@ fn render_tile(tile: Tile, context: RenderContext) -> Element {
                         },
                         SplitRightIcon {}
                     }
-                    button {
-                        r#type: "button",
-                        class: "rp-tile-action",
-                        "aria-label": "Split panel group down",
+                    Action {
+                        purpose: ActionPurpose::Create,
+                        variant: ActionVariant::Icon,
+                        class: "rp-tile-action ui-hover-action",
+                        aria_label: "Split panel group down",
                         title: "Split down (Alt+Shift+Down)",
                         onclick: move |_| {
                             mutate_layout(down_context.clone(), |layout| {
@@ -577,10 +568,11 @@ fn render_tile(tile: Tile, context: RenderContext) -> Element {
                         SplitDownIcon {}
                     }
                     if tile.panels.is_empty() && (context.layout)().tile_count() > 1 {
-                        button {
-                            r#type: "button",
-                            class: "rp-tile-action",
-                            "aria-label": "Close empty panel group",
+                        Action {
+                            purpose: ActionPurpose::Close,
+                            variant: ActionVariant::Icon,
+                            class: "rp-tile-action ui-hover-action",
+                            aria_label: "Close empty panel group",
                             title: "Close empty group",
                             onclick: move |_| {
                                 mutate_layout(close_context.clone(), |layout| {
@@ -699,18 +691,13 @@ fn mutate_layout(context: RenderContext, mutation: impl FnOnce(&mut PanelLayout)
     if !mutation(&mut next) {
         return;
     }
-    store_if_requested(context.storage_key.as_deref(), &next);
     layout_signal.set(next.clone());
     context.on_layout_change.call(next);
     context.on_resize.call(());
 }
 
-fn layout_for_registry(
-    storage_key: Option<&str>,
-    initial_layout: PanelLayout,
-    placements: &[PanelPlacement],
-) -> PanelLayout {
-    let mut layout = storage_key.and_then(read_stored).unwrap_or(initial_layout);
+fn layout_for_registry(initial_layout: PanelLayout, placements: &[PanelPlacement]) -> PanelLayout {
+    let mut layout = initial_layout;
     layout.reconcile(placements);
     layout
 }
@@ -750,16 +737,8 @@ fn mobile_tab_dom_id(panel: &PanelId) -> String {
     format!("rp-mobile-tab-{}", safe_id(panel.as_str()))
 }
 
-#[cfg(feature = "web")]
 fn focus_tab(panel: &PanelId) {
-    let Some(element) = web_sys::window()
-        .and_then(|window| window.document())
-        .and_then(|document| document.get_element_by_id(&tab_dom_id(panel)))
-        .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
-    else {
-        return;
-    };
-    let _ = element.focus();
+    focus_element(&tab_dom_id(panel));
 }
 
 #[cfg(feature = "web")]
@@ -774,38 +753,7 @@ fn scroll_mobile_tab_into_view(panel: &PanelId) {
 }
 
 #[cfg(not(feature = "web"))]
-fn focus_tab(_panel: &PanelId) {}
-
-#[cfg(not(feature = "web"))]
 fn scroll_mobile_tab_into_view(_panel: &PanelId) {}
-
-#[cfg(feature = "web")]
-fn read_stored(key: &str) -> Option<PanelLayout> {
-    let value = web_sys::window()?
-        .local_storage()
-        .ok()??
-        .get_item(key)
-        .ok()??;
-    PanelLayout::decode(&value)
-}
-
-#[cfg(not(feature = "web"))]
-fn read_stored(_key: &str) -> Option<PanelLayout> {
-    None
-}
-
-#[cfg(feature = "web")]
-fn store_if_requested(key: Option<&str>, layout: &PanelLayout) {
-    let (Some(key), Some(value)) = (key, layout.encode()) else {
-        return;
-    };
-    if let Some(storage) = web_sys::window().and_then(|window| window.local_storage().ok()?) {
-        let _ = storage.set_item(key, &value);
-    }
-}
-
-#[cfg(not(feature = "web"))]
-fn store_if_requested(_key: Option<&str>, _layout: &PanelLayout) {}
 
 #[cfg(feature = "web")]
 fn element_span(id: &str, axis: SplitAxis) -> Option<f64> {
@@ -857,15 +805,6 @@ fn SplitDownIcon() -> Element {
         svg { view_box: "0 0 16 16", "aria-hidden": "true",
             rect { x: "2.5", y: "3", width: "11", height: "10", rx: "1", fill: "none", stroke: "currentColor" }
             path { d: "M2.5 8h11", fill: "none", stroke: "currentColor" }
-        }
-    }
-}
-
-#[component]
-fn CloseIcon() -> Element {
-    rsx! {
-        svg { view_box: "0 0 16 16", "aria-hidden": "true",
-            path { d: "m4 4 8 8m0-8-8 8", fill: "none", stroke: "currentColor", stroke_linecap: "round" }
         }
     }
 }

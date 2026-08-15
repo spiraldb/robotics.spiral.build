@@ -42,12 +42,11 @@ pub(crate) struct CalibrationHistoryActivity {
     pub recording: Option<String>,
     pub replaying: Option<String>,
     pub training_active: bool,
-    pub publication_active: bool,
 }
 
-/// Durable local changes completed before optional SpiralDB synchronization.
+/// Changes committed directly to the historical rows in SpiralDB.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ReappliedLocalPositions {
+pub(crate) struct ReappliedPositions {
     pub updated_episode_ids: Vec<String>,
     pub frames_updated: u64,
     pub episodes_unchanged: u64,
@@ -55,14 +54,13 @@ pub(crate) struct ReappliedLocalPositions {
     pub warnings: Vec<String>,
 }
 
-/// Result presented to the delivery layer after local state is durable.
+/// Result presented to the delivery layer after SpiralDB is durable.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ReapplyCalibrationOutput {
     pub episodes_updated: u64,
     pub frames_updated: u64,
     pub episodes_unchanged: u64,
     pub episodes_skipped: u64,
-    pub spiral_syncs_queued: u64,
     pub warnings: Vec<String>,
 }
 
@@ -73,15 +71,11 @@ pub(crate) trait CalibrationHistoryPort {
     fn activity(&self) -> CalibrationHistoryActivity;
     fn current_calibration(&self, robot: &str) -> Result<Option<Calibration>, ApplicationError>;
 
-    async fn reapply_local_positions(
+    async fn reapply_positions(
         &self,
         robot: String,
         calibration: Calibration,
-    ) -> Result<ReappliedLocalPositions, ApplicationError>;
-
-    /// Queue synchronization when a SpiralDB destination is configured.
-    /// `false` means the take intentionally remains local.
-    fn queue_spiral_sync(&self, episode: String) -> Result<bool, ApplicationError>;
+    ) -> Result<ReappliedPositions, ApplicationError>;
 }
 
 struct CalibrationHistoryReservation<'a, P: CalibrationHistoryPort + ?Sized> {
@@ -123,7 +117,7 @@ pub(crate) struct FinishCalibrationOutput {
 /// The ordering is part of the product contract: a read/build/write failure
 /// keeps the sweep alive so the operator does not lose collected motion. Once
 /// persistence succeeds, later adapter failures become warnings because the
-/// next connection can load the already-correct file.
+/// next connection can load the already-correct SpiralDB row.
 pub(crate) async fn finish<R, C>(
     repository: &R,
     control: &C,
@@ -197,39 +191,21 @@ where
                 .to_owned(),
         ));
     }
-    if activity.publication_active {
-        return Err(ApplicationError::Conflict(
-            "an episode is being published; wait for it to finish before reapplying calibration"
-                .to_owned(),
-        ));
-    }
-
     let calibration = port.current_calibration(robot)?.ok_or_else(|| {
         ApplicationError::InvalidInput(format!(
             "robot {robot:?} must have a saved calibration before positions can be reapplied"
         ))
     })?;
-    let local = port
-        .reapply_local_positions(robot.to_owned(), calibration)
+    let updated = port
+        .reapply_positions(robot.to_owned(), calibration)
         .await?;
-    let mut output = ReapplyCalibrationOutput {
-        episodes_updated: local.updated_episode_ids.len() as u64,
-        frames_updated: local.frames_updated,
-        episodes_unchanged: local.episodes_unchanged,
-        episodes_skipped: local.episodes_skipped,
-        warnings: local.warnings,
-        ..ReapplyCalibrationOutput::default()
-    };
-    for episode in local.updated_episode_ids {
-        match port.queue_spiral_sync(episode.clone()) {
-            Ok(true) => output.spiral_syncs_queued += 1,
-            Ok(false) => {}
-            Err(error) => output.warnings.push(format!(
-                "take {episode:?} was updated locally but could not be queued for SpiralDB: {error}"
-            )),
-        }
-    }
-    Ok(output)
+    Ok(ReapplyCalibrationOutput {
+        episodes_updated: updated.updated_episode_ids.len() as u64,
+        frames_updated: updated.frames_updated,
+        episodes_unchanged: updated.episodes_unchanged,
+        episodes_skipped: updated.episodes_skipped,
+        warnings: updated.warnings,
+    })
 }
 
 #[cfg(test)]
@@ -287,7 +263,7 @@ mod tests {
         ) -> Result<(), ApplicationError> {
             self.events.lock().unwrap().push("save");
             if self.fail_save {
-                Err(ApplicationError::Internal("disk is busy".to_owned()))
+                Err(ApplicationError::Internal("Spiral is busy".to_owned()))
             } else {
                 Ok(())
             }
@@ -386,7 +362,10 @@ mod tests {
     async fn persistence_failure_keeps_the_sweep_alive() {
         let (repository, control) = setup(true, Ok(input()));
         let error = finish(&repository, &control, "arm").await.unwrap_err();
-        assert_eq!(error, ApplicationError::Internal("disk is busy".to_owned()));
+        assert_eq!(
+            error,
+            ApplicationError::Internal("Spiral is busy".to_owned())
+        );
         assert_eq!(*repository.events.lock().unwrap(), ["specs", "save"]);
         assert_eq!(*control.events.lock().unwrap(), ["input"]);
     }
@@ -437,9 +416,7 @@ mod tests {
         lease: CatalogMutationLease,
         activity: CalibrationHistoryActivity,
         calibration: Option<Calibration>,
-        local: ReappliedLocalPositions,
-        synced: Mutex<Vec<String>>,
-        fail_sync: bool,
+        updated: ReappliedPositions,
     }
 
     impl CalibrationHistoryPort for History {
@@ -463,21 +440,12 @@ mod tests {
             Ok(self.calibration.clone())
         }
 
-        async fn reapply_local_positions(
+        async fn reapply_positions(
             &self,
             _robot: String,
             _calibration: Calibration,
-        ) -> Result<ReappliedLocalPositions, ApplicationError> {
-            Ok(self.local.clone())
-        }
-
-        fn queue_spiral_sync(&self, episode: String) -> Result<bool, ApplicationError> {
-            self.synced.lock().unwrap().push(episode);
-            if self.fail_sync {
-                Err(ApplicationError::Internal("catalog offline".to_owned()))
-            } else {
-                Ok(true)
-            }
+        ) -> Result<ReappliedPositions, ApplicationError> {
+            Ok(self.updated.clone())
         }
     }
 
@@ -487,20 +455,18 @@ mod tests {
             lease: CatalogMutationLease::default(),
             activity: CalibrationHistoryActivity::default(),
             calibration: Some(calibration),
-            local: ReappliedLocalPositions {
+            updated: ReappliedPositions {
                 updated_episode_ids: vec!["episode_000001".to_owned(), "episode_000002".to_owned()],
                 frames_updated: 120,
                 episodes_unchanged: 3,
                 episodes_skipped: 1,
                 warnings: vec!["one old take was incomplete".to_owned()],
             },
-            synced: Mutex::new(Vec::new()),
-            fail_sync: false,
         }
     }
 
     #[tokio::test]
-    async fn historical_state_is_rewritten_before_changed_takes_are_synced() {
+    async fn historical_state_is_rewritten_directly_in_spiral() {
         let history = history();
         let output = reapply_history(&history, "arm").await.unwrap();
 
@@ -508,29 +474,7 @@ mod tests {
         assert_eq!(output.frames_updated, 120);
         assert_eq!(output.episodes_unchanged, 3);
         assert_eq!(output.episodes_skipped, 1);
-        assert_eq!(output.spiral_syncs_queued, 2);
-        assert_eq!(
-            *history.synced.lock().unwrap(),
-            ["episode_000001", "episode_000002"]
-        );
         assert!(!history.lease.is_held());
-    }
-
-    #[tokio::test]
-    async fn remote_sync_failure_does_not_undo_durable_local_recalibration() {
-        let mut history = history();
-        history.fail_sync = true;
-
-        let output = reapply_history(&history, "arm").await.unwrap();
-
-        assert_eq!(output.episodes_updated, 2);
-        assert_eq!(output.spiral_syncs_queued, 0);
-        assert!(
-            output
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("offline"))
-        );
     }
 
     #[tokio::test]
@@ -548,16 +492,11 @@ mod tests {
                 training_active: true,
                 ..CalibrationHistoryActivity::default()
             },
-            CalibrationHistoryActivity {
-                publication_active: true,
-                ..CalibrationHistoryActivity::default()
-            },
         ] {
             let mut history = history();
             history.activity = activity;
             let error = reapply_history(&history, "arm").await.unwrap_err();
             assert!(matches!(error, ApplicationError::Conflict(_)));
-            assert!(history.synced.lock().unwrap().is_empty());
             assert!(!history.lease.is_held());
         }
     }

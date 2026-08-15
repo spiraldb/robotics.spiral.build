@@ -1,7 +1,7 @@
 //! Application-owned execution workflow for an injected training backend.
 //!
 //! Concrete adapters resolve credentials, validate ADBC queries, persist run
-//! history, launch tasks, and publish checkpoint bytes. This module owns the
+//! history, launch tasks, and persist checkpoint bytes. This module owns the
 //! ordering, compensation, event acceptance, and terminal-state policy around
 //! those effects.
 
@@ -13,8 +13,8 @@ use crate::backend::application::training::{
 
 const STARTING_MESSAGE: &str = "Opening the Spiral ADBC stream and training backend…";
 const STOPPING_MESSAGE: &str =
-    "Finishing the current Arrow read or optimizer step and publishing a final checkpoint…";
-const DRAINED_CHECKPOINT_ERROR: &str = "trainer completed before checkpoint publication";
+    "Finishing the current Arrow read or optimizer step and saving a final checkpoint…";
+const DRAINED_CHECKPOINT_ERROR: &str = "trainer completed before checkpoint persistence";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TrainingRunIdentity {
@@ -22,18 +22,10 @@ pub(crate) struct TrainingRunIdentity {
     pub created_ms: i64,
 }
 
-/// A plain source identity paired with an adapter-owned launch capability.
-pub(crate) struct ResolvedTrainingSource<T> {
-    pub source: TrainingSource,
-    pub handle: T,
-}
-
 /// Immutable input handed back to the runtime adapter after admission.
-pub(crate) struct TrainingLaunch<T> {
+pub(crate) struct TrainingLaunch {
     pub run_id: String,
     pub command: StartTrainingCommand,
-    pub source: TrainingSource,
-    pub source_handle: T,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -57,42 +49,23 @@ pub(crate) trait TrainingRunPort: Send + Sync {
     fn now_ms(&self) -> i64;
 }
 
-/// Effects required by start admission. `SourceHandle` is deliberately opaque:
-/// it is minted by `resolve_training_source` and consumed only by
-/// `launch_training_runtime`, so credentials and database types cannot escape
-/// into policy.
+/// Effects required by start admission.
 pub(crate) trait TrainingCoordinatorPort: TrainingRunPort {
-    type SourceHandle;
-
     async fn refresh_training_readiness(&self) -> TrainingReadiness;
 
-    fn resolve_training_source(
-        &self,
-        dataset_id: &str,
-    ) -> Result<ResolvedTrainingSource<Self::SourceHandle>, ApplicationError>;
+    fn resolve_training_source(&self, dataset_id: &str)
+    -> Result<TrainingSource, ApplicationError>;
 
     async fn validate_training_query(
         &self,
-        handle: &Self::SourceHandle,
         command: &StartTrainingCommand,
     ) -> Result<(), ApplicationError>;
 
     fn next_training_identity(&self) -> TrainingRunIdentity;
 
-    fn register_training_source(
-        &self,
-        run_id: &str,
-        source: &TrainingSource,
-    ) -> Result<(), ApplicationError>;
-
-    fn unregister_training_source(&self, run_id: &str, source: &TrainingSource);
-
     fn admit_training_run(&self, run: TrainingRun) -> Result<(), ApplicationError>;
 
-    fn launch_training_runtime(
-        &self,
-        launch: TrainingLaunch<Self::SourceHandle>,
-    ) -> Result<(), ApplicationError>;
+    fn launch_training_runtime(&self, launch: TrainingLaunch) -> Result<(), ApplicationError>;
 }
 
 pub(crate) async fn coordinate_training_start<P>(
@@ -107,14 +80,13 @@ where
         return Err(ApplicationError::Conflict(readiness.summary));
     }
 
-    let resolved = port.resolve_training_source(&command.dataset_id)?;
-    port.validate_training_query(&resolved.handle, &command)
-        .await?;
+    let source = port.resolve_training_source(&command.dataset_id)?;
+    port.validate_training_query(&command).await?;
     let identity = port.next_training_identity();
     let run = TrainingRun {
         id: identity.id.clone(),
         config: command.clone(),
-        source: resolved.source.clone(),
+        source: source.clone(),
         phase: TrainingRunPhase::Starting,
         current_step: 0,
         started_ms: identity.created_ms,
@@ -125,17 +97,11 @@ where
         logs: Vec::new(),
     };
 
-    port.register_training_source(&run.id, &run.source)?;
-    if let Err(error) = port.admit_training_run(run.clone()) {
-        port.unregister_training_source(&run.id, &run.source);
-        return Err(error);
-    }
+    port.admit_training_run(run.clone())?;
 
     let launch = TrainingLaunch {
         run_id: run.id.clone(),
         command,
-        source: resolved.source,
-        source_handle: resolved.handle,
     };
     if let Err(error) = port.launch_training_runtime(launch) {
         fail_run(port, &run.id, error.message().to_owned());
@@ -163,7 +129,7 @@ where
         },
     );
     // Preserve the safety property that a stop request reaches the worker even
-    // when durable state publication fails.
+    // when durable state persistence fails.
     port.signal_runtime_stop(run_id);
     if let Err(error) = transition {
         port.mark_persistence_failure(run_id, &error);
@@ -195,28 +161,22 @@ pub(crate) struct TrainingRuntimeOutcome {
 pub(crate) struct TrainingRuntimeSession {
     run_id: String,
     resolved_command: StartTrainingCommand,
-    source: TrainingSource,
-    publication_failure: Option<String>,
+    persistence_failure: Option<String>,
 }
 
 impl TrainingRuntimeSession {
-    pub(crate) fn new(
-        run_id: String,
-        command: StartTrainingCommand,
-        source: TrainingSource,
-    ) -> Self {
+    pub(crate) fn new(run_id: String, command: StartTrainingCommand) -> Self {
         Self {
             run_id,
             resolved_command: command,
-            source,
-            publication_failure: None,
+            persistence_failure: None,
         }
     }
 }
 
 /// Runtime-side effects. `CheckpointEnvelope` may contain native tensors or an
 /// acknowledgement channel, but is closed-loop between the runtime adapter and
-/// its checkpoint publisher/rejector.
+/// its checkpoint writer/rejector.
 pub(crate) trait TrainingRuntimePort: TrainingRunPort {
     type CheckpointEnvelope;
 
@@ -232,11 +192,10 @@ pub(crate) trait TrainingRuntimePort: TrainingRunPort {
 
     fn record_log(&self, run_id: &str, message: String);
 
-    async fn publish_runtime_checkpoint(
+    async fn persist_runtime_checkpoint(
         &self,
         run_id: &str,
         command: &StartTrainingCommand,
-        source: &TrainingSource,
         checkpoint: Self::CheckpointEnvelope,
     ) -> Result<(), String>;
 
@@ -251,7 +210,7 @@ pub(crate) async fn accept_runtime_event<P, T>(
 ) where
     P: TrainingRuntimePort<CheckpointEnvelope = T> + ?Sized,
 {
-    if let Some(error) = session.publication_failure.clone() {
+    if let Some(error) = session.persistence_failure.clone() {
         if let TrainingRuntimeEvent::Checkpoint(checkpoint) = event {
             port.reject_runtime_checkpoint(checkpoint, error);
         }
@@ -263,7 +222,7 @@ pub(crate) async fn accept_runtime_event<P, T>(
             let error = DRAINED_CHECKPOINT_ERROR.to_owned();
             port.reject_runtime_checkpoint(checkpoint, error.clone());
             fail_run(port, &session.run_id, error.clone());
-            session.publication_failure = Some(error);
+            session.persistence_failure = Some(error);
         }
         TrainingRuntimeEvent::Configured(command) => {
             session.resolved_command = *command;
@@ -291,17 +250,12 @@ pub(crate) async fn accept_runtime_event<P, T>(
         TrainingRuntimeEvent::Log(message) => port.record_log(&session.run_id, message),
         TrainingRuntimeEvent::Checkpoint(checkpoint) => {
             if let Err(error) = port
-                .publish_runtime_checkpoint(
-                    &session.run_id,
-                    &session.resolved_command,
-                    &session.source,
-                    checkpoint,
-                )
+                .persist_runtime_checkpoint(&session.run_id, &session.resolved_command, checkpoint)
                 .await
             {
                 port.signal_runtime_stop(&session.run_id);
                 fail_run(port, &session.run_id, error.clone());
-                session.publication_failure = Some(error);
+                session.persistence_failure = Some(error);
             }
         }
     }
@@ -315,7 +269,7 @@ pub(crate) fn complete_runtime<P>(
     P: TrainingRunPort + ?Sized,
 {
     port.cleanup_runtime(&session.run_id);
-    if session.publication_failure.is_some() {
+    if session.persistence_failure.is_some() {
         return;
     }
 
@@ -336,7 +290,7 @@ pub(crate) fn complete_runtime<P>(
             phase: TrainingRunPhase::Stopped,
             finished_ms: Some(port.now_ms()),
             message: Some(format!(
-                "Stopped after step {}; the final checkpoint was published to Spiral.",
+                "Stopped after step {}; the final checkpoint was saved to Spiral.",
                 outcome.steps
             )),
         },
@@ -344,7 +298,7 @@ pub(crate) fn complete_runtime<P>(
             phase: TrainingRunPhase::Completed,
             finished_ms: Some(port.now_ms()),
             message: Some(format!(
-                "Completed {} steps; the final checkpoint was published to Spiral.",
+                "Completed {} steps; the final checkpoint was saved to Spiral.",
                 outcome.steps
             )),
         },
@@ -360,7 +314,7 @@ where
 {
     port.signal_runtime_stop(&session.run_id);
     port.mark_persistence_failure(&session.run_id, &error);
-    session.publication_failure = Some(error);
+    session.persistence_failure = Some(error);
 }
 
 fn fail_run<P>(port: &P, run_id: &str, message: String)
@@ -460,8 +414,6 @@ mod tests {
     }
 
     impl TrainingCoordinatorPort for FakePort {
-        type SourceHandle = String;
-
         async fn refresh_training_readiness(&self) -> TrainingReadiness {
             self.push("readiness");
             self.readiness.clone()
@@ -470,17 +422,13 @@ mod tests {
         fn resolve_training_source(
             &self,
             dataset_id: &str,
-        ) -> Result<ResolvedTrainingSource<Self::SourceHandle>, ApplicationError> {
+        ) -> Result<TrainingSource, ApplicationError> {
             self.push(format!("resolve:{dataset_id}"));
-            Ok(ResolvedTrainingSource {
-                source: source(),
-                handle: "credentials".to_owned(),
-            })
+            Ok(source())
         }
 
         async fn validate_training_query(
             &self,
-            _handle: &Self::SourceHandle,
             _command: &StartTrainingCommand,
         ) -> Result<(), ApplicationError> {
             self.push("validate");
@@ -498,19 +446,6 @@ mod tests {
             }
         }
 
-        fn register_training_source(
-            &self,
-            run_id: &str,
-            _source: &TrainingSource,
-        ) -> Result<(), ApplicationError> {
-            self.push(format!("register:{run_id}"));
-            Ok(())
-        }
-
-        fn unregister_training_source(&self, run_id: &str, _source: &TrainingSource) {
-            self.push(format!("unregister:{run_id}"));
-        }
-
         fn admit_training_run(&self, run: TrainingRun) -> Result<(), ApplicationError> {
             self.push(format!("admit:{}", run.id));
             if self.fail == Some("admit") {
@@ -519,10 +454,7 @@ mod tests {
             Ok(())
         }
 
-        fn launch_training_runtime(
-            &self,
-            launch: TrainingLaunch<Self::SourceHandle>,
-        ) -> Result<(), ApplicationError> {
+        fn launch_training_runtime(&self, launch: TrainingLaunch) -> Result<(), ApplicationError> {
             self.push(format!("launch:{}", launch.run_id));
             if self.fail == Some("launch") {
                 return Err(ApplicationError::Internal("launch failed".to_owned()));
@@ -559,11 +491,10 @@ mod tests {
             self.push(format!("log:{run_id}:{message}"));
         }
 
-        async fn publish_runtime_checkpoint(
+        async fn persist_runtime_checkpoint(
             &self,
             run_id: &str,
             _command: &StartTrainingCommand,
-            _source: &TrainingSource,
             checkpoint: Self::CheckpointEnvelope,
         ) -> Result<(), String> {
             self.push(format!("checkpoint:{run_id}:{checkpoint}"));
@@ -614,14 +545,12 @@ mod tests {
 
     fn source() -> TrainingSource {
         TrainingSource {
-            project: "project".to_owned(),
-            dataset: "namespace".to_owned(),
             dataset_id: "dataset".to_owned(),
         }
     }
 
     fn session() -> TrainingRuntimeSession {
-        TrainingRuntimeSession::new("run-1".to_owned(), command(), source())
+        TrainingRuntimeSession::new("run-1".to_owned(), command())
     }
 
     #[tokio::test]
@@ -636,7 +565,6 @@ mod tests {
                 "resolve:dataset",
                 "validate",
                 "identity",
-                "register:run-1",
                 "admit:run-1",
                 "launch:run-1",
             ]
@@ -656,14 +584,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_failure_precedes_identity_registration_and_admission() {
+    async fn query_failure_precedes_identity_and_admission() {
         let port = FakePort::with_failure("validate");
         assert!(coordinate_training_start(&port, command()).await.is_err());
         assert_eq!(port.events(), ["readiness", "resolve:dataset", "validate"]);
     }
 
     #[tokio::test]
-    async fn admission_failure_unregisters_the_immutable_source() {
+    async fn admission_failure_stops_before_launch() {
         let port = FakePort::with_failure("admit");
         assert!(coordinate_training_start(&port, command()).await.is_err());
         assert_eq!(
@@ -673,9 +601,7 @@ mod tests {
                 "resolve:dataset",
                 "validate",
                 "identity",
-                "register:run-1",
                 "admit:run-1",
-                "unregister:run-1",
             ]
         );
     }
@@ -691,7 +617,6 @@ mod tests {
                 "resolve:dataset",
                 "validate",
                 "identity",
-                "register:run-1",
                 "admit:run-1",
                 "launch:run-1",
                 "transition:run-1:Failed",
@@ -802,7 +727,7 @@ mod tests {
         )
         .await;
         assert_eq!(
-            session.publication_failure.as_deref(),
+            session.persistence_failure.as_deref(),
             Some("checkpoint failed")
         );
         complete_runtime(
@@ -908,7 +833,7 @@ mod tests {
         assert_eq!(
             port.events(),
             [
-                "reject:late:trainer completed before checkpoint publication",
+                "reject:late:trainer completed before checkpoint persistence",
                 "transition:run-1:Failed",
             ]
         );

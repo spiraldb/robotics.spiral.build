@@ -136,9 +136,33 @@ fn LiveCameraFrame(robot: String, role: String, device: String) -> Element {
     // live image element while WebKit was painting it, which presented as a flash. The
     // backend camera status is already authoritative and lets the image node
     // remain completely stable for the life of this panel.
+    // A camera can fail without reporting an error string: denied OS permission
+    // leaves the device listed, `error: null`, and `streaming: false` forever.
+    // Reading only `error` meant nothing was drawn over the mat, so the browser
+    // filled the empty <img> with its own broken-image rendering — the alt text,
+    // in the default ink, at the top-left corner of a near-black panel. That is
+    // exactly the permanently blank preview the design system says to replace
+    // with an explicit report, and it arrived in the one place that had no say
+    // over how it looked. `streaming` is the backend's own verdict, so it costs
+    // no image lifecycle events to consult.
     let problem = match status {
         None => Some("This assigned camera is not currently detected.".to_owned()),
-        Some(status) => status.error,
+        Some(status) => status.error.clone().or_else(|| {
+            if !status.streaming {
+                Some("This camera is assigned but its capture stream is not running.".to_owned())
+            } else if status.frames == 0 {
+                // Denied camera permission on macOS looks exactly like this from
+                // the backend: the capture thread opens, reports `streaming`,
+                // and never delivers a frame or an error. A healthy camera
+                // leaves this state within one frame period.
+                Some(
+                    "No frames received yet. On macOS this is usually camera permission — check System Settings › Privacy & Security › Camera."
+                        .to_owned(),
+                )
+            } else {
+                None
+            }
+        }),
     };
 
     rsx! {

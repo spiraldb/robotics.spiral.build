@@ -1,6 +1,7 @@
 //! Low-frequency Studio chrome around the activity workspaces.
 
 use dioxus::prelude::*;
+use spiral_robotics_ui::{Action, ActionPurpose, ActionVariant, focus_after_render};
 
 use crate::frontend::app::activity::Activity;
 use crate::frontend::app::notifications::MessageAction;
@@ -16,43 +17,48 @@ pub(crate) fn ActivityRail(
 ) -> Element {
     rsx! {
         nav { class: "studio-activity-rail", "aria-label": "Application",
-            button {
-                r#type: "button",
+            Action {
+                purpose: ActionPurpose::Navigate,
+                variant: ActionVariant::Row,
                 class: if activity == Activity::Live { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
-                "aria-pressed": activity == Activity::Live,
+                aria_pressed: activity == Activity::Live,
                 onclick: move |_| on_activity.call(Activity::Live),
                 RobotPanelIcon {}
                 span { "Live" }
             }
-            button {
-                r#type: "button",
+            Action {
+                purpose: ActionPurpose::Navigate,
+                variant: ActionVariant::Row,
                 class: if activity == Activity::Data { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
-                "aria-pressed": activity == Activity::Data,
+                aria_pressed: activity == Activity::Data,
                 onclick: move |_| on_activity.call(Activity::Data),
                 DataIcon {}
                 span { "Data" }
             }
-            button {
-                r#type: "button",
+            Action {
+                purpose: ActionPurpose::Navigate,
+                variant: ActionVariant::Row,
                 class: if activity == Activity::Training { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
-                "aria-pressed": activity == Activity::Training,
+                aria_pressed: activity == Activity::Training,
                 onclick: move |_| on_activity.call(Activity::Training),
                 TrainingIcon {}
                 span { "Training" }
             }
-            button {
-                r#type: "button",
+            Action {
+                purpose: ActionPurpose::Navigate,
+                variant: ActionVariant::Row,
                 class: if activity == Activity::Rollout { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
-                "aria-pressed": activity == Activity::Rollout,
+                aria_pressed: activity == Activity::Rollout,
                 onclick: move |_| on_activity.call(Activity::Rollout),
                 RolloutIcon {}
                 span { "Rollout" }
             }
-            button {
+            Action {
                 id: "settings-rail-trigger",
-                r#type: "button",
+                purpose: ActionPurpose::Navigate,
+                variant: ActionVariant::Row,
                 class: "activity-rail-item activity-rail-settings",
-                "aria-label": "Settings",
+                aria_label: "Settings",
                 title: "Settings",
                 onclick: move |_| on_settings.call(()),
                 SettingsIcon {}
@@ -79,7 +85,14 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
     let mode_label = snapshot.mode.selection.label();
     let status_mode = format!("{} · {mode_label}", mode.label());
     let arms_label = format!("{connected_arms}/{} arms", snapshot.robots.len());
-    let robot_problems_label = format!("{} robot problems", snapshot.issues.len());
+    // A bench with nothing wrong on it does not need a line saying so, and the
+    // count that appears when something is wrong should be able to say "1 robot
+    // problem" without the trailing s the fixed string used to force.
+    let robot_problems_label = match snapshot.issues.len() {
+        0 => None,
+        1 => Some("1 robot problem".to_owned()),
+        count => Some(format!("{count} robot problems")),
+    };
     let training_problem_count = snapshot.issues.len() + usize::from(!training.readiness.ready);
     let training_problems_label = format!(
         "{training_problem_count} {}",
@@ -102,6 +115,22 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
     let training_step =
         training_run.map(|run| format!("step {} / {}", run.current_step, run.config.steps));
     let training_runs_label = format!("{} runs", training.runs.len());
+    let (mobile_state, mobile_state_critical) = if mode == Activity::Training {
+        (
+            if training.readiness.ready {
+                "Training ready".to_owned()
+            } else {
+                "Training unavailable".to_owned()
+            },
+            false,
+        )
+    } else if let Some(recording) = recording_label.as_ref() {
+        (recording.clone(), true)
+    } else if holding > 0 {
+        (format!("{holding} holding"), true)
+    } else {
+        (status_mode.clone(), false)
+    };
     let center = studio.notifications.read().clone();
     let now = (studio.clock_ms)();
     let unread = center.unread_count();
@@ -121,15 +150,9 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
     use_effect(use_reactive((&center_open,), move |(center_open,)| {
         let was_open = center_was_open();
         if center_open && !was_open {
-            spawn(async {
-                gloo_timers::future::TimeoutFuture::new(0).await;
-                focus_element("notification-center-close");
-            });
+            focus_after_render("notification-center-close".to_owned());
         } else if !center_open && was_open {
-            spawn(async {
-                gloo_timers::future::TimeoutFuture::new(0).await;
-                focus_element("notification-center-trigger");
-            });
+            focus_after_render("notification-center-trigger".to_owned());
         }
         if was_open != center_open {
             center_was_open.set(center_open);
@@ -161,16 +184,18 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                         span { "{message_count} in this session" }
                     }
                     if message_count > 0 {
-                        button {
-                            r#type: "button",
+                        Action {
+                            purpose: ActionPurpose::Remove,
+                            variant: ActionVariant::Link,
                             class: "notification-center-action",
                             onclick: move |_| studio.notifications.write().clear(),
                             "Clear all"
                         }
                     }
-                    button {
+                    Action {
                         id: "notification-center-close",
-                        r#type: "button",
+                        purpose: ActionPurpose::Close,
+                        variant: ActionVariant::Link,
                         class: "notification-center-action",
                         onclick: move |_| studio.notifications.write().close(),
                         "Close"
@@ -194,20 +219,26 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                                 p { "{message.text}" }
                                 div { class: "notification-item-actions",
                                     if let Some(action) = message.action.clone() {
-                                        button {
-                                            r#type: "button",
-                                            class: "notification-primary-action",
-                                            onclick: move |_| {
-                                                match &action {
-                                                    MessageAction::OpenEpisode(episode) => on_open_episode.call(episode.clone()),
-                                                }
-                                                studio.notifications.write().close();
-                                            },
-                                            "{action.label()}"
+                                        {
+                                            let action_label = action.label();
+                                            let action_for_click = action.clone();
+                                            rsx! { Action {
+                                                purpose: ActionPurpose::Navigate,
+                                                variant: ActionVariant::Solid,
+                                                class: "notification-primary-action",
+                                                onclick: move |_| {
+                                                    match &action_for_click {
+                                                        MessageAction::OpenEpisode(episode) => on_open_episode.call(episode.clone()),
+                                                    }
+                                                    studio.notifications.write().close();
+                                                },
+                                                "{action_label}"
+                                            } }
                                         }
                                     }
-                                    button {
-                                        r#type: "button",
+                                    Action {
+                                        purpose: ActionPurpose::Remove,
+                                        variant: ActionVariant::Link,
                                         class: "notification-center-action",
                                         onclick: move |_| studio.notifications.write().dismiss(message.id),
                                         "Dismiss"
@@ -243,6 +274,7 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                     if let Some(phase) = training_phase { span { class: "status-bar-item", "{phase}" } }
                     if let Some(step) = training_step { span { class: "status-bar-item", "{step}" } }
                     span { class: "status-bar-item", "{training_problems_label}" }
+                    span { class: "status-bar-mobile-state", title: "{mobile_state}", "{mobile_state}" }
                     NotificationTrigger { unread, open: center_open }
                 }
             }
@@ -253,7 +285,7 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                         span { class: "status-dot", style: if connected { "background: var(--tone-good)" } else { "background: var(--tone-danger)" } }
                         if connected { "Connected" } else { "Reconnecting" }
                     }
-                    span { class: "status-bar-item", if snapshot.simulated { "Motors simulated" } else { "Physical hardware" } }
+                    span { class: "status-bar-item", "Physical hardware" }
                     span { class: "status-bar-item", "{arms_label}" }
                 }
                 div { class: "status-bar-group status-bar-group-right",
@@ -271,7 +303,14 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                     if holding > 0 { span { class: "status-bar-item status-bar-danger", "{holding} holding" } }
                     span { class: "status-bar-item status-bar-accent", "{status_mode}" }
                     if telemetry.target_hz > 0.0 { span { class: "status-bar-item", "{rate_label}" } }
-                    span { class: "status-bar-item", "{robot_problems_label}" }
+                    if let Some(robot_problems_label) = robot_problems_label {
+                        span { class: "status-bar-item status-bar-caution", "{robot_problems_label}" }
+                    }
+                    span {
+                        class: if mobile_state_critical { "status-bar-mobile-state status-bar-danger" } else { "status-bar-mobile-state status-bar-accent" },
+                        title: "{mobile_state}",
+                        "{mobile_state}"
+                    }
                     NotificationTrigger { unread, open: center_open }
                 }
             }
@@ -304,13 +343,14 @@ fn SavedToDataCue(episode: String) -> Element {
 fn NotificationTrigger(unread: usize, open: bool) -> Element {
     let mut studio = crate::frontend::app::state::studio();
     rsx! {
-        button {
+        Action {
             id: "notification-center-trigger",
-            r#type: "button",
+            purpose: ActionPurpose::Toggle,
+            variant: ActionVariant::Icon,
             class: "status-bar-notifications",
-            "aria-label": if unread == 0 { "Open notifications" } else { "Open notifications, {unread} unread" },
-            "aria-expanded": open,
-            "aria-controls": "notification-center",
+            aria_label: if unread == 0 { "Open notifications" } else { "Open notifications, {unread} unread" },
+            aria_expanded: open,
+            aria_controls: "notification-center",
             title: if unread == 0 { "Notifications" } else { "{unread} unread notifications" },
             onclick: move |_| studio.notifications.write().toggle(),
             NotificationIcon {}
@@ -318,23 +358,6 @@ fn NotificationTrigger(unread: usize, open: bool) -> Element {
         }
     }
 }
-
-#[cfg(feature = "web")]
-fn focus_element(id: &str) {
-    use wasm_bindgen::JsCast as _;
-
-    let Some(element) = web_sys::window()
-        .and_then(|window| window.document())
-        .and_then(|document| document.get_element_by_id(id))
-        .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
-    else {
-        return;
-    };
-    let _ = element.focus();
-}
-
-#[cfg(not(feature = "web"))]
-fn focus_element(_id: &str) {}
 
 fn format_message_age(now_ms: f64, raised_ms: f64) -> String {
     let seconds = ((now_ms - raised_ms) / 1_000.0).max(0.0);

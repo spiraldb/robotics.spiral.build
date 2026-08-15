@@ -4,6 +4,9 @@ use std::collections::BTreeSet;
 
 use dioxus::prelude::*;
 use spiral_robotics_contracts::api::{ModeSelection, default_teleoperation_pair};
+use spiral_robotics_ui::{
+    Action, ActionPurpose, ActionVariant, BlockingConfirmation, ModeAction, ModeGroup,
+};
 
 use crate::frontend::app::state::{Selection, studio};
 use crate::frontend::screens::live::actions::LiveAction;
@@ -11,7 +14,7 @@ use crate::frontend::screens::live::control::JointPanel;
 
 /// The complete left-hand workbench for operating a connected pair.
 #[component]
-pub fn LiveWorkbench(on_action: EventHandler<LiveAction>) -> Element {
+pub(crate) fn LiveWorkbench(on_action: EventHandler<LiveAction>) -> Element {
     let studio = studio();
     let robots = studio.snapshot.read().robots.clone();
 
@@ -121,14 +124,15 @@ fn RobotRoster(
                             studio.position_of(&robot.id),
                         );
                     rsx! {
-                        button {
+                        Action {
                             key: "{robot.id}",
-                            r#type: "button",
-                            class: if selected { "live-robot-row live-robot-row-selected" } else { "live-robot-row" },
+                            purpose: ActionPurpose::Select,
+                            variant: ActionVariant::Row,
+                            class: "live-robot-row",
                             role: "tab",
-                            "aria-pressed": selected,
-                            "aria-selected": selected,
-                            "aria-label": "{accessible_label}",
+                            aria_pressed: selected,
+                            aria_selected: selected,
+                            aria_label: "{accessible_label}",
                             title: "{state}",
                             onclick: move |_| on_select.call(Some(Selection::Robot(id.clone()))),
                             span {
@@ -172,30 +176,39 @@ fn ControlSection(on_action: EventHandler<LiveAction>) -> Element {
                 h3 { "Control" }
                 if teleop { span { "Leader → follower" } }
             }
-            div { class: "control-segmented", role: "group", "aria-label": "Motor control mode",
-                button {
-                    r#type: "button",
-                    class: if holding && !teleop { "control-segment control-segment-active control-segment-energized" } else { "control-segment" },
+            ModeGroup { class: "control-segmented", label: "Motor control mode",
+                ModeAction {
+                    purpose: ActionPurpose::Hold,
+                    checked: holding && !teleop,
+                    class: "control-segment",
                     disabled: focused.is_none() || telemetry.is_none(),
                     onclick: {
                         let id = focused.as_ref().map(|robot| robot.id.clone());
-                        move |_| if let Some(id) = id.clone() { on_action.call(LiveAction::Hold(id)); }
+                        move |_| if (!holding || teleop)
+                            && let Some(id) = id.clone()
+                        {
+                            on_action.call(LiveAction::Hold(id));
+                        }
                     },
                     "Hold"
                 }
-                button {
-                    r#type: "button",
-                    class: if !holding && !teleop { "control-segment control-segment-active" } else { "control-segment" },
+                ModeAction {
+                    id: "motor-mode-release",
+                    purpose: ActionPurpose::Release,
+                    checked: !holding && !teleop,
+                    class: "control-segment",
+                    aria_label: "Release motor torque",
                     disabled: focused.is_none() || telemetry.is_none(),
-                    onclick: move |_| confirm_release.set(true),
+                    onclick: move |_| if holding || teleop { confirm_release.set(true) },
                     "Release"
                 }
-                button {
-                    r#type: "button",
-                    class: if teleop { "control-segment control-segment-active control-segment-energized" } else { "control-segment" },
+                ModeAction {
+                    purpose: ActionPurpose::Teleoperate,
+                    checked: teleop,
+                    class: "control-segment",
                     disabled: pair.is_none() || !studio.controls_available(),
                     onclick: move |_| {
-                        if let Some((leader, follower)) = pair.clone() {
+                        if !teleop && let Some((leader, follower)) = pair.clone() {
                             on_action.call(LiveAction::Teleoperate { leader, follower });
                         }
                     },
@@ -203,20 +216,23 @@ fn ControlSection(on_action: EventHandler<LiveAction>) -> Element {
                 }
             }
             if confirm_release() {
-                div { class: "inline-safety-confirm", role: "alert",
-                    span { "Support the arm—it goes limp when released." }
-                    button {
-                        r#type: "button", class: "studio-button studio-button-danger",
-                        onclick: {
-                            let id = focused.as_ref().map(|robot| robot.id.clone());
-                            move |_| {
-                                confirm_release.set(false);
-                                if let Some(id) = id.clone() { on_action.call(LiveAction::Release(id)); }
-                            }
-                        },
-                        "Release"
-                    }
-                    button { r#type: "button", class: "studio-button", onclick: move |_| confirm_release.set(false), "Cancel" }
+                BlockingConfirmation {
+                    id: "release-arm-confirmation",
+                    title: focused.as_ref().map(|robot| format!("Release {}?", robot.id)).unwrap_or_else(|| "Release arm?".to_owned()),
+                    message: "Support the arm before continuing.".to_owned(),
+                    consequence: "Motor torque will turn off immediately and the arm can fall under its own weight.".to_owned(),
+                    confirm_label: "Release arm",
+                    cancel_label: "Keep holding",
+                    purpose: ActionPurpose::Release,
+                    return_focus_id: "motor-mode-release",
+                    on_confirm: {
+                        let id = focused.as_ref().map(|robot| robot.id.clone());
+                        move |_| {
+                            confirm_release.set(false);
+                            if let Some(id) = id.clone() { on_action.call(LiveAction::Release(id)); }
+                        }
+                    },
+                    on_cancel: move |_| confirm_release.set(false),
                 }
             }
         }

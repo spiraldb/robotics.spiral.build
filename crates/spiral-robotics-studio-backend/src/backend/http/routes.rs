@@ -29,35 +29,29 @@ use serde_json::{Map, Value};
 use spiral_robotics::serial_ports::{available_ports, port_description, port_kind};
 use spiral_robotics_contracts::api::{
     ApiError, CalibrationReapplyResponse, CameraStatus, ConnectionTestResponse, CreateRobotRequest,
-    DataSettings, EpisodeSummary, ExportRequest, ExportResponse, GoalRequest, IdentifyPortRequest,
-    IdentifyPortResponse, ImportResponse, JudgeEpisodeRequest, ModeSelection, PortSettings,
-    PublicationStatus, RobotSummary, RolloutSnapshot, SerialPortSummary, SetRecordingPausedRequest,
-    SetReplayPausedRequest, SpiralQueryRequest, SpiralQueryResponse,
-    SpiralSettings as ContractSpiralSettings, StartRecordingRequest, StartReplayRequest,
-    StartRolloutRequest, StartSpiralReplayRequest, StartTrainingRequest, StopRecordingRequest,
-    StudioSnapshot, TrainingPolicy as ContractTrainingPolicy, TrainingRun, TrainingSnapshot,
+    DataSettings, EpisodeCatalogResponse, EpisodeSummary, GoalRequest, IdentifyPortRequest,
+    IdentifyPortResponse, JudgeEpisodeRequest, ModeSelection, PortSettings, RobotSummary,
+    RolloutSnapshot, SerialPortSummary, SetRecordingPausedRequest, SetReplayPausedRequest,
+    SpiralQueryRequest, SpiralQueryResponse, SpiralSettings as ContractSpiralSettings,
+    StartRecordingRequest, StartReplayRequest, StartRolloutRequest, StartSpiralReplayRequest,
+    StartTrainingRequest, StopRecordingRequest, StudioSnapshot,
+    TrainingPolicy as ContractTrainingPolicy, TrainingRun, TrainingSnapshot,
     UpdateDataSettingsRequest, UpdateRobotRequest, VideoSettings, default_teleoperation_pair,
 };
 use spiral_robotics_core::calibration::{Calibration, CalibrationInput, MotorSpec};
-use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 
 use crate::backend::application::calibration::{
     self, CalibrationControlPort, CalibrationHistoryActivity, CalibrationHistoryPort,
-    ReappliedLocalPositions, RobotCalibrationRepository,
+    ReappliedPositions, RobotCalibrationRepository,
 };
 use crate::backend::application::catalog_lease::{
     CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease,
 };
 use crate::backend::application::data::{
-    self as data_application, ConnectionCheck, DataCatalogPort, DataSettingsView, PublicationView,
+    self as data_application, ConnectionCheck, DataCatalogPort, DataSettingsView,
     QueryColumn as ApplicationQueryColumn, QueryCommand, QueryResult as ApplicationQueryResult,
     QueryValue, ReplayTrajectory as SpiralReplayTrajectory, SpiralDestinationSettings,
     SpiralReplayPort, StartSpiralReplayCommand, UpdateDataSettingsCommand, VideoAssetQuery,
-};
-use crate::backend::application::datasets::{
-    self as dataset_application, DatasetActivity, DatasetCandidate, DatasetImportSummary,
-    DatasetPort, ExportCompatibilityPlan, ExportDatasetCommand, ExportEpisodeInspection,
-    ImportDatasetCommand, InspectedDatasetExport, StagedDatasetImport,
 };
 use crate::backend::application::device_discovery::{
     self as device_discovery, CameraDiscoveryPort, DiscoveredCamera, IdentifySerialPortCommand,
@@ -76,8 +70,7 @@ use crate::backend::application::episode_seek::{
 };
 use crate::backend::application::episodes::{
     self as episode_catalog, DeleteEpisodeCommand, EpisodeActivity, EpisodeCatalogPort,
-    EpisodeMutationResult, ExportCandidate, ExportEpisodesCommand, ExportEpisodesResult,
-    JudgeEpisodeCommand,
+    EpisodeMutationResult, JudgeEpisodeCommand,
 };
 use crate::backend::application::error::ApplicationError;
 use crate::backend::application::mode_control::{self, ModeControlPort, OperatorMode};
@@ -106,11 +99,6 @@ use crate::backend::application::training::{
     TrainingRunActivity, TrainingRunPhase as ApplicationTrainingRunPhase, TrainingRunStatus,
     TrainingSnapshot as ApplicationTrainingSnapshot, TrainingSource as ApplicationTrainingSource,
 };
-use crate::backend::recording::dataset::{
-    MAX_ARCHIVE_COMPRESSED_BYTES, PreparedDatasetExport, StagedDatasetImport as CodecStagedImport,
-    commit_staged_lerobot_import, export_prepared_lerobot_to_file, prepare_lerobot_export,
-    stage_lerobot_archive_file_into_dataset,
-};
 use crate::backend::recording::episodes::{
     ArmCondition, EpisodeError, EpisodeStore, EpisodeWriter, TimelineMetadata, TimelineSample,
     TimelineTraces, build_arms,
@@ -119,12 +107,12 @@ use crate::backend::robotics::cameras::{CameraManager, Frame};
 use crate::backend::robotics::hardware::{HardwareHandle, RobotSpec};
 use crate::backend::robotics::video::{
     CameraCaptureSpec, VideoAsset, VideoAssetMetadata, VideoCapture, VideoEncoderSettings,
-    load_assets,
 };
 use crate::backend::robots::workspace::{RobotWorkspace, WorkspaceError};
 use crate::backend::rollout::manager::RolloutManager;
 use crate::backend::storage::manager::StorageManager;
-use crate::backend::storage::settings::DataSettingsStore;
+use crate::backend::storage::settings::BackendStateStore;
+use crate::backend::storage::settings::StudioPreferencesStore;
 use crate::backend::training::manager::TrainingManager;
 
 /// Boundary marker separating parts of an MJPEG response.
@@ -140,7 +128,6 @@ const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(400);
 /// automatic stop before the next telemetry snapshot is published.
 const VIDEO_RECORDING_MONITOR_INTERVAL: Duration = Duration::from_millis(200);
 const VIDEO_RECORDING_STOP_TICKS: u8 = 5;
-const SPIRAL_AUTO_SYNC_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Everything a request handler can reach.
 #[derive(Clone)]
@@ -149,14 +136,14 @@ pub(crate) struct AppState {
     pub episodes: Arc<EpisodeStore>,
     pub hardware: Arc<HardwareHandle>,
     pub cameras: Arc<CameraManager>,
-    pub data_settings: Arc<DataSettingsStore>,
+    pub backend_state: Arc<BackendStateStore>,
+    pub preferences: Arc<StudioPreferencesStore>,
     pub storage: Arc<StorageManager>,
     pub training: Arc<TrainingManager>,
     pub rollout: Arc<RolloutManager>,
     pub catalog_lease: Arc<CatalogMutationLease>,
     pub recording_video: Arc<tokio::sync::Mutex<Option<VideoCapture>>>,
     pub video_encoder: VideoEncoderSettings,
-    pub simulated: bool,
 }
 
 pub(crate) async fn monitor_video_recording(state: AppState) {
@@ -207,28 +194,13 @@ pub(crate) async fn auto_connect_saved_robots(state: AppState) {
     devices::auto_connect_saved_robots(state).await;
 }
 
-/// Keep local recovery episodes flowing to Spiral without depending on a
-/// browser session or an operator opening Data. The first interval tick is
-/// immediate; later ticks recover imports, external files, and transient
-/// publication failures.
-pub(crate) async fn auto_sync_episodes(storage: Arc<StorageManager>) {
-    let mut ticker = tokio::time::interval(SPIRAL_AUTO_SYNC_INTERVAL);
-    loop {
-        ticker.tick().await;
-        let queued = storage.sync_pending();
-        if queued > 0 {
-            tracing::info!(episodes = queued, "queued automatic Spiral publications");
-        }
-    }
-}
-
-/// Close and stage any capture whose corresponding control-loop recording has
+/// Close and commit any capture whose corresponding control-loop recording has
 /// already ended. Also used during graceful backend shutdown.
 pub(crate) async fn finish_stale_video_capture(state: &AppState) {
-    // Claim the recording publication exactly once, but retain the catalog
-    // exclusion until episode reload and durable media staging both finish.
-    // This exists independently of VideoCapture because camera-less recordings
-    // still allocate and publish catalog identities.
+    // Claim the recording exactly once, but retain catalog exclusion until the
+    // episode and finalized media have both been committed. This exists
+    // independently of VideoCapture because camera-less recordings still
+    // allocate catalog identities.
     let recording = state.catalog_lease.claim_recording();
     let capture = state.recording_video.lock().await.take();
     if recording.is_none() && capture.is_none() {
@@ -247,13 +219,22 @@ pub(crate) async fn finish_stale_video_capture(state: &AppState) {
         None => Vec::new(),
     };
     if let Some(episode_id) = episode_id {
-        if let Err(error) = state.episodes.reload() {
-            tracing::warn!(episode = %episode_id, "could not reload automatically stopped episode: {error}");
-        }
-        if let Err(error) = state.storage.stage_local(episode_id.clone(), videos) {
-            tracing::error!(episode = %episode_id, "could not stage automatically stopped episode: {error}");
+        let episodes = state.episodes.clone();
+        let storage = state.storage.clone();
+        let committed = tokio::task::spawn_blocking(move || {
+            let episode = episodes
+                .completed(&episode_id)
+                .map_err(|error| error.to_string())?;
+            storage.commit_episode_blocking(&episode, &videos)
+        })
+        .await;
+        if let Err(error) = committed
+            .map_err(|error| error.to_string())
+            .and_then(|result| result)
+        {
+            tracing::error!("could not commit automatically stopped episode media: {error}");
             state.cameras.note_issue(format!(
-                "episode {episode_id} stopped, but its local media could not be staged: {error}"
+                "episode media could not be committed to SpiralDB: {error}"
             ));
         }
     }
@@ -287,6 +268,10 @@ impl Failure {
     fn bad_request(message: impl Into<String>) -> Self {
         Self(StatusCode::BAD_REQUEST, message.into())
     }
+
+    fn conflict(message: impl Into<String>) -> Self {
+        Self(StatusCode::CONFLICT, message.into())
+    }
 }
 
 impl IntoResponse for Failure {
@@ -300,8 +285,6 @@ impl From<EpisodeError> for Failure {
         let status = match &error {
             EpisodeError::InvalidId(_) | EpisodeError::Invalid(_) => StatusCode::BAD_REQUEST,
             EpisodeError::NotFound(_) => StatusCode::NOT_FOUND,
-            EpisodeError::AlreadyExists(_) => StatusCode::CONFLICT,
-            EpisodeError::Io { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
         Self(status, error.to_string())
     }
@@ -312,10 +295,8 @@ impl From<WorkspaceError> for Failure {
         let status = match &error {
             WorkspaceError::InvalidId(_) | WorkspaceError::Invalid(_) => StatusCode::BAD_REQUEST,
             WorkspaceError::NotFound(_) => StatusCode::NOT_FOUND,
-            WorkspaceError::AlreadyExists(_) | WorkspaceError::Conflict(_) => StatusCode::CONFLICT,
-            WorkspaceError::Config(_) | WorkspaceError::Io { .. } => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            WorkspaceError::AlreadyExists(_) => StatusCode::CONFLICT,
+            WorkspaceError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         Self(status, error.to_string())
     }
@@ -349,8 +330,6 @@ fn episode_application_error(error: EpisodeError) -> ApplicationError {
             ApplicationError::InvalidInput(message)
         }
         EpisodeError::NotFound(_) => ApplicationError::NotFound(message),
-        EpisodeError::AlreadyExists(_) => ApplicationError::Conflict(message),
-        EpisodeError::Io { .. } => ApplicationError::Internal(message),
     }
 }
 
@@ -361,12 +340,8 @@ fn workspace_application_error(error: WorkspaceError) -> ApplicationError {
             ApplicationError::InvalidInput(message)
         }
         WorkspaceError::NotFound(_) => ApplicationError::NotFound(message),
-        WorkspaceError::AlreadyExists(_) | WorkspaceError::Conflict(_) => {
-            ApplicationError::Conflict(message)
-        }
-        WorkspaceError::Config(_) | WorkspaceError::Io { .. } => {
-            ApplicationError::Internal(message)
-        }
+        WorkspaceError::AlreadyExists(_) => ApplicationError::Conflict(message),
+        WorkspaceError::Config(_) => ApplicationError::Internal(message),
     }
 }
 
@@ -395,9 +370,8 @@ pub(crate) fn build_snapshot(state: &AppState) -> StudioSnapshot {
                 .cloned()
                 .unwrap_or_default();
             let mut summary = state.workspace.get(&saved.id).ok()?.summary(connection);
-            // Limits come from the motors, not the file, so they are folded in
-            // here rather than inside a summary built purely from what was
-            // written on disk.
+            // Limits come from the motors, not the saved configuration, so they
+            // are folded in here after loading the SpiralDB row.
             if let Some(limits) = hardware.limits.get(&saved.id) {
                 for motor in &mut summary.motors {
                     if let Some(limits) = limits.get(&motor.name) {
@@ -411,36 +385,12 @@ pub(crate) fn build_snapshot(state: &AppState) -> StudioSnapshot {
 
     let mut issues = state.workspace.issues();
     issues.extend(state.cameras.issues());
-    issues.extend(state.episodes.issues());
-    issues.extend(
-        data_application::list_publications(&data::DataHttpAdapter::new(state))
-            .into_iter()
-            .filter(|status| status.state == "failed")
-            .map(|status| format!("{} publication failed", status.episode_id)),
-    );
     // A take that stopped itself has to be visible after the counters that were
     // describing it have gone.
     issues.extend(hardware.recording_issue);
 
-    // The take being captured right now has a part file on disk, which the store
-    // correctly reports as a recording that has not finished. It has not — it is
-    // still going, and the live counters are what describe it. Listing it here
-    // as well would draw it twice and count it as a casualty while it is still
-    // being written.
-    let recording = hardware
-        .telemetry
-        .recording
-        .as_ref()
-        .map(|progress| progress.episode.clone());
-    let episodes = episode_queries::list(&recordings::EpisodeHttpAdapter::catalog(state))
-        .into_iter()
-        .filter(|episode| Some(&episode.id) != recording.as_ref())
-        .map(recordings::contract_episode)
-        .collect();
-
     StudioSnapshot {
-        workspace: state.workspace.directory().display().to_string(),
-        simulated: state.simulated,
+        storage: "SpiralDB".to_owned(),
         robots,
         cameras: device_discovery::list_cameras(&state.cameras)
             .into_iter()
@@ -456,8 +406,6 @@ pub(crate) fn build_snapshot(state: &AppState) -> StudioSnapshot {
             })
             .collect(),
         mode: hardware.mode,
-        episodes,
-        episode_directory: state.episodes.directory().display().to_string(),
         issues,
     }
 }

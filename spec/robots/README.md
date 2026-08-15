@@ -20,8 +20,8 @@ each SO-ARM101 arm.
 - **ROBOT-004** The backend must try to reconnect configured robots when it
   starts.
 - **ROBOT-005** The browser must never drive a robot without the Studio backend.
-- **ROBOT-006** Simulation must exercise the same application policies without
-  authorizing physical hardware.
+- **ROBOT-006** Studio must open physical motor buses only; product simulation
+  is deferred until it has a separate, principled design.
 
 ## Data and boundaries
 
@@ -36,7 +36,7 @@ the intended source of truth.
   [`spiral-robotics-core`](../../crates/spiral-robotics-core/)
 - Feetech bus, discovery, and robot configuration codec:
   [`src`](../../src/)
-- Current robot workspace adapter:
+- SpiralDB robot repository:
   [`backend/robots`](../../crates/spiral-robotics-studio-backend/src/backend/robots/)
 - Hardware and camera adapters:
   [`backend/robotics`](../../crates/spiral-robotics-studio-backend/src/backend/robotics/)
@@ -44,4 +44,3 @@ the intended source of truth.
   [`backend/application`](../../crates/spiral-robotics-studio-backend/src/backend/application/)
 - Settings UI:
   [`frontend/screens/settings/robots`](../../crates/spiral-robotics-studio/src/frontend/screens/settings/robots/)
-

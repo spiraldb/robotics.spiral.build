@@ -1,15 +1,18 @@
 use dioxus::prelude::*;
 use gloo_net::http::Method;
 use spiral_robotics_contracts::api::RobotSummary;
+use spiral_robotics_ui::{Action, ActionPurpose, ActionVariant, InlineConfirmation};
 
 use crate::frontend::api::http as api;
 use crate::frontend::app::state::studio;
+use crate::frontend::tasks::single_flight;
 
 /// Deleting an arm destroys its calibration, so it takes a specific second click.
 #[component]
-pub(super) fn DeleteButton(robot: RobotSummary) -> Element {
+pub(super) fn DeleteRobotAction(robot: RobotSummary) -> Element {
     let studio = studio();
     let mut confirming = use_signal(|| false);
+    let deleting = use_signal(|| false);
     let id = robot.id.clone();
 
     // Resting, this is the quietest thing in the file row: it is the rarest
@@ -18,26 +21,50 @@ pub(super) fn DeleteButton(robot: RobotSummary) -> Element {
     // was not.
     if !confirming() {
         return rsx! {
-            button {
-                r#type: "button", class: "link device-delete", title: "Delete {robot.id}",
+            Action {
+                id: "delete-robot-{robot.id}",
+                purpose: ActionPurpose::Delete,
+                variant: ActionVariant::Link,
+                class: "device-delete", title: "Delete {robot.id}",
                 onclick: move |_| confirming.set(true), "Delete"
             }
         };
     }
 
     rsx! {
-        button {
-            r#type: "button", class: "btn btn-danger",
-            title: "Delete {robot.id} and its calibration",
-            onclick: move |_| {
+        InlineConfirmation {
+            id: "delete-robot-confirmation-{robot.id}",
+            class: "device-delete-confirmation",
+            message: format!(
+                "Delete robot {}? Its setup and calibration will be permanently removed.",
+                robot.id,
+            ),
+            confirm_label: if deleting() { "Deleting…" } else { "Delete robot" },
+            cancel_label: "Keep robot",
+            purpose: ActionPurpose::Delete,
+            pending: deleting(),
+            return_focus_id: "delete-robot-{robot.id}",
+            on_confirm: move |_| {
+                if deleting() {
+                    return;
+                }
                 let id = id.clone();
-                confirming.set(false);
                 studio.run(format!("Deleted {id}."), async move {
-                    api::send::<()>(Method::DELETE, &format!("/api/robots/{id}"), None).await
+                    let Some(result) = single_flight(
+                        deleting,
+                        api::send::<()>(Method::DELETE, &format!("/api/robots/{id}"), None),
+                    )
+                    .await
+                    else {
+                        return Ok(());
+                    };
+                    if result.is_ok() {
+                        confirming.set(false);
+                    }
+                    result
                 });
             },
-            "Delete {robot.id}"
+            on_cancel: move |_| confirming.set(false),
         }
-        button { r#type: "button", class: "btn", onclick: move |_| confirming.set(false), "Keep" }
     }
 }

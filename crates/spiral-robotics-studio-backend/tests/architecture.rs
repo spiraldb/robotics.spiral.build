@@ -93,9 +93,7 @@ fn read_controllers_delegate_selection_and_admission_to_application_use_cases() 
     let routes = fs::read_to_string(root.join("routes.rs")).expect("routes source");
     for seam in [
         "robots::list(&robot_adapter)",
-        "episode_queries::list(&recordings::EpisodeHttpAdapter::catalog(state))",
         "device_discovery::list_cameras(&state.cameras)",
-        "data_application::list_publications(&data::DataHttpAdapter::new(state))",
     ] {
         assert!(routes.contains(seam), "state snapshot bypasses {seam}");
     }
@@ -137,11 +135,167 @@ fn read_controllers_delegate_selection_and_admission_to_application_use_cases() 
 }
 
 #[test]
+fn episode_catalog_is_loaded_explicitly_from_spiral() {
+    let backend = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let crates = backend.parent().expect("workspace crates directory");
+    let contracts = fs::read_to_string(crates.join("spiral-robotics-contracts/src/api.rs"))
+        .expect("contracts source");
+    let snapshot = contracts
+        .split("pub struct StudioSnapshot")
+        .nth(1)
+        .and_then(|source| source.split("/// One robot instance").next())
+        .expect("StudioSnapshot declaration");
+    assert!(
+        !snapshot.contains("pub episodes:"),
+        "episode catalog must not ride the live Studio snapshot"
+    );
+    let routes =
+        fs::read_to_string(backend.join("src/backend/http/routes.rs")).expect("routes source");
+    for catalog_data in ["state.episodes.issues()", "list_publications"] {
+        assert!(
+            !routes.contains(catalog_data),
+            "episode catalog data {catalog_data:?} must not ride the live Studio snapshot"
+        );
+    }
+
+    let server = fs::read_to_string(backend.join("src/backend/http/server.rs"))
+        .expect("backend server source");
+    assert!(
+        !server.contains("episodes.reload_if_changed()"),
+        "the sole-writer episode directory must not be polled"
+    );
+
+    let frontend_state =
+        fs::read_to_string(crates.join("spiral-robotics-studio/src/frontend/app/state.rs"))
+            .expect("frontend state source");
+    assert!(
+        frontend_state.contains("api::get::<EpisodeCatalogResponse>(\"/api/episodes\")"),
+        "the browser must load episodes as one explicit catalog"
+    );
+    assert!(
+        !backend.join("src/backend/recording/dataset.rs").exists(),
+        "the filesystem episode store must stay removed"
+    );
+    let episode_store = fs::read_to_string(backend.join("src/backend/recording/episodes.rs"))
+        .expect("Spiral episode store source");
+    for retired in [
+        "struct FileStamp",
+        "fn stamps(&self)",
+        "std::fs",
+        "tempfile",
+    ] {
+        assert!(
+            !episode_store.contains(retired),
+            "the Spiral episode store must not retain filesystem detail {retired:?}"
+        );
+    }
+
+    let data_state = fs::read_to_string(
+        crates.join("spiral-robotics-studio/src/frontend/screens/data/state.rs"),
+    )
+    .expect("data controller source");
+    assert!(
+        !data_state.contains("TimeoutFuture::new(1_000)"),
+        "publication status must not use the retired one-second poll"
+    );
+    assert!(
+        !data_state.contains("/api/publications"),
+        "publication status must travel with the explicit episode catalog"
+    );
+}
+
+#[test]
+fn studio_has_one_spiral_persistence_boundary() {
+    let backend = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for retired in [
+        "src/backend/recording/dataset.rs",
+        "src/backend/application/datasets.rs",
+    ] {
+        assert!(
+            !backend.join(retired).exists(),
+            "retired filesystem storage module {retired:?} must stay removed"
+        );
+    }
+
+    let server = fs::read_to_string(backend.join("src/backend/http/server.rs"))
+        .expect("backend server source");
+    for retired_argument in ["workspace: PathBuf", "episodes: PathBuf", "simulate: bool"] {
+        assert!(
+            !server.contains(retired_argument),
+            "Studio must not restore process-local storage/simulation option {retired_argument:?}"
+        );
+    }
+    assert!(
+        server.contains("SpiralRepository::new")
+            && server.contains("RobotWorkspace::new(")
+            && server.contains("EpisodeStore::new(")
+            && server.contains("StorageManager::new("),
+        "robots, episodes, and Studio state must share one Spiral repository"
+    );
+    for retired in ["spiral_uri:", "StoredSpiralSettings", "DataSettingsStore"] {
+        assert!(
+            !server.contains(retired),
+            "the Spiral project selector must not restore {retired:?}"
+        );
+    }
+    assert!(
+        server.contains("BackendStateStore::open_default")
+            && !server.contains("Spiral project is required"),
+        "Studio must start without a project and recover its bootstrap pointer from backend state"
+    );
+
+    let settings = fs::read_to_string(backend.join("src/backend/storage/settings.rs"))
+        .expect("backend settings source");
+    let bootstrap = settings
+        .split_once("struct BackendState {")
+        .and_then(|(_, source)| source.split_once("pub(crate) struct BackendStateStore"))
+        .map(|(state, _)| state)
+        .expect("backend state must remain an explicit narrow document");
+    assert!(bootstrap.contains("project_id: String"));
+    assert!(bootstrap.contains("spiral_endpoint: String"));
+    assert!(bootstrap.contains("spiral_spfs_endpoint: String"));
+    for forbidden in ["episodes:", "robots:", "training:", "rollout:", "video:"] {
+        assert!(
+            !bootstrap.contains(forbidden),
+            "backend bootstrap state must not grow a project-data field {forbidden:?}"
+        );
+    }
+
+    let repository = fs::read_to_string(backend.join("src/backend/storage/repository.rs"))
+        .expect("Spiral repository source");
+    for retired in [
+        "spiral:memory:",
+        "memory: Arc",
+        "settings: StoredSpiralSettings",
+    ] {
+        assert!(
+            !repository.contains(retired),
+            "the product repository must not retain alternate destination plumbing {retired:?}"
+        );
+    }
+
+    let checkpoints = fs::read_to_string(backend.join("src/backend/application/checkpoints.rs"))
+        .expect("checkpoint boundary source");
+    for retired in ["CheckpointSource", "register_run_source"] {
+        assert!(
+            !checkpoints.contains(retired),
+            "checkpoints must inherit the selected Spiral destination instead of retaining {retired:?}"
+        );
+    }
+
+    let crates = backend.parent().expect("workspace crates directory");
+    let panels = fs::read_to_string(crates.join("spiral-robotics-panels/src/workspace.rs"))
+        .expect("panel workspace source");
+    assert!(
+        !panels.contains("local_storage()") && !panels.contains("session_storage()"),
+        "panel layout must remain session state rather than browser persistence"
+    );
+}
+
+#[test]
 fn application_associated_types_are_only_closed_loop_capability_tokens() {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/backend/application");
     let allowed = BTreeSet::from([
-        ("datasets.rs".to_owned(), "PreparedExport".to_owned()),
-        ("datasets.rs".to_owned(), "StagedImport".to_owned()),
         ("recording.rs".to_owned(), "MediaCapture".to_owned()),
         ("recording.rs".to_owned(), "MediaOutput".to_owned()),
         ("recording.rs".to_owned(), "RecordingDraft".to_owned()),
@@ -149,10 +303,6 @@ fn application_associated_types_are_only_closed_loop_capability_tokens() {
         (
             "training_execution.rs".to_owned(),
             "CheckpointEnvelope".to_owned(),
-        ),
-        (
-            "training_execution.rs".to_owned(),
-            "SourceHandle".to_owned(),
         ),
     ]);
 

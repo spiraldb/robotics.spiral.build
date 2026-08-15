@@ -1,4 +1,8 @@
-//! Backend-owned data destination settings.
+//! Backend bootstrap state and project-owned Studio preferences.
+//!
+//! The one local JSON document stores only the control-plane pointers needed to
+//! find Spiral before Spiral can be read. Project data and preferences remain
+//! in Spiral; this file is never a mirror, spool, or fallback data store.
 
 use std::fs;
 use std::io::Write as _;
@@ -7,100 +11,52 @@ use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 use spiral_robotics_contracts::api::{
-    DataSettings, SpiralSettings, TrainingRuntimeSettings, UpdateDataSettingsRequest, VideoSettings,
+    DEFAULT_SPIRAL_ENDPOINT, DEFAULT_SPIRAL_SPFS_ENDPOINT, TrainingRuntimeSettings, VideoSettings,
 };
-use spiral_robotics_contracts::spiral;
+use url::Url;
 
-const SETTINGS_FILE: &str = ".spiral-robotics-data-settings.json";
+const BACKEND_STATE_FILE: &str = "backend-state.json";
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub(crate) struct StoredDataSettings {
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+struct BackendState {
     #[serde(default)]
-    pub spiral: StoredSpiralSettings,
+    project_id: String,
     #[serde(default)]
-    pub training: TrainingRuntimeSettings,
+    spiral_endpoint: String,
     #[serde(default)]
-    pub video: VideoSettings,
+    spiral_spfs_endpoint: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct StoredSpiralSettings {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "default_spiral_uri")]
-    pub uri: String,
-    #[serde(default)]
-    pub project_id: String,
-    #[serde(default = "default_dataset")]
-    pub dataset: String,
-}
-
-impl Default for StoredSpiralSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            uri: default_spiral_uri(),
-            project_id: String::new(),
-            dataset: default_dataset(),
-        }
-    }
-}
-
-impl StoredSpiralSettings {
-    /// Spiral is active when its destination is complete. The persisted
-    /// `enabled` bit remains readable for compatibility with older settings
-    /// files, but configuration—not a second toggle—is the source of truth.
-    pub(crate) fn configured(&self) -> bool {
-        let uri = self.uri.trim();
-        let dataset = self.dataset.trim();
-        !dataset.is_empty()
-            && (uri == "spiral:memory:"
-                || (uri == "spiraldb://" && !self.project_id.trim().is_empty()))
-    }
-}
-
-impl StoredDataSettings {
-    pub(crate) fn public(&self) -> DataSettings {
-        DataSettings {
-            spiral: SpiralSettings {
-                enabled: self.spiral.configured(),
-                uri: self.spiral.uri.clone(),
-                project_id: self.spiral.project_id.clone(),
-                dataset: self.spiral.dataset.clone(),
-            },
-            training: self.training.clone(),
-            video: self.video.clone(),
-        }
-    }
-}
-
-/// The settings file lives beside the recovery spool and is readable only by
-/// the backend account.
-pub(crate) struct DataSettingsStore {
+/// Private backend-local bootstrap state. Future auth/session metadata may
+/// live here, but durable product records must not.
+pub(crate) struct BackendStateStore {
     path: PathBuf,
-    current: Mutex<StoredDataSettings>,
+    current: Mutex<BackendState>,
 }
 
-impl DataSettingsStore {
-    pub(crate) fn open(episode_directory: &Path) -> Result<Self, String> {
-        let path = episode_directory.join(SETTINGS_FILE);
+impl BackendStateStore {
+    pub(crate) fn open_default() -> Result<Self, String> {
+        let path = std::env::var_os("SPIRAL_ROBOTICS_BACKEND_STATE")
+            .map(PathBuf::from)
+            .map(Ok)
+            .unwrap_or_else(|| {
+                dirs::config_dir()
+                    .map(|directory| directory.join("spiral-robotics").join(BACKEND_STATE_FILE))
+                    .ok_or_else(|| {
+                        "could not determine the backend configuration directory".to_owned()
+                    })
+            })?;
+        Self::open(path)
+    }
+
+    fn open(path: PathBuf) -> Result<Self, String> {
         let current = if path.exists() {
-            let bytes = fs::read(&path)
-                .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-            let mut document = serde_json::from_slice::<serde_json::Value>(&bytes)
-                .map_err(|error| format!("could not parse {}: {error}", path.display()))?;
-            let removed_legacy_hugging_face = document
-                .as_object_mut()
-                .and_then(|object| object.remove("hugging_face"))
-                .is_some();
-            let current = serde_json::from_value(document)
-                .map_err(|error| format!("could not parse {}: {error}", path.display()))?;
-            if removed_legacy_hugging_face {
-                write_private_json(&path, &current)?;
-            }
-            current
+            let bytes =
+                fs::read(&path).map_err(|error| format!("reading {}: {error}", path.display()))?;
+            serde_json::from_slice(&bytes)
+                .map_err(|error| format!("parsing {}: {error}", path.display()))?
         } else {
-            StoredDataSettings::default()
+            BackendState::default()
         };
         Ok(Self {
             path,
@@ -108,124 +64,127 @@ impl DataSettingsStore {
         })
     }
 
-    pub(crate) fn get(&self) -> StoredDataSettings {
+    pub(crate) fn project_id(&self) -> Option<String> {
+        let project_id = lock(&self.current).project_id.trim().to_owned();
+        (!project_id.is_empty()).then_some(project_id)
+    }
+
+    pub(crate) fn spiral_endpoint(&self) -> Option<String> {
+        let endpoint = lock(&self.current).spiral_endpoint.trim().to_owned();
+        (!endpoint.is_empty()).then_some(endpoint)
+    }
+
+    pub(crate) fn spiral_spfs_endpoint(&self) -> Option<String> {
+        let endpoint = lock(&self.current).spiral_spfs_endpoint.trim().to_owned();
+        (!endpoint.is_empty()).then_some(endpoint)
+    }
+
+    pub(crate) fn save_connection(
+        &self,
+        project_id: &str,
+        spiral_endpoint: &str,
+        spiral_spfs_endpoint: &str,
+    ) -> Result<(), String> {
+        let project_id = project_id.trim();
+        if project_id.is_empty()
+            || !project_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err("Spiral project must contain only letters, numbers, '_' or '-'".to_owned());
+        }
+        let spiral_endpoint = normalize_spiral_endpoint(spiral_endpoint)?;
+        let spiral_spfs_endpoint = normalize_spiral_spfs_endpoint(spiral_spfs_endpoint)?;
+        let next = BackendState {
+            project_id: project_id.to_owned(),
+            spiral_endpoint,
+            spiral_spfs_endpoint,
+        };
+        write_private_json(&self.path, &next)?;
+        *lock(&self.current) = next;
+        Ok(())
+    }
+}
+
+pub(crate) fn normalize_spiral_endpoint(endpoint: &str) -> Result<String, String> {
+    normalize_service_endpoint(endpoint, "Spiral API endpoint")
+}
+
+pub(crate) fn normalize_spiral_spfs_endpoint(endpoint: &str) -> Result<String, String> {
+    normalize_service_endpoint(endpoint, "Spiral SpFS endpoint")
+}
+
+fn normalize_service_endpoint(endpoint: &str, label: &str) -> Result<String, String> {
+    let endpoint = endpoint.trim();
+    let parsed = Url::parse(endpoint)
+        .map_err(|error| format!("{label} must be an http:// or https:// URL: {error}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(format!(
+            "{label} must be an http:// or https:// URL with a host"
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(format!("{label} must not contain embedded credentials"));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(format!(
+            "{label} must not contain a query string or fragment"
+        ));
+    }
+    Ok(parsed.as_str().trim_end_matches('/').to_owned())
+}
+
+pub(crate) fn environment_spiral_endpoint() -> String {
+    std::env::var("SPIRAL__SERVER__URL")
+        .or_else(|_| std::env::var("SPIRALDB_API_URL"))
+        .unwrap_or_else(|_| DEFAULT_SPIRAL_ENDPOINT.to_owned())
+}
+
+pub(crate) fn environment_spiral_spfs_endpoint() -> String {
+    std::env::var("SPIRAL__SPFS__URL").unwrap_or_else(|_| DEFAULT_SPIRAL_SPFS_ENDPOINT.to_owned())
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct StoredStudioPreferences {
+    #[serde(default)]
+    pub training: TrainingRuntimeSettings,
+    #[serde(default)]
+    pub video: VideoSettings,
+}
+
+pub(crate) struct StudioPreferencesStore {
+    current: Mutex<StoredStudioPreferences>,
+}
+
+impl StudioPreferencesStore {
+    pub(crate) fn new(current: StoredStudioPreferences) -> Self {
+        Self {
+            current: Mutex::new(current),
+        }
+    }
+
+    pub(crate) fn get(&self) -> StoredStudioPreferences {
         lock(&self.current).clone()
     }
 
-    pub(crate) fn public(&self) -> DataSettings {
-        lock(&self.current).public()
-    }
-
-    pub(crate) fn update(&self, update: UpdateDataSettingsRequest) -> Result<DataSettings, String> {
-        validate_update(&update)?;
-        let mut current = lock(&self.current);
-        let mut staged = current.clone();
-        staged.spiral.uri = update.spiral.uri.trim().to_owned();
-        staged.spiral.project_id = update.spiral.project_id.trim().to_owned();
-        staged.spiral.dataset = update.spiral.dataset.trim().to_owned();
-        staged.spiral.enabled = staged.spiral.configured();
-        staged.training.endpoint = update.training.endpoint.trim().to_owned();
-        staged.video = update.video;
-
-        // Publish to disk before replacing the in-memory value. A failed disk
-        // write must not make the running backend claim settings it cannot
-        // recover after restart.
-        write_private_json(&self.path, &staged)?;
-        *current = staged;
-        Ok(current.public())
-    }
-}
-
-fn validate_update(update: &UpdateDataSettingsRequest) -> Result<(), String> {
-    validate_spiral_uri(&update.spiral.uri)?;
-    let spiral_configured =
-        update.spiral.uri.trim() == "spiral:memory:" || !update.spiral.project_id.trim().is_empty();
-    if spiral_configured {
-        if update.spiral.uri.trim() != "spiral:memory:" {
-            validate_identifier("Spiral project", &update.spiral.project_id)?;
+    pub(crate) fn stage_update(
+        &self,
+        mut training: TrainingRuntimeSettings,
+        video: VideoSettings,
+    ) -> Result<StoredStudioPreferences, String> {
+        let endpoint = training.endpoint.trim();
+        if !endpoint.starts_with("http://") || endpoint.len() <= "http://".len() {
+            return Err("Training runtime endpoint must be a plain http:// address".to_owned());
         }
-        validate_dataset_identifier(&update.spiral.dataset)?;
+        training.endpoint = endpoint.to_owned();
+        Ok(StoredStudioPreferences { training, video })
     }
-    validate_training_endpoint(&update.training.endpoint)?;
-    Ok(())
-}
 
-fn validate_training_endpoint(endpoint: &str) -> Result<(), String> {
-    let endpoint = endpoint.trim();
-    if !endpoint.starts_with("http://") || endpoint.len() <= "http://".len() {
-        return Err("Training runtime endpoint must be a plain http:// address".to_owned());
+    pub(crate) fn replace(&self, preferences: StoredStudioPreferences) -> StoredStudioPreferences {
+        let mut current = lock(&self.current);
+        *current = preferences;
+        current.clone()
     }
-    Ok(())
-}
-
-fn validate_dataset_identifier(value: &str) -> Result<(), String> {
-    let value = value.trim();
-    if !spiral::is_identifier(value) {
-        return Err(
-            "Spiral namespace must start with a letter or '_' and contain only letters, numbers, or '_'"
-                .to_owned(),
-        );
-    }
-    Ok(())
-}
-
-fn validate_identifier(label: &str, value: &str) -> Result<(), String> {
-    let value = value.trim();
-    if value.is_empty()
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
-        return Err(format!(
-            "{label} must contain only letters, numbers, '_' or '-'"
-        ));
-    }
-    Ok(())
-}
-
-fn validate_spiral_uri(value: &str) -> Result<(), String> {
-    let value = value.trim();
-    if value == "spiral:memory:" || value == "spiraldb://" {
-        return Ok(());
-    }
-    Err("Spiral ADBC URI must be 'spiraldb://' or 'spiral:memory:'".to_owned())
-}
-
-fn write_private_json(path: &Path, value: &StoredDataSettings) -> Result<(), String> {
-    let temp = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(value)
-        .map_err(|error| format!("could not encode data settings: {error}"))?;
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(&temp)
-        .map_err(|error| format!("could not open {}: {error}", temp.display()))?;
-    file.write_all(&bytes)
-        .and_then(|()| file.write_all(b"\n"))
-        .and_then(|()| file.sync_all())
-        .map_err(|error| format!("could not write {}: {error}", temp.display()))?;
-    fs::rename(&temp, path)
-        .map_err(|error| format!("could not publish {}: {error}", path.display()))?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("settings path {} has no parent directory", path.display()))?;
-    fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| format!("could not sync {}: {error}", parent.display()))?;
-    Ok(())
-}
-
-fn default_spiral_uri() -> String {
-    "spiraldb://".to_owned()
-}
-
-fn default_dataset() -> String {
-    "spiral_robotics".to_owned()
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -234,81 +193,127 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+fn write_private_json(path: &Path, value: &BackendState) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("backend state path {} has no parent", path.display()))?;
+    let mut directory = fs::DirBuilder::new();
+    directory.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        directory.mode(0o700);
+    }
+    directory
+        .create(parent)
+        .map_err(|error| format!("creating {}: {error}", parent.display()))?;
+
+    let temporary = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(value)
+        .map_err(|error| format!("encoding backend state: {error}"))?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| format!("opening {}: {error}", temporary.display()))?;
+    file.write_all(&bytes)
+        .and_then(|()| file.write_all(b"\n"))
+        .and_then(|()| file.sync_all())
+        .map_err(|error| format!("writing {}: {error}", temporary.display()))?;
+    fs::rename(&temporary, path)
+        .map_err(|error| format!("publishing {}: {error}", path.display()))?;
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("syncing {}: {error}", parent.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn legacy_hugging_face_credentials_are_removed_from_disk() {
+    fn backend_state_round_trips_only_the_spiral_bootstrap_pointers() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join(SETTINGS_FILE);
-        fs::write(
-            &path,
-            r#"{"hugging_face":{"enabled":true,"repository":"owner/data","revision":"main","token":"secret"}}"#,
-        )
-        .unwrap();
+        let path = directory.path().join(BACKEND_STATE_FILE);
+        let store = BackendStateStore::open(path.clone()).unwrap();
+        assert_eq!(store.project_id(), None);
+        assert_eq!(store.spiral_endpoint(), None);
+        assert_eq!(store.spiral_spfs_endpoint(), None);
 
-        DataSettingsStore::open(directory.path()).unwrap();
-
-        let stored = fs::read_to_string(path).unwrap();
-        assert!(!stored.contains("hugging_face"));
-        assert!(!stored.contains("secret"));
-    }
-
-    #[test]
-    fn enabled_spiral_dataset_is_safe_for_generated_sql() {
-        let mut update = UpdateDataSettingsRequest::default();
-        update.spiral.enabled = true;
-        update.spiral.uri = "spiral:memory:".to_owned();
-        update.spiral.project_id = "project-123".to_owned();
-        update.spiral.dataset = "robot-data".to_owned();
-
-        let error = validate_update(&update).unwrap_err();
-        assert!(error.contains("Spiral namespace must start"));
-
-        update.spiral.dataset = "robot_data_1".to_owned();
-        validate_update(&update).unwrap();
-    }
-
-    #[test]
-    fn spiral_configuration_is_implicit_from_the_destination() {
-        let mut update = UpdateDataSettingsRequest::default();
-        update.spiral.uri = "spiraldb://".to_owned();
-        validate_update(&update).unwrap();
-
-        update.spiral.uri = "spiral:memory:".to_owned();
-        validate_update(&update).unwrap();
-
-        let mut stored = StoredSpiralSettings::default();
-        assert!(!stored.configured());
-        stored.project_id = "project-123".to_owned();
-        assert!(stored.configured());
-        assert!(
-            StoredDataSettings {
-                spiral: stored,
-                ..StoredDataSettings::default()
-            }
-            .public()
-            .spiral
-            .enabled
+        store
+            .save_connection(
+                " project-123 ",
+                " http://127.0.0.1:4279/ ",
+                " http://127.0.0.1:4295/ ",
+            )
+            .unwrap();
+        assert_eq!(store.project_id().as_deref(), Some("project-123"));
+        assert_eq!(
+            store.spiral_endpoint().as_deref(),
+            Some("http://127.0.0.1:4279")
+        );
+        assert_eq!(
+            store.spiral_spfs_endpoint().as_deref(),
+            Some("http://127.0.0.1:4295")
+        );
+        let reopened = BackendStateStore::open(path).unwrap();
+        assert_eq!(reopened.project_id().as_deref(), Some("project-123"));
+        assert_eq!(
+            reopened.spiral_endpoint().as_deref(),
+            Some("http://127.0.0.1:4279")
+        );
+        assert_eq!(
+            reopened.spiral_spfs_endpoint().as_deref(),
+            Some("http://127.0.0.1:4295")
         );
     }
 
     #[test]
-    fn legacy_settings_default_to_the_local_http_runtime() {
-        let stored: StoredDataSettings = serde_json::from_str(r#"{"video":{"enabled":true}}"#)
-            .expect("legacy settings still decode");
+    fn spiral_endpoint_rejects_non_http_and_embedded_credentials() {
+        assert!(normalize_spiral_endpoint("file:///tmp/spiral").is_err());
+        assert!(normalize_spiral_endpoint("https://user:secret@example.com").is_err());
+        assert!(normalize_spiral_endpoint("http://127.0.0.1:4279?debug=1").is_err());
+        assert!(normalize_spiral_spfs_endpoint("file:///tmp/spfs").is_err());
+        assert!(normalize_spiral_spfs_endpoint("https://user:secret@example.com").is_err());
+    }
 
-        assert_eq!(stored.public().training, TrainingRuntimeSettings::default());
+    #[test]
+    fn project_only_backend_state_remains_readable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(BACKEND_STATE_FILE);
+        fs::write(&path, br#"{"project_id":"legacy-project"}"#).unwrap();
+
+        let store = BackendStateStore::open(path).unwrap();
+        assert_eq!(store.project_id().as_deref(), Some("legacy-project"));
+        assert_eq!(store.spiral_endpoint(), None);
+        assert_eq!(store.spiral_spfs_endpoint(), None);
     }
 
     #[test]
     fn training_runtime_requires_a_plain_http_endpoint() {
-        let mut update = UpdateDataSettingsRequest::default();
-        update.training.endpoint = "https://runtime.example".to_owned();
-        assert!(validate_update(&update).unwrap_err().contains("http://"));
+        let store = StudioPreferencesStore::new(StoredStudioPreferences::default());
+        let invalid = TrainingRuntimeSettings {
+            endpoint: "https://runtime.example".to_owned(),
+        };
+        assert!(
+            store
+                .stage_update(invalid, VideoSettings::default())
+                .unwrap_err()
+                .contains("http://")
+        );
 
-        update.training.endpoint = " http://runtime.example:50051 ".to_owned();
-        validate_update(&update).expect("remote plaintext HTTP endpoint is accepted");
+        let valid = TrainingRuntimeSettings {
+            endpoint: " http://runtime.example:50051 ".to_owned(),
+        };
+        let staged = store
+            .stage_update(valid, VideoSettings::default())
+            .expect("remote plaintext HTTP endpoint is accepted");
+        assert_eq!(staged.training.endpoint, "http://runtime.example:50051");
     }
 }

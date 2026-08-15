@@ -14,6 +14,8 @@ panels to be arranged spatially.
 4. The status bar and notification center report global state without moving
    the workspace.
 5. The user opens Settings from the bottom of the activity rail.
+6. In Settings → SpiralDB, the user may back up or restore the complete active
+   project as one portable file.
 
 ## Routes and global shell
 
@@ -37,7 +39,8 @@ panels to be arranged spatially.
   close supported panels.
 - **STUDIO-010** Dragging must show a stable docking preview.
 - **STUDIO-011** Live and Data must keep independent layouts.
-- **STUDIO-012** Browser-local panel layout persistence is allowed.
+- **STUDIO-012** Panel layout changes last for the current session only and must
+  not create browser-local persistence.
 - **STUDIO-013** The default desktop split should place a narrow workbench beside
   a visualization area at about a one-to-two ratio.
 - **STUDIO-014** Resizing and conditional content must not cause layout shifts,
@@ -64,9 +67,15 @@ panels to be arranged spatially.
   the selected range.
 - **STUDIO-025** Empty, loading, unavailable, and error states must have stable
   dimensions.
+- **STUDIO-026** Whole-project import and export must live in Settings →
+  SpiralDB. Import must explicitly warn that it overwrites every Studio-owned
+  relation in the active project; export must include the full project rather
+  than only the selected dataset.
 
 ## Feature relationships
 
+- Studio-wide actions follow the
+  [interaction language](interaction-language.md).
 - Live composes [robot control](../robots/control.md) and
   [recording](../recording/README.md).
 - Data composes the [episode catalog](../data/README.md),
@@ -84,8 +93,9 @@ panels to be arranged spatially.
   [`frontend/panels`](../../crates/spiral-robotics-studio/src/frontend/panels/)
 - Panel layout model:
   [`spiral-robotics-panels`](../../crates/spiral-robotics-panels/)
+- Shared interaction primitives:
+  [`spiral-robotics-ui`](../../crates/spiral-robotics-ui/)
 - URDF and rendering:
   [`spiral-robotics-viewport`](../../crates/spiral-robotics-viewport/)
 
 Approved screenshots for this feature belong in [`assets/`](assets/README.md).
-

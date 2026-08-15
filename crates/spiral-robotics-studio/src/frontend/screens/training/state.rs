@@ -225,17 +225,18 @@ impl TrainingController {
         if self.deleting.peek().is_some() {
             return;
         }
-        self.confirming_delete.set(None);
         self.deleting.set(Some(id.clone()));
         let path = format!("/api/training/runs/{id}");
         let deleted_id = id.clone();
         let mut deleting = self.deleting;
+        let mut confirming_delete = self.confirming_delete;
         let mut selected_run = self.selected_run;
         let mut opened_runs = self.opened_runs;
         studio.run_utility(format!("Deleted run {name}."), async move {
             let result = api::send::<()>(Method::DELETE, &path, None).await;
             deleting.set(None);
             if result.is_ok() {
+                confirming_delete.set(None);
                 let selected = selected_run.peek().clone();
                 let next_selected = selection_after_close(
                     &mut opened_runs.write(),

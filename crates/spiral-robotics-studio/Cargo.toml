@@ -7,7 +7,7 @@ publish = false
 
 [features]
 default = []
-web = ["charming/wasm", "dioxus/web", "spiral-robotics-panels/web"]
+web = ["charming/wasm", "dioxus/web", "spiral-robotics-panels/web", "spiral-robotics-ui/web"]
 server = [
     "dioxus/cli-config",
     "dioxus/server",
@@ -19,6 +19,7 @@ charming = { version = "0.6.0", default-features = false }
 spiral-robotics-contracts.workspace = true
 spiral-robotics-core.workspace = true
 spiral-robotics-panels.workspace = true
+spiral-robotics-ui.workspace = true
 spiral-robotics-studio-backend = { workspace = true, optional = true }
 spiral-robotics-viewport.workspace = true
 dioxus = { workspace = true, features = [
@@ -50,17 +51,8 @@ web-sys = { version = "0.3", features = [
     "AbortController",
     "AbortSignal",
     "HtmlCanvasElement",
-    "HtmlElement",
-    "Node",
-    "NodeList",
     "PointerEvent",
     "ResizeObserver",
-    "WebGl2RenderingContext",
-    "WebGlBuffer",
-    "WebGlProgram",
-    "WebGlShader",
-    "WebGlUniformLocation",
-    "WebGlVertexArrayObject",
     "Window",
 ] }
 

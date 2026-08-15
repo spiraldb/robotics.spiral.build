@@ -22,6 +22,7 @@ use dioxus_elements::input_data::MouseButton;
 use spiral_robotics_contracts::api::{MotorCondition, RobotSummary};
 use spiral_robotics_core::arm::{JointAngles, counts_to_degrees};
 use spiral_robotics_core::calibration::{Direction, denormalize_centered_raw};
+use spiral_robotics_ui::{Action, ActionPurpose, ActionVariant};
 use spiral_robotics_viewport::glam::Vec3;
 use spiral_robotics_viewport::robot::BENCH_SPACING;
 use spiral_robotics_viewport::{
@@ -115,7 +116,7 @@ impl SceneSource {
 }
 
 #[component]
-pub fn Viewport(
+pub(crate) fn Viewport(
     source: SceneSource,
     #[props(default)] visible_robot: Option<String>,
     #[props(default)] resize_revision: u64,
@@ -421,12 +422,16 @@ pub fn Viewport(
                         "History · {format_history_time(sample.seconds)}"
                     }
                 } else if let Some((loading, reason)) = recorded_status {
+                    // The chip says which of the two things happened and stops
+                    // there. Appending the backend's reason inline grew a 20px
+                    // status marker into a ten-line block of vendor text hanging
+                    // over the middle of the stage, hiding the very scene it was
+                    // reporting on. The reason is one hover away, and it is
+                    // already in the status bar and the notification centre.
                     div {
-                        class: "pointer-events-none absolute left-1/2 top-2 z-20 -translate-x-1/2 rounded-sm border border-line bg-surface px-2 py-1 text-[10px] text-ink-soft",
+                        class: "scene-source-note",
+                        title: reason.clone().unwrap_or_default(),
                         if loading { "Loading recorded scene…" } else { "Recorded scene unavailable" }
-                        if let Some(reason) = reason {
-                            span { class: "ml-1 text-ink-faint", "· {reason}" }
-                        }
                     }
                 }
                 div { class: "viewport-help",
@@ -436,17 +441,17 @@ pub fn Viewport(
                 // second of which was pushed off the first by a hard-coded 64px
                 // that only held while "Home" was exactly that wide.
                 div { class: "viewport-controls",
-                    button {
-                        r#type: "button",
-                        class: "viewport-button",
-                        "aria-pressed": show_grid(),
+                    Action {
+                        purpose: ActionPurpose::Toggle,
+                        class: "viewport-action",
+                        aria_pressed: show_grid(),
                         onclick: move |_| show_grid.toggle(),
                         title: "Show or hide the scale grid",
                         "Grid"
                     }
-                    button {
-                        r#type: "button",
-                        class: "viewport-button",
+                    Action {
+                        purpose: ActionPurpose::Apply,
+                        class: "viewport-action",
                         onclick: move |_| camera.set(Camera::default()),
                         title: "Restore the default camera (0)",
                         "Home"
@@ -818,9 +823,11 @@ fn Legend(arms: Vec<RobotSummary>, on_select: EventHandler<Option<Selection>>) -
         ul { class: "viewport-legend",
             for (index, arm) in arms.into_iter().enumerate() {
                 li { key: "{arm.id}",
-                    button {
-                        r#type: "button",
-                        class: if studio.selected.read().as_ref().is_some_and(|selection| selection.matches_robot(&arm.id)) { "viewport-legend-row viewport-legend-selected" } else { "viewport-legend-row" },
+                    Action {
+                        purpose: ActionPurpose::Select,
+                        variant: ActionVariant::Row,
+                        class: "viewport-legend-row",
+                        aria_pressed: studio.selected.read().as_ref().is_some_and(|selection| selection.matches_robot(&arm.id)),
                         title: "Select {arm.id}; press F to frame it",
                         onclick: {
                             let id = arm.id.clone();
@@ -841,8 +848,9 @@ fn Legend(arms: Vec<RobotSummary>, on_select: EventHandler<Option<Selection>>) -
 fn ViewCube(mut camera: Signal<Camera>) -> Element {
     rsx! {
         div { class: "view-cube", role: "group", "aria-label": "Camera orientation",
-            button {
-                r#type: "button", title: "Top view", "aria-label": "Top view",
+            Action {
+                purpose: ActionPurpose::Apply,
+                title: "Top view", aria_label: "Top view",
                 onclick: move |_| camera.set(Camera { yaw: -0.65, pitch: 1.42, ..camera() }),
                 "Top"
             }
@@ -851,13 +859,15 @@ fn ViewCube(mut camera: Signal<Camera>) -> Element {
             // operator to press the key that starts a recording on live
             // hardware.
             div { class: "view-cube-row",
-                button {
-                    r#type: "button", title: "Front view", "aria-label": "Front view",
+                Action {
+                    purpose: ActionPurpose::Apply,
+                    title: "Front view", aria_label: "Front view",
                     onclick: move |_| camera.set(Camera { yaw: -std::f32::consts::FRAC_PI_2, pitch: 0.08, ..camera() }),
                     "Front"
                 }
-                button {
-                    r#type: "button", title: "Right side view", "aria-label": "Right side view",
+                Action {
+                    purpose: ActionPurpose::Apply,
+                    title: "Right side view", aria_label: "Right side view",
                     onclick: move |_| camera.set(Camera { yaw: 0.0, pitch: 0.08, ..camera() }),
                     "Right"
                 }
@@ -994,7 +1004,6 @@ mod tests {
     fn robot(calibration: MotorCalibration) -> RobotSummary {
         RobotSummary {
             id: "follower".to_owned(),
-            file: "follower.json".to_owned(),
             robot_type: Some("so101_follower".to_owned()),
             port: None,
             motors: vec![MotorSummary {

@@ -1,16 +1,10 @@
 //! Route-owned Rollout panel registry and follower-focused composition.
 
-use dioxus::prelude::*;
 use spiral_robotics_panels::{Panel, PanelLayout};
 
-use crate::frontend::app::activity::{Activity, PanelRole};
+use crate::frontend::app::activity::PanelRole;
 use crate::frontend::app::layout::default_panel_layout_with_workbench;
-use crate::frontend::app::workspace::{EpisodeWorkspace, ScreenWorkspaceDefinition};
-
-#[component]
-pub(crate) fn RolloutScreen() -> Element {
-    rsx! { EpisodeWorkspace { activity: Activity::Rollout } }
-}
+use crate::frontend::app::workspace::ScreenWorkspaceDefinition;
 
 pub(crate) fn compose(
     workbench: Panel,

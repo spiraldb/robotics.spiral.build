@@ -10,7 +10,6 @@ pub(crate) mod checkpoints;
 pub(crate) mod clock;
 pub(crate) mod control_session;
 pub(crate) mod data;
-pub(crate) mod datasets;
 pub(crate) mod device_discovery;
 mod episode_arms;
 pub(crate) mod episode_queries;

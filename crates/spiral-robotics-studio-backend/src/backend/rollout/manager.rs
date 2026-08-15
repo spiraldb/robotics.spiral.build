@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::FutureExt as _;
 use image::imageops::FilterType;
@@ -37,7 +37,8 @@ use crate::backend::application::rollout::{
 use crate::backend::robotics::cameras::{CameraManager, Frame};
 use crate::backend::robotics::hardware::{HardwareHandle, HardwareState};
 use crate::backend::robots::workspace::RobotWorkspace;
-use crate::backend::storage::settings::DataSettingsStore;
+use crate::backend::storage::manager::StorageManager;
+use crate::backend::storage::settings::StudioPreferencesStore;
 
 const INPUT_STALE_AFTER: Duration = Duration::from_millis(350);
 const INITIAL_CAMERA_TIMEOUT: Duration = Duration::from_secs(5);
@@ -108,11 +109,14 @@ async fn stop_and_join_active(active: ActiveRollout) {
 
 struct WatchRolloutEvents {
     state: watch::Sender<ContractRolloutSnapshot>,
+    persistence: watch::Sender<ContractRolloutSnapshot>,
 }
 
 impl RolloutEventPort for WatchRolloutEvents {
     fn publish(&self, snapshot: &RolloutSnapshot) {
-        self.state.send_replace(contract_snapshot(snapshot));
+        let snapshot = contract_snapshot(snapshot);
+        self.state.send_replace(snapshot.clone());
+        self.persistence.send_replace(snapshot);
     }
 }
 
@@ -310,61 +314,69 @@ pub(crate) struct RolloutManager {
     hardware: Arc<HardwareHandle>,
     cameras: Arc<CameraManager>,
     workspace: Arc<RobotWorkspace>,
-    settings: Arc<DataSettingsStore>,
+    preferences: Arc<StudioPreferencesStore>,
     clock: Arc<dyn Clock>,
     state: watch::Sender<ContractRolloutSnapshot>,
+    storage: Arc<StorageManager>,
     coordinator: Mutex<RolloutCoordinator>,
     active: Mutex<Option<ActiveRollout>>,
 }
 
 impl RolloutManager {
-    pub(crate) fn new<R>(
-        checkpoints: Arc<R>,
+    pub(crate) fn new(
+        storage: Arc<StorageManager>,
         hardware: Arc<HardwareHandle>,
         cameras: Arc<CameraManager>,
         workspace: Arc<RobotWorkspace>,
-        settings: Arc<DataSettingsStore>,
-    ) -> Arc<Self>
-    where
-        R: CheckpointRepository + 'static,
-    {
-        Self::new_with_clock(
-            checkpoints,
-            hardware,
-            cameras,
-            workspace,
-            settings,
-            Arc::new(SystemClock),
-        )
-    }
-
-    pub(crate) fn new_with_clock<R>(
-        checkpoints: Arc<R>,
-        hardware: Arc<HardwareHandle>,
-        cameras: Arc<CameraManager>,
-        workspace: Arc<RobotWorkspace>,
-        settings: Arc<DataSettingsStore>,
-        clock: Arc<dyn Clock>,
-    ) -> Arc<Self>
-    where
-        R: CheckpointRepository + 'static,
-    {
-        let (state, receiver) = watch::channel(ContractRolloutSnapshot::default());
+        preferences: Arc<StudioPreferencesStore>,
+    ) -> Result<Arc<Self>, String> {
+        let initial =
+            restored_rollout_snapshot(storage.load_rollout_snapshot().unwrap_or_else(|error| {
+                tracing::warn!("could not load Spiral rollout history during startup: {error}");
+                ContractRolloutSnapshot::default()
+            }));
+        let (persistence, mut changes) = watch::channel(initial.clone());
+        let persistence_storage = storage.clone();
+        tokio::spawn(async move {
+            while changes.changed().await.is_ok() {
+                let snapshot = changes.borrow_and_update().clone();
+                let storage = persistence_storage.clone();
+                if let Err(error) =
+                    tokio::task::spawn_blocking(move || storage.save_rollout_snapshot(&snapshot))
+                        .await
+                        .unwrap_or_else(|error| {
+                            Err(format!("rollout persistence task stopped: {error}"))
+                        })
+                {
+                    tracing::error!("could not persist rollout state: {error}");
+                }
+            }
+        });
+        let (state, receiver) = watch::channel(initial);
         drop(receiver);
         let events = Arc::new(WatchRolloutEvents {
             state: state.clone(),
+            persistence,
         });
-        Arc::new(Self {
-            checkpoints,
+        Ok(Arc::new(Self {
+            checkpoints: storage.clone(),
             hardware,
             cameras,
             workspace,
-            settings,
-            clock,
+            preferences,
+            clock: Arc::new(SystemClock),
             state,
+            storage,
             coordinator: Mutex::new(RolloutCoordinator::new(events)),
             active: Mutex::new(None),
-        })
+        }))
+    }
+
+    pub(crate) fn reload_from_storage(&self) -> Result<(), String> {
+        self.state.send_replace(restored_rollout_snapshot(
+            self.storage.load_rollout_snapshot()?,
+        ));
+        Ok(())
     }
 
     pub(crate) fn snapshot(&self) -> ContractRolloutSnapshot {
@@ -484,7 +496,7 @@ impl RolloutManager {
             artifact.payload,
         )
         .map_err(|error| format!("checkpoint identity is invalid: {error}"))?;
-        let policy_loader = HttpPolicyLoader::new(self.settings.get().training.endpoint);
+        let policy_loader = HttpPolicyLoader::new(self.preferences.get().training.endpoint);
         let policy = tokio::task::spawn_blocking(move || policy_loader.load(model_artifact))
             .await
             .map_err(|error| format!("policy loader stopped unexpectedly: {error}"))?
@@ -853,6 +865,21 @@ fn contract_snapshot(snapshot: &RolloutSnapshot) -> ContractRolloutSnapshot {
         warning: snapshot.warning.clone(),
         metrics: contract_metrics(&snapshot.metrics),
     }
+}
+
+fn restored_rollout_snapshot(mut snapshot: ContractRolloutSnapshot) -> ContractRolloutSnapshot {
+    if snapshot.phase.active() {
+        snapshot.phase = ContractRolloutPhase::Failed;
+        snapshot.finished_ms = Some(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
+                .unwrap_or(0),
+        );
+        snapshot.message = Some("Studio stopped before this rollout completed.".to_owned());
+        snapshot.warning = Some("No policy session was resumed after restart.".to_owned());
+    }
+    snapshot
 }
 
 fn contract_metrics(metrics: &RolloutMetrics) -> ContractRolloutMetrics {
@@ -1264,8 +1291,7 @@ mod tests {
         wait_for_policy_admission,
     };
     use crate::backend::application::checkpoints::{
-        CheckpointArtifact, CheckpointFuture, CheckpointKey, CheckpointPublication,
-        CheckpointRepository, CheckpointSource,
+        CheckpointArtifact, CheckpointFuture, CheckpointKey, CheckpointRepository, CheckpointWrite,
     };
     use crate::backend::application::policy_runtime::{
         ACT_ARTIFACT_FORMAT, ACT_TENSOR_NAMESPACE, CameraBindingContract, PolicyDataContract,
@@ -1528,18 +1554,7 @@ mod tests {
     }
 
     impl CheckpointRepository for FakeCheckpointRepository {
-        fn register_run_source(
-            &self,
-            _run_id: &str,
-            _source: CheckpointSource,
-        ) -> Result<(), String> {
-            Err("rollout must not register training sources".to_owned())
-        }
-
-        fn publish_checkpoint(
-            &self,
-            _publication: CheckpointPublication,
-        ) -> CheckpointFuture<'_, ()> {
+        fn save_checkpoint(&self, _write: CheckpointWrite) -> CheckpointFuture<'_, ()> {
             Box::pin(async { Err("rollout must not publish checkpoints".to_owned()) })
         }
 
@@ -1549,11 +1564,7 @@ mod tests {
             Box::pin(async move { Ok(artifact) })
         }
 
-        fn delete_run_checkpoints(
-            &self,
-            _run_id: String,
-            _source: CheckpointSource,
-        ) -> CheckpointFuture<'_, ()> {
+        fn delete_run_checkpoints(&self, _run_id: String) -> CheckpointFuture<'_, ()> {
             Box::pin(async { Err("rollout must not delete checkpoints".to_owned()) })
         }
     }

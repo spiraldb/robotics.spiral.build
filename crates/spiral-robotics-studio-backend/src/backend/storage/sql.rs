@@ -16,23 +16,6 @@ pub(crate) fn count_rows(relation: &str) -> String {
     format!("SELECT COUNT(*) AS rows FROM {relation}")
 }
 
-#[cfg(test)]
-pub(crate) fn count_episode_rows(relation: &str, episode_id: &str) -> String {
-    format!(
-        "SELECT COUNT(*) AS rows FROM {relation} WHERE {} = {}",
-        column::EPISODE_ID,
-        string_literal(episode_id)
-    )
-}
-
-pub(crate) fn episode_exists(relation: &str, episode_id: &str) -> String {
-    format!(
-        "SELECT {episode_id_column} FROM {relation} WHERE {episode_id_column} = {episode_id} LIMIT 1",
-        episode_id_column = column::EPISODE_ID,
-        episode_id = string_literal(episode_id),
-    )
-}
-
 pub(crate) fn dataset_exists(relation: &str, dataset_id: &str) -> String {
     format!(
         "SELECT {dataset_id_column} FROM {relation} WHERE {dataset_id_column} = {dataset_id} LIMIT 1",
@@ -187,19 +170,6 @@ pub(crate) fn create_video_dataset(dataset: &str, sources: &str) -> String {
     )
 }
 
-#[cfg(test)]
-pub(crate) fn video_tracks(sources: &str, episode_id: &str) -> String {
-    format!(
-        "SELECT v.{episode_id}, v.{stream_id}, tracks.* FROM {sources} v \
-         CROSS JOIN LATERAL spql.mp4.tracks(v.{source}) AS tracks \
-         WHERE v.{episode_id} = {episode_value}",
-        episode_id = column::EPISODE_ID,
-        stream_id = column::STREAM_ID,
-        source = column::SOURCE,
-        episode_value = string_literal(episode_id),
-    )
-}
-
 pub(crate) fn refresh_dataset(dataset: &str) -> String {
     format!("REFRESH DATASET {dataset}")
 }
@@ -211,7 +181,7 @@ pub(crate) fn ensure_read_only(sql: &str, mode: ReadOnlyMode) -> Result<(), Stri
 /// Escape a value for the SQL string-literal grammar. ADBC parameters are not
 /// uniformly implemented by the Spiral drivers currently supported here, so
 /// generated statements isolate this compatibility fallback in one function.
-fn string_literal(value: &str) -> String {
+pub(crate) fn string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
@@ -221,7 +191,7 @@ mod tests {
 
     #[test]
     fn generated_values_are_escaped_in_one_place() {
-        let sql = episode_exists("robot.episodes", "take-'one");
+        let sql = delete_episode("robot.episodes", "take-'one");
         assert!(sql.contains("'take-''one'"));
 
         let sql = delete_training_run("robot.training_checkpoints", "run-'one");

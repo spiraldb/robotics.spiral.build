@@ -443,20 +443,10 @@ impl CalibrationHistoryPort for CalibrationHistoryHttpAdapter<'_> {
                         | spiral_robotics_contracts::api::TrainingRunPhase::Stopping
                 )
             }),
-            publication_active: self
-                .state
-                .storage
-                .statuses()
-                .iter()
-                .any(|status| matches!(status.state.as_str(), "queued" | "publishing")),
         }
     }
 
     fn current_calibration(&self, robot: &str) -> Result<Option<Calibration>, ApplicationError> {
-        self.state
-            .workspace
-            .reload_if_changed()
-            .map_err(workspace_application_error)?;
         let record = self
             .state
             .workspace
@@ -478,44 +468,24 @@ impl CalibrationHistoryPort for CalibrationHistoryHttpAdapter<'_> {
         Ok(calibration)
     }
 
-    async fn reapply_local_positions(
+    async fn reapply_positions(
         &self,
         robot: String,
         calibration: Calibration,
-    ) -> Result<ReappliedLocalPositions, ApplicationError> {
+    ) -> Result<ReappliedPositions, ApplicationError> {
         let episodes = self.state.episodes.clone();
         let result =
             tokio::task::spawn_blocking(move || episodes.reapply_calibration(&robot, &calibration))
                 .await
                 .map_err(|error| ApplicationError::Internal(error.to_string()))?
                 .map_err(episode_application_error)?;
-        Ok(ReappliedLocalPositions {
+        Ok(ReappliedPositions {
             updated_episode_ids: result.updated_episode_ids,
             frames_updated: result.frames_updated,
             episodes_unchanged: result.episodes_unchanged,
             episodes_skipped: result.episodes_skipped,
             warnings: result.warnings,
         })
-    }
-
-    fn queue_spiral_sync(&self, episode: String) -> Result<bool, ApplicationError> {
-        if self
-            .state
-            .episodes
-            .get(&episode)
-            .map_err(episode_application_error)?
-            .discarded
-        {
-            return Ok(false);
-        }
-        if !self.state.data_settings.get().spiral.configured() {
-            return Ok(false);
-        }
-        self.state
-            .storage
-            .sync_spiral_existing(episode)
-            .map(|()| true)
-            .map_err(ApplicationError::Internal)
     }
 }
 
@@ -976,7 +946,6 @@ async fn reapply_calibration(
         frames_updated: output.frames_updated,
         episodes_unchanged: output.episodes_unchanged,
         episodes_skipped: output.episodes_skipped,
-        spiral_syncs_queued: output.spiral_syncs_queued,
         warnings: output.warnings,
     }))
 }
@@ -985,7 +954,7 @@ async fn set_mode(
     State(state): State<AppState>,
     Json(selection): Json<ModeSelection>,
 ) -> Result<StatusCode, Failure> {
-    // Replay carries a trajectory that has to be read off disk, so it has its
+    // Replay carries a trajectory that has to be read from SpiralDB, so it has its
     // own endpoint. Accepting it here would mean either loading the episode
     // behind the caller's back or entering a mode with nothing to play.
     let mode = match selection {

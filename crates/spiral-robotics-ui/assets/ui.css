@@ -1,0 +1,531 @@
+:root {
+  --ui-ink: var(--tone-ink, #37352f);
+  --ui-ink-soft: var(--tone-ink-soft, #65645f);
+  --ui-ink-faint: var(--tone-ink-faint, #71706c);
+  --ui-surface: var(--tone-surface, #ffffff);
+  --ui-sunken: var(--tone-sunken, #f7f7f5);
+  --ui-hover: var(--tone-hover, rgb(55 53 47 / 0.06));
+  /* One step past hover, for the moment a control is held down and for the
+     hover of something already selected. Without it a pressed toggle lightened
+     on hover instead of darkening, which reads as the selection letting go. */
+  --ui-pressed: rgb(55 53 47 / 0.11);
+  --ui-line: var(--tone-line, #e8e8e6);
+  --ui-accent: var(--tone-accent, #0868b8);
+  --ui-accent-ink: var(--tone-accent-ink, #ffffff);
+  --ui-selected: var(--tone-selected, rgb(8 104 184 / 0.1));
+  --ui-selected-strong: rgb(8 104 184 / 0.16);
+  --ui-danger: var(--tone-danger, #be423d);
+  --ui-danger-soft: var(--tone-danger-soft, rgb(190 66 61 / 0.1));
+  --ui-backdrop: rgb(55 53 47 / 0.32);
+  --ui-dialog-shadow: 0 18px 48px rgb(55 53 47 / 0.24);
+  --ui-radius: 4px;
+  --ui-target-compact: 24px;
+  --ui-target-standard: 28px;
+  --ui-target-prominent: 32px;
+  --ui-target-touch: 44px;
+}
+
+.ui-icon {
+  width: 0.875rem;
+  height: 0.875rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.35;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ui-icon--chevron-open {
+  transform: rotate(90deg);
+}
+
+.ui-action {
+  display: inline-flex;
+  min-width: 0;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 1px solid transparent;
+  border-radius: var(--ui-radius);
+  padding-inline: 6px;
+  color: var(--ui-ink);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.2;
+  text-align: center;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color 100ms ease-out, background-color 100ms ease-out,
+    border-color 100ms ease-out, opacity 100ms ease-out;
+}
+
+/* `:where()` costs no specificity, so an unselected control keeps the plain
+   hover while a selected one is free to answer the pointer in its own colour
+   further down. Without the exclusion the neutral wash landed on top of every
+   selected state and hovering the current mode greyed it out. */
+.ui-action:where(:not([aria-pressed="true"], [aria-selected="true"], [aria-checked="true"], [aria-current="page"])):hover:not(:disabled):not([aria-disabled="true"]) {
+  color: var(--ui-ink);
+  background: var(--ui-hover);
+}
+
+/* A control that is being pressed says so. One tonal step is the whole
+   gesture — no scale, no shadow, nothing that moves a neighbour. */
+.ui-action:active:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--ui-pressed);
+}
+
+.ui-action:focus-visible {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 1px;
+}
+
+/* Only for the actions that wrap a real control — the file picker hides its
+   input inside the label, so the label has to carry that input's focus. A bare
+   button never matches, which is what stopped a ring appearing on a button
+   merely because something inside it was focused. */
+.ui-action:has(input):focus-within {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 1px;
+}
+
+/* Faded to 0.44 a disabled control was unreadable, and this interface puts the
+   reason a control is unavailable in the control's own label. Dimmed enough to
+   read as unavailable, legible enough to still be read. */
+.ui-action:disabled,
+.ui-action[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/*
+  A filled action that cannot be taken stops being filled. Faded, "Run policy"
+  and "Run training" stayed the largest and most saturated thing on their
+  panel — a pale blue block that still looked like the way forward while the
+  sentence underneath explained it was not. Emptied out, the panel's primary
+  action is visibly waiting, and the reason beside it is what the eye lands on.
+*/
+.ui-action--solid:disabled,
+.ui-action--solid[aria-disabled="true"] {
+  border-color: var(--ui-line);
+  color: var(--ui-ink-faint);
+  background: var(--ui-sunken);
+  opacity: 1;
+}
+
+.ui-action[aria-busy="true"] {
+  cursor: wait;
+}
+
+.ui-action--compact { min-height: var(--ui-target-compact); }
+.ui-action--standard { min-height: var(--ui-target-standard); }
+.ui-action--prominent { min-height: var(--ui-target-prominent); }
+
+.ui-action--outline {
+  border-color: var(--ui-line);
+}
+
+.ui-action--outline,
+.ui-action--solid {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.ui-action--solid {
+  color: var(--ui-accent-ink);
+  background: var(--ui-accent);
+}
+
+.ui-action--solid:hover:not(:disabled):not([aria-disabled="true"]) {
+  color: var(--ui-accent-ink);
+  background: color-mix(in srgb, var(--ui-accent) 92%, black);
+}
+
+.ui-action--link {
+  padding-inline: 0;
+  color: var(--ui-ink-soft);
+}
+
+.ui-action--link:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: transparent;
+}
+
+.ui-action--icon {
+  width: var(--ui-target-compact);
+  min-width: var(--ui-target-compact);
+  padding: 0;
+  color: var(--ui-ink-soft);
+}
+
+.ui-action--row {
+  justify-content: flex-start;
+  text-align: start;
+}
+
+.ui-action--tab {
+  border-radius: 0;
+  justify-content: flex-start;
+  color: var(--ui-ink-soft);
+  text-align: start;
+}
+
+.ui-action--segment {
+  min-height: 32px;
+  border-radius: 0;
+  color: var(--ui-ink-soft);
+  background: var(--ui-surface);
+}
+
+/*
+  Selection is a wash and a weight. It is never a ring.
+
+  One rule used to draw a one-pixel accent box around anything reporting
+  itself as pressed, selected, checked, current, or merely open, and because
+  almost everything in a workbench is one of those, the workspace became a
+  field of small blue rectangles: the arm switcher, the grid toggle, the scene
+  legend, every panel tab, and every disclosure that happened to be expanded.
+  A tinted cell among untinted neighbours already reads as the chosen one, and
+  giving the ring back to focus is what lets a keyboard be seen at all.
+*/
+.ui-action:where(:not(.ui-action--solid)):is(
+  [aria-pressed="true"],
+  [aria-selected="true"],
+  [aria-checked="true"],
+  [aria-current="page"]
+) {
+  color: var(--ui-accent);
+  background: var(--ui-selected);
+  font-weight: 500;
+}
+
+.ui-action:where(:not(.ui-action--solid)):is(
+  [aria-pressed="true"],
+  [aria-selected="true"],
+  [aria-checked="true"],
+  [aria-current="page"]
+):hover:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--ui-selected-strong);
+}
+
+/*
+  A tab is the exception, because the strip it sits in is already telling the
+  story: the active tab's own row lifts to paper while the bar behind it stays
+  recessed, and a two-pixel accent edge caps it. The label's job is only to
+  stop being secondary — tinting it as well put a blue lozenge inside a white
+  tab inside a grey bar, three treatments for one fact.
+*/
+.ui-action--tab:is([aria-selected="true"], [aria-current="page"]) {
+  color: var(--ui-ink);
+  background: transparent;
+  font-weight: 500;
+}
+
+/*
+  `--bare` is for an action that fills a row which already owns a surface: a
+  list item that lights on hover and tints when it is the selected one. Without
+  it the row and the label inside it light separately, so a hovered episode had
+  a grey label sitting on white paper next to its own Delete action — half the
+  row responding to a pointer that was over all of it.
+
+  The selectors carry the same weight as the general rules above and come after
+  them, which is the whole mechanism: opting out has to be able to win.
+*/
+.ui-action--bare,
+.ui-action--bare:hover:not(:disabled):not([aria-disabled="true"]),
+.ui-action--bare:active:not(:disabled):not([aria-disabled="true"]),
+.ui-action--bare:is(
+  [aria-pressed="true"],
+  [aria-selected="true"],
+  [aria-checked="true"],
+  [aria-current="page"]
+),
+.ui-action--bare:is(
+  [aria-pressed="true"],
+  [aria-selected="true"],
+  [aria-checked="true"],
+  [aria-current="page"]
+):hover:not(:disabled):not([aria-disabled="true"]) {
+  background: transparent;
+}
+
+.ui-action--tab:is([aria-selected="true"], [aria-current="page"]):hover:not(:disabled) {
+  background: transparent;
+}
+
+/* Open is not selected. A disclosure that is showing its contents has a
+   chevron that already turned; colouring it as well claimed the operator had
+   chosen it over its neighbours. */
+.ui-action[aria-expanded="true"]:not([aria-selected="true"]):not([aria-pressed="true"]) {
+  color: var(--ui-ink);
+  background: var(--ui-hover);
+}
+
+/*
+  The mode group is three cells on white, so the selected one needs a wash and
+  not a fill. Every one of these used to paint itself solid alarm red when
+  chosen — including Release, which is the state where the motors are *off* —
+  and a colour that is on in all three positions has stopped saying anything.
+  Blue is the current mode; red below is reserved for the one fact in this
+  group worth a colour.
+*/
+.ui-action--segment[aria-checked="true"] {
+  border-color: transparent;
+  color: var(--ui-accent);
+  background: var(--ui-selected);
+  font-weight: 500;
+}
+
+.ui-action:is(
+  [data-action="delete"],
+  [data-action="discard"],
+  [data-action="replace"],
+  [data-action="release"],
+  [data-action="stop"]
+) {
+  color: var(--ui-danger);
+}
+
+/* A filled danger button is a commitment: the confirmation that actually
+   deletes the episode or drops the torque. The mode group no longer borrows
+   it — choosing a mode is not the same gesture as confirming one. */
+.ui-action--solid:is(
+  [data-action="delete"],
+  [data-action="discard"],
+  [data-action="replace"],
+  [data-action="release"],
+  [data-action="stop"]
+) {
+  border-color: transparent;
+  color: var(--ui-accent-ink);
+  background: var(--ui-danger);
+}
+
+/* Torque is live: the arm is holding itself against gravity and will move on
+   command. That is the one condition in the mode group worth a colour, and the
+   wash carries it at the same size and position as the other two cells, so the
+   control does not resize when the bench becomes dangerous. */
+.ui-action--segment:is([data-action="hold"], [data-action="teleoperate"])[aria-checked="true"] {
+  border-color: transparent;
+  color: var(--ui-danger);
+  background: var(--ui-danger-soft);
+}
+
+.ui-action--segment:is([data-action="hold"], [data-action="teleoperate"])[aria-checked="true"]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ui-danger) 16%, transparent);
+}
+
+/* Selected, this is the resting state — the motors are off and nothing is
+   about to happen. The red belongs to the press that gets you here, which is
+   the unchecked cell above, not to sitting in it. */
+.ui-action--segment[data-action="release"][aria-checked="true"] {
+  color: var(--ui-accent);
+}
+
+.ui-hover-action {
+  transition: color 100ms ease-out, background-color 100ms ease-out,
+    opacity 100ms ease-out;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .ui-hover-action-host:not(:hover):not(:focus-within) .ui-hover-action {
+    opacity: 0;
+  }
+
+  .ui-hover-action:focus {
+    opacity: 1;
+  }
+}
+
+.ui-action:is(
+  [data-action="delete"],
+  [data-action="discard"],
+  [data-action="replace"],
+  [data-action="release"],
+  [data-action="stop"]
+):hover:not(:disabled) {
+  color: var(--ui-danger);
+  background: var(--ui-danger-soft);
+}
+
+.ui-action--solid:is(
+  [data-action="delete"],
+  [data-action="discard"],
+  [data-action="replace"],
+  [data-action="release"],
+  [data-action="stop"]
+):hover:not(:disabled) {
+  color: var(--ui-accent-ink);
+  background: color-mix(in srgb, var(--ui-danger) 92%, black);
+}
+
+.ui-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.ui-mode-group {
+  display: grid;
+  overflow: hidden;
+  gap: 1px;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius);
+  background: var(--ui-line);
+}
+
+.ui-toggle {
+  display: inline-flex;
+  min-height: var(--ui-target-compact);
+  cursor: pointer;
+  align-items: center;
+  gap: 6px;
+  color: var(--ui-ink);
+  font-size: 11px;
+}
+
+.ui-toggle[aria-disabled="true"] {
+  cursor: not-allowed;
+  color: var(--ui-ink-faint);
+}
+
+.ui-toggle input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--ui-accent);
+}
+
+.ui-toggle:focus-within {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 2px;
+}
+
+.ui-inline-confirmation {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  border-top: 1px solid var(--ui-line);
+  padding-block: 6px;
+  color: var(--ui-danger);
+  background: var(--ui-danger-soft);
+}
+
+.ui-inline-confirmation p {
+  min-width: min(100%, 16rem);
+  flex: 1 1 18rem;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.ui-confirmation-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.ui-dialog-backdrop {
+  position: fixed;
+  z-index: 98;
+  inset: 0;
+  background: var(--ui-backdrop);
+}
+
+.ui-dialog-surface {
+  border-radius: 6px;
+  color: var(--ui-ink);
+  background: var(--ui-surface);
+  box-shadow: var(--ui-dialog-shadow);
+}
+
+.ui-blocking-confirmation {
+  position: fixed;
+  z-index: 99;
+  top: 50%;
+  left: 50%;
+  display: flex;
+  width: min(28rem, calc(100vw - 2rem));
+  max-height: min(34rem, calc(100dvh - 2rem));
+  transform: translate(-50%, -50%);
+  flex-direction: column;
+  overflow: auto;
+}
+
+.ui-blocking-confirmation header {
+  padding: 12px 14px 8px;
+}
+
+.ui-blocking-confirmation h2 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.ui-confirmation-copy {
+  padding: 0 14px 12px;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.ui-confirmation-copy p {
+  margin: 0;
+}
+
+.ui-confirmation-consequence {
+  margin-top: 8px !important;
+  padding: 7px 8px;
+  border-radius: var(--ui-radius);
+  color: var(--ui-danger);
+  background: var(--ui-danger-soft);
+}
+
+.ui-blocking-confirmation footer {
+  padding: 8px 14px;
+  border-top: 1px solid var(--ui-line);
+}
+
+@media (max-width: 480px), (pointer: coarse) {
+  .ui-action {
+    min-width: var(--ui-target-touch);
+    min-height: var(--ui-target-touch);
+  }
+
+  .ui-action--icon {
+    width: var(--ui-target-touch);
+    min-width: var(--ui-target-touch);
+  }
+
+  .ui-toggle {
+    min-height: var(--ui-target-touch);
+  }
+
+  .ui-blocking-confirmation {
+    top: auto;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    max-height: min(80dvh, 34rem);
+    transform: none;
+    border-radius: 6px 6px 0 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-action {
+    transition: none;
+  }
+}

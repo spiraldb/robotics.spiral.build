@@ -227,8 +227,6 @@ pub(super) fn application_training_run(run: TrainingRun) -> ApplicationTrainingR
         id: run.id,
         config: training_command(run.config),
         source: ApplicationTrainingSource {
-            project: run.source.project,
-            dataset: run.source.dataset,
             dataset_id: run.source.dataset_id,
         },
         phase: application_training_phase(run.phase),
@@ -271,18 +269,11 @@ pub(super) fn application_training_run(run: TrainingRun) -> ApplicationTrainingR
 }
 
 pub(super) fn contract_training_run(run: ApplicationTrainingRun) -> TrainingRun {
-    let checkpoint_table = spiral_robotics_contracts::spiral::relation(
-        &run.source.dataset,
-        spiral_robotics_contracts::spiral::Table::TrainingCheckpoints,
-    );
     TrainingRun {
         id: run.id,
         config: training_request(run.config),
         source: spiral_robotics_contracts::api::TrainingSource {
-            project: run.source.project,
-            dataset: run.source.dataset,
             dataset_id: run.source.dataset_id,
-            checkpoint_table: checkpoint_table.clone(),
         },
         phase: contract_training_phase(run.phase),
         current_step: run.current_step,
@@ -316,7 +307,6 @@ pub(super) fn contract_training_run(run: ApplicationTrainingRun) -> TrainingRun 
                     step: checkpoint.step,
                     created_ms: checkpoint.created_ms,
                     validation_loss: checkpoint.validation_loss,
-                    spiral_table: checkpoint_table.clone(),
                     byte_size: checkpoint.byte_size,
                     inference_ready: checkpoint.inference_ready,
                     recommended_action_steps: checkpoint.recommended_action_steps,

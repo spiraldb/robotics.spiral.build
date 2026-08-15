@@ -8,21 +8,21 @@ use spiral_robotics_training::{
 };
 use spiral_robotics_training_http::HttpTrainingBackend;
 
-use crate::backend::storage::settings::DataSettingsStore;
+use crate::backend::storage::settings::StudioPreferencesStore;
 
 /// Resolve the selected endpoint for every probe and new session. Existing
 /// sessions retain their selected HTTP endpoint when Settings changes.
 pub(crate) struct ConfiguredHttpTrainingBackend {
-    settings: Arc<DataSettingsStore>,
+    preferences: Arc<StudioPreferencesStore>,
 }
 
 impl ConfiguredHttpTrainingBackend {
-    pub(crate) fn new(settings: Arc<DataSettingsStore>) -> Self {
-        Self { settings }
+    pub(crate) fn new(preferences: Arc<StudioPreferencesStore>) -> Self {
+        Self { preferences }
     }
 
     fn selected(&self) -> HttpTrainingBackend {
-        HttpTrainingBackend::new(self.settings.get().training.endpoint)
+        HttpTrainingBackend::new(self.preferences.get().training.endpoint)
     }
 }
 

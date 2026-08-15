@@ -20,13 +20,23 @@ The product does not reconcile a second local source of truth.
   or episode directory as another source of truth.
 - **PERSIST-009** The system must not use a durable local spool or application
   data buffer when SpiralDB is unavailable.
-- **PERSIST-010** Browser panel layouts may remain local.
-- **PERSIST-011** Downloaded pretrained model files may use a rebuildable local
-  cache.
+- **PERSIST-010** Browser panel layouts must remain session state; Studio must
+  not create a second durable browser store for them.
+- **PERSIST-011** Studio must not use a persistent local cache for project data
+  or model artifacts.
 - **PERSIST-012** Compute sessions may stay in memory because Studio owns their
   durable results.
-- **PERSIST-013** Settings must let the user configure and test the SpiralDB
-  destination.
+- **PERSIST-013** Studio must start when no Spiral project is selected. Settings
+  must let the operator configure both the Spiral control-plane API endpoint
+  and the SpFS endpoint, then select and test the active project. Project
+  switches must drain repository work, discard stale pooled connections, and
+  be refused while robots or project activity are active. Because the ADBC
+  driver binds both service endpoints when constructing a database, changing
+  either endpoint must save the complete next destination, clearly require a
+  Studio restart, and must not send project data to the still-active old
+  destination. The namespace remains process bootstrap configuration, and
+  individual domain operations must not accept or reconstruct alternate
+  destinations.
 - **PERSIST-014** Stored SpiralDB credentials must remain in the backend and
   must not be returned to the browser.
 
@@ -63,9 +73,47 @@ flowchart TD
   color channels.
 - **PERSIST-022** Persisted vectors must use typed Arrow-compatible columns, not
   JSON strings.
-- **PERSIST-023** Table and column names must be centralized.
+- **PERSIST-023** Table names, column names, and SQL value encoding must be
+  centralized at the Spiral persistence boundary.
 - **PERSIST-024** Product storage must preserve real table semantics for
   [SQL Query](query.md).
+
+## Portable transfer files
+
+- **PERSIST-025** Studio must export every Studio-owned relation in the active
+  SpiralDB namespace as one `.spiral-project` file.
+- **PERSIST-026** The portable file must carry a versioned manifest and typed
+  Arrow IPC payload for each included relation.
+- **PERSIST-027** Import must validate the file format, schema version, relation
+  names, and exact ordered columns before replacing project data.
+- **PERSIST-028** Import must replace the active project in one exclusive
+  transaction and roll back on failure. Rows in included relations must be
+  replaced, Studio-owned relations absent from the file must be removed, and
+  import must not stage through the local filesystem.
+- **PERSIST-029** Import must be refused while robots are connected or recording,
+  replay, rollout, training, or another catalog mutation is active.
+- **PERSIST-030** Project transfer may use a bounded in-memory request/response
+  buffer, currently limited to 1 GiB; that buffer is not durable storage.
+- **PERSIST-031** One private backend-local JSON file may persist only the
+  bootstrap state needed before Spiral can be opened, currently the API
+  endpoint, SpFS endpoint, selected project ID, and, when implemented,
+  authentication/session metadata. It must use atomic replacement and private
+  permissions and must never contain robots, episodes, media, runs,
+  checkpoints, project preferences, a write spool, or cached Spiral rows.
+- **PERSIST-032** Whole-project import and export must live in Settings →
+  SpiralDB, separate from episode transfer in Data.
+- **PERSIST-033** Data must export the selected dataset's metadata, episodes,
+  stream declarations, joint samples, and video assets as one versioned
+  `.spiral-episodes` file. It must exclude project-level relations.
+- **PERSIST-034** Episode import must target the selected dataset. It must keep
+  an existing target dataset's metadata, retarget imported episode rows to the
+  target, and merge the imported episode-owned relations transactionally.
+- **PERSIST-035** Episode import must validate its manifest, schema, exact
+  relation columns, single source dataset, episode IDs, and child references
+  before writing. It must refuse any episode ID that already exists in the
+  project and never replace an existing episode.
+- **PERSIST-036** `.spiral-project` and `.spiral-episodes` must have distinct
+  format identities and must not be accepted by the other's import path.
 
 The confirmed SQL example remains in the
 [SpiralDB section of `notes.md`](../../notes.md#spiraldb).
@@ -88,39 +136,34 @@ The confirmed SQL example remains in the
 
 ## Testability
 
-- **PERSIST-TEST-001** Application features must use storage ports instead of an
-  ADBC driver directly.
-- **PERSIST-TEST-002** Feature tests may use an in-memory fake that preserves the
-  product semantics needed by the use case.
-- **PERSIST-TEST-003** The fake does not need to reproduce SpiralDB internals
-  such as MP4 decoding.
-- **PERSIST-TEST-004** SpiralDB integration tests must use the real adapter for
+- **PERSIST-TEST-001** Persistent adapters must converge on one shared
+  `SpiralRepository`; ADBC is the physical persistence boundary.
+- **PERSIST-TEST-002** Pure application-policy tests may use capability fakes,
+  but Studio must not ship a simulated persistence backend or an in-memory
+  ADBC destination mode.
+- **PERSIST-TEST-003** SpiralDB integration tests must use the real adapter for
   relational and video behavior.
+- **PERSIST-TEST-004** A real-SpiralDB project-transfer test must export a
+  namespace containing relational JSON and binary checkpoint data, replace it
+  with conflicting data, import the exported bundle, and prove that the
+  exported state is restored exactly. Relations and rows created only after
+  export must be absent after import.
+- **PERSIST-TEST-005** A real-SpiralDB episode-transfer test must export one
+  dataset, import it into an existing target dataset, prove the target's prior
+  episodes survive and imported rows are retargeted, and prove a repeated
+  import is refused rather than overwriting an episode.
 
 ## Implementation ownership
 
 - Stable relation names:
   [`spiral-robotics-contracts/src/spiral.rs`](../../crates/spiral-robotics-contracts/src/spiral.rs)
-- Current ADBC, query, and publication adapter:
+- Shared ADBC repository, query, and transfer formats:
   [`backend/storage`](../../crates/spiral-robotics-studio-backend/src/backend/storage/)
 - Episode relation encoding:
   [`backend/recording/spiral.rs`](../../crates/spiral-robotics-studio-backend/src/backend/recording/spiral.rs)
 
-## Current gaps
+## Current gap
 
-The current working tree does not yet conform to SpiralDB-only durability:
-
-- robot instances still use JSON files in
-  [`backend/robots/workspace.rs`](../../crates/spiral-robotics-studio-backend/src/backend/robots/workspace.rs);
-- episodes and video still use local files in
-  [`backend/recording`](../../crates/spiral-robotics-studio-backend/src/backend/recording/);
-- local episode files remain the publication recovery boundary in
-  [`backend/storage/manager.rs`](../../crates/spiral-robotics-studio-backend/src/backend/storage/manager.rs);
-- service settings still use a local file in
-  [`backend/storage/settings.rs`](../../crates/spiral-robotics-studio-backend/src/backend/storage/settings.rs);
-- ordered checksummed `schema_migrations` are not implemented;
-- the project-owned relations for robots, calibration, training runs, and
-  rollout runs are incomplete.
-
-These are implementation gaps. They do not redefine the accepted persistence
-behavior.
+Ordered checksummed `schema_migrations` are not implemented yet. The current
+adapter rejects project files with a different schema version; this does not
+redefine the accepted migration behavior above.

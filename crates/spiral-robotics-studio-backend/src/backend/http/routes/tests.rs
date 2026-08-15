@@ -3,7 +3,7 @@ use super::data::{
     contract_query_result,
 };
 use super::devices::{build_camera_object, multipart_part};
-use super::recordings::{ByteRange, parse_byte_range, resolve_export_directory};
+use super::recordings::{ByteRange, parse_byte_range};
 use super::training_rollout::{
     application_rollout_snapshot, application_training_run, contract_rollout_snapshot,
     contract_training_run,
@@ -50,7 +50,6 @@ fn feature_routers_preserve_every_public_path_exactly_once() {
         "/episodes/replay",
         "/episodes/replay/pause",
         "/episodes/export",
-        "/episodes/export.zip",
         "/episodes/import",
         "/episodes/{id}",
         "/episodes/{id}/judge",
@@ -62,11 +61,11 @@ fn feature_routers_preserve_every_public_path_exactly_once() {
         "/episodes/{id}/videos/{stream}",
         "/settings/data",
         "/settings/data/test/spiral",
-        "/publications",
-        "/spiral/publications/{episode}",
         "/spiral/query",
         "/spiral/replay",
         "/spiral/video.mp4",
+        "/project/export",
+        "/project/import",
         "/training/runs",
         "/training/runs/{id}",
         "/training/runs/{id}/stop",
@@ -187,35 +186,7 @@ fn multipart_parts_carry_an_accurate_length() {
 }
 
 #[test]
-fn an_export_directory_may_not_climb_out_of_the_workspace() {
-    let episodes = std::path::Path::new("/bench/spiral-robotics/episodes");
-
-    // A plain name lands beside the episode directory, where a dataset goes.
-    assert_eq!(
-        resolve_export_directory(episodes, "pick-place-v1").unwrap(),
-        std::path::PathBuf::from("/bench/spiral-robotics/pick-place-v1")
-    );
-    // An absolute path is the operator being explicit.
-    assert_eq!(
-        resolve_export_directory(episodes, "/data/sets/a").unwrap(),
-        std::path::PathBuf::from("/data/sets/a")
-    );
-    // What is refused is the shape that reads as relative and is not.
-    for escape in ["../../etc", "sets/../../..", ".."] {
-        let error = resolve_export_directory(episodes, escape).expect_err(escape);
-        assert_eq!(error.0, StatusCode::BAD_REQUEST);
-        assert!(error.1.contains(".."), "{}", error.1);
-    }
-    assert_eq!(
-        resolve_export_directory(episodes, "   ")
-            .expect_err("blank")
-            .0,
-        StatusCode::BAD_REQUEST
-    );
-}
-
-#[test]
-fn local_video_ranges_cover_browser_seek_forms() {
+fn spiral_video_ranges_cover_browser_seek_forms() {
     assert_eq!(
         parse_byte_range("bytes=10-19", 100),
         Some(ByteRange { start: 10, end: 19 })
@@ -250,10 +221,6 @@ fn episode_errors_map_to_the_right_status_codes() {
             EpisodeError::NotFound("episode_000001".to_owned()),
             StatusCode::NOT_FOUND,
         ),
-        (
-            EpisodeError::AlreadyExists("/tmp/set".into()),
-            StatusCode::CONFLICT,
-        ),
     ];
     for (error, expected) in cases {
         assert_eq!(Failure::from(error).0, expected);
@@ -275,10 +242,6 @@ fn workspace_errors_map_to_the_right_status_codes() {
             WorkspaceError::AlreadyExists("arm".to_owned()),
             StatusCode::CONFLICT,
         ),
-        (
-            WorkspaceError::Conflict("changed".to_owned()),
-            StatusCode::CONFLICT,
-        ),
     ];
 
     for (error, expected) in cases {
@@ -295,18 +258,35 @@ fn workspace_errors_map_to_the_right_status_codes() {
 fn data_presenters_round_trip_transport_values_without_leaking_them_to_policy() {
     let settings = DataSettings {
         spiral: ContractSpiralSettings {
-            enabled: true,
-            uri: "spiral:memory:".to_owned(),
+            endpoint: "https://api.spiraldb.dev".to_owned(),
+            spfs_endpoint: "https://spfs.spiraldb.dev".to_owned(),
             project_id: "project".to_owned(),
-            dataset: "dataset".to_owned(),
+            namespace: "dataset".to_owned(),
+            endpoint_restart_required: false,
         },
         training: spiral_robotics_contracts::api::TrainingRuntimeSettings::default(),
         video: VideoSettings { enabled: true },
     };
     assert_eq!(
-        contract_data_settings(application_data_settings(settings.clone())),
+        contract_data_settings(application_data_settings(
+            settings.clone(),
+            None,
+            None,
+            None
+        )),
         settings
     );
+
+    let pending = application_data_settings(
+        settings,
+        Some("http://127.0.0.1:4279"),
+        Some("http://127.0.0.1:4295"),
+        Some("local-project"),
+    );
+    assert_eq!(pending.spiral.endpoint, "http://127.0.0.1:4279");
+    assert_eq!(pending.spiral.spfs_endpoint, "http://127.0.0.1:4295");
+    assert_eq!(pending.spiral.project_id, "local-project");
+    assert!(pending.spiral.endpoint_restart_required);
 
     let query = SpiralQueryResponse {
         columns: vec![spiral_robotics_contracts::api::QueryColumn {
@@ -333,10 +313,7 @@ fn training_and_rollout_presenters_round_trip_semantic_state() {
         id: "run-1".to_owned(),
         config: StartTrainingRequest::default(),
         source: spiral_robotics_contracts::api::TrainingSource {
-            project: "project".to_owned(),
-            dataset: "dataset".to_owned(),
             dataset_id: "default".to_owned(),
-            checkpoint_table: "dataset.training_checkpoints".to_owned(),
         },
         phase: spiral_robotics_contracts::api::TrainingRunPhase::Running,
         current_step: 4,

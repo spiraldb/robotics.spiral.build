@@ -1,18 +1,12 @@
 //! Route-owned Live panel registry and first-open composition.
 
-use dioxus::prelude::*;
 use spiral_robotics_panels::{Panel, PanelLayout};
 
-use crate::frontend::app::activity::{Activity, PanelRole};
+use crate::frontend::app::activity::PanelRole;
 use crate::frontend::app::layout::default_panel_layout_with_workbench;
-use crate::frontend::app::workspace::{EpisodeWorkspace, ScreenWorkspaceDefinition};
+use crate::frontend::app::workspace::ScreenWorkspaceDefinition;
 
 const LIVE_WORKBENCH_FRACTION: f64 = 0.29;
-
-#[component]
-pub(crate) fn LiveScreen() -> Element {
-    rsx! { EpisodeWorkspace { activity: Activity::Live } }
-}
 
 pub(crate) fn compose(
     workbench: Panel,

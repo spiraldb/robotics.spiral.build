@@ -13,7 +13,7 @@ durable checkpoints without moving data ownership into the compute runtime.
 3. Studio creates one run and streams prepared batches to the runtime.
 4. Studio shows learning, validation, throughput, resource, and transfer
    evidence.
-5. Studio publishes checkpoints while training continues.
+5. Studio commits checkpoints to SpiralDB while training continues.
 6. The user may stop, inspect, resume from a checkpoint, or delete the run.
 
 ## Run management
@@ -77,9 +77,13 @@ durable checkpoints without moving data ownership into the compute runtime.
   metadata.
 - **TRAIN-028** A checkpoint must declare the exact model, cameras, joints,
   normalization, sample rate, and action horizon.
-- **TRAIN-029** Studio must publish checkpoints to SpiralDB as the run
+- **TRAIN-029** Studio must commit checkpoints to SpiralDB as the run
   progresses.
 - **TRAIN-030** A runtime setting change must not retarget an active run.
+- **TRAIN-031** Persisted run history must identify the selected relational
+  dataset row, but must not duplicate the backend-selected Spiral project,
+  namespace, or checkpoint relation. Those locations are derived from the one
+  active repository.
 
 ## Implementation ownership
 
@@ -93,4 +97,3 @@ durable checkpoints without moving data ownership into the compute runtime.
   [`frontend/screens/training`](../../crates/spiral-robotics-studio/src/frontend/screens/training/)
 - Framework-neutral contracts:
   [`training/contracts`](../../training/contracts/)
-

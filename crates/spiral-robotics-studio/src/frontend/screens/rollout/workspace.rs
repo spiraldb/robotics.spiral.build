@@ -6,10 +6,12 @@ use spiral_robotics_contracts::api::{
     CameraStatus, MAX_ROLLOUT_ACTION_STEPS, MAX_ROLLOUT_DURATION_SECONDS, RobotSummary,
     RolloutPhase, RolloutSnapshot, StartRolloutRequest, TrainingRun, TrainingSnapshot,
 };
+use spiral_robotics_ui::{Action, ActionPurpose, ActionSize, ActionVariant};
 
 use crate::frontend::api::http as api;
 use crate::frontend::app::notifications::MessageSource;
 use crate::frontend::app::state::studio;
+use crate::frontend::format::format_loss;
 use crate::frontend::screens::rollout::state::rollout_controller;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -233,7 +235,7 @@ pub(crate) fn RolloutWorkbench() -> Element {
                     span { class: "rollout-runtime-dot", "aria-hidden": "true" }
                     div {
                         div { class: "rollout-runtime-summary",
-                            strong { "{runtime_title(&rollout)}" }
+                            strong { "{runtime_title(&rollout, blocker.as_deref())}" }
                             small { "{runtime_detail(&rollout)}" }
                         }
                         if let Some(warning) = rollout.warning.as_ref() {
@@ -241,11 +243,14 @@ pub(crate) fn RolloutWorkbench() -> Element {
                         }
                     }
                 }
-                div { class: "rollout-action-buttons",
-                    button {
-                        r#type: "button",
-                        class: "rollout-run-button",
+                div { class: "rollout-actions",
+                    Action {
+                        purpose: ActionPurpose::Start,
+                        variant: ActionVariant::Solid,
+                        size: ActionSize::Prominent,
+                        class: "rollout-run-action",
                         disabled: pending.is_some() || active || blocker.is_some(),
+                        aria_busy: pending == Some(PendingRolloutAction::Start),
                         title: blocker
                             .clone()
                             .unwrap_or_else(|| "Run policy on the follower".to_owned()),
@@ -289,12 +294,15 @@ pub(crate) fn RolloutWorkbench() -> Element {
                             "Run policy"
                         }
                     }
-                    button {
-                        r#type: "button",
-                        class: "rollout-stop-button",
+                    Action {
+                        purpose: ActionPurpose::Stop,
+                        variant: ActionVariant::Outline,
+                        size: ActionSize::Prominent,
+                        class: "rollout-stop-action",
                         disabled: pending.is_some() || !active || stopping,
+                        aria_busy: pending == Some(PendingRolloutAction::Stop) || stopping,
                         title: "Stop policy control and hold the follower at its current position",
-                        "aria-label": "Stop policy and hold the follower",
+                        aria_label: "Stop policy and hold the follower",
                         onclick: move |_| {
                             if pending_action.peek().is_some() || !active || stopping {
                                 return;
@@ -511,9 +519,10 @@ fn rollout_precondition_blocker(
     None
 }
 
-fn runtime_title(rollout: &RolloutSnapshot) -> &'static str {
+fn runtime_title(rollout: &RolloutSnapshot, blocker: Option<&str>) -> &'static str {
     match rollout.phase {
         RolloutPhase::Idle if rollout.finished_ms.is_some() => "Policy stopped",
+        RolloutPhase::Idle if blocker.is_some() => "Rollout unavailable",
         RolloutPhase::Idle => "Ready",
         RolloutPhase::Loading => "Loading checkpoint",
         RolloutPhase::WarmingUp => "Preparing policy",
@@ -558,14 +567,6 @@ fn format_count(value: u64) -> String {
         .join(",")
 }
 
-fn format_loss(value: f64) -> String {
-    if value >= 0.01 {
-        format!("{value:.4}")
-    } else {
-        format!("{value:.3e}")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use spiral_robotics_contracts::api::{
@@ -575,13 +576,12 @@ mod tests {
 
     use super::{
         RolloutCameraSummary, camera_roles, checkpoints_for_run, follower, rollout_camera_summary,
-        rollout_precondition_blocker, runtime_note_class,
+        rollout_precondition_blocker, runtime_note_class, runtime_title,
     };
 
     fn robot(id: &str, role: &str) -> RobotSummary {
         RobotSummary {
             id: id.to_owned(),
-            file: format!("{id}.json"),
             robot_type: Some(role.to_owned()),
             port: None,
             motors: Vec::new(),
@@ -605,6 +605,16 @@ mod tests {
             follower(&robots).map(|robot| robot.id),
             Some("follower".to_owned())
         );
+    }
+
+    #[test]
+    fn blocked_idle_rollout_never_claims_to_be_ready() {
+        let rollout = RolloutSnapshot::default();
+        assert_eq!(
+            runtime_title(&rollout, Some("Select a checkpoint.")),
+            "Rollout unavailable"
+        );
+        assert_eq!(runtime_title(&rollout, None), "Ready");
     }
 
     #[test]

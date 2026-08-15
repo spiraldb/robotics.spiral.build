@@ -10,6 +10,7 @@ use spiral_robotics_contracts::api::{
     GoalRequest, JointTelemetry, MotorCondition, MotorLimits, RobotSummary, RobotTelemetry,
 };
 use spiral_robotics_core::arm::{self, JointAngles};
+use spiral_robotics_ui::{Action, ActionPurpose, ActionVariant};
 
 use crate::frontend::api::http as api;
 use crate::frontend::app::state::{Selection, studio};
@@ -33,7 +34,7 @@ impl PendingGoals {
 }
 
 #[component]
-pub fn JointPanel(
+pub(crate) fn JointPanel(
     on_select: EventHandler<Option<Selection>>,
     on_point: EventHandler<Option<Selection>>,
 ) -> Element {
@@ -622,8 +623,9 @@ fn JointRow(
             // choosing it.
             onpointerenter: move |_| on_point.call(true),
             onpointerleave: move |_| on_point.call(false),
-            button {
-                r#type: "button",
+            Action {
+                purpose: ActionPurpose::Select,
+                variant: ActionVariant::Row,
                 class: "joint-label",
                 title: "Select {label}",
                 onfocus: move |_| on_point.call(true),

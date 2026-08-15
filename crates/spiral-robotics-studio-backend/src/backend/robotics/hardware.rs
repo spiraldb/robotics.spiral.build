@@ -21,9 +21,11 @@ use std::sync::mpsc::{self, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use spiral_robotics::bus::SimulatedBus;
 use spiral_robotics::bus::{
     MotorBus, MotorFault as BusMotorFault, MotorFaults as BusMotorFaults,
-    MotorLimits as BusMotorLimits, MotorSample, SimulatedBus,
+    MotorLimits as BusMotorLimits, MotorSample,
 };
 use spiral_robotics::feetech::FeetechBus;
 
@@ -102,8 +104,6 @@ pub(crate) struct ControlSettings {
     pub max_step_counts: i64,
     /// Largest per-cycle change while an arm is the teleoperation follower.
     pub teleop_max_step_counts: i64,
-    /// Drive simulated motors instead of opening serial ports.
-    pub simulated: bool,
 }
 
 impl Default for ControlSettings {
@@ -112,7 +112,6 @@ impl Default for ControlSettings {
             period: CONTROL_PERIOD,
             max_step_counts: DEFAULT_MAX_STEP_COUNTS,
             teleop_max_step_counts: DEFAULT_TELEOP_MAX_STEP_COUNTS,
-            simulated: false,
         }
     }
 }
@@ -253,7 +252,7 @@ struct Recording {
     ///
     /// A recording almost always opens with the arm travelling — to a fresh
     /// manual goal, or to wherever the leader is standing. That transient is
-    /// real, stays in the file, and says nothing about how well the take
+    /// real, stays in the recorded samples, and says nothing about how well the take
     /// tracked. Summarising it would rank every take by how far its arm had to
     /// move before the work started, which is why measurement waits until the
     /// arm has been inside [`CAUTION_FOLLOW_ERROR_DEGREES`] at least once.
@@ -269,7 +268,7 @@ struct Recording {
     /// The worst each motor has seen so far, in the arms' joint order.
     ///
     /// Accumulated as the take runs so the footer can state it without a second
-    /// pass over a file that may be a hundred thousand lines long.
+    /// pass over a take that may contain a hundred thousand samples.
     condition: Vec<ArmConditionSummary>,
 }
 
@@ -572,9 +571,9 @@ impl HardwareHandle {
 
     /// Begin sampling the named arms into an already-opened take.
     ///
-    /// The writer is created by the caller because the episode store owns the
-    /// directory, and handed over whole because only this thread runs at the
-    /// rate a take has to be sampled at.
+    /// The writer is created by the caller at the Spiral repository boundary
+    /// and handed over whole because only this thread runs at the rate a take
+    /// has to be sampled at.
     pub(crate) async fn start_recording(
         &self,
         writer: EpisodeWriter,
@@ -689,7 +688,7 @@ impl HardwareHandle {
             .await
     }
 
-    /// Adopt a calibration that has just been written to disk.
+    /// Adopt a calibration that has just been committed to SpiralDB.
     pub(crate) async fn apply_calibration(
         &self,
         id: &str,
@@ -982,7 +981,7 @@ impl ConnectedRobot {
     /// This instant's positions for the named joints, normalized and raw.
     ///
     /// The caller supplies the order, which comes from published telemetry, so a
-    /// frame in the file lines up with the joint rows the operator was watching
+    /// sample in the take lines up with the joint rows the operator was watching
     /// while it was captured.
     fn sample(&self, joints: &[String]) -> (Vec<Option<f64>>, Vec<i64>) {
         let calibration = self.spec.calibration.as_ref();
@@ -1209,6 +1208,8 @@ struct Controller {
     /// drives motors and only one thing may do that at a time.
     replay: Option<Replay>,
     recording_issue: Option<String>,
+    #[cfg(test)]
+    use_test_bus: bool,
 }
 
 impl Controller {
@@ -1224,7 +1225,16 @@ impl Controller {
             recording: None,
             replay: None,
             recording_issue: None,
+            #[cfg(test)]
+            use_test_bus: false,
         }
+    }
+
+    #[cfg(test)]
+    fn new_for_test(settings: ControlSettings, state: watch::Sender<HardwareState>) -> Self {
+        let mut controller = Self::new(settings, state);
+        controller.use_test_bus = true;
+        controller
     }
 
     fn run(mut self, requests: &mpsc::Receiver<Command>) {
@@ -1501,10 +1511,14 @@ impl Controller {
                 // FIFO ordering means this barrier is processed after every
                 // sample accepted before the pause. The async caller awaits it
                 // without blocking this fixed-rate controller thread.
-                (
-                    recording.writer.checkpoint()?,
-                    recording.active_elapsed(Instant::now()).as_secs_f64(),
-                )
+                let elapsed_seconds = recording.active_elapsed(Instant::now()).as_secs_f64();
+                let checkpoint = recording.writer.checkpoint(
+                    elapsed_seconds,
+                    recording.gaps.clone(),
+                    recording.follow_error(),
+                    recording.condition.clone(),
+                )?;
+                (checkpoint, elapsed_seconds)
             };
             self.set_mode(ModeSelection::Idle)?;
             return Ok((Some(checkpoint), elapsed_seconds));
@@ -1536,7 +1550,7 @@ impl Controller {
         };
 
         // An arm that left mid-take ends the take. Recording zeros in its place
-        // would produce a file that looks complete and describes motion that
+        // would produce a take that looks complete and describes motion that
         // never happened.
         let missing = recording
             .arms
@@ -1789,25 +1803,29 @@ impl Controller {
                 )
             })?;
         }
-        // Two robots cannot share one serial port. Simulated buses open no
-        // device, so a placeholder path may legitimately be reused.
-        if !self.settings.simulated {
-            let holder = self
-                .robots
-                .values()
-                .find(|robot| robot.spec.port.path == spec.port.path);
-            if let Some(holder) = holder {
-                return Err(format!(
-                    "port {:?} is already open for robot {:?}",
-                    spec.port.path, holder.spec.id
-                ));
-            }
+        // Two robots cannot share one physical serial port.
+        let holder = self
+            .robots
+            .values()
+            .find(|robot| robot.spec.port.path == spec.port.path);
+        if let Some(holder) = holder {
+            return Err(format!(
+                "port {:?} is already open for robot {:?}",
+                spec.port.path, holder.spec.id
+            ));
         }
 
         let open = |spec: &RobotSpec| -> Result<Box<dyn MotorBus>, String> {
-            if self.settings.simulated {
+            #[cfg(test)]
+            if self.use_test_bus {
                 Ok(Box::new(SimulatedBus::new(&spec.motors, true)))
             } else {
+                FeetechBus::connect(&spec.port.path, spec.port.baud_rate, &spec.motors)
+                    .map(|bus| Box::new(bus) as Box<dyn MotorBus>)
+                    .map_err(|error| error.to_string())
+            }
+            #[cfg(not(test))]
+            {
                 FeetechBus::connect(&spec.port.path, spec.port.baud_rate, &spec.motors)
                     .map(|bus| Box::new(bus) as Box<dyn MotorBus>)
                     .map_err(|error| error.to_string())
@@ -2837,13 +2855,7 @@ mod tests {
 
     fn controller() -> Controller {
         let (state, _receiver) = watch::channel(HardwareState::default());
-        Controller::new(
-            ControlSettings {
-                simulated: true,
-                ..ControlSettings::default()
-            },
-            state,
-        )
+        Controller::new_for_test(ControlSettings::default(), state)
     }
 
     struct FailingEnableBus {
@@ -2913,68 +2925,6 @@ mod tests {
         calls
     }
 
-    /// A take on disk, plus the temporary directory that holds it.
-    fn take(
-        controller: &mut Controller,
-        arms: &[&str],
-        frames: usize,
-    ) -> (tempfile::TempDir, EpisodeSummary) {
-        let directory = tempfile::TempDir::new().expect("temporary directory");
-        let store = crate::backend::recording::episodes::EpisodeStore::open(
-            directory.path().join("episodes"),
-        )
-        .expect("store");
-        let layout = arms
-            .iter()
-            .map(|id| {
-                let joints = controller.robots[*id]
-                    .ordered_motors()
-                    .into_iter()
-                    .map(|(name, _)| name.clone())
-                    .collect::<Vec<_>>();
-                ((*id).to_owned(), joints)
-            })
-            .collect::<Vec<_>>();
-        let layout = crate::backend::recording::episodes::build_arms(&layout).expect("arms");
-
-        let writer = store
-            .begin(
-                "Teleoperation".to_owned(),
-                None,
-                60.0,
-                layout.clone(),
-                Vec::new(),
-            )
-            .expect("begin");
-        controller
-            .start_recording(writer, layout)
-            .expect("start recording");
-        for _ in 0..frames {
-            controller.poll_robots();
-            controller.capture_sample();
-        }
-        let summary = controller.stop_recording(true).expect("stop recording");
-        store.reload().expect("reload");
-        (directory, summary)
-    }
-
-    #[test]
-    fn a_take_captures_one_frame_per_control_cycle() {
-        let mut controller = controller();
-        controller
-            .connect(spec("arm", Some(calibration(2048, 500))))
-            .expect("connect");
-
-        let (_directory, summary) = take(&mut controller, &["arm"], 5);
-
-        assert_eq!(summary.frames, 5);
-        assert_eq!(summary.arms.len(), 1);
-        assert_eq!(summary.arms[0].id, "arm");
-        assert_eq!(summary.arms[0].joints.len(), motors().len());
-        assert!(summary.usable());
-        assert!(controller.recording.is_none(), "the take is closed");
-    }
-
     #[test]
     fn motor_reads_must_match_the_exact_configured_set() {
         let configured = motors();
@@ -2991,237 +2941,6 @@ mod tests {
         let mut extra = exact;
         extra.insert("phantom".to_owned(), 0);
         assert!(validate_motor_read_keys(&configured, &extra, "test").is_err());
-    }
-
-    #[test]
-    fn pause_keeps_one_take_flushes_history_and_restores_teleoperation() {
-        let mut controller = controller();
-        controller
-            .connect(spec("leader", Some(calibration(2048, 500))))
-            .expect("connect leader");
-        controller
-            .connect(spec("follower", Some(calibration(2048, 500))))
-            .expect("connect follower");
-        let teleoperation = ModeSelection::Teleoperate {
-            leader: "leader".to_owned(),
-            follower: "follower".to_owned(),
-        };
-        controller
-            .set_mode(teleoperation.clone())
-            .expect("start teleoperation");
-
-        let directory = tempfile::TempDir::new().expect("temporary directory");
-        let store = crate::backend::recording::episodes::EpisodeStore::open(
-            directory.path().join("episodes"),
-        )
-        .expect("store");
-        let layout = crate::backend::recording::episodes::build_arms(&[
-            ("leader".to_owned(), vec!["gripper".to_owned()]),
-            ("follower".to_owned(), vec!["gripper".to_owned()]),
-        ])
-        .expect("arms");
-        let writer = store
-            .begin(
-                "Teleoperation".to_owned(),
-                None,
-                60.0,
-                layout.clone(),
-                Vec::new(),
-            )
-            .expect("begin");
-        let episode = writer.id().to_owned();
-        controller
-            .start_recording(writer, layout)
-            .expect("start recording");
-        for _ in 0..2 {
-            controller.poll_robots();
-            controller.capture_sample();
-        }
-
-        let (checkpoint, before_pause) = controller
-            .set_recording_paused(true)
-            .expect("pause recording");
-        checkpoint
-            .expect("pause has a writer barrier")
-            .blocking_recv()
-            .expect("writer still running")
-            .expect("partial file flushed");
-        assert_eq!(controller.mode.selection, ModeSelection::Idle);
-        assert!(controller.recording.as_ref().unwrap().paused_at.is_some());
-
-        store.reload().expect("reload flushed partial");
-        assert_eq!(
-            store.timeline_metadata(&episode).unwrap().samples,
-            2,
-            "all pre-pause samples are visible before pause acknowledges"
-        );
-        std::thread::sleep(Duration::from_millis(15));
-        controller.capture_sample();
-        assert_eq!(controller.recording.as_ref().unwrap().frames, 2);
-
-        let (_, resume_at) = controller
-            .set_recording_paused(false)
-            .expect("resume recording");
-        assert_eq!(controller.mode.selection, teleoperation);
-        assert!((resume_at - before_pause).abs() < 0.01);
-        for _ in 0..2 {
-            controller.poll_robots();
-            controller.capture_sample();
-        }
-        let summary = controller.stop_recording(true).expect("finish same take");
-
-        assert_eq!(summary.id, episode);
-        assert_eq!(summary.frames, 4);
-        assert_eq!(summary.recording_gaps.len(), 1);
-        assert!(summary.recording_gaps[0].duration_seconds >= 0.01);
-        assert!(
-            summary.duration_seconds + summary.recording_gaps[0].duration_seconds
-                >= Duration::from_millis(15).as_secs_f64()
-        );
-    }
-
-    #[test]
-    fn a_takes_headline_error_ignores_the_arm_getting_into_position() {
-        let mut recording = Recording {
-            condition: Vec::new(),
-            writer: {
-                let directory = tempfile::TempDir::new().expect("temporary directory");
-                let store = crate::backend::recording::episodes::EpisodeStore::open(
-                    directory.path().join("e"),
-                )
-                .expect("store");
-                let arms = crate::backend::recording::episodes::build_arms(&[(
-                    "a".to_owned(),
-                    vec!["j".to_owned()],
-                )])
-                .unwrap();
-                let writer = store
-                    .begin("t".to_owned(), None, 60.0, arms, Vec::new())
-                    .expect("begin");
-                std::mem::forget(directory);
-                writer
-            },
-            arms: Vec::new(),
-            resume_mode: ModeSelection::Idle,
-            started: Instant::now(),
-            paused_at: None,
-            paused_duration: Duration::ZERO,
-            gaps: Vec::new(),
-            frames: 0,
-            max_follow_error: None,
-            settled: false,
-            unsettled_peak: None,
-        };
-
-        // The arm travels to the take's opening pose, catches up, then tracks
-        // with one genuine wobble.
-        for error in [43.4, 30.0, 12.0, 2.1, 0.4, 6.8, 1.0] {
-            recording.observe(error);
-        }
-        assert!(recording.settled);
-        assert_eq!(
-            recording.follow_error(),
-            Some(6.8),
-            "the opening 43.4 degrees is the arm getting into position, not the take tracking badly"
-        );
-
-        // A take that never catches up has no settled period, and must still
-        // report badly rather than reporting nothing.
-        let mut never = Recording {
-            settled: false,
-            max_follow_error: None,
-            unsettled_peak: None,
-            ..recording
-        };
-        for error in [80.0, 120.0, 95.0] {
-            never.observe(error);
-        }
-        assert!(!never.settled);
-        assert_eq!(never.follow_error(), Some(120.0));
-    }
-
-    #[test]
-    fn recording_a_second_take_while_one_runs_is_refused() {
-        let mut controller = controller();
-        controller
-            .connect(spec("arm", Some(calibration(2048, 500))))
-            .expect("connect");
-        let directory = tempfile::TempDir::new().expect("temporary directory");
-        let store = crate::backend::recording::episodes::EpisodeStore::open(
-            directory.path().join("episodes"),
-        )
-        .expect("store");
-        let layout = crate::backend::recording::episodes::build_arms(&[(
-            "arm".to_owned(),
-            vec!["gripper".to_owned()],
-        )])
-        .expect("arms");
-
-        let first = store
-            .begin("Idle".to_owned(), None, 60.0, layout.clone(), Vec::new())
-            .expect("begin");
-        controller
-            .start_recording(first, layout.clone())
-            .expect("first take");
-
-        let second = store
-            .begin("Idle".to_owned(), None, 60.0, layout.clone(), Vec::new())
-            .expect("begin");
-        assert!(
-            controller
-                .start_recording(second, layout)
-                .expect_err("second take")
-                .contains("already recording")
-        );
-
-        // And stopping when nothing is running says so rather than inventing an
-        // empty episode.
-        controller.stop_recording(true).expect("stop the first");
-        assert!(
-            controller
-                .stop_recording(true)
-                .expect_err("nothing to stop")
-                .contains("no take")
-        );
-    }
-
-    #[test]
-    fn losing_an_arm_mid_take_closes_it_and_says_so() {
-        let mut controller = controller();
-        controller
-            .connect(spec("arm", Some(calibration(2048, 500))))
-            .expect("connect");
-        let directory = tempfile::TempDir::new().expect("temporary directory");
-        let store = crate::backend::recording::episodes::EpisodeStore::open(
-            directory.path().join("episodes"),
-        )
-        .expect("store");
-        let layout = crate::backend::recording::episodes::build_arms(&[(
-            "arm".to_owned(),
-            vec!["gripper".to_owned()],
-        )])
-        .expect("arms");
-        let writer = store
-            .begin("Idle".to_owned(), None, 60.0, layout.clone(), Vec::new())
-            .expect("begin");
-        controller.start_recording(writer, layout).expect("start");
-
-        controller.poll_robots();
-        controller.capture_sample();
-        assert!(controller.recording.is_some());
-
-        // The bus goes away underneath the recording.
-        controller.robots.remove("arm");
-        controller.capture_sample();
-
-        assert!(controller.recording.is_none(), "the take stops itself");
-        let issue = controller
-            .recording_issue
-            .as_deref()
-            .expect("the operator is told why");
-        assert!(issue.contains("no longer connected"), "{issue}");
-        // The frames captured before the arm left are kept, not thrown away.
-        assert!(issue.contains("1 frames"), "{issue}");
     }
 
     #[test]
@@ -3828,46 +3547,6 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_finalizes_the_active_take_and_releases_every_robot() {
-        let mut controller = controller();
-        controller
-            .connect(spec("arm", Some(calibration(2048, 500))))
-            .expect("connect");
-        controller.set_torque("arm", true).expect("torque on");
-        let directory = tempfile::TempDir::new().expect("temporary directory");
-        let store = crate::backend::recording::episodes::EpisodeStore::open(
-            directory.path().join("episodes"),
-        )
-        .expect("store");
-        let joints = controller.robots["arm"]
-            .ordered_motors()
-            .into_iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>();
-        let layout = crate::backend::recording::episodes::build_arms(&[("arm".to_owned(), joints)])
-            .expect("arms");
-        let writer = store
-            .begin("Manual".to_owned(), None, 60.0, layout.clone(), Vec::new())
-            .expect("begin");
-        controller
-            .start_recording(writer, layout)
-            .expect("start recording");
-        controller.poll_robots();
-        controller.capture_sample();
-        let calls = install_failing_enable_bus(&mut controller, false);
-
-        controller.shutdown_all().expect("safe shutdown");
-        assert_eq!(*calls.lock().unwrap(), [false]);
-        assert!(controller.recording.is_none());
-        assert!(controller.robots.is_empty());
-        store.reload().expect("reload completed take");
-        let episodes = store.list();
-        assert_eq!(episodes.len(), 1);
-        assert_eq!(episodes[0].frames, 1);
-        assert!(!episodes[0].file.ends_with(".part"));
-    }
-
-    #[test]
     fn commands_require_torque_and_accept_the_normalized_boundary() {
         let mut controller = controller();
         controller
@@ -4059,7 +3738,7 @@ mod tests {
             .connect(spec("arm", Some(calibration(2048, 500))))
             .expect("connect");
 
-        // Torque is off, so the simulated arm is back-driven; polling must keep
+        // Torque is off, so the test arm is back-driven; polling must keep
         // the target following it so energizing later cannot cause a jump.
         for _ in 0..20 {
             controller.poll_robots();
@@ -4241,7 +3920,7 @@ mod tests {
         // A refused read keeps the sweep, so the operator can keep going.
         assert!(controller.robots["arm"].sweep.is_some());
 
-        // The simulated arm drifts through its travel while torque is off.
+        // The test arm drifts through its travel while torque is off.
         for _ in 0..500 {
             controller.poll_robots();
         }

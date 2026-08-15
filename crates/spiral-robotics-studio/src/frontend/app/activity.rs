@@ -326,7 +326,6 @@ mod tests {
         EpisodeSummary {
             dataset_id: "default".to_owned(),
             id: id.to_owned(),
-            file: format!("{id}.jsonl"),
             arms: Vec::new(),
             frames: 120,
             duration_seconds: 2.0,

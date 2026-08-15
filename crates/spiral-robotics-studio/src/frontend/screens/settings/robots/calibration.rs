@@ -5,10 +5,12 @@ use spiral_robotics_contracts::api::{
 };
 use spiral_robotics_core::arm;
 use spiral_robotics_core::calibration::MINIMUM_CALIBRATION_TRAVEL;
+use spiral_robotics_ui::{Action, ActionPurpose, ActionVariant, BlockingConfirmation};
 
 use crate::frontend::api::http as api;
 use crate::frontend::app::notifications::MessageSource;
 use crate::frontend::app::state::studio;
+use crate::frontend::tasks::single_flight;
 
 #[component]
 pub(super) fn CalibrationSection(
@@ -18,13 +20,13 @@ pub(super) fn CalibrationSection(
 ) -> Element {
     let studio = studio();
     let mut confirming_reapply = use_signal(|| false);
-    let mut reapplying = use_signal(|| false);
+    let reapplying = use_signal(|| false);
+    let mut command = use_signal(|| None::<&'static str>);
     let id = robot.id.clone();
+    let recalibrate_id = id.clone();
     let matching_episodes = studio
-        .snapshot
-        .read()
-        .episodes
-        .iter()
+        .episodes()
+        .into_iter()
         .filter(|episode| episode.arms.iter().any(|arm| arm.id == robot.id))
         .count();
 
@@ -33,11 +35,11 @@ pub(super) fn CalibrationSection(
             section {
                 div { class: "device-section-head",
                     h3 { class: "label mb-0 flex-1", "Calibration" }
-                    if robot.calibrated && !confirming_reapply() {
-                        button {
-                            r#type: "button",
-                            class: "btn",
-                            disabled: reapplying() || matching_episodes == 0,
+                    if robot.calibrated {
+                        Action {
+                            id: "reapply-calibration-{robot.id}",
+                            purpose: ActionPurpose::Apply,
+                            disabled: reapplying() || command().is_some() || matching_episodes == 0,
                             title: if matching_episodes == 0 {
                                 "No recorded episodes contain this arm"
                             } else {
@@ -46,58 +48,12 @@ pub(super) fn CalibrationSection(
                             onclick: move |_| confirming_reapply.set(true),
                             "Reapply calibration"
                         }
-                    } else if robot.calibrated {
-                        button {
-                            r#type: "button",
-                            class: "btn btn-primary",
-                            disabled: reapplying(),
-                            title: "Updates measured state only; recorded actions and raw positions are preserved",
-                            onclick: {
-                                let id = id.clone();
-                                move |_| {
-                                    let id = id.clone();
-                                    reapplying.set(true);
-                                    studio.run_utility("", async move {
-                                        let result = api::send_json::<(), CalibrationReapplyResponse>(
-                                            Method::POST,
-                                            &format!("/api/robots/{id}/calibration/reapply"),
-                                            None,
-                                        )
-                                        .await;
-                                        reapplying.set(false);
-                                        confirming_reapply.set(false);
-                                        match result {
-                                            Ok(result) => {
-                                                studio.report_success(format_reapply_success(&result));
-                                                if !result.warnings.is_empty() {
-                                                    studio.report_warning_from(
-                                                        MessageSource::Studio,
-                                                        result.warnings.join(" "),
-                                                    );
-                                                }
-                                                Ok(())
-                                            }
-                                            Err(error) => Err(error),
-                                        }
-                                    });
-                                }
-                            },
-                            {if reapplying() {
-                                "Reapplying…".to_owned()
-                            } else {
-                                format!("Apply to {matching_episodes} takes")
-                            }}
-                        }
-                        button {
-                            r#type: "button",
-                            class: "btn",
-                            disabled: reapplying(),
-                            onclick: move |_| confirming_reapply.set(false),
-                            "Cancel"
-                        }
                     }
-                    button {
-                        r#type: "button", class: "btn btn-outline", disabled: !connected || reapplying(),
+                    Action {
+                        purpose: ActionPurpose::Start,
+                        variant: ActionVariant::Outline,
+                        disabled: !connected || reapplying() || command().is_some(),
+                        aria_busy: command() == Some("start"),
                         title: if !connected {
                             "Connect the arm first"
                         } else if robot.calibrated {
@@ -106,10 +62,77 @@ pub(super) fn CalibrationSection(
                             ""
                         },
                         onclick: move |_| {
-                            let id = id.clone();
-                            studio.run("", async move { api::post(&format!("/api/robots/{id}/calibration/start")).await });
+                            if command.peek().is_some() {
+                                return;
+                            }
+                            let id = recalibrate_id.clone();
+                            command.set(Some("start"));
+                            studio.run("", async move {
+                                let result = api::post(&format!("/api/robots/{id}/calibration/start")).await;
+                                command.set(None);
+                                result
+                            });
                         },
-                        {if robot.calibrated { "Recalibrate" } else { "Calibrate" }}
+                        {if command() == Some("start") { "Starting…" } else if robot.calibrated { "Recalibrate" } else { "Calibrate" }}
+                    }
+                }
+                if confirming_reapply() {
+                    BlockingConfirmation {
+                        id: "reapply-calibration-confirmation-{robot.id}",
+                        title: format!("Apply {} calibration to recorded takes?", robot.id),
+                        message: format!(
+                            "Recalculate measured joint state in {matching_episodes} recorded takes using this calibration."
+                        ),
+                        consequence: "Recorded actions and raw encoder positions are preserved. Measured joint state will be replaced.".to_owned(),
+                        confirm_label: if reapplying() {
+                            "Applying…".to_owned()
+                        } else {
+                            format!("Apply to {matching_episodes} takes")
+                        },
+                        cancel_label: "Keep recorded data",
+                        purpose: ActionPurpose::Apply,
+                        pending: reapplying(),
+                        return_focus_id: "reapply-calibration-{robot.id}",
+                        on_confirm: {
+                            let id = id.clone();
+                            move |_| {
+                                if reapplying() {
+                                    return;
+                                }
+                                let id = id.clone();
+                                studio.run_utility("", async move {
+                                    let Some(result) = single_flight(
+                                        reapplying,
+                                        api::send_json::<(), CalibrationReapplyResponse>(
+                                            Method::POST,
+                                            &format!("/api/robots/{id}/calibration/reapply"),
+                                            None,
+                                        ),
+                                    )
+                                    .await
+                                    else {
+                                        return Ok(());
+                                    };
+                                    if result.is_ok() {
+                                        confirming_reapply.set(false);
+                                    }
+                                    match result {
+                                        Ok(result) => {
+                                            studio.report_success(format_reapply_success(&result));
+                                            if !result.warnings.is_empty() {
+                                                studio.report_warning_from(
+                                                    MessageSource::Studio,
+                                                    result.warnings.join(" "),
+                                                );
+                                            }
+                                            Ok(())
+                                        }
+                                        Err(error) => Err(error),
+                                    }
+                                });
+                            }
+                        },
+                        on_cancel: move |_| confirming_reapply.set(false),
                     }
                 }
                 // Instructions only where there is still work to do. On a
@@ -128,28 +151,49 @@ pub(super) fn CalibrationSection(
         section {
             div { class: "flex items-center gap-1",
                 h3 { class: "label mb-0 flex-1", "Calibrating" }
-                button {
-                    r#type: "button", class: "btn btn-primary", disabled: !progress.ready,
+                Action {
+                    purpose: ActionPurpose::Apply,
+                    variant: ActionVariant::Solid,
+                    disabled: !progress.ready || command().is_some(),
+                    aria_busy: command() == Some("finish"),
                     title: if progress.ready { "" } else { "Every joint still needs to move" },
                     onclick: {
                         let id = id.clone();
                         move |_| {
+                            if command.peek().is_some() {
+                                return;
+                            }
                             let id = id.clone();
-                            studio.run("Calibration saved.", async move { api::post(&format!("/api/robots/{id}/calibration/finish")).await });
+                            command.set(Some("finish"));
+                            studio.run("Calibration saved.", async move {
+                                let result = api::post(&format!("/api/robots/{id}/calibration/finish")).await;
+                                command.set(None);
+                                result
+                            });
                         }
                     },
-                    "Save"
+                    if command() == Some("finish") { "Saving…" } else { "Save" }
                 }
-                button {
-                    r#type: "button", class: "btn",
+                Action {
+                    purpose: ActionPurpose::Cancel,
+                    disabled: command().is_some(),
+                    aria_busy: command() == Some("cancel"),
                     onclick: {
                         let id = id.clone();
                         move |_| {
+                            if command.peek().is_some() {
+                                return;
+                            }
                             let id = id.clone();
-                            studio.run("", async move { api::post(&format!("/api/robots/{id}/calibration/cancel")).await });
+                            command.set(Some("cancel"));
+                            studio.run("", async move {
+                                let result = api::post(&format!("/api/robots/{id}/calibration/cancel")).await;
+                                command.set(None);
+                                result
+                            });
                         }
                     },
-                    "Cancel"
+                    if command() == Some("cancel") { "Cancelling…" } else { "Cancel" }
                 }
             }
             p { class: "device-section-note device-section-note-live",
@@ -186,12 +230,6 @@ fn format_reapply_success(result: &CalibrationReapplyResponse) -> String {
     }
     if result.episodes_skipped > 0 {
         message.push_str(&format!("; {} skipped", result.episodes_skipped));
-    }
-    if result.spiral_syncs_queued > 0 {
-        message.push_str(&format!(
-            "; {} SpiralDB syncs queued",
-            result.spiral_syncs_queued
-        ));
     }
     message.push('.');
     message

@@ -16,6 +16,9 @@ use spiral_robotics_contracts::api::{
 };
 use spiral_robotics_contracts::spiral;
 use spiral_robotics_panels::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
+use spiral_robotics_ui::{
+    Action, ActionPurpose, ActionSize, ActionVariant, DeleteIcon, InlineConfirmation,
+};
 
 use crate::frontend::app::state::studio;
 use crate::frontend::components::charts::{
@@ -24,7 +27,7 @@ use crate::frontend::components::charts::{
     TooltipRateUnit, downsample_extrema, studio_bytes_tooltip, studio_numeric_tooltip,
     studio_percent_tooltip, studio_rate_tooltip,
 };
-use crate::frontend::components::icons::Trash;
+use crate::frontend::format::format_loss;
 use crate::frontend::screens::training::state::training_controller;
 
 const EMPTY_RUN_PANEL_ID: &str = "training-run-empty";
@@ -89,7 +92,11 @@ pub(crate) fn TrainingWorkspace() -> Element {
                 EMPTY_RUN_PANEL_ID,
                 "Run",
                 "training-runs",
-                rsx! { TrainingRunEmpty {} },
+                rsx! {
+                    section { class: "training-run-empty",
+                        strong { "Start training or select a run" }
+                    }
+                },
             )
             .with_class("training-run-editor"),
         );
@@ -143,7 +150,7 @@ pub(crate) fn TrainingWorkspace() -> Element {
         PanelWorkspace {
             panels,
             initial_layout: layout,
-            storage_key: Some("spiral_robotics.panel-layout.v2.training".to_owned()),
+            layout_scope: Some("training".to_owned()),
             active_panel: selected_panel,
             on_layout_change: move |_layout: PanelLayout| {},
             on_panel_activate: move |panel_id: PanelId| {
@@ -272,11 +279,14 @@ fn TrainingRunControl(
                         p { "{message}" }
                         }
                     }
-                    button {
-                        r#type: "button",
-                        class: "training-stop-button",
+                    Action {
+                        purpose: ActionPurpose::Stop,
+                        variant: ActionVariant::Outline,
+                        size: ActionSize::Standard,
+                        class: "training-stop-action",
                         title: "Finish the current step, save a checkpoint, and stop",
                         disabled: run.phase == TrainingRunPhase::Stopping || stopping.is_some(),
+                        aria_busy: run.phase == TrainingRunPhase::Stopping || stopping.is_some(),
                         onclick: move |_| {
                             let id = active_id.clone().unwrap_or_default();
                             controller.stop(studio, id);
@@ -513,10 +523,13 @@ fn TrainingRunControl(
             }
             }
 
-            button {
-                r#type: "button",
-                class: "training-start-button",
+            Action {
+                purpose: ActionPurpose::Start,
+                variant: ActionVariant::Solid,
+                size: ActionSize::Prominent,
+                class: "training-start-action",
                 disabled: !can_start,
+                aria_busy: starting,
                 title: if active_run.is_some() { "Stop the active run first".to_owned() } else if !dataset_valid { "Choose a valid dataset ID first".to_owned() } else if !readiness.ready { readiness_recovery.clone() } else { "Start training".to_owned() },
                 onclick: move |_| {
                     controller.start(studio);
@@ -572,11 +585,12 @@ fn TrainingHistoryRow(run: TrainingRun, selected: bool) -> Element {
 
     rsx! {
         article {
-            class: if selected { "training-history-entry training-history-entry-selected" } else { "training-history-entry" },
-            button {
-                r#type: "button",
+            class: "training-history-entry",
+            Action {
+                purpose: ActionPurpose::Select,
+                variant: ActionVariant::Row,
                 class: "training-history-row",
-                "aria-pressed": selected,
+                aria_pressed: selected,
                 title: "Open {run.config.run_name}",
                 onclick: {
                     let id = run.id.clone();
@@ -587,54 +601,43 @@ fn TrainingHistoryRow(run: TrainingRun, selected: bool) -> Element {
                 span { class: phase_class(run.phase), "{run.phase.label()}" }
                 span { class: "training-history-step", "{run.current_step} / {run.config.steps}" }
             }
-            button {
-                r#type: "button",
+            Action {
+                id: "delete-run-{run.id}",
+                purpose: ActionPurpose::Delete,
+                variant: ActionVariant::Icon,
                 class: "training-history-delete",
                 disabled: delete_disabled,
                 title: "{delete_title}",
-                "aria-label": "Delete run {run.config.run_name}",
+                aria_label: "Delete run {run.config.run_name}",
                 onclick: {
                     let id = run.id.clone();
                     move |_| controller.confirm_delete(id.clone())
                 },
-                Trash {}
+                DeleteIcon {}
             }
             if confirming {
-                div { class: "training-history-delete-confirmation", role: "alert",
-                    span {
-                        "Delete "
-                        strong { "{run.config.run_name}" }
-                        " and its {run.checkpoints.len()} {checkpoint_word}? Metrics and logs are removed too."
-                    }
-                    button {
-                        r#type: "button",
-                        class: "btn btn-danger bg-danger-soft",
-                        disabled: deleting,
-                        onclick: {
-                            let id = run.id.clone();
-                            let name = run.config.run_name.clone();
-                            move |_| controller.delete(studio, id.clone(), name.clone())
-                        },
-                        if deleting { "Deleting…" } else { "Delete run" }
-                    }
-                    button {
-                        r#type: "button",
-                        class: "btn btn-outline",
-                        disabled: deleting,
-                        onclick: move |_| controller.cancel_delete(),
-                        "Keep"
-                    }
+                InlineConfirmation {
+                    id: "delete-run-confirmation-{run.id}",
+                    class: "training-history-delete-confirmation",
+                    message: format!(
+                        "Delete {} and its {} {}? Metrics and logs will be permanently removed.",
+                        run.config.run_name,
+                        run.checkpoints.len(),
+                        checkpoint_word,
+                    ),
+                    confirm_label: if deleting { "Deleting…" } else { "Delete run" },
+                    cancel_label: "Keep run",
+                    purpose: ActionPurpose::Delete,
+                    pending: deleting,
+                    return_focus_id: "delete-run-{run.id}",
+                    on_confirm: {
+                        let id = run.id.clone();
+                        let name = run.config.run_name.clone();
+                        move |_| controller.delete(studio, id.clone(), name.clone())
+                    },
+                    on_cancel: move |_| controller.cancel_delete(),
                 }
             }
-        }
-    }
-}
-
-#[component]
-fn TrainingRunEmpty() -> Element {
-    rsx! {
-        section { class: "training-run-empty",
-            strong { "Start training or select a run" }
         }
     }
 }
@@ -721,6 +724,18 @@ fn training_readiness_guidance(readiness: &TrainingReadiness) -> (String, String
         return (
             "SpiralDB is unavailable.".to_owned(),
             "Open Settings and test the SpiralDB connection.".to_owned(),
+        );
+    }
+    if readiness.runtime.is_none() {
+        return (
+            readiness.summary.clone(),
+            "Open Settings and connect the policy compute runtime.".to_owned(),
+        );
+    }
+    if !readiness.ready {
+        return (
+            readiness.summary.clone(),
+            "Resolve the reported blocker, then retry training.".to_owned(),
         );
     }
     (readiness.summary.clone(), "Training is ready.".to_owned())
@@ -1147,14 +1162,6 @@ fn metric_event_label(point: &TrainingMetricPoint) -> String {
     )
 }
 
-fn format_loss(value: f64) -> String {
-    if value >= 0.01 {
-        format!("{value:.4}")
-    } else {
-        format!("{value:.2e}")
-    }
-}
-
 fn format_rate(bytes_per_second: f64) -> String {
     const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
     const MIB: f64 = 1024.0 * 1024.0;
@@ -1194,6 +1201,33 @@ mod tests {
         assert!(sql.contains(&format!("j.{}", spiral::column::STATE_VALID)));
         assert!(sql.contains(&format!("j.{}", spiral::column::ACTION_VALID)));
         assert!(sql.contains("LIKE '%follower%'"));
+    }
+
+    #[test]
+    fn unavailable_training_never_claims_to_be_ready() {
+        let readiness = TrainingReadiness {
+            ready: false,
+            spiral_ready: true,
+            runtime: None,
+            summary: "Policy compute runtime is unavailable.".to_owned(),
+        };
+        let (summary, recovery) = training_readiness_guidance(&readiness);
+        assert_eq!(summary, "Policy compute runtime is unavailable.");
+        assert_eq!(
+            recovery,
+            "Open Settings and connect the policy compute runtime."
+        );
+
+        let checking = TrainingReadiness {
+            ready: false,
+            spiral_ready: true,
+            runtime: Some(Default::default()),
+            summary: "Checking training storage.".to_owned(),
+        };
+        assert_ne!(
+            training_readiness_guidance(&checking).1,
+            "Training is ready."
+        );
     }
 
     #[test]

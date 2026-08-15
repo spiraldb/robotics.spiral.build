@@ -13,7 +13,7 @@ assigned cameras as one complete episode in the selected dataset.
 4. The user may pause, resume, stop and keep, or discard.
 5. A kept recording returns to Live and briefly reports that it was saved to
    Data.
-6. The backend publishes the complete episode to SpiralDB automatically.
+6. The backend commits the complete episode directly to SpiralDB.
 
 ## Recording controls
 
@@ -46,14 +46,17 @@ assigned cameras as one complete episode in the selected dataset.
   dimensions, frame rate, and frame count.
 - **RECORD-016** A kept episode must commit as one complete unit.
 
-## Publication
+## Persistence
 
-- **RECORD-017** Every completed kept episode must publish to SpiralDB
-  automatically.
-- **RECORD-018** Studio must not expose a normal manual Push action.
-- **RECORD-019** When automatic publication fails, the episode must show the
-  failure and offer Retry.
-- **RECORD-020** Publication must not depend on an open browser session.
+- **RECORD-017** Every completed kept episode must commit directly to SpiralDB
+  without a local durable staging copy.
+- **RECORD-018** Studio must not expose Push, Sync, or Retry states that imply a
+  second storage layer.
+- **RECORD-019** A failed SpiralDB commit must be reported as a recording error;
+  Studio must not silently fall back to local durable storage.
+- **RECORD-020** Persistence must not depend on an open browser session.
+- **RECORD-021** Pausing must checkpoint accepted joint samples and completed
+  camera segments directly to SpiralDB so paused inspection is deterministic.
 
 The durable write behavior is defined by [Data persistence](../data/persistence.md).
 Recorded inspection is defined by
@@ -71,4 +74,3 @@ Recorded inspection is defined by
   [`frontend/screens/live`](../../crates/spiral-robotics-studio/src/frontend/screens/live/)
 - Episode invariants:
   [`spiral-robotics-core/src/episode.rs`](../../crates/spiral-robotics-core/src/episode.rs)
-

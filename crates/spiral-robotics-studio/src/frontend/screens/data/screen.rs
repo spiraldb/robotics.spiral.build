@@ -1,15 +1,11 @@
 //! Route-owned Data panel registry and first-open composition.
 
+#[cfg(test)]
 use dioxus::prelude::*;
 use spiral_robotics_panels::{LayoutNode, Panel, PanelLayout, SplitAxis};
 
-use crate::frontend::app::activity::{Activity, PanelRole};
-use crate::frontend::app::workspace::{EpisodeWorkspace, ScreenWorkspaceDefinition};
-
-#[component]
-pub(crate) fn DataScreen() -> Element {
-    rsx! { EpisodeWorkspace { activity: Activity::Data } }
-}
+use crate::frontend::app::activity::PanelRole;
+use crate::frontend::app::workspace::ScreenWorkspaceDefinition;
 
 /// Episodes and Query are independent top-level panels. The initial layout
 /// keeps both visible while preserving episode evidence and the shared clock.

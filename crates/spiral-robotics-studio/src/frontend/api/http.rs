@@ -47,7 +47,7 @@ pub(crate) async fn send_json<B: Serialize, T: DeserializeOwned>(
 
 /// Send JSON with a browser-owned cancellation signal. Aborting releases the
 /// UI immediately; hosted ADBC work is isolated on its own checked-out
-/// connection, so a slow abandoned query cannot block publication or replay.
+/// connection, so a slow abandoned query cannot block persistence or replay.
 pub(crate) async fn send_json_abortable<B: Serialize, T: DeserializeOwned>(
     method: Method,
     path: &str,
@@ -84,7 +84,7 @@ pub(crate) struct TimelineMetadata {
     pub last_seconds: Option<f64>,
 }
 
-/// Local episode detail used to align timeline samples and recorded media.
+/// Episode detail used to align timeline samples and recorded media.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub(crate) struct EpisodeTimelineResponse {
     pub episode: EpisodeSummary,
@@ -311,12 +311,12 @@ pub(crate) fn camera_stream_url(id: &str) -> String {
     format!("/api/cameras/stream.mjpeg?id={}", encode_query(id))
 }
 
-/// Timeline detail endpoint for one local episode.
+/// Timeline detail endpoint for one persisted Spiral episode.
 pub(crate) fn episode_timeline_url(episode: &str) -> String {
     format!("/api/episodes/{}/timeline", encode_query(episode))
 }
 
-/// Random-access sample endpoint for one local episode.
+/// Random-access sample endpoint for one persisted Spiral episode.
 pub(crate) fn timeline_sample_url(episode: &str, seconds: f64) -> String {
     format!(
         "/api/episodes/{}/timeline/sample?at={seconds:.6}",

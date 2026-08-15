@@ -1,7 +1,7 @@
 //! Recording and replay application actions.
 //!
 //! The ports in this module describe consequences, not implementation tools:
-//! an HTTP adapter may use JSONL files, cameras, and a control-thread actor,
+//! an HTTP adapter may use SpiralDB, cameras, and a control-thread actor,
 //! while another delivery mechanism can provide different adapters without
 //! changing session ordering, validation, or rollback policy.
 
@@ -46,7 +46,7 @@ pub(crate) struct SetRecordingPausedCommand {
 
 /// Consequences needed by the recording-session use cases.
 ///
-/// `MediaCapture` and `MediaOutput` remain opaque so video libraries and file
+/// `MediaCapture` and `MediaOutput` remain opaque so video libraries and media
 /// formats cannot leak into application policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RecordingResult {
@@ -86,7 +86,7 @@ pub(crate) trait RecordingPort {
         &self,
         draft: Self::RecordingDraft,
     ) -> Result<RecordingResult, ApplicationError>;
-    async fn publish_recording_media(&self, capture: Option<Self::MediaCapture>);
+    async fn retain_recording_media(&self, capture: Option<Self::MediaCapture>);
     async fn abandon_recording_media(&self, capture: Self::MediaCapture);
 
     async fn take_recording_media(&self) -> Option<Self::MediaCapture>;
@@ -97,8 +97,7 @@ pub(crate) trait RecordingPort {
     ) -> Result<RecordingResult, ApplicationError>;
     async fn finish_recording_media(&self, capture: Self::MediaCapture) -> Self::MediaOutput;
     fn empty_media_output(&self) -> Self::MediaOutput;
-    fn reload_episodes(&self) -> Result<(), ApplicationError>;
-    fn stage_recording(
+    fn commit_recording(
         &self,
         episode: String,
         media: Self::MediaOutput,
@@ -124,7 +123,7 @@ impl<'a, P: RecordingPort + ?Sized> RecordingStartReservation<'a, P> {
     }
 
     /// A successfully opened recording owns the shared catalog lease until its
-    /// final episode and media manifest have been published.
+    /// final episode and media rows have been committed.
     fn retain_for_recording(&mut self, episode: String) {
         let token = self.token.take().expect("recording reservation is live");
         self.port.bind_recording_lease(token, episode);
@@ -239,7 +238,7 @@ async fn start_reserved<P: RecordingPort + ?Sized>(
         let media = port.start_recording_media(&episode, &arms).await?;
         match port.begin_recording(draft).await {
             Ok(recording) => {
-                port.publish_recording_media(media).await;
+                port.retain_recording_media(media).await;
                 Ok(recording)
             }
             Err(error) => {
@@ -289,26 +288,24 @@ pub(crate) async fn stop_recording<P: RecordingPort + ?Sized>(
 
     match (recording, idle) {
         (Ok(summary), Ok(())) => {
-            port.reload_episodes()?;
-            port.stage_recording(summary.episode.clone(), media)?;
+            port.commit_recording(summary.episode.clone(), media)?;
             Ok(summary)
         }
         (Ok(summary), Err(mode_error)) => {
-            port.reload_episodes()?;
-            port.stage_recording(summary.episode, media)?;
+            port.commit_recording(summary.episode, media)?;
             Err(ApplicationError::Conflict(format!(
                 "the recording ended, but teleoperation could not stop: {mode_error}"
             )))
         }
         (Err(recording_error), Ok(())) => {
             if let Some(episode) = capture_episode {
-                port.stage_recording(episode, media)?;
+                port.commit_recording(episode, media)?;
             }
             Err(recording_error)
         }
         (Err(recording_error), Err(mode_error)) => {
             if let Some(episode) = capture_episode {
-                port.stage_recording(episode, media)?;
+                port.commit_recording(episode, media)?;
             }
             Err(ApplicationError::Conflict(format!(
                 "{recording_error}; teleoperation also could not stop: {mode_error}"
@@ -327,7 +324,6 @@ pub(crate) async fn set_recording_paused<P: RecordingPort + ?Sized>(
         let paused = port.set_recording_paused(true).await;
         port.finish_media_pause().await;
         paused?;
-        port.reload_episodes()?;
     } else {
         let active_seconds = port.set_recording_paused(false).await?;
         port.resume_media(active_seconds).await;
@@ -476,7 +472,7 @@ mod tests {
         stop_error: Option<ApplicationError>,
         idle_error: Option<ApplicationError>,
         pause_error: Option<ApplicationError>,
-        stage_error: Option<ApplicationError>,
+        commit_error: Option<ApplicationError>,
         episode: ReplayEpisode,
     }
 
@@ -497,7 +493,7 @@ mod tests {
                 stop_error: None,
                 idle_error: None,
                 pause_error: None,
-                stage_error: None,
+                commit_error: None,
                 episode: ReplayEpisode {
                     id: "episode_000001".to_owned(),
                     arms: vec!["leader".to_owned(), "follower".to_owned()],
@@ -620,8 +616,8 @@ mod tests {
                 .map_or_else(|| Ok(RecordingResult { episode: draft }), Err)
         }
 
-        async fn publish_recording_media(&self, _capture: Option<Self::MediaCapture>) {
-            self.events.lock().unwrap().push("publish-media".to_owned());
+        async fn retain_recording_media(&self, _capture: Option<Self::MediaCapture>) {
+            self.events.lock().unwrap().push("retain-media".to_owned());
         }
 
         async fn abandon_recording_media(&self, _capture: Self::MediaCapture) {
@@ -661,18 +657,13 @@ mod tests {
             Vec::new()
         }
 
-        fn reload_episodes(&self) -> Result<(), ApplicationError> {
-            self.events.lock().unwrap().push("reload".to_owned());
-            Ok(())
-        }
-
-        fn stage_recording(
+        fn commit_recording(
             &self,
             _episode: String,
             _media: Self::MediaOutput,
         ) -> Result<(), ApplicationError> {
-            self.events.lock().unwrap().push("stage".to_owned());
-            self.stage_error.clone().map_or(Ok(()), Err)
+            self.events.lock().unwrap().push("commit".to_owned());
+            self.commit_error.clone().map_or(Ok(()), Err)
         }
 
         async fn request_media_pause(&self) {
@@ -763,7 +754,7 @@ mod tests {
                 "draft:leader+follower:leader+follower:60",
                 "start-media:episode_000001",
                 "begin",
-                "publish-media"
+                "retain-media"
             ]
         );
     }
@@ -771,12 +762,12 @@ mod tests {
     #[tokio::test]
     async fn failed_open_rolls_back_and_reports_a_failed_safety_transition() {
         let port = FakePort {
-            open_error: Some(ApplicationError::Internal("disk full".to_owned())),
+            open_error: Some(ApplicationError::Internal("Spiral unavailable".to_owned())),
             idle_error: Some(ApplicationError::Conflict("control stopped".to_owned())),
             ..FakePort::default()
         };
         let error = start_recording(&port, start_command()).await.unwrap_err();
-        assert!(error.to_string().contains("disk full"));
+        assert!(error.to_string().contains("Spiral unavailable"));
         assert!(error.to_string().contains("control stopped"));
         assert_eq!(
             *port.events.lock().unwrap(),
@@ -842,17 +833,17 @@ mod tests {
                 "stop",
                 "idle",
                 "finish-media",
-                "stage",
+                "commit",
                 "release-start"
             ]
         );
     }
 
     #[tokio::test]
-    async fn durable_staging_failure_is_returned_after_recording_and_media_finish() {
+    async fn durable_commit_failure_is_returned_after_recording_and_media_finish() {
         let port = FakePort {
-            stage_error: Some(ApplicationError::Internal(
-                "video manifest could not be synced".to_owned(),
+            commit_error: Some(ApplicationError::Internal(
+                "video rows could not be committed".to_owned(),
             )),
             ..FakePort::default()
         };
@@ -860,7 +851,7 @@ mod tests {
         let error = stop_recording(&port, StopRecordingCommand { keep: true })
             .await
             .unwrap_err();
-        assert!(error.message().contains("manifest"));
+        assert!(error.message().contains("committed"));
         assert_eq!(
             *port.events.lock().unwrap(),
             [
@@ -868,8 +859,7 @@ mod tests {
                 "stop",
                 "idle",
                 "finish-media",
-                "reload",
-                "stage",
+                "commit",
                 "release-start"
             ]
         );

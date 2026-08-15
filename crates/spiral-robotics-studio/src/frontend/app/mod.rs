@@ -10,6 +10,7 @@ pub(crate) mod state;
 pub(crate) mod workspace;
 
 use dioxus::prelude::*;
+use spiral_robotics_ui::UiStyles;
 
 use self::routes::StudioRouter;
 use self::state::Studio;
@@ -19,5 +20,8 @@ use self::state::Studio;
 pub fn App() -> Element {
     Studio::use_studio();
     state::use_description();
-    rsx! { StudioRouter {} }
+    rsx! {
+        UiStyles {}
+        StudioRouter {}
+    }
 }

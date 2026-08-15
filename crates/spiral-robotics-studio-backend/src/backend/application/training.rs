@@ -126,8 +126,6 @@ pub(crate) struct TrainingCheckpoint {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct TrainingSource {
-    pub project: String,
-    pub dataset: String,
     pub dataset_id: String,
 }
 

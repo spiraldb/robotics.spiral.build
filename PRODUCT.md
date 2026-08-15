@@ -25,14 +25,14 @@ when the project is opened. See **Distribution** below.
 ## Product Purpose
 
 Spiral Robotics sets up, calibrates, and drives SO-ARM101 arms, records synchronized
-robot and camera data, publishes and queries episodes, trains policies, and
+robot and camera data in SpiralDB, queries episodes, trains policies, and
 safely replays actions on a follower. Operators use it from the browser or the
 terminal and connect Studio to a selectable policy compute runtime.
 
 The durable scope is the **full robot-learning loop**: connect → calibrate →
-teleoperate → record → inspect/query → publish/export → train → run a policy.
+teleoperate → record → inspect/query → export → train → run a policy.
 The loop now crosses the Studio backend boundary: vision-conditioned ACT
-training publishes a native artifact, and Rollout loads, supervises, measures,
+training stores a native artifact, and Rollout loads, supervises, measures,
 and applies it through the follower's bounded control path.
 
 Success is an ML engineer collecting a usable dataset, understanding any
@@ -52,20 +52,25 @@ on real hardware without writing glue code or operating a second training stack.
   HTTP to a selected remote ACT/CVAE compute runtime. The same runtime owns
   PyTorch policy sessions for rollout inference. Rust owns lifecycle,
   cancellation, validation, remote telemetry, and SafeTensors checkpoint
-  publication without linking the Studio server to LibTorch.
-- **One arm is one robot instance is one JSON file.** Serial port, cameras,
-  motors, and calibration live in one versioned file. There is no hidden
-  calibration cache or second manifest to reconcile, and the Studio notices
-  when another tool changes the file.
+  persistence without linking the Studio server to LibTorch.
+- **One arm is one robot instance in SpiralDB.** Serial port, cameras, motors,
+  and calibration live in one versioned configuration row. JSON is an explicit
+  per-robot transfer format, not live storage.
 - **Episode data keeps its natural streams and one clock.** Joint state,
   commanded action, camera media, and recording gaps are separate synchronized
   streams rather than one wide table of duplicated or resampled values. The
   Timeline is the common inspection and control surface for that clock.
-- **SpiralDB is the primary connected data path.** Completed episodes can be
-  published as relational Arrow tables plus managed MP4 data through ADBC,
-  queried from the Studio, and brought back through the backend for safe local
-  replay. Local JSONL/MP4 is the operator-cleared staging and recovery buffer,
-  not a second connected dataset.
+- **SpiralDB is the only persistent data path.** Robots, settings, episodes,
+  relational Arrow samples, MP4 assets, training runs, checkpoints, and rollout
+  state are written and read through one shared ADBC repository. There is no
+  filesystem staging, recovery spool, in-memory database mode, or second
+  connected dataset. The selected API endpoint, SpFS endpoint, and project are
+  backend bootstrap pointers. Settings may change the project across an idle
+  live cutover; a service-endpoint change is saved for the next process because
+  ADBC binds both endpoints when constructing the database. The namespace is
+  fixed when the repository is constructed. Saved runs retain only their
+  selected dataset row. One private local JSON file remembers only
+  bootstrap/auth session state, never project records or cached Spiral rows.
 - **The robot description is the single source of truth.** Geometry, joint
   limits, and the rendered model come from URDF rather than duplicated drawing
   constants.
@@ -81,9 +86,8 @@ Browser frontend
 Spiral Robotics backend
       ├── robot connections and safety
       ├── recording and MP4 encoding
-      ├── local episode recovery
-      ├── SpiralDB ingest and read-only queries
-      ├── policy-training supervision and checkpoint publication
+      ├── SpiralDB persistence and read-only queries
+      ├── policy-training supervision and checkpoint persistence
       ├── episode validation and bounded follower control
       └── Arrow IPC / HTTP ──► selected compute runtime
                                ├── in-memory model and optimizer session
@@ -95,8 +99,8 @@ Spiral Robotics backend
   backend and does not connect directly to robots or SpiralDB.
 - **The backend is the one consequential system.** It normally runs near the
   arms and owns all hardware connections, the control loop, safety decisions,
-  camera capture, video encoding, durable episode files, service credentials,
-  database work, and replay execution.
+  camera capture, video encoding, SpiralDB credentials and persistence, and
+  replay execution.
 - **The wire API is a product boundary.** The Dioxus browser is the current
   client, not a privileged bypass. Hardware and safety behavior must remain
   correct for any client that uses the API.
@@ -104,9 +108,9 @@ Spiral Robotics backend
   telemetry, and unavailable services must suspend or block consequential
   actions without pretending the physical system is safe merely because the
   browser lost contact.
-- **Replay never depends on a live database stream.** The backend obtains and
-  validates the action trajectory before motion, then executes through the
-  same bounded local control path used by local episodes.
+- **Replay never drives from a live database stream.** The backend obtains and
+  validates the SpiralDB trajectory before motion, then executes through the
+  same bounded control path used by every physical mode.
 - **Service settings are backend-scoped.** Secrets are stored and used by the
   backend. The browser receives configuration state, not stored tokens.
 
@@ -133,9 +137,8 @@ never becomes the motor-control runtime.
 - A fullstack Dioxus Studio with four primary operating activities:
   - **Live** owns recording, arm selection, Hold / Release / Teleop, joint
     control, health, and camera status.
-  - **Data** owns the episode catalog, automatic SpiralDB publication and retry
-    visibility, replay/delete actions, import and export, and guarded read-only
-    Spiral SQL.
+  - **Data** owns the SpiralDB episode catalog, replay/delete actions,
+    selected-dataset episode import/export, and guarded read-only Spiral SQL.
   - **Training** owns random anchor and camera/action sampling through the
     Spiral ADBC/Arrow path, remote HTTP runtime selection, vision ACT
     configuration, learning/resource telemetry, graceful cancellation, and
@@ -145,12 +148,12 @@ never becomes the motor-control runtime.
     camera recorded for the policy, authoritative start/stop lifecycle, and
     measured native inference evidence.
   - **Settings** owns robot setup (ports, camera assignment, calibration,
-    add/import/delete) and backend data destinations. Setup is not mixed into
-    the live operating flow.
+    add/import/delete), backend data destinations, and complete-project
+    backup/restore. Setup is not mixed into the live operating flow.
 - A reusable `spiral-robotics-panels` crate supplies tabbed tiles, horizontal and
   vertical splits, drag docking with five-zone previews, split resizing,
-  keyboard equivalents, persistence, panel reconciliation, and compact shared
-  chrome. Live and Data keep independent saved layouts. The default desktop
+  keyboard equivalents, session-state panel reconciliation, and compact shared
+  chrome. Live and Data keep independent session layouts. The default desktop
   composition is a one-third workbench beside a two-thirds visualization, with
   Scene/Query, camera panels, and Timeline as movable panels rather than fixed
   slots.
@@ -163,8 +166,8 @@ never becomes the motor-control runtime.
 - Episode recording during Teleop with server-owned start, pause, resume, stop,
   and discard. Pause/resume preserves one episode identity and records explicit
   time gaps. Assigned cameras can be encoded by the backend into browser-
-  playable MP4 segments with episode-clock offsets. A completed recording is
-  queued automatically for the configured SpiralDB destination.
+  playable MP4 segments with episode-clock offsets. Paused checkpoints and
+  completed recordings commit directly to the configured SpiralDB project.
 - One canonical **Timeline** in both Live and Data. During capture it follows
   new joint and camera data. A paused or completed episode can be scrubbed to
   synchronize recorded camera frames, historical 3D pose, signals, and the
@@ -172,16 +175,16 @@ never becomes the motor-control runtime.
   applied on committed release rather than every pointer move.
 - Dataset semantics are explicit: one dataset contains many episodes. An
   episode can be selected, deleted, or replayed on a compatible follower.
-  LeRobot v2/v3 archives can be imported; export currently produces LeRobot v3
-  low-dimensional state/action and metadata. Recorded camera MP4s remain local
-  sidecars and publication assets rather than being included in that archive.
+  Data transfers the selected dataset's episodes as `.spiral-episodes`;
+  Settings imports and exports the complete active project—including binary
+  MP4 and checkpoint data—as one versioned `.spiral-project` file.
 - Replay ramps a compatible calibrated follower to the first pose before
   playback. Pause/resume keeps the current replay frame rather than restarting
   the episode.
-- Automatic SpiralDB publication writes completed episode metadata, stream
+- Direct SpiralDB persistence writes completed episode metadata, stream
   semantics, fixed-rate joint samples, actions, and MP4 assets as Arrow
-  relations through a trusted ADBC driver. Publication and retry do not depend
-  on a browser session. Hosted configurations maintain
+  relations through a trusted ADBC driver without a browser session or local
+  retry spool. Hosted configurations maintain
   managed per-episode MP4 datasets. Training derives the MP4 frame directly
   from sample index and the declared stream rates, then submits only finite
   frame manifests; Spiral performs frame selection, decode, resize,
@@ -190,8 +193,8 @@ never becomes the motor-control runtime.
   without materializing encoded video frames.
   The Studio exposes row-limited, read-only query preview and video retrieval
   through the backend.
-- A `--simulate` mode with emulated motors allows calibration, teleoperation,
-  recording, and replay without hardware.
+- Product simulation is intentionally absent until it can be introduced as a
+  separate, principled system rather than another storage or runtime mode.
 
 **Shipped with a safety boundary:** Studio-managed ACT control from a durable
 Spiral checkpoint. The same control thread that bounds manual, teleoperation,
@@ -230,8 +233,8 @@ meet the observation safety window is rejected before a new action is sent.
   path.
 
 **Terminology:** *robot instance* (one arm), *leader* / *follower*, *joint*,
-*calibration*, *travel*, *torque*, *Hold* / *Release* / *Teleop*, *workspace*
-(the directory of robot JSON files), *Studio* (the browser interface),
+*calibration*, *travel*, *torque*, *Hold* / *Release* / *Teleop*, *Studio*
+(the browser interface),
 *workbench* (Live, Data, or Rollout operating panel), *panel* (one registered content
 surface), *tile* (a tab group in the layout tree), *dataset* (a collection of
 episodes), *episode* / *take* (one recording; *episode* is canonical in data and
@@ -257,13 +260,13 @@ time), and *Follow Δ* (the gap between measured and commanded joint position).
 Real, in-repo:
 
 - `crates/spiral-robotics-core/assets/so101.urdf` — the shipped robot description.
-- `crates/spiral-robotics-panels/` — the reusable panel, tile, docking, persistence,
+- `crates/spiral-robotics-panels/` — the reusable panel, tile, docking, session layout,
   keyboard, and motion system used by the Studio.
 - `examples/robot.json`, `examples/calibration-input.json` — real configuration
   and calibration input.
 - `robots/leader.json`, `robots/follower.json` — a working two-arm setup.
-- `crates/spiral-robotics-studio/src/backend/recording/spiral.rs` — the relational episode schema.
-- `crates/spiral-robotics-studio/src/backend/robotics/video.rs` — server-owned MP4 capture and
+- `crates/spiral-robotics-studio-backend/src/backend/recording/spiral.rs` — the relational episode schema.
+- `crates/spiral-robotics-studio-backend/src/backend/robotics/video.rs` — server-owned MP4 capture and
   timeline-aligned segment manifests.
 - A detailed `README.md` maintained in the repository.
 
@@ -274,7 +277,7 @@ or deployment/endorsement claims**. The project has not been released.
 ## Product Principles
 
 1. **The browser observes and requests; the backend owns consequences.**
-   Hardware, safety, recording, credentials, data publication, and replay remain
+   Hardware, safety, recording, credentials, data persistence, and replay remain
    backend responsibilities regardless of which client is connected.
 2. **The wire API is the product boundary.** The current Dioxus UI is one
    client, so correctness cannot depend on browser-local state or component
@@ -282,8 +285,9 @@ or deployment/endorsement claims**. The project has not been released.
 3. **One clock composes the episode.** State, action, camera media, gaps,
    signals, query selection, and replay meet at the Timeline without erasing
    their natural stream rates.
-4. **One file holds the whole robot; completed episodes publish as complete
-   units.** Configuration stays portable, while episode retries and destination
-   failures never make partial data look complete.
+4. **One SpiralDB project holds the complete durable system; explicit files are
+   transfer formats.** Robot JSON, selected-dataset episode bundles, and
+   whole-project bundles stay portable, while no filesystem spool or retry
+   queue becomes a second source of truth.
 5. **Safety is enforced where it cannot be bypassed.** Every client receives
    the same bounded, calibrated, server-owned motion behavior.

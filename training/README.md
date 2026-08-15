@@ -29,7 +29,9 @@ cd spiral-robotics
 The script verifies Python, creates `training/.venv`, installs the complete
 locked runtime, verifies that PyTorch can see the GPU, and serves on
 `0.0.0.0:50051`. It intentionally stays in the foreground so SSH, `tmux`,
-`systemd`, or the cloud-init caller owns process lifetime and logs.
+`systemd`, or the cloud-init caller owns process lifetime and logs. Before the
+server starts, it discovers the machine's public IPv4 address and prints the
+exact Studio endpoint.
 
 Connect Studio to:
 
@@ -40,7 +42,8 @@ http://LAMBDA_INSTANCE_IP:50051
 The current prototype has no authentication or TLS. Bind it only on a trusted
 network or use an SSH tunnel. Set `SPIRAL_RUNTIME_PORT` to change the port and
 `SPIRAL_POLICY_DEVICE` to select the rollout device; both default to automatic
-CUDA selection.
+CUDA selection. Set `SPIRAL_RUNTIME_PUBLIC_HOST` to override the printed public
+IP with a DNS name or another externally reachable address.
 
 ## Local development
 

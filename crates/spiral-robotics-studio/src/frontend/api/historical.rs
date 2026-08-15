@@ -102,7 +102,7 @@ pub(crate) fn request_historical_preview(
         if !revision.peek().eq(&ticket) {
             return;
         }
-        let timeline_source_file = timeline.episode.file.clone();
+        let timeline_source_frames = timeline.episode.frames;
         let sample_path = api::timeline_sample_url(&episode, seconds);
         match with_deadline(
             "The episode sample",
@@ -117,7 +117,7 @@ pub(crate) fn request_historical_preview(
                     .as_ref()
                     .filter(|source| source.episode == episode)
                     .and_then(RecordedSource::renderable)
-                    .filter(|preview| preview.timeline.episode.file == timeline_source_file)
+                    .filter(|preview| preview.timeline.episode.frames == timeline_source_frames)
                     .cloned();
                 let (signal_lanes, signal_lanes_error) = carried_trace_state(
                     current.as_ref(),
@@ -147,7 +147,7 @@ pub(crate) fn request_historical_preview(
                             attach_historical_traces(
                                 &mut state.write(),
                                 &episode,
-                                &timeline_source_file,
+                                timeline_source_frames,
                                 &traces,
                             );
                         }
@@ -155,7 +155,7 @@ pub(crate) fn request_historical_preview(
                             attach_historical_trace_failure(
                                 &mut state.write(),
                                 &episode,
-                                &timeline_source_file,
+                                timeline_source_frames,
                                 &error,
                             );
                         }
@@ -230,7 +230,7 @@ async fn with_deadline<T>(
 pub(crate) fn attach_historical_trace_failure(
     source: &mut Option<RecordedSource<HistoricalPreview>>,
     episode: &str,
-    source_file: &str,
+    source_frames: u64,
     reason: &str,
 ) -> bool {
     let Some(source) = source.as_mut().filter(|source| source.episode == episode) else {
@@ -249,7 +249,7 @@ pub(crate) fn attach_historical_trace_failure(
         | LoadState::Failed { previous: None, .. }
         | LoadState::Unavailable { .. } => return false,
     };
-    if preview.timeline.episode.file != source_file || preview.signal_lanes.is_some() {
+    if preview.timeline.episode.frames != source_frames || preview.signal_lanes.is_some() {
         return false;
     }
     preview.signal_lanes_error = Some(reason.to_owned());
@@ -259,7 +259,7 @@ pub(crate) fn attach_historical_trace_failure(
 pub(crate) fn attach_historical_traces(
     source: &mut Option<RecordedSource<HistoricalPreview>>,
     episode: &str,
-    source_file: &str,
+    source_frames: u64,
     traces: &RecordedTimelineTraces,
 ) -> bool {
     let Some(source) = source.as_mut().filter(|source| source.episode == episode) else {
@@ -278,7 +278,7 @@ pub(crate) fn attach_historical_traces(
         | LoadState::Failed { previous: None, .. }
         | LoadState::Unavailable { .. } => return false,
     };
-    if preview.timeline.episode.file != source_file {
+    if preview.timeline.episode.frames != source_frames {
         return false;
     }
     preview.signal_lanes = Some(traces.signal_lanes());
@@ -299,7 +299,6 @@ mod tests {
                 episode: EpisodeSummary {
                     dataset_id: "default".to_owned(),
                     id: "take-1".to_owned(),
-                    file: "take-1.jsonl".to_owned(),
                     arms: Vec::new(),
                     frames: 60,
                     duration_seconds: 1.0,

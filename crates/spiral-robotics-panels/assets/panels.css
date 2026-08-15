@@ -190,7 +190,24 @@
   align-items: stretch;
   border-right: 1px solid var(--rp-line);
   background: transparent;
-  transition: color 100ms ease-out, background-color 100ms ease-out;
+  transition: background-color 100ms ease-out, border-color 100ms ease-out;
+}
+
+/*
+  The separator earns its place only between two resting tabs. Drawn
+  unconditionally it left a hairline hanging off the end of the strip with
+  nothing after it — most visible in this studio, where a group usually holds
+  exactly one tab — and it re-drew the edge of the active tab, which the change
+  from recess to paper has already made.
+*/
+.rp-tab-item:last-child,
+.rp-tab-item-active,
+.rp-tab-item:has(+ .rp-tab-item-active) {
+  border-right-color: transparent;
+}
+
+.rp-tab-item:hover:not(.rp-tab-item-active) {
+  background: var(--rp-hover);
 }
 
 .rp-tab {
@@ -201,31 +218,17 @@
   flex: 1 1 auto;
   cursor: grab;
   align-items: center;
-  border: 0;
   padding: 0 9px;
-  color: var(--rp-ink-soft);
-  background: transparent;
   font: inherit;
   font-size: 11px;
   text-align: left;
-  transition: color 100ms ease-out, background-color 100ms ease-out;
-}
-
-.rp-tab-item:hover {
-  background: var(--rp-hover);
-}
-
-.rp-tab:hover {
-  color: var(--rp-ink);
 }
 
 .rp-tab:active {
   cursor: grabbing;
 }
 
-.rp-tab-item-active,
-.rp-tab-active {
-  color: var(--rp-ink);
+.rp-tab-item-active {
   background: var(--rp-surface);
 }
 
@@ -236,14 +239,6 @@
   inset: 0 0 auto;
   height: 2px;
   background: var(--rp-accent);
-}
-
-.rp-tab:focus-visible,
-.rp-tab-close:focus-visible,
-.rp-tile-action:focus-visible {
-  z-index: 2;
-  outline: 1px solid var(--rp-accent);
-  outline-offset: -2px;
 }
 
 .rp-tab-label {
@@ -257,27 +252,8 @@
   width: 24px;
   min-height: 24px;
   flex: 0 0 24px;
-  cursor: pointer;
   place-items: center;
   align-self: center;
-  border: 0;
-  border-radius: 4px;
-  padding: 0;
-  color: var(--rp-ink-faint);
-  background: transparent;
-  opacity: 0;
-  transition: color 100ms ease-out, background-color 100ms ease-out, opacity 100ms ease-out;
-}
-
-.rp-tab-item-active .rp-tab-close,
-.rp-tab-item:hover .rp-tab-close,
-.rp-tab-item:focus-within .rp-tab-close {
-  opacity: 1;
-}
-
-.rp-tab-close:hover {
-  color: var(--rp-ink);
-  background: var(--rp-hover);
 }
 
 .rp-tab-close svg,
@@ -303,37 +279,23 @@
   padding: 0 3px;
   border-left: 1px solid var(--rp-line);
   background: var(--rp-sunken);
+  transition: border-color 100ms ease-out;
+}
+
+/* The split controls fade in with the pointer, so the rule that fences them
+   off waits for them. On its own it was a hairline standing beside nothing,
+   once per panel group, on every screen. */
+@media (hover: hover) and (pointer: fine) {
+  .rp-tab-bar:not(:hover):not(:focus-within) .rp-tile-actions {
+    border-left-color: transparent;
+  }
 }
 
 .rp-tile-action {
   display: inline-grid;
   width: 24px;
   height: 24px;
-  cursor: pointer;
   place-items: center;
-  border: 0;
-  border-radius: 4px;
-  padding: 0;
-  color: var(--rp-ink-faint);
-  background: transparent;
-  opacity: 0;
-  transition: color 100ms ease-out, background-color 100ms ease-out, opacity 100ms ease-out;
-}
-
-.rp-tab-bar:hover .rp-tile-action,
-.rp-tab-bar:focus-within .rp-tile-action,
-.rp-tile-action:focus {
-  opacity: 1;
-}
-
-@media (hover: none) {
-  .rp-tab-close,
-  .rp-tile-action { opacity: 1; }
-}
-
-.rp-tile-action:hover {
-  color: var(--rp-ink);
-  background: var(--rp-hover);
 }
 
 .rp-tile-action svg {
@@ -502,31 +464,13 @@
   }
 
   .rp-mobile-tab {
-    min-width: 0;
+    min-width: 44px;
     min-height: 44px;
     flex: 1 1 auto;
-    cursor: pointer;
-    border: 0;
     border-radius: 4px;
     padding: 0 9px;
-    color: var(--rp-ink-soft);
-    background: transparent;
     font: inherit;
     font-size: 11px;
-  }
-
-  .rp-mobile-tab:hover {
-    color: var(--rp-ink);
-    background: var(--rp-hover);
-  }
-
-  .rp-mobile-tab:focus-visible {
-    outline: 1px solid var(--rp-accent);
-    outline-offset: -1px;
-  }
-
-  .rp-mobile-tab-active {
-    color: var(--rp-accent);
   }
 
   .rp-mobile-tab-item-active {
@@ -539,23 +483,7 @@
     width: 44px;
     min-height: 44px;
     flex: 0 0 44px;
-    cursor: pointer;
     place-items: center;
-    border: 0;
-    border-radius: 4px;
-    padding: 0;
-    color: var(--rp-ink-faint);
-    background: transparent;
-  }
-
-  .rp-mobile-tab-close:hover {
-    color: var(--rp-ink);
-    background: var(--rp-hover);
-  }
-
-  .rp-mobile-tab-close:focus-visible {
-    outline: 1px solid var(--rp-accent);
-    outline-offset: -1px;
   }
 
   .rp-workspace .rp-split,

@@ -18,7 +18,7 @@ serde_json.workspace = true
 axum = { version = "0.8", features = ["macros"] }
 bytes = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "sync", "signal", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "signal", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.7", features = ["set-header", "trace"] }
 tracing = "0.1"
@@ -26,12 +26,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-stream = "0.3"
 arrow-array = "58.4.0"
 arrow-schema = "58.4.0"
-parquet = { version = "58.4.0", default-features = false, features = ["arrow", "snap"] }
-zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
+arrow-ipc = "58.4.0"
 arrow-json = "58.4.0"
 adbc_core = "0.24.0"
 adbc_driver_manager = "0.24.0"
 safetensors = "0.7"
 image.workspace = true
-tempfile.workspace = true
 spiral-robotics-inference.workspace = true
+dirs = "6"
+url = "2"
+
+[dev-dependencies]
+tempfile.workspace = true

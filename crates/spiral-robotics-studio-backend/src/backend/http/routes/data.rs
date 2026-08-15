@@ -1,5 +1,17 @@
 use super::*;
 
+struct CatalogReservation {
+    lease: Arc<CatalogMutationLease>,
+    token: CatalogLeaseToken,
+}
+
+impl Drop for CatalogReservation {
+    fn drop(&mut self) {
+        let released = self.lease.release(self.token);
+        debug_assert!(released, "catalog transfer releases its exact lease once");
+    }
+}
+
 pub(super) fn router() -> Router<AppState> {
     Router::new()
         .route(
@@ -8,55 +20,274 @@ pub(super) fn router() -> Router<AppState> {
         )
         .route("/settings/data/test/spiral", post(test_spiral))
         .route("/settings/data/test/training", post(test_training_runtime))
-        .route("/publications", get(list_publications))
-        .route(
-            "/spiral/publications/{episode}",
-            post(sync_existing_episode_to_spiral),
-        )
         .route("/spiral/query", post(spiral_query))
         .route("/spiral/replay", post(start_spiral_replay))
         .route("/spiral/video.mp4", get(spiral_video))
+        .route("/project/export", get(export_project))
+        .route(
+            "/project/import",
+            post(import_project).layer(DefaultBodyLimit::max(
+                crate::backend::storage::bundle::MAX_PROJECT_BUNDLE_BYTES,
+            )),
+        )
+        .route("/episodes/export", get(export_episodes))
+        .route(
+            "/episodes/import",
+            post(import_episodes).layer(DefaultBodyLimit::max(
+                crate::backend::storage::bundle::MAX_EPISODE_BUNDLE_BYTES,
+            )),
+        )
+}
+
+#[derive(Debug, Deserialize)]
+struct EpisodeTransferQuery {
+    dataset_id: String,
+}
+
+async fn export_project(State(state): State<AppState>) -> Result<Response, Failure> {
+    let storage = state.storage.clone();
+    let bytes = tokio::task::spawn_blocking(move || storage.export_project_bundle())
+        .await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            header::CONTENT_TYPE,
+            "application/vnd.spiral-robotics.project",
+        )
+        .header(
+            header::CONTENT_DISPOSITION,
+            "attachment; filename=spiral-robotics-project.spiral-project",
+        )
+        .header(header::CONTENT_LENGTH, bytes.len())
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .body(Body::from(bytes))
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+}
+
+async fn import_project(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<spiral_robotics_contracts::api::ProjectImportSummary>, Failure> {
+    let token = state
+        .catalog_lease
+        .try_acquire(CatalogLeaseOwner::ProjectImport)
+        .ok_or_else(|| {
+            Failure(
+                StatusCode::CONFLICT,
+                "Wait for the current recording or catalog change before importing a project"
+                    .to_owned(),
+            )
+        })?;
+    let _reservation = CatalogReservation {
+        lease: state.catalog_lease.clone(),
+        token,
+    };
+    require_import_idle(&state, "a project")?;
+    if body.is_empty() {
+        return Err(Failure::bad_request(
+            "choose a .spiral-project file to import",
+        ));
+    }
+    let storage = state.storage.clone();
+    let bytes = body.to_vec();
+    let summary = tokio::task::spawn_blocking(move || storage.import_project_bundle(&bytes))
+        .await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+        .map_err(Failure::bad_request)?;
+    state.preferences.replace(
+        state
+            .storage
+            .load_studio_preferences()
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?,
+    );
+    state
+        .training
+        .reload_from_storage()
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    state.training.refresh_readiness().await;
+    state
+        .rollout
+        .reload_from_storage()
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    Ok(Json(summary))
+}
+
+async fn export_episodes(
+    State(state): State<AppState>,
+    Query(query): Query<EpisodeTransferQuery>,
+) -> Result<Response, Failure> {
+    if !spiral_robotics_contracts::spiral::is_dataset_id(&query.dataset_id) {
+        return Err(Failure::bad_request(
+            "dataset ID must contain 1–96 letters, numbers, '.', '_' or '-'",
+        ));
+    }
+    let dataset_id = query.dataset_id;
+    let filename = format!("{dataset_id}.spiral-episodes");
+    let storage = state.storage.clone();
+    let bytes = tokio::task::spawn_blocking(move || storage.export_episode_bundle(&dataset_id))
+        .await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+        .map_err(Failure::bad_request)?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            header::CONTENT_TYPE,
+            "application/vnd.spiral-robotics.episodes",
+        )
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{filename}\""),
+        )
+        .header(header::CONTENT_LENGTH, bytes.len())
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .body(Body::from(bytes))
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+}
+
+async fn import_episodes(
+    State(state): State<AppState>,
+    Query(query): Query<EpisodeTransferQuery>,
+    body: Bytes,
+) -> Result<Json<spiral_robotics_contracts::api::EpisodeImportSummary>, Failure> {
+    if !spiral_robotics_contracts::spiral::is_dataset_id(&query.dataset_id) {
+        return Err(Failure::bad_request(
+            "dataset ID must contain 1–96 letters, numbers, '.', '_' or '-'",
+        ));
+    }
+    let token = state
+        .catalog_lease
+        .try_acquire(CatalogLeaseOwner::EpisodeImport)
+        .ok_or_else(|| {
+            Failure::conflict(
+                "Wait for the current recording or catalog change before importing episodes",
+            )
+        })?;
+    let _reservation = CatalogReservation {
+        lease: state.catalog_lease.clone(),
+        token,
+    };
+    require_import_idle(&state, "episodes")?;
+    if body.is_empty() {
+        return Err(Failure::bad_request(
+            "choose a .spiral-episodes file to import",
+        ));
+    }
+    let storage = state.storage.clone();
+    let dataset_id = query.dataset_id;
+    let bytes = body.to_vec();
+    let summary =
+        tokio::task::spawn_blocking(move || storage.import_episode_bundle(&dataset_id, &bytes))
+            .await
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+            .map_err(Failure::bad_request)?;
+    Ok(Json(summary))
+}
+
+fn require_import_idle(state: &AppState, subject: &str) -> Result<(), Failure> {
+    let hardware = state.hardware.state();
+    let busy = hardware.telemetry.recording.is_some()
+        || !matches!(hardware.mode.selection, ModeSelection::Idle)
+        || hardware
+            .connections
+            .values()
+            .any(|connection| connection.connected)
+        || state
+            .training
+            .snapshot()
+            .runs
+            .iter()
+            .any(|run| run.phase.active())
+        || matches!(
+            state.rollout.snapshot().phase,
+            ApplicationRolloutPhase::Loading
+                | ApplicationRolloutPhase::WarmingUp
+                | ApplicationRolloutPhase::Running
+                | ApplicationRolloutPhase::Stopping
+        );
+    if busy {
+        return Err(Failure::conflict(format!(
+            "Disconnect robots and stop recording, replay, rollout, and training before importing {subject}"
+        )));
+    }
+    Ok(())
 }
 
 pub(super) struct DataHttpAdapter<'a> {
     state: &'a AppState,
 }
 
-impl<'a> DataHttpAdapter<'a> {
-    pub(super) fn new(state: &'a AppState) -> Self {
-        Self { state }
-    }
-}
-
 impl DataCatalogPort for DataHttpAdapter<'_> {
     fn settings(&self) -> DataSettingsView {
-        application_data_settings(self.state.data_settings.public())
+        let configured_endpoint = self.state.backend_state.spiral_endpoint();
+        let configured_spfs_endpoint = self.state.backend_state.spiral_spfs_endpoint();
+        let configured_project = self.state.backend_state.project_id();
+        application_data_settings(
+            self.state
+                .storage
+                .data_settings(&self.state.preferences.get()),
+            configured_endpoint.as_deref(),
+            configured_spfs_endpoint.as_deref(),
+            configured_project.as_deref(),
+        )
     }
 
     fn update_settings(
         &self,
         command: UpdateDataSettingsCommand,
     ) -> Result<DataSettingsView, ApplicationError> {
-        let settings = self
+        let endpoint_changed = self.state.storage.spiral_endpoint() != command.spiral_endpoint
+            || self.state.storage.spiral_spfs_endpoint() != command.spiral_spfs_endpoint;
+        let project_changed = self.state.storage.project_id() != command.project_id;
+        let staged = self
             .state
-            .data_settings
-            .update(UpdateDataSettingsRequest {
-                spiral: ContractSpiralSettings {
-                    enabled: false,
-                    uri: command.spiral.uri,
-                    project_id: command.spiral.project_id,
-                    dataset: command.spiral.namespace,
-                },
-                training: spiral_robotics_contracts::api::TrainingRuntimeSettings {
+            .preferences
+            .stage_update(
+                spiral_robotics_contracts::api::TrainingRuntimeSettings {
                     endpoint: command.training_endpoint,
                 },
-                video: VideoSettings {
+                VideoSettings {
                     enabled: command.video_enabled,
                 },
-            })
+            )
             .map_err(ApplicationError::InvalidInput)?;
-        self.state.storage.sync_pending();
-        Ok(application_data_settings(settings))
+        self.state
+            .backend_state
+            .save_connection(
+                &command.project_id,
+                &command.spiral_endpoint,
+                &command.spiral_spfs_endpoint,
+            )
+            .map_err(ApplicationError::Internal)?;
+        if endpoint_changed {
+            // The ADBC driver has no per-database endpoint option. Preserve the
+            // complete next destination as bootstrap state, but do not write
+            // project-owned preferences to the still-active old endpoint.
+            return Ok(self.settings());
+        }
+        if project_changed {
+            self.state
+                .storage
+                .configure_project(&command.project_id)
+                .map_err(ApplicationError::InvalidInput)?;
+        }
+        self.state
+            .storage
+            .save_studio_preferences(&staged)
+            .map_err(ApplicationError::External)?;
+        if project_changed {
+            self.state
+                .training
+                .reload_from_storage()
+                .map_err(ApplicationError::External)?;
+            self.state
+                .rollout
+                .reload_from_storage()
+                .map_err(ApplicationError::External)?;
+        }
+        self.state.preferences.replace(staged);
+        Ok(self.settings())
     }
 
     async fn refresh_training_readiness(&self) {
@@ -69,27 +300,6 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
             ok: response.ok,
             message: response.message,
         }
-    }
-
-    fn publications(&self) -> Vec<PublicationView> {
-        self.state
-            .storage
-            .statuses()
-            .into_iter()
-            .map(|status| PublicationView {
-                episode_id: status.episode_id,
-                state: status.state,
-                spiral: status.spiral,
-                updated_ms: status.updated_ms,
-            })
-            .collect()
-    }
-
-    fn sync_existing_episode(&self, episode: String) -> Result<(), ApplicationError> {
-        self.state
-            .storage
-            .sync_spiral_existing(episode)
-            .map_err(ApplicationError::InvalidInput)
     }
 
     async fn query(
@@ -127,13 +337,32 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
     }
 }
 
-pub(super) fn application_data_settings(settings: DataSettings) -> DataSettingsView {
+pub(super) fn application_data_settings(
+    mut settings: DataSettings,
+    configured_endpoint: Option<&str>,
+    configured_spfs_endpoint: Option<&str>,
+    configured_project: Option<&str>,
+) -> DataSettingsView {
+    let mut endpoint_restart_required = false;
+    if let Some(configured_endpoint) = configured_endpoint {
+        endpoint_restart_required |= configured_endpoint != settings.spiral.endpoint;
+        settings.spiral.endpoint = configured_endpoint.to_owned();
+    }
+    if let Some(configured_spfs_endpoint) = configured_spfs_endpoint {
+        endpoint_restart_required |= configured_spfs_endpoint != settings.spiral.spfs_endpoint;
+        settings.spiral.spfs_endpoint = configured_spfs_endpoint.to_owned();
+    }
+    settings.spiral.endpoint_restart_required = endpoint_restart_required;
+    if endpoint_restart_required && let Some(configured_project) = configured_project {
+        settings.spiral.project_id = configured_project.to_owned();
+    }
     DataSettingsView {
-        spiral_configured: settings.spiral.enabled,
         spiral: SpiralDestinationSettings {
-            uri: settings.spiral.uri,
+            endpoint: settings.spiral.endpoint,
+            spfs_endpoint: settings.spiral.spfs_endpoint,
             project_id: settings.spiral.project_id,
-            namespace: settings.spiral.dataset,
+            namespace: settings.spiral.namespace,
+            endpoint_restart_required: settings.spiral.endpoint_restart_required,
         },
         training_endpoint: settings.training.endpoint,
         video_enabled: settings.video.enabled,
@@ -143,10 +372,11 @@ pub(super) fn application_data_settings(settings: DataSettings) -> DataSettingsV
 pub(super) fn contract_data_settings(settings: DataSettingsView) -> DataSettings {
     DataSettings {
         spiral: ContractSpiralSettings {
-            enabled: settings.spiral_configured,
-            uri: settings.spiral.uri,
+            endpoint: settings.spiral.endpoint,
+            spfs_endpoint: settings.spiral.spfs_endpoint,
             project_id: settings.spiral.project_id,
-            dataset: settings.spiral.namespace,
+            namespace: settings.spiral.namespace,
+            endpoint_restart_required: settings.spiral.endpoint_restart_required,
         },
         training: spiral_robotics_contracts::api::TrainingRuntimeSettings {
             endpoint: settings.training_endpoint,
@@ -273,11 +503,9 @@ impl SpiralReplayPort for HardwareHandle {
 
 fn data_settings_command(request: UpdateDataSettingsRequest) -> UpdateDataSettingsCommand {
     UpdateDataSettingsCommand {
-        spiral: SpiralDestinationSettings {
-            uri: request.spiral.uri,
-            project_id: request.spiral.project_id,
-            namespace: request.spiral.dataset,
-        },
+        spiral_endpoint: request.spiral_endpoint,
+        spiral_spfs_endpoint: request.spiral_spfs_endpoint,
+        project_id: request.project_id,
         training_endpoint: request.training.endpoint,
         video_enabled: request.video.enabled,
     }
@@ -301,6 +529,59 @@ async fn update_data_settings(
     State(state): State<AppState>,
     Json(request): Json<UpdateDataSettingsRequest>,
 ) -> Result<Json<DataSettings>, Failure> {
+    let requested_endpoint =
+        crate::backend::storage::settings::normalize_spiral_endpoint(&request.spiral_endpoint)
+            .map_err(Failure::bad_request)?;
+    let requested_spfs_endpoint =
+        crate::backend::storage::settings::normalize_spiral_spfs_endpoint(
+            &request.spiral_spfs_endpoint,
+        )
+        .map_err(Failure::bad_request)?;
+    let endpoint_changed = state.storage.spiral_endpoint() != requested_endpoint
+        || state.storage.spiral_spfs_endpoint() != requested_spfs_endpoint;
+    let project_changed = state.storage.project_id() != request.project_id.trim();
+    let _reservation = if project_changed || endpoint_changed {
+        let token = state
+            .catalog_lease
+            .try_acquire(CatalogLeaseOwner::ProjectSwitch)
+            .ok_or_else(|| {
+                Failure::conflict(
+                    "Wait for the current recording or catalog change before changing the Spiral destination",
+                )
+            })?;
+        let reservation = CatalogReservation {
+            lease: state.catalog_lease.clone(),
+            token,
+        };
+        let hardware = state.hardware.state();
+        let project_is_busy = hardware.telemetry.recording.is_some()
+            || !matches!(hardware.mode.selection, ModeSelection::Idle)
+            || hardware
+                .connections
+                .values()
+                .any(|connection| connection.connected)
+            || state
+                .training
+                .snapshot()
+                .runs
+                .iter()
+                .any(|run| run.phase.active())
+            || matches!(
+                state.rollout.snapshot().phase,
+                ApplicationRolloutPhase::Loading
+                    | ApplicationRolloutPhase::WarmingUp
+                    | ApplicationRolloutPhase::Running
+                    | ApplicationRolloutPhase::Stopping
+            );
+        if project_is_busy {
+            return Err(Failure::conflict(
+                "Disconnect robots and stop recording, replay, rollout, and training before changing the Spiral destination",
+            ));
+        }
+        Some(reservation)
+    } else {
+        None
+    };
     let settings = data_application::update_settings(
         &DataHttpAdapter { state: &state },
         data_settings_command(request),
@@ -319,28 +600,6 @@ async fn test_spiral(State(state): State<AppState>) -> Json<ConnectionTestRespon
 
 async fn test_training_runtime(State(state): State<AppState>) -> Json<ConnectionTestResponse> {
     Json(state.training.test_runtime().await)
-}
-
-async fn list_publications(State(state): State<AppState>) -> Json<Vec<PublicationStatus>> {
-    Json(
-        data_application::list_publications(&DataHttpAdapter { state: &state })
-            .into_iter()
-            .map(|status| PublicationStatus {
-                episode_id: status.episode_id,
-                state: status.state,
-                spiral: status.spiral,
-                updated_ms: status.updated_ms,
-            })
-            .collect(),
-    )
-}
-
-async fn sync_existing_episode_to_spiral(
-    State(state): State<AppState>,
-    Path(episode): Path<String>,
-) -> Result<StatusCode, Failure> {
-    data_application::sync_existing_episode(&DataHttpAdapter { state: &state }, episode)?;
-    Ok(StatusCode::ACCEPTED)
 }
 
 async fn spiral_query(

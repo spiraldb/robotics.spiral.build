@@ -1,4 +1,4 @@
-//! Robot-configuration actions independent of HTTP, JSON, files, and drivers.
+//! Robot-configuration actions independent of HTTP, serialization, storage, and drivers.
 
 use std::collections::BTreeMap;
 
@@ -253,10 +253,10 @@ fn validate_plain_name(label: &str, value: &str, maximum: usize) -> Result<(), A
 
 /// Forget live hardware before removing its durable configuration.
 ///
-/// The existence check happens first so a missing file cannot unexpectedly
+/// The existence check happens first so a missing configuration cannot unexpectedly
 /// tear down a bus. Once it passes, failure is deliberately biased toward a
-/// saved-but-disconnected robot: deleting the file first could leave a live bus
-/// that no configuration or UI card can identify and stop.
+/// saved-but-disconnected robot: deleting the SpiralDB row first could leave a
+/// live bus that no configuration or UI card can identify and stop.
 pub(crate) async fn delete<R, C>(
     repository: &R,
     control: &C,
@@ -428,7 +428,7 @@ mod tests {
             self.events.lock().unwrap().push(format!("delete:{robot}"));
             if self.fail_delete {
                 Err(ApplicationError::Internal(
-                    "disk refused deletion".to_owned(),
+                    "storage refused deletion".to_owned(),
                 ))
             } else {
                 Ok(())
@@ -516,7 +516,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deletion_forgets_live_state_before_removing_the_file() {
+    async fn deletion_forgets_live_state_before_removing_the_configuration() {
         let (repository, control, events) = setup();
 
         delete(&repository, &control, "arm").await.unwrap();
@@ -528,7 +528,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deletion_never_removes_the_file_if_forgetting_live_state_fails() {
+    async fn deletion_never_removes_the_configuration_if_forgetting_live_state_fails() {
         let (repository, mut control, events) = setup();
         control.fail_forget = true;
 
@@ -679,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn simple_configuration_actions_delegate_without_learning_json_or_files() {
+    fn simple_configuration_actions_delegate_without_learning_serialization_or_storage() {
         let (repository, _control, events) = setup();
         assert_eq!(
             create(

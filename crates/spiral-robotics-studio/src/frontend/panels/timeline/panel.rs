@@ -16,11 +16,15 @@ use charming::series::Line;
 use dioxus::prelude::*;
 use serde::Deserialize;
 use spiral_robotics_core::arm::SO101_JOINTS;
+use spiral_robotics_ui::{
+    Action, ActionPurpose, ActionSize, ActionVariant, InlineConfirmation, Toggle,
+};
 
 use crate::frontend::app::activity::{Activity, TimelineSubject, TimelineTarget};
 use crate::frontend::components::charts::{
     CharmingChart, downsample_extrema, studio_numeric_tooltip,
 };
+use crate::frontend::format::format_clock;
 use crate::frontend::panels::timeline::signals::{SignalStore, signal_color};
 
 const TIMELINE_CHART_ID: &str = "studio-timeline-signal-chart";
@@ -505,14 +509,16 @@ pub(crate) fn StudioTimeline(
             header { class: "flex min-h-9 flex-wrap items-center gap-2 border-b border-line px-2 py-1",
                 if let Some(episode) = capture_episode.clone() {
                     // Stop is the one reached for with a hand still on the arm
-                    // once a take is running, so it takes the 28px take-button
+                    // once a take is running, so it takes the 28px take action
                     // and the live red. Pause stays an ordinary 24px control and
                     // Discard sits behind a confirm at the far end of the row —
                     // the three used to be the same size, 8px apart, with the
                     // only unconfirmed one being the only unrecoverable one.
-                    button {
-                        r#type: "button",
-                        class: "take-button take-button-live",
+                    Action {
+                        purpose: ActionPurpose::Stop,
+                        variant: ActionVariant::Solid,
+                        size: ActionSize::Standard,
+                        class: "take-action take-action-live",
                         onclick: {
                             let episode = capture_episode.clone();
                             move |_| on_action.call(TimelineAction::Capture {
@@ -522,56 +528,57 @@ pub(crate) fn StudioTimeline(
                         },
                         "Stop"
                     }
-                    button {
-                        r#type: "button",
-                        class: "btn btn-outline",
+                    Action {
+                        purpose: ActionPurpose::Toggle,
+                        variant: ActionVariant::Outline,
                         onclick: move |_| on_action.call(TimelineAction::Capture {
                             episode: Some(episode.clone()),
                             action: if capture_paused { TimelineCaptureAction::Resume } else { TimelineCaptureAction::Pause },
                         }),
                         if capture_paused { "Resume recording" } else { "Pause recording" }
                     }
-                    div { class: "ml-1 flex items-center gap-1 border-l border-line pl-2",
-                        if confirm_discard() {
-                            span { class: "text-[11px] text-danger", "Discard this take?" }
-                            button {
-                                r#type: "button",
-                                class: "btn btn-danger",
-                                onclick: {
-                                    let episode = capture_episode.clone();
-                                    move |_| {
-                                        confirm_discard.set(false);
-                                        on_action.call(TimelineAction::Capture {
-                                            episode: episode.clone(),
-                                            action: TimelineCaptureAction::Discard,
-                                        });
-                                    }
-                                },
-                                "Discard"
-                            }
-                            button {
-                                r#type: "button",
-                                class: "btn btn-outline",
-                                onclick: move |_| confirm_discard.set(false),
-                                "Keep"
-                            }
-                        } else {
-                            button {
-                                r#type: "button",
-                                class: "btn btn-danger",
-                                "aria-label": "Discard this take without saving",
+                    if confirm_discard() {
+                        InlineConfirmation {
+                            id: "discard-take-confirmation",
+                            class: "timeline-discard-confirmation",
+                            message: "Discard this take? The current recording will not be saved.".to_owned(),
+                            confirm_label: "Discard take",
+                            cancel_label: "Keep recording",
+                            purpose: ActionPurpose::Discard,
+                            return_focus_id: "discard-take",
+                            on_confirm: {
+                                let episode = capture_episode.clone();
+                                move |_| {
+                                    confirm_discard.set(false);
+                                    on_action.call(TimelineAction::Capture {
+                                        episode: episode.clone(),
+                                        action: TimelineCaptureAction::Discard,
+                                    });
+                                }
+                            },
+                            on_cancel: move |_| confirm_discard.set(false),
+                        }
+                    } else {
+                        div { class: "ml-1 flex items-center gap-1 border-l border-line pl-2",
+                            Action {
+                                id: "discard-take",
+                                purpose: ActionPurpose::Discard,
+                                variant: ActionVariant::Link,
+                                aria_label: "Discard this take without saving",
                                 onclick: move |_| confirm_discard.set(true),
                                 "Discard"
                             }
                         }
                     }
                 } else {
-                    button {
-                        r#type: "button",
-                        class: "take-button",
+                    Action {
+                        purpose: ActionPurpose::Start,
+                        variant: ActionVariant::Solid,
+                        size: ActionSize::Standard,
+                        class: "take-action",
                         disabled: !capabilities.record.allowed,
                         title: "{record_title}",
-                        "aria-label": if capabilities.record.allowed { "Record".to_owned() } else { format!("Record — {record_title}") },
+                        aria_label: if capabilities.record.allowed { "Record".to_owned() } else { format!("Record — {record_title}") },
                         onclick: move |_| on_action.call(TimelineAction::Capture {
                             episode: None,
                             action: TimelineCaptureAction::Start,
@@ -580,12 +587,13 @@ pub(crate) fn StudioTimeline(
                     }
                 }
 
-                button {
-                    r#type: "button",
-                    class: "btn btn-outline h-6 w-6 px-0",
+                Action {
+                    purpose: ActionPurpose::Toggle,
+                    variant: ActionVariant::Icon,
+                    class: "timeline-transport-action",
                     disabled: !transport_allowed,
                     title: "{transport_title}",
-                    "aria-label": "{transport_label}",
+                    aria_label: "{transport_label}",
                     onclick: {
                         let episode = preview_episode.clone();
                         move |_| if let Some(episode) = episode.clone() {
@@ -604,24 +612,22 @@ pub(crate) fn StudioTimeline(
                     PlaybackIcon { playing: transport_playing }
                 }
 
-                label {
-                    class: if capabilities.robot_sync.allowed { "flex min-h-6 cursor-pointer items-center gap-1 text-[11px]" } else { "flex min-h-6 items-center gap-1 text-[11px] text-ink-faint" },
+                Toggle {
+                    purpose: ActionPurpose::Sync,
+                    class: "timeline-sync-toggle",
+                    label: "Sync robot",
                     title: "{sync_title}",
-                    input {
-                        r#type: "checkbox",
-                        checked: state.sync_robot,
-                        disabled: !capabilities.robot_sync.allowed,
-                        onchange: {
-                            let target = sync_target.clone();
-                            move |event| if let Some(target) = target.clone() {
+                    checked: state.sync_robot,
+                    disabled: !capabilities.robot_sync.allowed,
+                    onchange: {
+                        let target = sync_target.clone();
+                        move |checked| if let Some(target) = target.clone() {
                                 on_action.call(TimelineAction::SetRobotSync {
                                     target,
-                                    enabled: event.checked(),
+                                    enabled: checked,
                                 });
-                            }
-                        },
-                    }
-                    span { "Sync robot" }
+                        }
+                    },
                 }
 
                 // The list says "#21", the Scene tab says "Episode · #21", and
@@ -642,10 +648,11 @@ pub(crate) fn StudioTimeline(
                     span { class: "ml-1 text-[10px] text-ink-faint", "{frames} frames" }
                 }
                 if recording.is_some() {
-                    button {
-                        r#type: "button",
-                        class: if follow_live { "btn btn-outline text-accent" } else { "btn btn-outline" },
-                        "aria-pressed": follow_live,
+                    Action {
+                        purpose: ActionPurpose::Sync,
+                        variant: ActionVariant::Outline,
+                        class: if follow_live { "text-accent" } else { "" },
+                        aria_pressed: follow_live,
                         title: if follow_live { "Stop following the newest recorded sample" } else { "Return the playhead to the newest recorded sample" },
                         onclick: move |_| on_action.call(TimelineAction::SetFollowLive(!follow_live)),
                         if follow_live { "Following live" } else { "Follow live" }
@@ -669,12 +676,15 @@ pub(crate) fn StudioTimeline(
             // an empty episode, and there was nothing to press.
             if let Some((failed_episode, reason)) = signal_source.unavailable() {
                 div {
-                    class: "m-0 flex flex-wrap items-center gap-2 border-b border-line bg-caution-soft px-2 py-1 text-[11px] text-caution",
+                    class: "timeline-source-note",
                     role: "alert",
-                    span { class: "min-w-0 flex-1", "Signals for {failed_episode} are unavailable. {reason}" }
-                    button {
-                        r#type: "button",
-                        class: "btn btn-outline",
+                    span {
+                        title: "Signals for {failed_episode} are unavailable. {reason}",
+                        "Signals for {failed_episode} are unavailable. {reason}"
+                    }
+                    Action {
+                        purpose: ActionPurpose::Retry,
+                        variant: ActionVariant::Outline,
                         onclick: {
                             let episode = failed_episode.to_owned();
                             move |_| on_action.call(TimelineAction::ReloadRecorded {
@@ -709,7 +719,9 @@ pub(crate) fn StudioTimeline(
                                     key: "tick-{tick.ordinal}",
                                     class: "timeline-time-tick",
                                     style: "left: {tick.position:.4}%",
-                                    span { "{tick.label}" }
+                                    if !tick.label.is_empty() {
+                                        span { "{tick.label}" }
+                                    }
                                 }
                             }
                             input {
@@ -782,6 +794,7 @@ pub(crate) fn StudioTimeline(
                                         key: "state-{lane.joint}",
                                         lane: lane.clone(),
                                         source: signal_source.clone(),
+                                        clocked: duration > 0.0,
                                     }
                                 }
                             }
@@ -800,16 +813,30 @@ pub(crate) fn StudioTimeline(
     }
 }
 
+/// The per-lane verdict, drawn only once there is a clock for it to be about.
+///
+/// `clocked` is false when the panel has no recording and no selected episode.
+/// Six lanes each reporting "No samples" for an episode that does not exist
+/// restated the panel's own empty line six times, in the six places the eye
+/// goes looking for data — absence stated that emphatically reads as failure.
+/// Once an episode is on the clock, a lane that is genuinely missing its trace
+/// is a real fact about that episode and says so.
 #[component]
-fn SignalLaneState(lane: TimelineSignalLane, source: SignalSource) -> Element {
-    let empty = lane.series.is_empty();
-    let loading = empty && source.loading();
-    let unavailable = empty && source.unavailable().is_some();
+fn SignalLaneState(lane: TimelineSignalLane, source: SignalSource, clocked: bool) -> Element {
+    let blank = lane.series.is_empty();
+    let loading = blank && source.loading();
+    let unavailable = blank && source.unavailable().is_some();
+    // A request that is still in flight or has already failed is a verdict about
+    // a real episode, so it is reported whether or not the clock has a span yet.
+    // "No samples" is the only one of the three that needs an episode to be
+    // about, which is why it alone waits for the clock.
+    let missing = blank && clocked && !loading && !unavailable;
+    let reported = loading || unavailable || missing;
     let label = if loading {
         format!("{} samples are loading", lane.label)
     } else if unavailable {
         format!("{} samples are unavailable", lane.label)
-    } else if empty {
+    } else if missing {
         format!("{} had no samples", lane.label)
     } else {
         String::new()
@@ -817,10 +844,10 @@ fn SignalLaneState(lane: TimelineSignalLane, source: SignalSource) -> Element {
     rsx! {
         div {
             class: "timeline-signal-lane-state",
-            role: empty.then_some("status"),
+            role: reported.then_some("status"),
             "aria-busy": if loading { "true" } else { "false" },
             "aria-label": (!label.is_empty()).then_some(label),
-            "aria-hidden": (!empty).then_some("true"),
+            "aria-hidden": (!reported).then_some("true"),
             if loading {
                 // A resting placeholder, not a shimmer: the reduced-motion block
                 // strips animation anyway, and a lane that pulses while the arm
@@ -828,7 +855,7 @@ fn SignalLaneState(lane: TimelineSignalLane, source: SignalSource) -> Element {
                 span { class: "timeline-signal-loading" }
             } else if unavailable {
                 span { class: "timeline-signal-unavailable", "Unavailable" }
-            } else if empty {
+            } else if missing {
                 span { class: "timeline-signal-empty", "No samples" }
             }
         }
@@ -856,8 +883,16 @@ struct TimelineTick {
     label: String,
 }
 
+/// The five divisions of the axis, labelled only once there is a span to label.
+///
+/// A clock with no episode on it has no scale, and stamping `format_clock(0.0)`
+/// at every division printed `0:00.0` five times across the head of the panel —
+/// a row that looks like a readout stuck at zero rather than an axis waiting for
+/// an episode. The divisions themselves stay, so the lanes keep their grid and
+/// every tick keeps the distinct identity its render key depends on.
 fn timeline_ticks(duration: f64) -> Vec<TimelineTick> {
     let duration = duration.max(0.0);
+    let scaled = duration > 0.0;
     (0_u8..=4)
         .map(|index| {
             let fraction = f64::from(index) / 4.0;
@@ -866,7 +901,11 @@ fn timeline_ticks(duration: f64) -> Vec<TimelineTick> {
                 ordinal: index,
                 seconds,
                 position: fraction * 100.0,
-                label: format_clock(seconds),
+                label: if scaled {
+                    format_clock(seconds)
+                } else {
+                    String::new()
+                },
             }
         })
         .collect()
@@ -878,17 +917,6 @@ fn percent(seconds: f64, duration: f64) -> f64 {
     } else {
         (seconds / duration * 100.0).clamp(0.0, 100.0)
     }
-}
-
-fn format_clock(seconds: f64) -> String {
-    let seconds = if seconds.is_finite() {
-        seconds.max(0.0)
-    } else {
-        0.0
-    };
-    let minutes = (seconds / 60.0).floor() as u64;
-    let remainder = seconds - minutes as f64 * 60.0;
-    format!("{minutes}:{remainder:04.1}")
 }
 
 fn timeline_signal_chart(lanes: &[TimelineSignalLane; 6], duration: f64) -> Chart {
@@ -1036,9 +1064,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clock_and_percent_are_stable_for_invalid_values() {
-        assert_eq!(format_clock(f64::NAN), "0:00.0");
-        assert_eq!(format_clock(61.25), "1:01.2");
+    fn percent_is_stable_for_invalid_duration() {
         assert_eq!(percent(5.0, 10.0), 50.0);
         assert_eq!(percent(5.0, 0.0), 0.0);
     }
@@ -1081,6 +1107,18 @@ mod tests {
 
         assert_eq!(ticks.len(), 5);
         assert_eq!(identities.len(), ticks.len());
+    }
+
+    #[test]
+    fn an_unscaled_axis_is_unlabelled_and_a_scaled_one_is_not() {
+        assert!(
+            timeline_ticks(0.0).iter().all(|tick| tick.label.is_empty()),
+            "an axis with no episode on it has no times to print"
+        );
+
+        let ticks = timeline_ticks(8.0);
+        assert!(ticks.iter().all(|tick| !tick.label.is_empty()));
+        assert_eq!(ticks.last().map(|tick| tick.seconds), Some(8.0));
     }
 
     #[test]
