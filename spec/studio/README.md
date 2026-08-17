@@ -58,19 +58,30 @@ panels to be arranged spatially.
   draggable.
 - **STUDIO-020** Repeated labels and implementation explanations must be removed
   when the surrounding structure provides the meaning.
-- **STUDIO-021** Values must use the correct unit and only useful precision.
+- **STUDIO-021** Values must use the correct unit and only useful precision. A
+  single-series chart with its label already visible must show only the
+  formatted value in a single-line tooltip.
 - **STUDIO-022** Charts must use Charming/ECharts with linear axes unless a
   metric requires another scale.
 - **STUDIO-023** Studio must load a pinned ECharts asset from a CDN instead of
   vendoring the library.
-- **STUDIO-024** Long charts must provide data zoom. Related charts should share
-  the selected range.
+- **STUDIO-024** Long charts must provide data zoom through a visible range
+  slider. Related charts should share the selected range. Pointer-wheel input
+  over a chart must scroll normally and must not change that range.
 - **STUDIO-025** Empty, loading, unavailable, and error states must have stable
   dimensions.
 - **STUDIO-026** Whole-project import and export must live in Settings →
   SpiralDB. Import must explicitly warn that it overwrites every Studio-owned
   relation in the active project; export must include the full project rather
   than only the selected dataset.
+- **STUDIO-051** Studio must bind its backend listener before external-service
+  probes, camera discovery, project hydration, or saved-robot connection. Its
+  application contract must distinguish Bootstrapping, Ready, and Degraded;
+  the status bar must present that state. State, events, Spiral/runtime
+  settings and tests, and camera discovery/preview must remain available while
+  bootstrapping. Catalog-dependent routes must return HTTP 503 with a retry
+  hint until the catalog is available, and setup snapshots must not perform
+  catalog I/O during that interval.
 
 ## Feature relationships
 

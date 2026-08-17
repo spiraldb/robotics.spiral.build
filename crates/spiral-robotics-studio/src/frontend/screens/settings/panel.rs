@@ -40,6 +40,7 @@ pub(crate) fn SettingsPanel(
         SettingsSection::Robots
     };
     let mut current = use_signal(move || initial_value);
+    let mut client_secret = use_signal(String::new);
     let mut section = use_signal(move || initial_section);
     let mut saving = use_signal(|| false);
     let mut testing = use_signal(|| false);
@@ -76,6 +77,10 @@ pub(crate) fn SettingsPanel(
             spiral_endpoint: current().spiral.endpoint,
             spiral_spfs_endpoint: current().spiral.spfs_endpoint,
             project_id: current().spiral.project_id,
+            client_id: current().spiral.client_id,
+            client_secret: client_secret(),
+            clear_client_secret: current().spiral.client_id.trim().is_empty()
+                && current().spiral.client_secret_configured,
             training: current().training,
             video: current().video,
         };
@@ -88,38 +93,26 @@ pub(crate) fn SettingsPanel(
             .await
             {
                 Ok(settings) => {
-                    let endpoint_restart_required = settings.spiral.endpoint_restart_required;
                     current.set(settings);
+                    client_secret.set(String::new());
                     on_saved.call(());
                     if let Some(path) = test_path {
-                        if endpoint_restart_required {
-                            test_result.set(None);
-                        } else {
-                            testing.set(true);
-                            test_result.set(None);
-                            match api::send_json::<(), ConnectionTestResponse>(
-                                Method::POST,
-                                path,
-                                None,
-                            )
+                        testing.set(true);
+                        test_result.set(None);
+                        match api::send_json::<(), ConnectionTestResponse>(Method::POST, path, None)
                             .await
-                            {
-                                Ok(response) => test_result.set(Some(response)),
-                                Err(error) => test_result.set(Some(ConnectionTestResponse {
-                                    ok: false,
-                                    message: error,
-                                })),
-                            }
-                            testing.set(false);
+                        {
+                            Ok(response) => test_result.set(Some(response)),
+                            Err(error) => test_result.set(Some(ConnectionTestResponse {
+                                ok: false,
+                                message: error,
+                            })),
                         }
+                        testing.set(false);
                     } else {
                         studio.report_success_from(
                             MessageSource::Settings,
-                            if endpoint_restart_required {
-                                "Settings saved. Restart Studio to use the new Spiral service endpoints."
-                            } else {
-                                "Settings saved."
-                            },
+                            "Settings saved and applied.",
                         );
                     }
                 }
@@ -213,13 +206,23 @@ pub(crate) fn SettingsPanel(
                                     }
                                     SettingsField { label: "Namespace", value: current().spiral.namespace, placeholder: "spiral_robotics", disabled: true, oninput: move |_| {} }
                                 }
-                                p { class: "settings-help",
-                                    "The API coordinates catalogs and queries; SpFS carries relation, video, and checkpoint payloads. These endpoints and the project ID are saved in this backend's private bootstrap file. Project switches apply live while idle. Either endpoint change takes effect after restarting Studio because the ADBC driver selects both services when it starts."
-                                }
-                                if current().spiral.endpoint_restart_required {
-                                    p { class: "connection-test connection-test-pending", role: "status",
-                                        "Restart Studio to activate the saved service endpoints. The current process is still connected to its previous destination."
+                                div { class: "settings-field-row",
+                                    SettingsField {
+                                        label: "Client ID",
+                                        value: current().spiral.client_id,
+                                        placeholder: "your-client-id",
+                                        oninput: move |value| current.write().spiral.client_id = value,
                                     }
+                                    SettingsField {
+                                        label: "Client secret",
+                                        value: client_secret(),
+                                        placeholder: if current().spiral.client_secret_configured { "Saved — leave blank to keep" } else { "your-client-secret" },
+                                        secret: true,
+                                        oninput: move |value| client_secret.set(value),
+                                    }
+                                }
+                                p { class: "settings-help",
+                                    "The API, SpFS endpoint, project, and optional client credentials are applied to a new scoped SpiralDB connection when you save. The secret is stored only in the backend's private bootstrap file and is never returned to this page."
                                 }
                                 Action {
                                     purpose: ActionPurpose::Apply,
@@ -227,7 +230,7 @@ pub(crate) fn SettingsPanel(
                                     disabled: saving() || testing() || transferring_project() || current().spiral.project_id.trim().is_empty(),
                                     aria_busy: testing(),
                                     onclick: move |_| save(Some("/api/settings/data/test/spiral")),
-                                    if testing() { "Testing…" } else if current().spiral.endpoint_restart_required { "Save endpoints" } else { "Save and test connection" }
+                                    if testing() { "Testing…" } else { "Save and test connection" }
                                 }
                                 section { class: "settings-project-transfer", "aria-labelledby": "project-transfer-title",
                                     div { class: "provider-heading",
@@ -309,7 +312,7 @@ pub(crate) fn SettingsPanel(
                     div { Action { purpose: ActionPurpose::Close, variant: ActionVariant::Solid, disabled: saving() || transferring_project(), onclick: move |_| if !saving() && !transferring_project() { on_close.call(()) }, "Done" } }
                 } else {
                     span {
-                        if current().spiral.endpoint_restart_required { "Service endpoint activation requires a restart." } else { "Applies to this Studio." }
+                        "Applies to this Studio."
                     }
                     div {
                         Action { purpose: ActionPurpose::Cancel, disabled: saving() || transferring_project(), onclick: move |_| if !saving() && !transferring_project() { on_close.call(()) }, "Cancel" }
@@ -415,14 +418,15 @@ fn ProviderHeading(title: &'static str, description: &'static str) -> Element {
 fn SettingsField(
     label: &'static str,
     value: String,
-    placeholder: &'static str,
+    placeholder: String,
     #[props(default)] disabled: bool,
+    #[props(default)] secret: bool,
     oninput: EventHandler<String>,
 ) -> Element {
     rsx! {
         label { class: "settings-field",
             span { class: "label", "{label}" }
-            input { class: "field", value, placeholder, disabled, oninput: move |event| oninput.call(event.value()) }
+            input { class: "field", r#type: if secret { "password" } else { "text" }, value, placeholder, disabled, oninput: move |event| oninput.call(event.value()) }
         }
     }
 }

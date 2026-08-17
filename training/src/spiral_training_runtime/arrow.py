@@ -13,7 +13,7 @@ from .errors import RuntimeRequestError
 class TrainingArrays:
     """Zero-copy NumPy views whose owner keeps the Arrow buffers alive."""
 
-    owner: pa.RecordBatch
+    owner: pa.RecordBatch | None
     states: np.ndarray
     images: np.ndarray
     actions: np.ndarray
@@ -21,7 +21,7 @@ class TrainingArrays:
 
     @property
     def batch_size(self) -> int:
-        return self.owner.num_rows
+        return int(self.states.shape[0])
 
 
 @dataclass(frozen=True)
@@ -36,7 +36,7 @@ def decode_training_batch(body: bytes, config: TrainingConfig) -> TrainingArrays
     if batch.num_rows == 0:
         raise RuntimeRequestError("Arrow training batch cannot be empty")
     states = _fixed_values(batch, "states", config.state_width, pa.float32())
-    images = _fixed_values(batch, "images", config.image_width_per_row, pa.float32())
+    images = _fixed_values(batch, "images", config.image_width_per_row, pa.uint8())
     actions = _fixed_values(batch, "actions", config.action_width, pa.float32())
     action_is_pad = _fixed_values(batch, "action_is_pad", config.chunk_size, pa.uint8())
     if np.any(action_is_pad > 1):

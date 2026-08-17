@@ -16,8 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -28,14 +29,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use spiral_robotics::serial_ports::{available_ports, port_description, port_kind};
 use spiral_robotics_contracts::api::{
-    ApiError, CalibrationReapplyResponse, CameraStatus, ConnectionTestResponse, CreateRobotRequest,
-    DataSettings, EpisodeCatalogResponse, EpisodeSummary, GoalRequest, IdentifyPortRequest,
-    IdentifyPortResponse, JudgeEpisodeRequest, ModeSelection, PortSettings, RobotSummary,
-    RolloutSnapshot, SerialPortSummary, SetRecordingPausedRequest, SetReplayPausedRequest,
-    SpiralQueryRequest, SpiralQueryResponse, SpiralSettings as ContractSpiralSettings,
-    StartRecordingRequest, StartReplayRequest, StartRolloutRequest, StartSpiralReplayRequest,
-    StartTrainingRequest, StopRecordingRequest, StudioSnapshot,
-    TrainingPolicy as ContractTrainingPolicy, TrainingRun, TrainingSnapshot,
+    ApiError, BackendReadiness, BackendReadinessState, CalibrationReapplyResponse, CameraStatus,
+    ConnectionTestResponse, CreateRobotRequest, DataSettings, EpisodeCatalogResponse,
+    EpisodeSummary, GoalRequest, IdentifyPortRequest, IdentifyPortResponse, JudgeEpisodeRequest,
+    ModeSelection, PortSettings, RobotSummary, RolloutSnapshot, SerialPortSummary,
+    SetRecordingPausedRequest, SetReplayPausedRequest, SpiralQueryRequest, SpiralQueryResponse,
+    SpiralSettings as ContractSpiralSettings, StartRecordingRequest, StartReplayRequest,
+    StartRolloutRequest, StartSpiralReplayRequest, StartTrainingRequest, StopRecordingRequest,
+    StudioSnapshot, TrainingPolicy as ContractTrainingPolicy, TrainingRun, TrainingSnapshot,
     UpdateDataSettingsRequest, UpdateRobotRequest, VideoSettings, default_teleoperation_pair,
 };
 use spiral_robotics_core::calibration::{Calibration, CalibrationInput, MotorSpec};
@@ -141,9 +142,58 @@ pub(crate) struct AppState {
     pub storage: Arc<StorageManager>,
     pub training: Arc<TrainingManager>,
     pub rollout: Arc<RolloutManager>,
+    pub bootstrap: BootstrapState,
     pub catalog_lease: Arc<CatalogMutationLease>,
     pub recording_video: Arc<tokio::sync::Mutex<Option<VideoCapture>>>,
     pub video_encoder: VideoEncoderSettings,
+}
+
+/// Shared application lifecycle published to the browser and consulted by
+/// catalog-dependent request admission.
+#[derive(Clone)]
+pub(crate) struct BootstrapState {
+    current: tokio::sync::watch::Sender<BackendReadiness>,
+}
+
+impl BootstrapState {
+    pub(crate) fn new() -> Self {
+        let (current, receiver) = tokio::sync::watch::channel(BackendReadiness::default());
+        drop(receiver);
+        Self { current }
+    }
+
+    pub(crate) fn current(&self) -> BackendReadiness {
+        self.current.borrow().clone()
+    }
+
+    pub(crate) fn bootstrapping(&self, detail: impl Into<String>) {
+        self.current.send_replace(BackendReadiness {
+            state: BackendReadinessState::Bootstrapping,
+            catalog_available: false,
+            detail: detail.into(),
+        });
+    }
+
+    pub(crate) fn ready(&self) {
+        self.current.send_replace(BackendReadiness {
+            state: BackendReadinessState::Ready,
+            catalog_available: true,
+            detail: "Studio services are ready".to_owned(),
+        });
+    }
+
+    pub(crate) fn degraded(&self, catalog_available: bool, detail: impl Into<String>) {
+        self.current.send_replace(BackendReadiness {
+            state: BackendReadinessState::Degraded,
+            catalog_available,
+            detail: detail.into(),
+        });
+    }
+
+    fn catalog_unavailable(&self) -> Option<String> {
+        let current = self.current();
+        (!current.catalog_available).then(|| current.detail)
+    }
 }
 
 pub(crate) async fn monitor_video_recording(state: AppState) {
@@ -282,11 +332,22 @@ impl Failure {
     fn conflict(message: impl Into<String>) -> Self {
         Self(StatusCode::CONFLICT, message.into())
     }
+
+    fn unavailable(message: impl Into<String>) -> Self {
+        Self(StatusCode::SERVICE_UNAVAILABLE, message.into())
+    }
 }
 
 impl IntoResponse for Failure {
     fn into_response(self) -> Response {
-        (self.0, Json(ApiError::new(self.1))).into_response()
+        let retry = self.0 == StatusCode::SERVICE_UNAVAILABLE;
+        let mut response = (self.0, Json(ApiError::new(self.1))).into_response();
+        if retry {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, "1".parse().expect("valid retry delay"));
+        }
+        response
     }
 }
 
@@ -357,49 +418,81 @@ fn workspace_application_error(error: WorkspaceError) -> ApplicationError {
 
 /// Build the studio's API routes.
 pub(crate) fn api_router(state: AppState) -> Router {
-    Router::new()
-        .merge(data::router())
-        .merge(devices::router())
+    let catalog_routes = Router::new()
+        .merge(data::catalog_router())
+        .merge(devices::catalog_router())
         .merge(recordings::router())
         .merge(training_rollout::router())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_catalog_ready,
+        ));
+
+    Router::new()
+        .merge(data::bootstrap_router())
+        .merge(devices::bootstrap_router())
+        .merge(catalog_routes)
         .route("/state", get(get_state))
         .route("/events", get(events))
         .with_state(state)
 }
 
+async fn require_catalog_ready(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, Failure> {
+    match state.bootstrap.catalog_unavailable() {
+        Some(detail) => Err(Failure::unavailable(format!(
+            "Studio catalog is not ready: {detail}"
+        ))),
+        None => Ok(next.run(request).await),
+    }
+}
+
 /// Assemble the current setup-level view of the studio.
 pub(crate) fn build_snapshot(state: &AppState) -> StudioSnapshot {
     let hardware = state.hardware.state();
-    let robot_adapter = devices::RobotHttpAdapter::new(state);
-    let robots = robots::list(&robot_adapter)
-        .into_iter()
-        .filter_map(|saved| {
-            let connection = hardware
-                .connections
-                .get(&saved.id)
-                .cloned()
-                .unwrap_or_default();
-            let mut summary = state.workspace.get(&saved.id).ok()?.summary(connection);
-            // Limits come from the motors, not the saved configuration, so they
-            // are folded in here after loading the SpiralDB row.
-            if let Some(limits) = hardware.limits.get(&saved.id) {
-                for motor in &mut summary.motors {
-                    if let Some(limits) = limits.get(&motor.name) {
-                        motor.limits = *limits;
+    let readiness = state.bootstrap.current();
+    let robots = if readiness.catalog_available {
+        let robot_adapter = devices::RobotHttpAdapter::new(state);
+        robots::list(&robot_adapter)
+            .into_iter()
+            .filter_map(|saved| {
+                let connection = hardware
+                    .connections
+                    .get(&saved.id)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut summary = state.workspace.get(&saved.id).ok()?.summary(connection);
+                // Limits come from the motors, not the saved configuration, so they
+                // are folded in here after loading the SpiralDB row.
+                if let Some(limits) = hardware.limits.get(&saved.id) {
+                    for motor in &mut summary.motors {
+                        if let Some(limits) = limits.get(&motor.name) {
+                            motor.limits = *limits;
+                        }
                     }
                 }
-            }
-            Some(summary)
-        })
-        .collect();
+                Some(summary)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
-    let mut issues = state.workspace.issues();
+    let mut issues = if readiness.catalog_available {
+        state.workspace.issues()
+    } else {
+        Vec::new()
+    };
     issues.extend(state.cameras.issues());
     // A take that stopped itself has to be visible after the counters that were
     // describing it have gone.
     issues.extend(hardware.recording_issue);
 
     StudioSnapshot {
+        readiness,
         storage: "SpiralDB".to_owned(),
         robots,
         cameras: device_discovery::list_cameras(&state.cameras)

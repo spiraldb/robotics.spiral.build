@@ -1026,6 +1026,7 @@ mod tests {
                 environment_spiral_endpoint(),
                 environment_spiral_spfs_endpoint(),
                 Some(project),
+                None,
                 namespace,
             )
             .expect("the Spiral E2E repository must be valid"),
@@ -1126,6 +1127,7 @@ mod tests {
                 environment_spiral_endpoint(),
                 environment_spiral_spfs_endpoint(),
                 Some(project),
+                None,
                 namespace,
             )
             .expect("the Spiral episode E2E repository must be valid"),

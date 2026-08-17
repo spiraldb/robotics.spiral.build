@@ -10,12 +10,15 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = { text = "Apache-2.0" }
 dependencies = [
+    "adbc-driver-manager>=1.7,<2",
     "fastapi>=0.116,<1",
     "lerobot==0.6.0",
     "numpy>=2.0,<2.3",
+    "nvidia-ml-py>=12,<14; sys_platform == 'linux'",
     "psutil>=7,<8",
     "pyarrow>=21,<30",
     "safetensors>=0.4.3,<1",
+    "spiraldb==0.16.23",
     "torch>=2.7,<2.8",
     "torchvision>=0.22,<0.23",
     "triton==3.3.1; sys_platform == 'linux'",

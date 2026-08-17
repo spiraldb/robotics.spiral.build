@@ -330,11 +330,9 @@ impl RolloutManager {
         workspace: Arc<RobotWorkspace>,
         preferences: Arc<StudioPreferencesStore>,
     ) -> Result<Arc<Self>, String> {
-        let initial =
-            restored_rollout_snapshot(storage.load_rollout_snapshot().unwrap_or_else(|error| {
-                tracing::warn!("could not load Spiral rollout history during startup: {error}");
-                ContractRolloutSnapshot::default()
-            }));
+        // Persisted state is hydrated after the listener starts. Constructing
+        // the manager must not put Spiral I/O on the server's critical path.
+        let initial = ContractRolloutSnapshot::default();
         let (persistence, mut changes) = watch::channel(initial.clone());
         let persistence_storage = storage.clone();
         tokio::spawn(async move {

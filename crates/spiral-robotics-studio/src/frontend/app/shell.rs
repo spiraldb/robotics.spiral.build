@@ -1,6 +1,7 @@
 //! Low-frequency Studio chrome around the activity workspaces.
 
 use dioxus::prelude::*;
+use spiral_robotics_contracts::api::BackendReadinessState;
 use spiral_robotics_ui::{Action, ActionPurpose, ActionVariant, focus_after_render};
 
 use crate::frontend::app::activity::Activity;
@@ -76,6 +77,23 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
     let training = studio.training.read().clone();
     let connected = studio.controls_available();
     let backend_connected = (studio.live)();
+    let (service_label, service_style) = if !backend_connected {
+        ("Reconnecting", "background: var(--tone-danger)")
+    } else {
+        match snapshot.readiness.state {
+            BackendReadinessState::Bootstrapping => {
+                ("Starting…", "background: var(--tone-caution)")
+            }
+            BackendReadinessState::Ready if mode != Activity::Training && !connected => {
+                ("Reconnecting", "background: var(--tone-danger)")
+            }
+            BackendReadinessState::Ready => ("Connected", "background: var(--tone-good)"),
+            BackendReadinessState::Degraded if snapshot.readiness.catalog_available => {
+                ("Limited", "background: var(--tone-caution)")
+            }
+            BackendReadinessState::Degraded => ("Unavailable", "background: var(--tone-danger)"),
+        }
+    };
     let connected_arms = snapshot
         .robots
         .iter()
@@ -254,8 +272,9 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
             footer { class: "studio-status-bar",
                 div { class: "status-bar-group",
                     span { class: "status-bar-item",
-                        span { class: "status-dot", style: if backend_connected { "background: var(--tone-good)" } else { "background: var(--tone-danger)" } }
-                        if backend_connected { "Connected" } else { "Reconnecting" }
+                        title: "{snapshot.readiness.detail}",
+                        span { class: "status-dot", style: service_style }
+                        "{service_label}"
                     }
                     span { class: "status-bar-item",
                         if training.readiness.ready { "Training ready" } else { "Training unavailable" }
@@ -283,8 +302,9 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
             footer { class: "studio-status-bar",
                 div { class: "status-bar-group",
                     span { class: "status-bar-item",
-                        span { class: "status-dot", style: if connected { "background: var(--tone-good)" } else { "background: var(--tone-danger)" } }
-                        if connected { "Connected" } else { "Reconnecting" }
+                        title: "{snapshot.readiness.detail}",
+                        span { class: "status-dot", style: service_style }
+                        "{service_label}"
                     }
                     span { class: "status-bar-item", "Physical hardware" }
                     span { class: "status-bar-item", "{arms_label}" }

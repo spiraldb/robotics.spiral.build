@@ -24,17 +24,18 @@ The product does not reconcile a second local source of truth.
   not create a second durable browser store for them.
 - **PERSIST-011** Studio must not use a persistent local cache for project data
   or model artifacts.
-- **PERSIST-012** Compute sessions may stay in memory because Studio owns their
-  durable results.
+- **PERSIST-012** Live compute jobs may stay in worker memory, but their
+  checkpoints must be written directly to SpiralDB and Studio must be able to
+  reattach by stable job ID.
 - **PERSIST-013** Studio must start when no Spiral project is selected. Settings
   must let the operator configure both the Spiral control-plane API endpoint
   and the SpFS endpoint, then select and test the active project. Project
   switches must drain repository work, discard stale pooled connections, and
-  be refused while robots or project activity are active. Because the ADBC
-  driver binds both service endpoints when constructing a database, changing
-  either endpoint must save the complete next destination, clearly require a
-  Studio restart, and must not send project data to the still-active old
-  destination. The namespace remains process bootstrap configuration, and
+  be refused while robots or project activity are active. Endpoint, project,
+  client ID, and client-secret changes must create a new database with scoped
+  ADBC options and apply live after the old pool drains; they must not mutate
+  process-global environment variables or require a Studio restart. The
+  namespace remains process bootstrap configuration, and
   individual domain operations must not accept or reconstruct alternate
   destinations.
 - **PERSIST-014** Stored SpiralDB credentials must remain in the backend and
@@ -95,9 +96,9 @@ flowchart TD
 - **PERSIST-030** Project transfer may use a bounded in-memory request/response
   buffer, currently limited to 1 GiB; that buffer is not durable storage.
 - **PERSIST-031** One private backend-local JSON file may persist only the
-  bootstrap state needed before Spiral can be opened, currently the API
-  endpoint, SpFS endpoint, selected project ID, and, when implemented,
-  authentication/session metadata. It must use atomic replacement and private
+  bootstrap state needed before Spiral can be opened: the API endpoint, SpFS
+  endpoint, selected project ID, and optional client ID and client secret. It
+  must use atomic replacement and private
   permissions and must never contain robots, episodes, media, runs,
   checkpoints, project preferences, a write spool, or cached Spiral rows.
 - **PERSIST-032** Whole-project import and export must live in Settings →
@@ -122,6 +123,12 @@ flowchart TD
   long-lived, exclusive, invalidating, and synchronous-worker checkouts. No
   domain or delivery module may construct an ADBC database or bypass that
   capacity gate.
+- **PERSIST-038** After the HTTP listener binds, Studio must prewarm the active
+  project's authenticated catalog through the same shared ADBC pool used by
+  ordinary repository work. Only after that succeeds may it hydrate
+  project-owned preferences and run history, and those independent loads must
+  run concurrently on bounded blocking workers rather than delaying listener
+  startup or occupying async executor threads.
 
 The confirmed SQL example remains in the
 [SpiralDB section of `notes.md`](../../notes.md#spiraldb).

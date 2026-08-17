@@ -18,6 +18,8 @@ use arrow_array::{RecordBatch, RecordBatchReader};
 use arrow_schema::Schema;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use crate::backend::storage::settings::SpiralCredentials;
+
 const HOSTED_ADBC_CONNECTIONS: usize = 4;
 const SPIRAL_UNAVAILABLE_PREFIX: &str = "SpiralDB is unavailable at ";
 const TRANSPORT_FAILURE_MARKERS: [&str; 5] = [
@@ -32,6 +34,9 @@ const TRANSPORT_FAILURE_MARKERS: [&str; 5] = [
 struct ConnectionConfig {
     driver_path: PathBuf,
     project_id: String,
+    endpoint: String,
+    spfs_endpoint: String,
+    credentials: Option<SpiralCredentials>,
 }
 
 /// The only connection type visible to Studio code.
@@ -184,8 +189,9 @@ impl ConnectionPool {
 
 pub(crate) struct SpiralRepository {
     driver_path: PathBuf,
-    endpoint: String,
-    spfs_endpoint: String,
+    endpoint: Arc<RwLock<String>>,
+    spfs_endpoint: Arc<RwLock<String>>,
+    credentials: Arc<RwLock<Option<SpiralCredentials>>>,
     project_id: Arc<RwLock<Option<String>>>,
     namespace: String,
     hosted: Arc<Mutex<ConnectionPool>>,
@@ -199,6 +205,7 @@ impl SpiralRepository {
         endpoint: String,
         spfs_endpoint: String,
         project_id: Option<String>,
+        credentials: Option<SpiralCredentials>,
         namespace: String,
     ) -> Result<Self, String> {
         if !driver_path.is_absolute() || !driver_path.is_file() {
@@ -212,8 +219,9 @@ impl SpiralRepository {
         }
         Ok(Self {
             driver_path,
-            endpoint,
-            spfs_endpoint,
+            endpoint: Arc::new(RwLock::new(endpoint)),
+            spfs_endpoint: Arc::new(RwLock::new(spfs_endpoint)),
+            credentials: Arc::new(RwLock::new(credentials)),
             project_id: Arc::new(RwLock::new(project_id)),
             namespace,
             hosted: Arc::new(Mutex::new(ConnectionPool::default())),
@@ -226,16 +234,31 @@ impl SpiralRepository {
         read(&self.project_id).clone().unwrap_or_default()
     }
 
-    pub(crate) fn endpoint(&self) -> &str {
-        &self.endpoint
+    pub(crate) fn endpoint(&self) -> String {
+        read(&self.endpoint).clone()
     }
 
-    pub(crate) fn spfs_endpoint(&self) -> &str {
-        &self.spfs_endpoint
+    pub(crate) fn spfs_endpoint(&self) -> String {
+        read(&self.spfs_endpoint).clone()
+    }
+
+    pub(crate) fn credentials(&self) -> Option<SpiralCredentials> {
+        read(&self.credentials).clone()
     }
 
     pub(crate) fn is_configured(&self) -> bool {
         read(&self.project_id).is_some()
+    }
+
+    /// Initialize the shared driver/database and force one authenticated
+    /// project-catalog lookup without mutating project data.
+    pub(crate) async fn prewarm(&self) -> Result<(), String> {
+        let namespace = self.namespace.clone();
+        self.run(move |connection| {
+            let _ = connection.table_schema(&namespace)?;
+            Ok(())
+        })
+        .await
     }
 
     /// Change the bootstrap pointer without introducing another data store.
@@ -247,6 +270,34 @@ impl SpiralRepository {
         *write(&self.project_id) = Some(project_id);
         lock(&self.hosted).reset();
         Ok(())
+    }
+
+    /// Atomically switch the complete per-database destination. Active work is
+    /// drained before the old pool is discarded; the next checkout opens a
+    /// database with the new scoped endpoint and credential options.
+    pub(crate) fn configure_connection(
+        &self,
+        endpoint: String,
+        spfs_endpoint: String,
+        project_id: &str,
+        credentials: Option<SpiralCredentials>,
+    ) -> Result<(), String> {
+        let project_id = validate_project_id(project_id)?;
+        let _operation = write(&self.operation_gate);
+        *write(&self.endpoint) = endpoint;
+        *write(&self.spfs_endpoint) = spfs_endpoint;
+        *write(&self.project_id) = Some(project_id);
+        *write(&self.credentials) = credentials;
+        lock(&self.hosted).reset();
+        Ok(())
+    }
+
+    /// Drop idle read snapshots after another process commits to this project.
+    /// Active calls finish normally; their connections are discarded when the
+    /// worker-owned checkpoint event reaches Studio.
+    pub(crate) fn invalidate_idle_connections(&self) {
+        let _operation = write(&self.operation_gate);
+        lock(&self.hosted).available.clear();
     }
 
     pub(crate) fn namespace(&self) -> &str {
@@ -269,19 +320,28 @@ impl SpiralRepository {
         let driver_path = self.driver_path.clone();
         let project_id = self.project_id.clone();
         let endpoint = self.endpoint.clone();
+        let spfs_endpoint = self.spfs_endpoint.clone();
+        let credentials = self.credentials.clone();
         tokio::task::spawn_blocking(move || {
             let _operation = read(&operation_gate);
-            let connection = connection_config(driver_path, &project_id)?;
+            let connection = connection_config(
+                driver_path,
+                &project_id,
+                &endpoint,
+                &spfs_endpoint,
+                &credentials,
+            )?;
+            let display_endpoint = connection.endpoint.clone();
             let connection = lock(&hosted)
                 .checkout(&connection)
-                .map_err(|error| present_error(&endpoint, error))?;
+                .map_err(|error| present_error(&display_endpoint, error))?;
             let mut connection = RepositoryConnection { inner: connection };
             let result = operation(&mut connection);
             if result.is_ok() {
                 lock(&hosted).checkin(connection.into_inner());
             }
             drop(permit);
-            result.map_err(|error| present_error(&endpoint, error))
+            result.map_err(|error| present_error(&display_endpoint, error))
         })
         .await
         .map_err(|error| format!("Spiral ADBC task failed: {error}"))?
@@ -298,6 +358,8 @@ impl SpiralRepository {
         let project_id = self.project_id.clone();
         let operation_gate = self.operation_gate.clone();
         let endpoint = self.endpoint.clone();
+        let spfs_endpoint = self.spfs_endpoint.clone();
+        let credentials = self.credentials.clone();
         let permit = self
             .hosted_slots
             .clone()
@@ -306,17 +368,24 @@ impl SpiralRepository {
             .map_err(|_| "Spiral ADBC connection pool is shutting down".to_owned())?;
         tokio::task::spawn_blocking(move || {
             let _operation = read(&operation_gate);
-            let connection = connection_config(driver_path, &project_id)?;
+            let connection = connection_config(
+                driver_path,
+                &project_id,
+                &endpoint,
+                &spfs_endpoint,
+                &credentials,
+            )?;
+            let display_endpoint = connection.endpoint.clone();
             let connection = lock(&hosted)
                 .checkout(&connection)
-                .map_err(|error| present_error(&endpoint, error))?;
+                .map_err(|error| present_error(&display_endpoint, error))?;
             let mut connection = RepositoryConnection { inner: connection };
             let result = operation(&mut connection);
             if result.is_ok() {
                 lock(&hosted).checkin(connection.into_inner());
             }
             drop(permit);
-            result.map_err(|error| present_error(&endpoint, error))
+            result.map_err(|error| present_error(&display_endpoint, error))
         })
         .await
         .map_err(|error| format!("Spiral dedicated ADBC task failed: {error}"))?
@@ -330,16 +399,23 @@ impl SpiralRepository {
     ) -> Result<T, String> {
         let _permit = acquire_blocking(self.hosted_slots.clone())?;
         let _operation = read(&self.operation_gate);
-        let connection = connection_config(self.driver_path.clone(), &self.project_id)?;
+        let connection = connection_config(
+            self.driver_path.clone(),
+            &self.project_id,
+            &self.endpoint,
+            &self.spfs_endpoint,
+            &self.credentials,
+        )?;
+        let endpoint = connection.endpoint.clone();
         let connection = lock(&self.hosted)
             .checkout(&connection)
-            .map_err(|error| present_error(&self.endpoint, error))?;
+            .map_err(|error| present_error(&endpoint, error))?;
         let mut connection = RepositoryConnection { inner: connection };
         let result = operation(&mut connection);
         if result.is_ok() {
             lock(&self.hosted).checkin(connection.into_inner());
         }
-        result.map_err(|error| present_error(&self.endpoint, error))
+        result.map_err(|error| present_error(&endpoint, error))
     }
 
     /// Run a durable mutation after draining repository readers, with no
@@ -357,14 +433,21 @@ impl SpiralRepository {
     ) -> Result<T, String> {
         let _permit = acquire_blocking(self.hosted_slots.clone())?;
         let _operation = write(&self.operation_gate);
-        let connection = connection_config(self.driver_path.clone(), &self.project_id)?;
+        let connection = connection_config(
+            self.driver_path.clone(),
+            &self.project_id,
+            &self.endpoint,
+            &self.spfs_endpoint,
+            &self.credentials,
+        )?;
+        let endpoint = connection.endpoint.clone();
         lock(&self.hosted).available.clear();
         let connection = lock(&self.hosted)
             .checkout(&connection)
-            .map_err(|error| present_error(&self.endpoint, error))?;
+            .map_err(|error| present_error(&endpoint, error))?;
         let mut connection = RepositoryConnection { inner: connection };
         let result = operation(&mut connection);
-        result.map_err(|error| present_error(&self.endpoint, error))
+        result.map_err(|error| present_error(&endpoint, error))
     }
 
     /// Run a namespace replacement without allowing another repository call to
@@ -375,16 +458,23 @@ impl SpiralRepository {
     ) -> Result<T, String> {
         let _permit = acquire_blocking(self.hosted_slots.clone())?;
         let _operation = write(&self.operation_gate);
-        let connection = connection_config(self.driver_path.clone(), &self.project_id)?;
+        let connection = connection_config(
+            self.driver_path.clone(),
+            &self.project_id,
+            &self.endpoint,
+            &self.spfs_endpoint,
+            &self.credentials,
+        )?;
+        let endpoint = connection.endpoint.clone();
         let connection = lock(&self.hosted)
             .checkout(&connection)
-            .map_err(|error| present_error(&self.endpoint, error))?;
+            .map_err(|error| present_error(&endpoint, error))?;
         let mut connection = RepositoryConnection { inner: connection };
         let result = operation(&mut connection);
         if result.is_ok() {
             lock(&self.hosted).checkin(connection.into_inner());
         }
-        result.map_err(|error| present_error(&self.endpoint, error))
+        result.map_err(|error| present_error(&endpoint, error))
     }
 }
 
@@ -426,6 +516,9 @@ fn validate_project_id(project_id: &str) -> Result<String, String> {
 fn connection_config(
     driver_path: PathBuf,
     project_id: &RwLock<Option<String>>,
+    endpoint: &RwLock<String>,
+    spfs_endpoint: &RwLock<String>,
+    credentials: &RwLock<Option<SpiralCredentials>>,
 ) -> Result<ConnectionConfig, String> {
     let project_id = read(project_id).clone().ok_or_else(|| {
         "Spiral project is not configured. Choose a project in Settings → SpiralDB.".to_owned()
@@ -433,6 +526,9 @@ fn connection_config(
     Ok(ConnectionConfig {
         driver_path,
         project_id,
+        endpoint: read(endpoint).clone(),
+        spfs_endpoint: read(spfs_endpoint).clone(),
+        credentials: read(credentials).clone(),
     })
 }
 
@@ -449,8 +545,29 @@ fn open_database(config: &ConnectionConfig) -> Result<(ManagedDriver, ManagedDat
         )
     })?;
     let database_uri = format!("spiraldb://?project={}", config.project_id);
+    let mut options = vec![
+        (OptionDatabase::Uri, database_uri.clone().into()),
+        (
+            OptionDatabase::Other("spiral.api_url".to_owned()),
+            config.endpoint.clone().into(),
+        ),
+        (
+            OptionDatabase::Other("spiral.spfs_url".to_owned()),
+            config.spfs_endpoint.clone().into(),
+        ),
+    ];
+    if let Some(credentials) = &config.credentials {
+        options.push((
+            OptionDatabase::Username,
+            credentials.client_id.clone().into(),
+        ));
+        options.push((
+            OptionDatabase::Password,
+            credentials.client_secret.clone().into(),
+        ));
+    }
     let database = driver
-        .new_database_with_opts([(OptionDatabase::Uri, database_uri.clone().into())])
+        .new_database_with_opts(options)
         .map_err(|error| format!("opening Spiral ADBC database {database_uri}: {error}"))?;
     Ok((driver, database))
 }
@@ -488,6 +605,7 @@ mod tests {
             "https://api.spiraldb.dev".to_owned(),
             "https://spfs.spiraldb.dev".to_owned(),
             None,
+            None,
             "spiral_robotics".to_owned(),
         )
         .unwrap();
@@ -511,6 +629,7 @@ mod tests {
             driver.path().to_owned(),
             "https://api.spiraldb.dev".to_owned(),
             "https://spfs.spiraldb.dev".to_owned(),
+            None,
             None,
             "spiral_robotics".to_owned(),
         )

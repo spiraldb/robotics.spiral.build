@@ -50,9 +50,9 @@ the durable results of recording and training.
 
 ## Catalog refresh
 
-- **DATA-013** The browser must load the episode catalog once at startup and
-  update its local catalog from successful recording, deletion, and import
-  responses.
+- **DATA-013** The browser must load the episode catalog once per session, after
+  backend readiness first reports that the catalog is available, and update
+  its local catalog from successful recording, deletion, and import responses.
 - **DATA-014** The episode catalog must not travel in the live event stream or
   use interval polling. The Episodes panel must provide an explicit Refresh
   action that reloads episodes and catalog issues in one request.

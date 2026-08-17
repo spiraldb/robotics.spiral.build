@@ -211,12 +211,12 @@ fn TrainingRunControl(
     let mut runtime_devices = vec![("auto".to_owned(), "Auto".to_owned())];
     if let Some(runtime) = &readiness.runtime {
         for label in &runtime.devices {
-            let value = label.to_ascii_lowercase();
+            let (value, label) = runtime_device_option(label);
             if !runtime_devices
                 .iter()
                 .any(|(existing, _)| existing == &value)
             {
-                runtime_devices.push((value, label.clone()));
+                runtime_devices.push((value, label));
             }
         }
     }
@@ -888,6 +888,11 @@ fn TrainingPerformance(run: TrainingRun) -> Element {
         .and_then(|point| point.memory_bytes)
         .map(format_bytes)
         .unwrap_or_else(|| "—".to_owned());
+    let loader_ms = format_milliseconds(last.and_then(|point| point.loader_ms));
+    let arrow_encode_ms = format_milliseconds(last.and_then(|point| point.arrow_encode_ms));
+    let upload_ms = format_milliseconds(last.and_then(|point| point.upload_ms));
+    let device_copy_ms = format_milliseconds(last.and_then(|point| point.device_copy_ms));
+    let model_ms = format_milliseconds(last.and_then(|point| point.model_ms));
     let throughput_chart =
         training_resource_chart(metrics, observed_steps, ResourceSeries::Throughput);
     let transfer_chart = training_resource_chart(metrics, observed_steps, ResourceSeries::Transfer);
@@ -897,12 +902,34 @@ fn TrainingPerformance(run: TrainingRun) -> Element {
 
     rsx! {
         section { class: "training-resources",
+            dl { class: "training-phase-timings", "aria-label": "Latest optimizer step timing",
+                div { title: "Spiral query, frame decode, normalization, and batch assembly. Prefetch overlaps this work with the preceding optimizer step.",
+                    dt { "Load" }
+                    dd { "{loader_ms}" }
+                }
+                div { title: "Studio time to materialize the batch as an Arrow IPC stream.",
+                    dt { "Arrow encode" }
+                    dd { "{arrow_encode_ms}" }
+                }
+                div { title: "HTTP request and response time outside the remote runtime handler, dominated by request-body upload for remote runtimes.",
+                    dt { "Upload" }
+                    dd { "{upload_ms}" }
+                }
+                div { title: "Runtime tensor conversion and host-to-device transfer.",
+                    dt { "Device copy" }
+                    dd { "{device_copy_ms}" }
+                }
+                div { title: "Runtime forward pass, backward pass, gradient clipping, and optimizer step.",
+                    dt { "Model" }
+                    dd { "{model_ms}" }
+                }
+            }
             div { class: "training-resource-grid",
                 ResourceLane { id: chart_dom_id("training-rate", &run.id), label: "Training rate", value: throughput, chart: throughput_chart, group: chart_group.clone(), class: "resource-throughput", description: "Samples completed per second." }
                 ResourceLane { id: chart_dom_id("input-rate", &run.id), label: "Input rate", value: transfer, chart: transfer_chart, group: chart_group.clone(), class: "resource-transfer", description: "Prepared camera data per second." }
-                ResourceLane { id: chart_dom_id("cpu-utilization", &run.id), label: "CPU", value: cpu, chart: cpu_chart, group: chart_group.clone(), class: "resource-cpu", description: "Studio process CPU utilization. 100% is one fully occupied core." }
-                ResourceLane { id: chart_dom_id("gpu-utilization", &run.id), label: "GPU", value: gpu, chart: gpu_chart, group: chart_group.clone(), class: "resource-gpu", description: "Whole-device Apple GPU utilization reported by macOS; other processes may contribute." }
-                ResourceLane { id: chart_dom_id("memory-usage", &run.id), label: "Memory", value: memory, chart: memory_chart, group: chart_group, class: "resource-memory", description: "Current resident memory used by the Studio process, including training allocations." }
+                ResourceLane { id: chart_dom_id("cpu-utilization", &run.id), label: "CPU", value: cpu, chart: cpu_chart, group: chart_group.clone(), class: "resource-cpu", description: "Runtime process CPU utilization. 100% is one fully occupied core." }
+                ResourceLane { id: chart_dom_id("gpu-utilization", &run.id), label: "GPU", value: gpu, chart: gpu_chart, group: chart_group.clone(), class: "resource-gpu", description: "Whole-device utilization reported by the selected runtime; other processes may contribute." }
+                ResourceLane { id: chart_dom_id("memory-usage", &run.id), label: "Memory", value: memory, chart: memory_chart, group: chart_group, class: "resource-memory", description: "Current resident memory used by the runtime process, including training allocations." }
             }
         }
     }
@@ -984,7 +1011,6 @@ fn training_loss_chart(run: &TrainingRun) -> Chart {
                 .split_number(4),
         )
         .y_axis(chart_axis(AxisType::Value, true).split_number(5))
-        .data_zoom(training_inside_zoom())
         .data_zoom(training_slider_zoom(48.0, 12.0))
         .series(metric_line("train-loss", "Train", COLOR_TRAIN, train, 2.0))
         .series(metric_line(
@@ -994,15 +1020,6 @@ fn training_loss_chart(run: &TrainingRun) -> Chart {
             validation,
             1.8,
         ))
-}
-
-fn training_inside_zoom() -> DataZoom {
-    DataZoom::new()
-        .type_(DataZoomType::Inside)
-        .x_axis_index(0)
-        .filter_mode(FilterMode::Filter)
-        .realtime(true)
-        .throttle(50)
 }
 
 fn training_slider_zoom(left: f64, right: f64) -> DataZoom {
@@ -1066,7 +1083,6 @@ fn training_resource_chart(
             ResourceSeries::Gpu => chart_axis(AxisType::Value, false).min(0).max(100),
             _ => chart_axis(AxisType::Value, false).min(0).scale(true),
         })
-        .data_zoom(training_inside_zoom())
         .data_zoom(training_slider_zoom(8.0, 8.0))
         .series(
             metric_line(id, name, color, data, 1.5)
@@ -1183,11 +1199,62 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+fn format_milliseconds(value: Option<f64>) -> String {
+    value
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| {
+            if value >= 1_000.0 {
+                format!("{:.2} s", value / 1_000.0)
+            } else if value >= 10.0 {
+                format!("{value:.0} ms")
+            } else {
+                format!("{value:.1} ms")
+            }
+        })
+        .unwrap_or_else(|| "—".to_owned())
+}
+
+/// Runtime health responses keep device discovery intentionally lightweight:
+/// the first whitespace-delimited token is the identifier accepted by session
+/// creation and the complete string is its operator-facing label.
+fn runtime_device_option(advertised: &str) -> (String, String) {
+    let label = advertised.trim();
+    let value = label
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    (value, label.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use spiral_robotics_contracts::spiral::Table;
 
     use super::*;
+
+    #[test]
+    fn phase_timings_keep_submillisecond_detail_and_scan_long_uploads_as_seconds() {
+        assert_eq!(format_milliseconds(Some(0.26)), "0.3 ms");
+        assert_eq!(format_milliseconds(Some(149.4)), "149 ms");
+        assert_eq!(format_milliseconds(Some(2_963.0)), "2.96 s");
+        assert_eq!(format_milliseconds(None), "—");
+    }
+
+    #[test]
+    fn runtime_device_options_submit_identifiers_instead_of_hardware_labels() {
+        assert_eq!(
+            runtime_device_option("CUDA:0 NVIDIA A100-SXM4-40GB"),
+            (
+                "cuda:0".to_owned(),
+                "CUDA:0 NVIDIA A100-SXM4-40GB".to_owned()
+            )
+        );
+        assert_eq!(
+            runtime_device_option("CPU"),
+            ("cpu".to_owned(), "CPU".to_owned())
+        );
+    }
 
     #[test]
     fn default_query_selects_complete_kept_follower_samples() {
@@ -1231,7 +1298,7 @@ mod tests {
     }
 
     #[test]
-    fn throughput_uses_the_optimizer_step_axis_and_shared_zoom() {
+    fn throughput_uses_the_optimizer_step_axis_and_slider_zoom() {
         let metrics = vec![TrainingMetricPoint {
             step: 50,
             examples_per_second: 25.0,
@@ -1241,16 +1308,15 @@ mod tests {
         let option = serde_json::to_value(chart).expect("chart should serialize");
         assert_eq!(option["xAxis"]["max"], 100.0);
         assert_eq!(option["series"][0]["data"][0][0], 50.0);
-        assert_eq!(option["dataZoom"].as_array().map(Vec::len), Some(2));
-        assert_eq!(option["dataZoom"][0]["type"], "inside");
-        assert_eq!(option["dataZoom"][1]["type"], "slider");
-        assert_eq!(option["dataZoom"][1]["show"], true);
+        assert_eq!(option["dataZoom"].as_array().map(Vec::len), Some(1));
+        assert_eq!(option["dataZoom"][0]["type"], "slider");
+        assert_eq!(option["dataZoom"][0]["show"], true);
         assert_eq!(option["dataZoom"][0]["xAxisIndex"], 0);
         assert_eq!(step_percent(50, 100), 50.0);
     }
 
     #[test]
-    fn loss_chart_uses_a_linear_axis_and_step_zoom_with_stable_series() {
+    fn loss_chart_uses_a_linear_axis_and_slider_zoom_with_stable_series() {
         let run = TrainingRun {
             metrics: vec![TrainingMetricPoint {
                 step: 1,
@@ -1264,9 +1330,8 @@ mod tests {
             serde_json::to_value(training_loss_chart(&run)).expect("chart should serialize");
 
         assert_eq!(option["yAxis"]["type"], "value");
-        assert_eq!(option["dataZoom"].as_array().map(Vec::len), Some(2));
-        assert_eq!(option["dataZoom"][0]["type"], "inside");
-        assert_eq!(option["dataZoom"][1]["type"], "slider");
+        assert_eq!(option["dataZoom"].as_array().map(Vec::len), Some(1));
+        assert_eq!(option["dataZoom"][0]["type"], "slider");
         assert_eq!(option["dataZoom"][0]["xAxisIndex"], 0);
         assert_eq!(option["series"].as_array().map(Vec::len), Some(2));
         assert_eq!(option["series"][0]["id"], "train-loss");

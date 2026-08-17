@@ -889,6 +889,10 @@ mod tests {
             preset_sql("training", "pick-place", QueryPreset::JointSamples),
             "SELECT j.* FROM training.joint_samples AS j JOIN training.episodes AS e ON e.episode_id = j.episode_id WHERE e.dataset_id = 'pick-place' ORDER BY j.episode_id DESC, j.stream_id, j.sample_index LIMIT 100"
         );
+        assert_eq!(
+            preset_sql("training", "pick-'place", QueryPreset::Episodes),
+            "SELECT * FROM training.episodes WHERE dataset_id = 'pick-''place' ORDER BY started_ms DESC LIMIT 100"
+        );
     }
 
     #[test]

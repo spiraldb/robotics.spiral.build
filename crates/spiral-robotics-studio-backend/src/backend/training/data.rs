@@ -1,9 +1,10 @@
 //! Spiral ADBC to backend-neutral ACT batch preparation.
 //!
-//! Video frame selection, decode, optional resize, CHW conversion, and
-//! ImageNet normalization remain SPQL operations. This module also derives
-//! the dataset state/action normalization contract before packing finite host
-//! buffers for the injected training backend.
+//! Video frame selection, decode, and optional resize remain SPQL operations.
+//! Images cross the runtime boundary as interleaved HWC RGB bytes; the selected
+//! runtime owns device-side CHW conversion and ImageNet normalization. This
+//! module also derives the dataset state/action normalization contract before
+//! packing finite host buffers for the injected training backend.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
@@ -649,7 +650,7 @@ impl<'a> SpiralActLoader<'a> {
         Ok((state_values, action_values, padding))
     }
 
-    fn fetch_images(&mut self, anchors: &[Anchor]) -> Result<(Vec<f32>, u64), String> {
+    fn fetch_images(&mut self, anchors: &[Anchor]) -> Result<(Vec<u8>, u64), String> {
         let coordinates = self.image_coordinates(anchors)?;
         let groups = frame_groups(&coordinates);
         let image_values = 3_usize
@@ -666,7 +667,7 @@ impl<'a> SpiralActLoader<'a> {
         images
             .try_reserve_exact(image_elements)
             .map_err(|error| format!("could not reserve ACT image batch: {error}"))?;
-        images.resize(image_elements, 0.0);
+        images.resize(image_elements, 0);
         let mut seen = BTreeSet::new();
         for (group_index, group) in groups.iter().enumerate() {
             let indices = group
@@ -743,12 +744,12 @@ impl<'a> SpiralActLoader<'a> {
                         );
                     }
                     let (values, shape) = tensor_value(required(batch, "image")?, row)?;
-                    if shape != [3, self.image_height, self.image_width]
+                    if shape != [self.image_height, self.image_width, 3]
                         || values.len() != image_values
                     {
                         return Err(format!(
-                            "Spiral returned image shape {shape:?}, expected [3, {}, {}]",
-                            self.image_height, self.image_width
+                            "Spiral returned image shape {shape:?}, expected [{}, {}, 3]",
+                            self.image_height, self.image_width,
                         ));
                     }
                     let destination =
@@ -760,18 +761,14 @@ impl<'a> SpiralActLoader<'a> {
         if seen.len() != coordinates.len() {
             return Err("Spiral did not decode every requested image tensor".to_owned());
         }
-        let bytes = images
-            .len()
-            .checked_mul(std::mem::size_of::<f32>())
-            .and_then(|bytes| bytes.try_into().ok())
-            .unwrap_or(u64::MAX);
+        let bytes = images.len().try_into().unwrap_or(u64::MAX);
         Ok((images, bytes))
     }
 
     fn decode_raw_video_group(
         &mut self,
         group: &FrameGroup,
-    ) -> Result<BTreeMap<u64, Vec<f32>>, String> {
+    ) -> Result<BTreeMap<u64, Vec<u8>>, String> {
         let payload = self.raw_video_payload(group)?;
         decode_video_frames(
             &self.ffmpeg,
@@ -857,12 +854,14 @@ fn validate_image_batch_size(
         .and_then(|values| values.checked_mul(image_width))
         .and_then(|values| values.checked_mul(image_height))
         .ok_or_else(|| "ACT image batch element count overflowed".to_owned())?;
-    let image_bytes = image_elements
+    // The transport allocation is one byte per element. Keep the existing
+    // safety cap on the f32 tensor that the runtime creates for the model.
+    let runtime_image_bytes = image_elements
         .checked_mul(std::mem::size_of::<f32>())
         .ok_or_else(|| "ACT image batch byte size overflowed".to_owned())?;
-    if image_bytes > MAX_TRAINING_IMAGE_BATCH_BYTES {
+    if runtime_image_bytes > MAX_TRAINING_IMAGE_BATCH_BYTES {
         return Err(format!(
-            "ACT image batch requires {image_bytes} bytes, exceeding the {MAX_TRAINING_IMAGE_BATCH_BYTES}-byte safety limit"
+            "ACT expanded f32 image batch requires {runtime_image_bytes} bytes, exceeding the {MAX_TRAINING_IMAGE_BATCH_BYTES}-byte safety limit"
         ));
     }
     Ok(image_elements)
@@ -1101,7 +1100,7 @@ fn numeric_vector(array: &ArrayRef, row: usize) -> Result<Vec<f32>, String> {
     Ok(result)
 }
 
-pub(crate) fn tensor_value(array: &ArrayRef, row: usize) -> Result<(Vec<f32>, Vec<usize>), String> {
+pub(crate) fn tensor_value(array: &ArrayRef, row: usize) -> Result<(Vec<u8>, Vec<usize>), String> {
     let values = array
         .as_any()
         .downcast_ref::<StructArray>()
@@ -1112,7 +1111,19 @@ pub(crate) fn tensor_value(array: &ArrayRef, row: usize) -> Result<(Vec<f32>, Ve
     let shape = values
         .column_by_name("shape")
         .ok_or_else(|| "Arrow tensor struct has no shape field".to_owned())?;
-    let data = numeric_vector(data, row)?;
+    let data = list_value(data, row)?;
+    let data = data
+        .as_any()
+        .downcast_ref::<UInt8Array>()
+        .filter(|values| values.null_count() == 0)
+        .ok_or_else(|| {
+            format!(
+                "expected non-null UInt8 tensor data, found {}",
+                data.data_type()
+            )
+        })?
+        .values()
+        .to_vec();
     let shape = list_value(shape, row)?;
     let shape = (0..shape.len())
         .map(|index| {
@@ -1150,10 +1161,10 @@ fn training_image_expression(video_decoder: &str, frame_expression: &str, resize
     );
     if resize {
         format!(
-            "spql.image.to_tensor(spql.image.resize({decoded}, $1, $2, 'bilinear'), 'chw', 'imagenet')"
+            "spql.image.to_tensor(spql.image.resize({decoded}, $1, $2, 'bilinear'), 'hwc', 'none')"
         )
     } else {
-        format!("spql.image.to_tensor({decoded}, 'chw', 'imagenet')")
+        format!("spql.image.to_tensor({decoded}, 'hwc', 'none')")
     }
 }
 
@@ -1184,7 +1195,7 @@ fn decode_video_frames(
     width: usize,
     height: usize,
     resize: bool,
-) -> Result<BTreeMap<u64, Vec<f32>>, String> {
+) -> Result<BTreeMap<u64, Vec<u8>>, String> {
     let unique = frame_indices.iter().copied().collect::<BTreeSet<_>>();
     if unique.is_empty() {
         return Ok(BTreeMap::new());
@@ -1256,31 +1267,17 @@ fn decode_video_frames(
         let start = position * frame_bytes;
         decoded.insert(
             frame_index,
-            imagenet_chw(&output.stdout[start..start + frame_bytes], width, height),
+            output.stdout[start..start + frame_bytes].to_vec(),
         );
     }
     Ok(decoded)
 }
 
-fn imagenet_chw(rgb: &[u8], width: usize, height: usize) -> Vec<f32> {
-    const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
-    const INVERSE_STD: [f32; 3] = [1.0 / 0.229, 1.0 / 0.224, 1.0 / 0.225];
-    let pixels = width * height;
-    let mut values = vec![0.0; pixels * 3];
-    for pixel in 0..pixels {
-        for channel in 0..3 {
-            let sample = f32::from(rgb[pixel * 3 + channel]) / 255.0;
-            values[channel * pixels + pixel] = (sample - MEAN[channel]) * INVERSE_STD[channel];
-        }
-    }
-    values
-}
-
 fn copy_decoded_video_frames(
     group_index: usize,
     group: &FrameGroup,
-    decoded: &BTreeMap<u64, Vec<f32>>,
-    images: &mut [f32],
+    decoded: &BTreeMap<u64, Vec<u8>>,
+    images: &mut [u8],
     seen: &mut BTreeSet<(usize, usize)>,
     camera_count: usize,
     image_values: usize,
@@ -1298,7 +1295,7 @@ fn copy_decoded_video_frames(
             .get(frame_index)
             .ok_or_else(|| format!("FFmpeg did not decode requested frame {frame_index}"))?;
         if values.len() != image_values {
-            return Err("FFmpeg returned an invalid normalized image shape".to_owned());
+            return Err("FFmpeg returned an invalid HWC RGB image shape".to_owned());
         }
         let destination = (destination.0 * camera_count + destination.1) * image_values;
         images[destination..destination + image_values].copy_from_slice(values);
@@ -1399,20 +1396,23 @@ mod tests {
     }
 
     #[test]
-    fn raw_video_normalization_matches_spiral_imagenet_chw() {
-        let values = imagenet_chw(&[255, 128, 0, 0, 64, 255], 2, 1);
-        assert_eq!(values.len(), 6);
-        let expected = [
-            (1.0 - 0.485) / 0.229,
-            (0.0 - 0.485) / 0.229,
-            (128.0 / 255.0 - 0.456) / 0.224,
-            (64.0 / 255.0 - 0.456) / 0.224,
-            (0.0 - 0.406) / 0.225,
-            (1.0 - 0.406) / 0.225,
-        ];
-        for (actual, expected) in values.iter().zip(expected) {
-            assert!((actual - expected).abs() < 1e-6);
-        }
+    fn raw_video_frames_remain_interleaved_hwc_bytes() {
+        let rgb = [255, 128, 0, 0, 64, 255];
+        let mut decoded = BTreeMap::new();
+        decoded.insert(7, rgb.to_vec());
+        let group = FrameGroup {
+            episode_id: "episode-1".to_owned(),
+            camera_stream_id: "top".to_owned(),
+            segment_index: 0,
+            media_relation: "robotics.video_assets".to_owned(),
+            frame_indices: vec![7],
+            destinations: vec![(0, 0)],
+        };
+        let mut images = vec![0; rgb.len()];
+        let mut seen = BTreeSet::new();
+        copy_decoded_video_frames(0, &group, &decoded, &mut images, &mut seen, 1, rgb.len())
+            .unwrap();
+        assert_eq!(images, rgb);
     }
 
     #[test]
@@ -1420,7 +1420,7 @@ mod tests {
         let expression = training_image_expression("auto", "f.frame", false);
         assert_eq!(
             expression,
-            "spql.image.to_tensor(spql.video.decode(f.frame, 'auto'), 'chw', 'imagenet')"
+            "spql.image.to_tensor(spql.video.decode(f.frame, 'auto'), 'hwc', 'none')"
         );
     }
 

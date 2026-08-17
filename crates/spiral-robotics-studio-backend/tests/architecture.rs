@@ -205,6 +205,47 @@ fn episode_catalog_is_loaded_explicitly_from_spiral() {
 }
 
 #[test]
+fn listener_binding_precedes_concurrent_external_bootstrap() {
+    let backend = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let server = fs::read_to_string(backend.join("src/backend/http/server.rs"))
+        .expect("backend server source");
+    let bind = server
+        .find("TcpListener::bind(bind).await")
+        .expect("server must bind its listener");
+    let bootstrap = server
+        .find("tokio::spawn(bootstrap_services")
+        .expect("server must start background bootstrap");
+    assert!(
+        bind < bootstrap,
+        "external bootstrap must follow listener bind"
+    );
+    let critical_path = &server[..bind];
+    for blocking_startup in [
+        "load_studio_preferences()",
+        "TrainingManager::open(",
+        "refresh_blocking()).await",
+        "auto_connect_saved_robots",
+    ] {
+        assert!(
+            !critical_path.contains(blocking_startup),
+            "listener startup performs external work {blocking_startup:?}"
+        );
+    }
+    assert!(
+        server.contains("tokio::join!(catalog, camera)")
+            && server.contains("tokio::join!(preferences, training, rollout)"),
+        "independent startup I/O must progress concurrently"
+    );
+
+    let training = fs::read_to_string(backend.join("src/backend/training/manager.rs"))
+        .expect("training manager source");
+    assert!(
+        training.contains("tokio::join!(backend_probe, spiral_probe)"),
+        "training readiness probes must run concurrently"
+    );
+}
+
+#[test]
 fn studio_has_one_spiral_persistence_boundary() {
     let backend = Path::new(env!("CARGO_MANIFEST_DIR"));
     for retired in [
@@ -541,12 +582,30 @@ fn studio_training_owns_only_the_remote_backend_trait_boundary() {
         root.join("crates/spiral-robotics-studio-backend/src/backend/training/manager.rs"),
     )
     .expect("training manager source");
+    let job_loop = manager
+        .split_once("async fn run_backend")
+        .and_then(|(_, source)| source.split_once("async fn save_checkpoint_bytes"))
+        .map(|(source, _)| source)
+        .expect("training manager must have one explicit worker-job loop");
     assert!(
         manager.contains("training_backend: Arc<dyn TrainingBackend>")
-            && manager.contains(".create_session")
-            && manager.contains("trainer: &mut dyn TrainingSession"),
-        "Studio must own only the backend-neutral training trait objects"
+            && job_loop.contains("create_job(job_request)")
+            && job_loop.contains("backend.job(&next_run_id)")
+            && job_loop.contains("backend.stop_job(&next_run_id)"),
+        "Studio must orchestrate a backend-neutral worker job"
     );
+    for forbidden_data_plane in [
+        "run_training_adbc",
+        "SpiralActLoader",
+        "create_session",
+        "buffer_training_batch",
+        "TrainingBatch",
+    ] {
+        assert!(
+            !job_loop.contains(forbidden_data_plane),
+            "the active Studio job loop must not retain training data-plane detail {forbidden_data_plane:?}"
+        );
+    }
     for detail in [
         "NativeActTrainer",
         "VisionActTrainingConfig",
@@ -566,6 +625,22 @@ fn studio_training_owns_only_the_remote_backend_trait_boundary() {
         adapter.contains("ACTPolicy") && adapter.contains("torch.optim.AdamW"),
         "the remote implementation must use the real PyTorch ACT policy and optimizer"
     );
+    let spiral = fs::read_to_string(root.join("training/src/spiral_training_runtime/spiral.py"))
+        .expect("Python Spiral training adapter source");
+    for required in [
+        "spiral.api_url",
+        "spiral.spfs_url",
+        "username",
+        "password",
+        "spql.video.frames",
+        "spql.video.decode",
+        "training_checkpoints",
+    ] {
+        assert!(
+            spiral.contains(required),
+            "the worker must own Spiral training operation {required:?}"
+        );
+    }
     for removed_native_crate in [
         "crates/spiral-robotics-inference-pytorch",
         "crates/spiral-robotics-training-pytorch",

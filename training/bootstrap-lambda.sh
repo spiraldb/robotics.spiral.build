@@ -3,8 +3,9 @@ set -euo pipefail
 
 runtime_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 uv_tool_dir="${runtime_dir}/.uv-tool"
-bind_host="${SPIRAL_RUNTIME_HOST:-0.0.0.0}"
+bind_host="${SPIRAL_RUNTIME_HOST:-127.0.0.1}"
 bind_port="${SPIRAL_RUNTIME_PORT:-50051}"
+ssh_user="${SPIRAL_RUNTIME_SSH_USER:-ubuntu}"
 
 if [[ "$(uname -s)" != "Linux" ]]; then
     echo "bootstrap-lambda.sh requires a Linux Lambda Stack host" >&2
@@ -63,7 +64,12 @@ if [[ -z "${public_host}" ]]; then
     public_host="${bind_host}"
 fi
 
-printf '\nStudio runtime endpoint: http://%s:%s\n\n' "${public_host}" "${bind_port}"
+printf '\nRuntime listening privately at http://%s:%s\n' "${bind_host}" "${bind_port}"
+printf 'On the Studio machine, start this SSH tunnel:\n'
+printf '  ssh -N -L %s:127.0.0.1:%s %s@%s\n' \
+    "${bind_port}" "${bind_port}" "${ssh_user}" "${public_host}"
+printf 'Then use this Studio runtime endpoint:\n'
+printf '  http://127.0.0.1:%s\n\n' "${bind_port}"
 
 exec "${runtime_dir}/.venv/bin/spiral-training-runtime" \
     --host "${bind_host}" \

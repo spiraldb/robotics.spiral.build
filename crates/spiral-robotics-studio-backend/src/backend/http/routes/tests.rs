@@ -11,6 +11,34 @@ use super::training_rollout::{
 use super::*;
 
 #[test]
+fn bootstrap_lifecycle_controls_catalog_admission() {
+    let state = BootstrapState::new();
+    assert_eq!(state.current().state, BackendReadinessState::Bootstrapping);
+    assert!(state.catalog_unavailable().is_some());
+
+    state.ready();
+    assert_eq!(state.current().state, BackendReadinessState::Ready);
+    assert!(state.catalog_unavailable().is_none());
+
+    state.degraded(false, "authentication expired");
+    assert_eq!(state.current().state, BackendReadinessState::Degraded);
+    assert_eq!(
+        state.catalog_unavailable().as_deref(),
+        Some("authentication expired")
+    );
+}
+
+#[test]
+fn temporary_unavailability_includes_a_retry_hint() {
+    let response = Failure::unavailable("still warming").into_response();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response.headers().get(header::RETRY_AFTER),
+        Some(&axum::http::HeaderValue::from_static("1"))
+    );
+}
+
+#[test]
 fn feature_routers_preserve_every_public_path_exactly_once() {
     let sources = [
         include_str!("../routes.rs"),
@@ -272,6 +300,8 @@ fn data_presenters_round_trip_transport_values_without_leaking_them_to_policy() 
             endpoint: "https://api.spiraldb.dev".to_owned(),
             spfs_endpoint: "https://spfs.spiraldb.dev".to_owned(),
             project_id: "project".to_owned(),
+            client_id: String::new(),
+            client_secret_configured: false,
             namespace: "dataset".to_owned(),
             endpoint_restart_required: false,
         },
@@ -283,7 +313,9 @@ fn data_presenters_round_trip_transport_values_without_leaking_them_to_policy() 
             settings.clone(),
             None,
             None,
-            None
+            None,
+            None,
+            false,
         )),
         settings
     );
@@ -293,11 +325,15 @@ fn data_presenters_round_trip_transport_values_without_leaking_them_to_policy() 
         Some("http://127.0.0.1:4279"),
         Some("http://127.0.0.1:4295"),
         Some("local-project"),
+        Some("client-id"),
+        true,
     );
     assert_eq!(pending.spiral.endpoint, "http://127.0.0.1:4279");
     assert_eq!(pending.spiral.spfs_endpoint, "http://127.0.0.1:4295");
     assert_eq!(pending.spiral.project_id, "local-project");
-    assert!(pending.spiral.endpoint_restart_required);
+    assert!(!pending.spiral.endpoint_restart_required);
+    assert_eq!(pending.spiral.client_id, "client-id");
+    assert!(pending.spiral.client_secret_configured);
 
     let query = SpiralQueryResponse {
         columns: vec![spiral_robotics_contracts::api::QueryColumn {
@@ -331,7 +367,15 @@ fn training_and_rollout_presenters_round_trip_semantic_state() {
         started_ms: 1,
         finished_ms: None,
         message: Some("running".to_owned()),
-        metrics: Vec::new(),
+        metrics: vec![spiral_robotics_contracts::api::TrainingMetricPoint {
+            step: 4,
+            loader_ms: Some(790.0),
+            arrow_encode_ms: Some(24.0),
+            upload_ms: Some(2_960.0),
+            device_copy_ms: Some(6.0),
+            model_ms: Some(149.0),
+            ..Default::default()
+        }],
         checkpoints: Vec::new(),
         logs: vec!["ready".to_owned()],
     };

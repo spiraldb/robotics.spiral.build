@@ -11,9 +11,10 @@ use charming::element::{
 use dioxus::prelude::*;
 
 pub(crate) const COLOR_LINE: &str = "#e8e8e6";
+#[cfg(feature = "web")]
+pub(crate) const COLOR_INK_SOFT: &str = "#65645f";
 pub(crate) const COLOR_INK_FAINT: &str = "#71706c";
 pub(crate) const COLOR_SURFACE: &str = "#ffffff";
-pub(crate) const COLOR_TOOLTIP_BORDER: &str = "#d9d9d6";
 pub(crate) const COLOR_SELECTED: &str = "rgba(8, 104, 184, 0.10)";
 pub(crate) const COLOR_TRAIN: &str = "#2a78d6";
 pub(crate) const COLOR_VALIDATION: &str = "#d9572b";
@@ -24,6 +25,10 @@ pub(crate) const COLOR_GPU: &str = "#2a78d6";
 pub(crate) const COLOR_MEMORY: &str = "#7a58a5";
 
 pub(crate) const MONO_FONT: &str = "ui-monospace, SF Mono, JetBrains Mono, Menlo, monospace";
+
+#[cfg(feature = "web")]
+const STUDIO_TOOLTIP_CSS: &str =
+    "border-radius: 4px; box-shadow: 0 1px 3px rgba(55, 53, 47, 0.10);";
 
 #[derive(Clone, Copy)]
 pub(crate) enum TooltipRateUnit {
@@ -75,24 +80,22 @@ return scaled.toLocaleString(undefined, { maximumFractionDigits: 2 }) + (large ?
 "#
         }
     };
-    studio_tooltip(JsFunction::new_with_args("value", body))
+    studio_single_series_tooltip(body)
 }
 
 pub(crate) fn studio_percent_tooltip() -> Tooltip {
-    studio_tooltip(JsFunction::new_with_args(
-        "value",
+    studio_single_series_tooltip(
         r#"
 const raw = Array.isArray(value) ? value[value.length - 1] : value;
 const numeric = Number(raw);
 if (!Number.isFinite(numeric)) return '—';
 return numeric.toLocaleString(undefined, { maximumFractionDigits: 1 }) + '%';
 "#,
-    ))
+    )
 }
 
 pub(crate) fn studio_bytes_tooltip() -> Tooltip {
-    studio_tooltip(JsFunction::new_with_args(
-        "value",
+    studio_single_series_tooltip(
         r#"
 const raw = Array.isArray(value) ? value[value.length - 1] : value;
 const numeric = Number(raw);
@@ -103,7 +106,21 @@ const large = Math.abs(numeric) >= gib;
 const scaled = numeric / (large ? gib : mib);
 return scaled.toLocaleString(undefined, { maximumFractionDigits: 2 }) + (large ? ' GiB' : ' MiB');
 "#,
-    ))
+    )
+}
+
+fn studio_single_series_tooltip(value_formatter_body: &str) -> Tooltip {
+    let popup_formatter_body = format!(
+        r#"
+const point = Array.isArray(params)
+  ? params.find((candidate) => candidate && candidate.value !== null && candidate.value !== undefined)
+  : params;
+const value = point ? point.value : null;
+{value_formatter_body}
+"#
+    );
+    studio_tooltip(JsFunction::new_with_args("value", value_formatter_body))
+        .formatter(JsFunction::new_with_args("params", &popup_formatter_body))
 }
 
 fn studio_tooltip(value_formatter: JsFunction) -> Tooltip {
@@ -118,13 +135,13 @@ fn studio_tooltip(value_formatter: JsFunction) -> Tooltip {
                     LineStyle::new()
                         .color(COLOR_INK_FAINT)
                         .width(1)
-                        .opacity(0.45),
+                        .opacity(0.3),
                 ),
         )
         .background_color(COLOR_SURFACE)
-        .border_color(COLOR_TOOLTIP_BORDER)
+        .border_color(COLOR_LINE)
         .border_width(1)
-        .padding(Padding::Double(6.0, 8.0))
+        .padding(Padding::Double(4.0, 6.0))
         .value_formatter(value_formatter)
 }
 
@@ -274,6 +291,7 @@ fn render_or_update(
     let rendered = charming::WasmRenderer::new_opt(None, None)
         .render(id, chart)
         .map_err(|_| ())?;
+    apply_studio_tooltip_theme(&rendered);
     connect_chart(&rendered, group)?;
     observer
         .borrow_mut()
@@ -331,7 +349,49 @@ fn update_chart(chart: &charming::Echarts, option: &Chart) {
     if let Ok(option) = serde_wasm_bindgen::to_value(option) {
         preserve_data_zoom(chart, &option);
         let _ = call_chart_method(chart, "setOption", &[option, settings.into()]);
+        apply_studio_tooltip_theme(chart);
     }
+}
+
+#[cfg(feature = "web")]
+fn apply_studio_tooltip_theme(chart: &charming::Echarts) {
+    use wasm_bindgen::JsValue;
+
+    let option = js_sys::Object::new();
+    let tooltip = js_sys::Object::new();
+    let text_style = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(
+        &text_style,
+        &JsValue::from_str("color"),
+        &JsValue::from_str(COLOR_INK_SOFT),
+    );
+    let _ = js_sys::Reflect::set(
+        &text_style,
+        &JsValue::from_str("fontSize"),
+        &JsValue::from_f64(12.0),
+    );
+    let _ = js_sys::Reflect::set(
+        &text_style,
+        &JsValue::from_str("fontWeight"),
+        &JsValue::from_f64(400.0),
+    );
+    let _ = js_sys::Reflect::set(
+        &text_style,
+        &JsValue::from_str("lineHeight"),
+        &JsValue::from_f64(16.0),
+    );
+    let _ = js_sys::Reflect::set(
+        &tooltip,
+        &JsValue::from_str("textStyle"),
+        &text_style.into(),
+    );
+    let _ = js_sys::Reflect::set(
+        &tooltip,
+        &JsValue::from_str("extraCssText"),
+        &JsValue::from_str(STUDIO_TOOLTIP_CSS),
+    );
+    let _ = js_sys::Reflect::set(&option, &JsValue::from_str("tooltip"), &tooltip.into());
+    let _ = call_chart_method(chart, "setOption", &[option.into()]);
 }
 
 #[cfg(feature = "web")]
@@ -351,9 +411,17 @@ fn preserve_data_zoom(chart: &charming::Echarts, option: &wasm_bindgen::JsValue)
     let Ok(current_zoom) = js_sys::Reflect::get(&current, &key) else {
         return;
     };
-    if !current_zoom.is_null() && !current_zoom.is_undefined() {
-        let _ = js_sys::Reflect::set(option, &key, &current_zoom);
+    if current_zoom.is_null() || current_zoom.is_undefined() {
+        return;
     }
+    if js_sys::Array::is_array(&next_zoom) && js_sys::Array::is_array(&current_zoom) {
+        let next_zoom = js_sys::Array::from(&next_zoom);
+        let current_zoom = js_sys::Array::from(&current_zoom);
+        if next_zoom.length() != current_zoom.length() {
+            return;
+        }
+    }
+    let _ = js_sys::Reflect::set(option, &key, &current_zoom);
 }
 
 #[cfg(feature = "web")]
@@ -435,13 +503,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tooltip_formatters_bound_precision_and_name_rate_units() {
+    fn tooltip_formatters_bound_precision_and_keep_single_series_popups_to_one_value() {
         let numeric = serde_json::to_value(studio_numeric_tooltip(3))
             .expect("numeric tooltip should serialize");
         let numeric_formatter = numeric["valueFormatter"]
             .as_str()
             .expect("numeric tooltip should contain a formatter");
         assert!(numeric_formatter.contains("maximumFractionDigits: 3"));
+        assert_eq!(numeric["padding"], serde_json::json!([4.0, 6.0]));
+        assert_eq!(numeric["borderColor"], COLOR_LINE);
+        assert_eq!(numeric["axisPointer"]["lineStyle"]["opacity"], 0.3);
+        assert!(numeric["formatter"].is_null());
 
         let byte_rate = serde_json::to_value(studio_rate_tooltip(TooltipRateUnit::BytesPerSecond))
             .expect("rate tooltip should serialize");
@@ -450,5 +522,12 @@ mod tests {
             .expect("rate tooltip should contain a formatter");
         assert!(byte_formatter.contains("GiB/s"));
         assert!(byte_formatter.contains("MiB/s"));
+        let byte_popup_formatter = byte_rate["formatter"]
+            .as_str()
+            .expect("single-series tooltip should contain a popup formatter");
+        assert!(byte_popup_formatter.contains("point.value"));
+        assert!(!byte_popup_formatter.contains("seriesName"));
+        assert!(!byte_popup_formatter.contains("axisValue"));
+        assert!(!byte_popup_formatter.contains("<br"));
     }
 }

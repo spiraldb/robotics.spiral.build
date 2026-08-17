@@ -14,6 +14,8 @@ pub(crate) struct SpiralDestinationSettings {
     pub endpoint: String,
     pub spfs_endpoint: String,
     pub project_id: String,
+    pub client_id: String,
+    pub client_secret_configured: bool,
     pub namespace: String,
     pub endpoint_restart_required: bool,
 }
@@ -23,6 +25,9 @@ pub(crate) struct UpdateDataSettingsCommand {
     pub spiral_endpoint: String,
     pub spiral_spfs_endpoint: String,
     pub project_id: String,
+    pub client_id: String,
+    /// `None` preserves the saved secret; `Some("")` clears it.
+    pub client_secret: Option<String>,
     pub training_endpoint: String,
     pub video_enabled: bool,
 }
@@ -232,6 +237,8 @@ fn validate_settings(
     command.spiral_spfs_endpoint =
         normalize_spiral_endpoint(&command.spiral_spfs_endpoint, "Spiral SpFS endpoint")?;
     command.project_id = command.project_id.trim().to_owned();
+    command.client_id = command.client_id.trim().to_owned();
+    command.client_secret = command.client_secret.map(|secret| secret.trim().to_owned());
     command.training_endpoint = command.training_endpoint.trim().to_owned();
 
     if command.project_id.is_empty()
@@ -245,13 +252,19 @@ fn validate_settings(
         ));
     }
 
-    if !command.training_endpoint.starts_with("http://")
-        || command.training_endpoint.len() <= "http://".len()
+    if command.client_id.is_empty()
+        && command
+            .client_secret
+            .as_ref()
+            .is_some_and(|secret| !secret.is_empty())
     {
         return Err(ApplicationError::InvalidInput(
-            "Training runtime endpoint must be a plain http:// address".to_owned(),
+            "Spiral client secret requires a client ID".to_owned(),
         ));
     }
+
+    command.training_endpoint =
+        normalize_spiral_endpoint(&command.training_endpoint, "Training runtime endpoint")?;
 
     Ok(command)
 }
@@ -427,6 +440,8 @@ mod tests {
                 endpoint: "https://api.spiraldb.dev".to_owned(),
                 spfs_endpoint: "https://spfs.spiraldb.dev".to_owned(),
                 project_id: project.to_owned(),
+                client_id: String::new(),
+                client_secret_configured: false,
                 namespace: "dataset".to_owned(),
                 endpoint_restart_required: false,
             },
@@ -462,6 +477,8 @@ mod tests {
             spiral_endpoint: " https://api.spiraldb.dev/ ".to_owned(),
             spiral_spfs_endpoint: " https://spfs.spiraldb.dev/ ".to_owned(),
             project_id: " project ".to_owned(),
+            client_id: String::new(),
+            client_secret: None,
             training_endpoint: " http://127.0.0.1:50051 ".to_owned(),
             video_enabled: true,
         }
@@ -519,7 +536,7 @@ mod tests {
         assert!(data.events.lock().unwrap().is_empty());
 
         let mut invalid = settings();
-        invalid.training_endpoint = "https://runtime.example".to_owned();
+        invalid.training_endpoint = "ftp://runtime.example".to_owned();
         assert!(matches!(
             update_settings(&data, invalid).await,
             Err(ApplicationError::InvalidInput(_))

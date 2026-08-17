@@ -9,8 +9,8 @@ use spiral_robotics_core::query::{ReadOnlyMode, ensure_read_only, is_identifier}
 use crate::backend::application::error::ApplicationError;
 use crate::backend::application::rollout::RolloutRequest;
 
-/// One decoded image batch must leave enough memory for model activations,
-/// optimizer state, and the hardware-control process itself.
+/// One image batch expanded to f32 model inputs must leave enough memory for
+/// model activations, optimizer state, and the hardware-control process itself.
 pub(crate) const MAX_TRAINING_IMAGE_BATCH_BYTES: usize = 256 * 1024 * 1024;
 
 /// Aggregate ACT compute-session budget. Independently valid dimensions must
@@ -109,6 +109,11 @@ pub(crate) struct TrainingMetric {
     pub cpu_percent: Option<f64>,
     pub gpu_percent: Option<f64>,
     pub memory_bytes: Option<u64>,
+    pub loader_ms: Option<f64>,
+    pub batch_encode_ms: Option<f64>,
+    pub upload_ms: Option<f64>,
+    pub device_copy_ms: Option<f64>,
+    pub model_ms: Option<f64>,
     pub elapsed_seconds: f64,
     pub event: Option<String>,
 }
@@ -265,7 +270,7 @@ fn validate_training_command(
     command.dataset_id = command.dataset_id.trim().to_owned();
     command.state_column = command.state_column.trim().to_owned();
     command.action_column = command.action_column.trim().to_owned();
-    command.device = command.device.trim().to_ascii_lowercase();
+    command.device = command.device.trim().to_owned();
 
     if command.run_name.is_empty()
         || command.run_name.len() > 80
@@ -294,8 +299,15 @@ fn validate_training_command(
     if command.state_column == command.action_column {
         return invalid("State and action columns must be different.");
     }
-    if !matches!(command.device.as_str(), "auto" | "cpu" | "mps" | "metal") {
-        return invalid("Training device must be auto, CPU, or Apple MPS/Metal.");
+    if command.device.is_empty()
+        || command.device.len() > 64
+        || !command.device.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':' | b'/' | b'+')
+        })
+    {
+        return invalid(
+            "Training device must be a 1–64 character identifier advertised by the runtime.",
+        );
     }
     if !(1..=10_000_000).contains(&command.steps) {
         return invalid("Training steps must be between 1 and 10,000,000.");
@@ -347,7 +359,7 @@ fn validate_training_command(
             "ACT image width and height must both be zero (native) or between 32 and 1,024.",
         );
     }
-    let decoded_image_bytes = if native_images {
+    let runtime_image_bytes = if native_images {
         // The adapter repeats the exact check after resolving native dataset
         // dimensions. Budget the largest batch it is allowed to admit here.
         MAX_TRAINING_IMAGE_BATCH_BYTES
@@ -360,6 +372,9 @@ fn validate_training_command(
         } else {
             command.act.camera_streams.len()
         };
+        // Training transports one byte per channel, but the runtime expands
+        // every image to f32 before model execution. Admission budgets that
+        // expanded representation rather than the smaller HTTP request body.
         let image_bytes = command
             .batch_size
             .checked_mul(camera_count)
@@ -369,10 +384,10 @@ fn validate_training_command(
             .and_then(|values| values.checked_mul(std::mem::size_of::<f32>()));
         if image_bytes.is_none_or(|bytes| bytes > MAX_TRAINING_IMAGE_BATCH_BYTES) {
             return invalid(format!(
-                "ACT decoded image batch may not exceed {MAX_TRAINING_IMAGE_BATCH_BYTES} bytes. Reduce batch size, camera count, or image dimensions."
+                "ACT expanded f32 image batch may not exceed {MAX_TRAINING_IMAGE_BATCH_BYTES} bytes. Reduce batch size, camera count, or image dimensions."
             ));
         }
-        image_bytes.expect("checked decoded image byte count")
+        image_bytes.expect("checked runtime image byte count")
     };
     if !matches!(
         command.act.video_decoder.as_str(),
@@ -405,7 +420,7 @@ fn validate_training_command(
     }
     enforce_act_training_resource_budget(estimate_act_training_resource_bytes(
         &command,
-        decoded_image_bytes,
+        runtime_image_bytes,
     ))?;
     if !command.act.kl_weight.is_finite() || command.act.kl_weight < 0.0 {
         return invalid("ACT KL weight must be finite and non-negative.");
@@ -433,7 +448,7 @@ fn validate_run_id(run_id: String) -> Result<String, ApplicationError> {
 /// command, including attention, feed-forward, bias, and norm terms.
 fn estimate_act_training_resource_bytes(
     command: &StartTrainingCommand,
-    decoded_image_bytes: usize,
+    runtime_image_bytes: usize,
 ) -> Option<usize> {
     let hidden = command.act.hidden_dim;
     let feedforward = command.act.feedforward_dim;
@@ -463,7 +478,7 @@ fn estimate_act_training_resource_bytes(
         .checked_add(hidden.checked_mul(command.chunk_size)?)?;
     let transformer_training_bytes =
         transformer_parameters.checked_mul(ACT_TRAINING_BYTES_PER_TRANSFORMER_PARAMETER)?;
-    let image_runtime_bytes = decoded_image_bytes.checked_mul(ACT_IMAGE_RUNTIME_MULTIPLIER)?;
+    let image_runtime_bytes = runtime_image_bytes.checked_mul(ACT_IMAGE_RUNTIME_MULTIPLIER)?;
     transformer_training_bytes
         .checked_add(image_runtime_bytes)?
         .checked_add(ACT_NON_TRANSFORMER_RESOURCE_RESERVE_BYTES)
@@ -621,7 +636,19 @@ mod tests {
         assert_eq!(starts[0].dataset_id, "demo");
         assert_eq!(starts[0].state_column, "state");
         assert_eq!(starts[0].action_column, "action");
-        assert_eq!(starts[0].device, "cpu");
+        assert_eq!(starts[0].device, "CPU");
+    }
+
+    #[tokio::test]
+    async fn training_accepts_runtime_advertised_cuda_device_identifiers() {
+        let mut command = training_command();
+        command.device = " cuda:0 ".to_owned();
+
+        let training = training(None);
+        start_training(&training, command).await.unwrap();
+
+        let starts = training.starts.lock().unwrap();
+        assert_eq!(starts[0].device, "cuda:0");
     }
 
     #[tokio::test]
@@ -654,7 +681,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decoded_image_batch_budget_is_checked_at_the_exact_boundary() {
+    async fn expanded_image_batch_budget_is_checked_at_the_exact_boundary() {
         let mut boundary = training_command();
         boundary.batch_size = 85;
         boundary.chunk_size = 1;
@@ -670,7 +697,7 @@ mod tests {
         boundary.batch_size = 86;
         let over_budget = training(None);
         let error = start_training(&over_budget, boundary).await.unwrap_err();
-        assert!(error.message().contains("decoded image batch"));
+        assert!(error.message().contains("expanded f32 image batch"));
         assert!(over_budget.starts.lock().unwrap().is_empty());
 
         let mut automatic = training_command();
@@ -681,7 +708,7 @@ mod tests {
         automatic.act.image_height = 512;
         let training = training(None);
         let error = start_training(&training, automatic).await.unwrap_err();
-        assert!(error.message().contains("decoded image batch"));
+        assert!(error.message().contains("expanded f32 image batch"));
     }
 
     #[tokio::test]

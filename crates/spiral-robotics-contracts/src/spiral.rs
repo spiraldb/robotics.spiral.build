@@ -437,6 +437,10 @@ mod tests {
             column::ACTION
         )));
         assert!(sql.contains("robot_type IS NULL AND s.stream_id = 'follower'"));
+
+        let quoted = default_training_sql_for_dataset("robotics", "pick-'place");
+        assert!(quoted.contains("d.dataset_id = 'pick-''place'"));
+        assert!(!quoted.contains("d.dataset_id = ''pick-''place''"));
     }
 
     #[test]

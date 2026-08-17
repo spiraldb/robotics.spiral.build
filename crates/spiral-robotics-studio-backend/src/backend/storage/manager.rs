@@ -54,6 +54,12 @@ impl StorageManager {
                 endpoint: self.repository.endpoint().to_owned(),
                 spfs_endpoint: self.repository.spfs_endpoint().to_owned(),
                 project_id: self.repository.project_id(),
+                client_id: self
+                    .repository
+                    .credentials()
+                    .map(|credentials| credentials.client_id)
+                    .unwrap_or_default(),
+                client_secret_configured: self.repository.credentials().is_some(),
                 namespace: self.repository.namespace().to_owned(),
                 endpoint_restart_required: false,
             },
@@ -66,20 +72,45 @@ impl StorageManager {
         self.repository.project_id()
     }
 
-    pub(crate) fn spiral_endpoint(&self) -> &str {
+    pub(crate) fn spiral_endpoint(&self) -> String {
         self.repository.endpoint()
     }
 
-    pub(crate) fn spiral_spfs_endpoint(&self) -> &str {
+    pub(crate) fn spiral_spfs_endpoint(&self) -> String {
         self.repository.spfs_endpoint()
+    }
+
+    pub(crate) fn spiral_credentials(
+        &self,
+    ) -> Option<crate::backend::storage::settings::SpiralCredentials> {
+        self.repository.credentials()
     }
 
     pub(crate) fn is_configured(&self) -> bool {
         self.repository.is_configured()
     }
 
+    pub(crate) async fn prewarm(&self) -> Result<(), String> {
+        self.repository.prewarm().await
+    }
+
     pub(crate) fn configure_project(&self, project_id: &str) -> Result<(), String> {
         self.repository.configure_project(project_id)
+    }
+
+    pub(crate) fn configure_connection(
+        &self,
+        endpoint: String,
+        spfs_endpoint: String,
+        project_id: &str,
+        credentials: Option<crate::backend::storage::settings::SpiralCredentials>,
+    ) -> Result<(), String> {
+        self.repository
+            .configure_connection(endpoint, spfs_endpoint, project_id, credentials)
+    }
+
+    pub(crate) fn invalidate_idle_connections(&self) {
+        self.repository.invalidate_idle_connections();
     }
 
     pub(crate) fn namespace(&self) -> &str {

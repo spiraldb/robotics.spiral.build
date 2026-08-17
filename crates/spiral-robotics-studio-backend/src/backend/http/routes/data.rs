@@ -12,7 +12,9 @@ impl Drop for CatalogReservation {
     }
 }
 
-pub(super) fn router() -> Router<AppState> {
+/// Bootstrap settings remain available even when the configured catalog does
+/// not, so an operator can repair or select the Spiral destination.
+pub(super) fn bootstrap_router() -> Router<AppState> {
     Router::new()
         .route(
             "/settings/data",
@@ -20,6 +22,10 @@ pub(super) fn router() -> Router<AppState> {
         )
         .route("/settings/data/test/spiral", post(test_spiral))
         .route("/settings/data/test/training", post(test_training_runtime))
+}
+
+pub(super) fn catalog_router() -> Router<AppState> {
+    Router::new()
         .route("/spiral/query", post(spiral_query))
         .route("/spiral/replay", post(start_spiral_replay))
         .route("/spiral/video.mp4", get(spiral_video))
@@ -223,6 +229,8 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
         let configured_endpoint = self.state.backend_state.spiral_endpoint();
         let configured_spfs_endpoint = self.state.backend_state.spiral_spfs_endpoint();
         let configured_project = self.state.backend_state.project_id();
+        let configured_client_id = self.state.backend_state.client_id();
+        let credentials_configured = self.state.backend_state.credentials().is_some();
         application_data_settings(
             self.state
                 .storage
@@ -230,6 +238,8 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
             configured_endpoint.as_deref(),
             configured_spfs_endpoint.as_deref(),
             configured_project.as_deref(),
+            (!configured_client_id.is_empty()).then_some(configured_client_id.as_str()),
+            credentials_configured,
         )
     }
 
@@ -237,9 +247,29 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
         &self,
         command: UpdateDataSettingsCommand,
     ) -> Result<DataSettingsView, ApplicationError> {
+        let catalog_was_available = self.state.bootstrap.current().catalog_available;
         let endpoint_changed = self.state.storage.spiral_endpoint() != command.spiral_endpoint
             || self.state.storage.spiral_spfs_endpoint() != command.spiral_spfs_endpoint;
         let project_changed = self.state.storage.project_id() != command.project_id;
+        let current_credentials = self.state.backend_state.credentials();
+        let credentials = match command.client_secret.as_deref() {
+            Some("") => None,
+            Some(secret) => Some(crate::backend::storage::settings::SpiralCredentials {
+                client_id: command.client_id.clone(),
+                client_secret: secret.to_owned(),
+            }),
+            None if command.client_id.is_empty() => None,
+            None => current_credentials
+                .clone()
+                .filter(|credentials| credentials.client_id == command.client_id)
+                .ok_or_else(|| {
+                    ApplicationError::InvalidInput(
+                        "Enter the client secret when changing the Spiral client ID".to_owned(),
+                    )
+                })
+                .map(Some)?,
+        };
+        let credentials_changed = current_credentials != credentials;
         let staged = self
             .state
             .preferences
@@ -258,25 +288,25 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
                 &command.project_id,
                 &command.spiral_endpoint,
                 &command.spiral_spfs_endpoint,
+                credentials.as_ref(),
             )
             .map_err(ApplicationError::Internal)?;
-        if endpoint_changed {
-            // The ADBC driver has no per-database endpoint option. Preserve the
-            // complete next destination as bootstrap state, but do not write
-            // project-owned preferences to the still-active old endpoint.
-            return Ok(self.settings());
-        }
-        if project_changed {
+        if endpoint_changed || project_changed || credentials_changed {
             self.state
                 .storage
-                .configure_project(&command.project_id)
+                .configure_connection(
+                    command.spiral_endpoint.clone(),
+                    command.spiral_spfs_endpoint.clone(),
+                    &command.project_id,
+                    credentials,
+                )
                 .map_err(ApplicationError::InvalidInput)?;
         }
         self.state
             .storage
             .save_studio_preferences(&staged)
             .map_err(ApplicationError::External)?;
-        if project_changed {
+        if endpoint_changed || project_changed || credentials_changed || !catalog_was_available {
             self.state
                 .training
                 .reload_from_storage()
@@ -342,25 +372,30 @@ pub(super) fn application_data_settings(
     configured_endpoint: Option<&str>,
     configured_spfs_endpoint: Option<&str>,
     configured_project: Option<&str>,
+    configured_client_id: Option<&str>,
+    credentials_configured: bool,
 ) -> DataSettingsView {
-    let mut endpoint_restart_required = false;
     if let Some(configured_endpoint) = configured_endpoint {
-        endpoint_restart_required |= configured_endpoint != settings.spiral.endpoint;
         settings.spiral.endpoint = configured_endpoint.to_owned();
     }
     if let Some(configured_spfs_endpoint) = configured_spfs_endpoint {
-        endpoint_restart_required |= configured_spfs_endpoint != settings.spiral.spfs_endpoint;
         settings.spiral.spfs_endpoint = configured_spfs_endpoint.to_owned();
     }
-    settings.spiral.endpoint_restart_required = endpoint_restart_required;
-    if endpoint_restart_required && let Some(configured_project) = configured_project {
+    settings.spiral.endpoint_restart_required = false;
+    if let Some(configured_project) = configured_project {
         settings.spiral.project_id = configured_project.to_owned();
     }
+    if let Some(configured_client_id) = configured_client_id {
+        settings.spiral.client_id = configured_client_id.to_owned();
+    }
+    settings.spiral.client_secret_configured = credentials_configured;
     DataSettingsView {
         spiral: SpiralDestinationSettings {
             endpoint: settings.spiral.endpoint,
             spfs_endpoint: settings.spiral.spfs_endpoint,
             project_id: settings.spiral.project_id,
+            client_id: settings.spiral.client_id,
+            client_secret_configured: settings.spiral.client_secret_configured,
             namespace: settings.spiral.namespace,
             endpoint_restart_required: settings.spiral.endpoint_restart_required,
         },
@@ -375,6 +410,8 @@ pub(super) fn contract_data_settings(settings: DataSettingsView) -> DataSettings
             endpoint: settings.spiral.endpoint,
             spfs_endpoint: settings.spiral.spfs_endpoint,
             project_id: settings.spiral.project_id,
+            client_id: settings.spiral.client_id,
+            client_secret_configured: settings.spiral.client_secret_configured,
             namespace: settings.spiral.namespace,
             endpoint_restart_required: settings.spiral.endpoint_restart_required,
         },
@@ -506,6 +543,14 @@ fn data_settings_command(request: UpdateDataSettingsRequest) -> UpdateDataSettin
         spiral_endpoint: request.spiral_endpoint,
         spiral_spfs_endpoint: request.spiral_spfs_endpoint,
         project_id: request.project_id,
+        client_id: request.client_id,
+        client_secret: if request.clear_client_secret {
+            Some(String::new())
+        } else if request.client_secret.trim().is_empty() {
+            None
+        } else {
+            Some(request.client_secret)
+        },
         training_endpoint: request.training.endpoint,
         video_enabled: request.video.enabled,
     }
@@ -537,9 +582,27 @@ async fn update_data_settings(
             &request.spiral_spfs_endpoint,
         )
         .map_err(Failure::bad_request)?;
+    let requested_training_endpoint =
+        crate::backend::storage::settings::normalize_training_runtime_endpoint(
+            &request.training.endpoint,
+        )
+        .map_err(Failure::bad_request)?;
     let endpoint_changed = state.storage.spiral_endpoint() != requested_endpoint
         || state.storage.spiral_spfs_endpoint() != requested_spfs_endpoint;
     let project_changed = state.storage.project_id() != request.project_id.trim();
+    let training_endpoint_changed =
+        state.preferences.get().training.endpoint != requested_training_endpoint;
+    let training_is_active = state
+        .training
+        .snapshot()
+        .runs
+        .iter()
+        .any(|run| run.phase.active());
+    if training_endpoint_changed && training_is_active {
+        return Err(Failure::conflict(
+            "Stop the active training job before changing its remote worker endpoint",
+        ));
+    }
     let _reservation = if project_changed || endpoint_changed {
         let token = state
             .catalog_lease
@@ -560,12 +623,7 @@ async fn update_data_settings(
                 .connections
                 .values()
                 .any(|connection| connection.connected)
-            || state
-                .training
-                .snapshot()
-                .runs
-                .iter()
-                .any(|run| run.phase.active())
+            || training_is_active
             || matches!(
                 state.rollout.snapshot().phase,
                 ApplicationRolloutPhase::Loading
@@ -587,6 +645,10 @@ async fn update_data_settings(
         data_settings_command(request),
     )
     .await?;
+    if !endpoint_changed {
+        state.bootstrap.ready();
+        tokio::spawn(super::auto_connect_saved_robots(state.clone()));
+    }
     Ok(Json(contract_data_settings(settings)))
 }
 

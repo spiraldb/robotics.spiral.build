@@ -25,6 +25,7 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 NORMALIZATION_EPSILON = 1.0e-8
 GLOBAL_GRADIENT_NORM_LIMIT = 10.0
+BUFFER_WAIT_SECONDS = 30.0
 
 
 def backend_info() -> dict[str, Any]:
@@ -37,7 +38,7 @@ def backend_info() -> dict[str, Any]:
     if torch.backends.mps.is_available():
         devices.insert(0, "MPS")
     return {
-        "api_version": 1,
+        "api_version": 4,
         "id": "pytorch.lerobot",
         "display_name": "PyTorch ACT",
         "runtime": f"PyTorch {torch.__version__} / LeRobot {version('lerobot')}",
@@ -93,8 +94,16 @@ class TrainingSession:
         self.lock = threading.Lock()
         self.last_step: int | None = None
         self.last_response: dict[str, Any] | None = None
+        self.buffer_condition = threading.Condition()
+        self.buffered_batch: tuple[str, int, TrainingArrays] | None = None
         self.process = psutil.Process()
         self.process.cpu_percent(interval=None)
+        self.image_mean = torch.tensor(IMAGENET_MEAN, dtype=torch.float32, device=self.device).view(
+            1, 1, 3, 1, 1
+        )
+        self.image_std = torch.tensor(IMAGENET_STD, dtype=torch.float32, device=self.device).view(
+            1, 1, 3, 1, 1
+        )
 
     @property
     def info(self) -> dict[str, Any]:
@@ -104,7 +113,35 @@ class TrainingSession:
             "parameter_count": self.parameter_count,
         }
 
-    def train(self, arrays: TrainingArrays, step: int) -> dict[str, Any]:
+    def buffer_batch(self, arrays: TrainingArrays, kind: str, step: int) -> None:
+        deadline = time.monotonic() + BUFFER_WAIT_SECONDS
+        with self.buffer_condition:
+            while self.buffered_batch is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeRequestError(
+                        "training session upload buffer remained occupied", 409
+                    )
+                self.buffer_condition.wait(remaining)
+            self.buffered_batch = (kind, step, arrays)
+
+    def _take_buffered_batch(self, kind: str, step: int) -> TrainingArrays:
+        with self.buffer_condition:
+            if self.buffered_batch is None:
+                raise RuntimeRequestError(f"{kind} step {step} has no buffered Arrow batch", 409)
+            buffered_kind, buffered_step, arrays = self.buffered_batch
+            if buffered_kind != kind or buffered_step != step:
+                raise RuntimeRequestError(
+                    f"{kind} step {step} cannot consume buffered "
+                    f"{buffered_kind} step {buffered_step}",
+                    409,
+                )
+            self.buffered_batch = None
+            self.buffer_condition.notify_all()
+            return arrays
+
+    def train_buffered(self, step: int) -> dict[str, Any]:
+        arrays = self._take_buffered_batch("training", step)
         with self.lock:
             if self.last_step == step and self.last_response is not None:
                 return self.last_response
@@ -116,7 +153,11 @@ class TrainingSession:
                 raise RuntimeRequestError(
                     f"optimizer step must be between 1 and {self.config.total_steps}", 409
                 )
+            device_started = time.perf_counter()
             batch = self._batch(arrays)
+            _synchronize(self.device)
+            device_copy_ms = _elapsed_ms(device_started)
+            model_started = time.perf_counter()
             self.policy.train()
             self.optimizer.zero_grad(set_to_none=True)
             loss, loss_parts = self.policy(batch)
@@ -126,29 +167,36 @@ class TrainingSession:
             torch.nn.utils.clip_grad_norm_(self.policy.parameters(), GLOBAL_GRADIENT_NORM_LIMIT)
             self.optimizer.step()
             _synchronize(self.device)
-            response = self._step_response(loss, loss_parts)
+            model_ms = _elapsed_ms(model_started)
+            response = self._step_response(loss, loss_parts, device_copy_ms, model_ms)
             self.last_step = step
             self.last_response = response
             return response
 
-    def validate(self, arrays: TrainingArrays) -> dict[str, Any]:
+    def validate_buffered(self, after_step: int) -> dict[str, Any]:
+        arrays = self._take_buffered_batch("validation", after_step)
         with self.lock, torch.inference_mode():
+            if self.last_step != after_step:
+                raise RuntimeRequestError(
+                    f"validation after step {after_step} cannot follow completed step "
+                    f"{self.last_step}",
+                    409,
+                )
+            device_started = time.perf_counter()
             batch = self._batch(arrays)
+            _synchronize(self.device)
+            device_copy_ms = _elapsed_ms(device_started)
+            model_started = time.perf_counter()
             self.policy.eval()
             loss, loss_parts = self.policy(batch)
             _synchronize(self.device)
-            return self._step_response(loss, loss_parts)
+            model_ms = _elapsed_ms(model_started)
+            return self._step_response(loss, loss_parts, device_copy_ms, model_ms)
 
     def telemetry(self) -> dict[str, Any]:
-        gpu_percent: float | None = None
-        if self.device.type == "cuda":
-            try:
-                gpu_percent = float(torch.cuda.utilization(self.device))
-            except (AttributeError, RuntimeError, ValueError):
-                gpu_percent = None
         return {
             "cpu_percent": float(self.process.cpu_percent(interval=None)),
-            "gpu_percent": gpu_percent,
+            "gpu_percent": _gpu_utilization(self.device),
             "memory_bytes": int(self.process.memory_info().rss),
         }
 
@@ -193,10 +241,11 @@ class TrainingSession:
         images = _from_numpy(arrays.images, self.device).reshape(
             batch_size,
             len(self.config.camera_streams),
-            3,
             self.config.image_height,
             self.config.image_width,
+            3,
         )
+        images = _normalize_hwc_images(images, self.image_mean, self.image_std)
         actions = _from_numpy(arrays.actions, self.device).reshape(
             batch_size, self.config.chunk_size, self.config.action_dimensions
         )
@@ -212,9 +261,22 @@ class TrainingSession:
             batch[camera] = images[:, index]
         return batch
 
-    def _step_response(self, loss: torch.Tensor, loss_parts: dict[str, float]) -> dict[str, Any]:
+    def _step_response(
+        self,
+        loss: torch.Tensor,
+        loss_parts: dict[str, float],
+        device_copy_ms: float,
+        model_ms: float,
+    ) -> dict[str, Any]:
         l1 = float(loss_parts.get("l1_loss", loss.detach().item()))
         kl = float(loss_parts.get("kld_loss", 0.0))
+        telemetry = self.telemetry()
+        telemetry.update(
+            {
+                "device_copy_ms": device_copy_ms,
+                "model_ms": model_ms,
+            }
+        )
         return {
             "loss": {
                 "total": float(loss.detach().item()),
@@ -223,7 +285,7 @@ class TrainingSession:
                 "pad": 0.0,
             },
             "learning_rate": self.config.learning_rate,
-            "telemetry": self.telemetry(),
+            "telemetry": telemetry,
         }
 
 
@@ -494,6 +556,16 @@ def _from_numpy(array: np.ndarray, device: torch.device) -> torch.Tensor:
     return tensor.to(device=device, non_blocking=False)
 
 
+def _normalize_hwc_images(
+    images: torch.Tensor,
+    mean: torch.Tensor,
+    std: torch.Tensor,
+) -> torch.Tensor:
+    """Convert device-resident HWC bytes into normalized CHW model inputs."""
+    images = images.permute(0, 1, 4, 2, 3).to(dtype=torch.float32).div_(255.0)
+    return (images - mean) / (std + NORMALIZATION_EPSILON)
+
+
 def _normalization_vector(request: dict[str, Any], name: str, expected: int) -> torch.Tensor:
     values = request.get(name)
     if not isinstance(values, list) or len(values) != expected:
@@ -533,6 +605,15 @@ def _device_name(device: torch.device) -> str:
     if device.type == "cuda":
         return f"CUDA:{device.index or 0}"
     return device.type.upper()
+
+
+def _gpu_utilization(device: torch.device) -> float | None:
+    if device.type != "cuda":
+        return None
+    try:
+        return float(torch.cuda.utilization(device))
+    except (AttributeError, ImportError, RuntimeError, ValueError):
+        return None
 
 
 def _synchronize(device: torch.device) -> None:

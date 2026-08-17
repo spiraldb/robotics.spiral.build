@@ -64,6 +64,17 @@ pub(crate) fn trajectory(dataset: &str, episode_id: &str, stream_id: &str) -> St
     )
 }
 
+pub(crate) fn episode_samples(dataset: &str, episode_id: &str) -> String {
+    format!(
+        "SELECT * FROM {} WHERE {} = {} ORDER BY {}, {}",
+        relation(dataset, Table::JointSamples),
+        column::EPISODE_ID,
+        string_literal(episode_id),
+        column::SAMPLE_INDEX,
+        column::STREAM_ID,
+    )
+}
+
 pub(crate) fn video_asset(
     dataset: &str,
     episode_id: &str,
@@ -191,14 +202,50 @@ mod tests {
 
     #[test]
     fn generated_values_are_escaped_in_one_place() {
-        let sql = delete_episode("robot.episodes", "take-'one");
-        assert!(sql.contains("'take-''one'"));
+        fn assert_single_literal(sql: &str, value: &str) {
+            let literal = string_literal(value);
+            assert!(
+                sql.contains(&literal),
+                "{sql:?} does not contain {literal:?}"
+            );
+            assert!(
+                !sql.contains(&format!("'{literal}'")),
+                "{sql:?} wraps the encoded literal {literal:?} in another pair of quotes"
+            );
+        }
 
-        let sql = delete_training_run("robot.training_checkpoints", "run-'one");
-        assert_eq!(
-            sql,
-            "DELETE FROM robot.training_checkpoints WHERE run_id = 'run-''one'"
-        );
+        let cases = [
+            (
+                dataset_exists("robot.datasets", "dataset-'one"),
+                "dataset-'one",
+            ),
+            (delete_episode("robot.episodes", "take-'one"), "take-'one"),
+            (
+                delete_training_run("robot.training_checkpoints", "run-'one"),
+                "run-'one",
+            ),
+            (episode_samples("robot", "episode-'one"), "episode-'one"),
+            (training_checkpoint("robot", "run-'two", 42), "run-'two"),
+            (
+                create_video_sources(
+                    "robot_episode_video_sources",
+                    "robot.video_assets",
+                    Some("episode-'two"),
+                ),
+                "episode-'two",
+            ),
+        ];
+        for (sql, value) in cases {
+            assert_single_literal(&sql, value);
+        }
+
+        let trajectory = trajectory("robot", "episode-'three", "stream-'three");
+        assert_single_literal(&trajectory, "episode-'three");
+        assert_single_literal(&trajectory, "stream-'three");
+
+        let video = video_asset("robot", "episode-'four", "stream-'four", Some(0));
+        assert_single_literal(&video, "episode-'four");
+        assert_single_literal(&video, "stream-'four");
     }
 
     #[test]
@@ -207,6 +254,18 @@ mod tests {
         for table in [Table::Episodes, Table::EpisodeStreams, Table::JointSamples] {
             assert!(sql.contains(&relation("robotics", table)));
         }
+    }
+
+    #[test]
+    fn episode_sample_id_is_encoded_as_exactly_one_string_literal() {
+        assert_eq!(
+            episode_samples("robotics", "episode_000051"),
+            "SELECT * FROM robotics.joint_samples WHERE episode_id = 'episode_000051' ORDER BY sample_index, stream_id"
+        );
+        assert_eq!(
+            episode_samples("robotics", "episode_'quoted"),
+            "SELECT * FROM robotics.joint_samples WHERE episode_id = 'episode_''quoted' ORDER BY sample_index, stream_id"
+        );
     }
 
     #[test]

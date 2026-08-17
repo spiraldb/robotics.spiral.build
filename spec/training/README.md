@@ -3,17 +3,20 @@
 ## Outcome
 
 Training turns a selected SpiralDB dataset into inspectable policy runs and
-durable checkpoints without moving data ownership into the compute runtime.
+durable checkpoints through a worker that reads and writes SpiralDB directly.
 
 ## User flow
 
 1. The user selects a dataset, policy, optional source checkpoint, run name, and
    training parameters.
-2. Studio verifies SpiralDB data and the selected [policy runtime](runtime.md).
-3. Studio creates one run and streams prepared batches to the runtime.
-4. Studio shows learning, validation, throughput, resource, and transfer
-   evidence.
-5. Studio commits checkpoints to SpiralDB while training continues.
+2. Studio verifies the selected [policy runtime](runtime.md) and submits one
+   immutable job specification.
+3. The worker opens SpiralDB, resolves the data contract, and trains without
+   sending samples through Studio.
+4. Studio polls replayable job evidence and shows learning, validation,
+   throughput, resource, and loader evidence.
+5. The worker commits checkpoints directly to SpiralDB while training
+   continues.
 6. The user may stop, inspect, resume from a checkpoint, or delete the run.
 
 ## Run management
@@ -32,8 +35,8 @@ durable checkpoints without moving data ownership into the compute runtime.
   checkpoint.
 - **TRAIN-009** Checkpoints created during a run must appear before the run
   finishes.
-- **TRAIN-010** Studio must persist run lifecycle, configuration, metrics, and
-  checkpoints in SpiralDB.
+- **TRAIN-010** Studio must persist mirrored run lifecycle, configuration, and
+  metrics; the worker must persist checkpoint rows directly in SpiralDB.
 
 ## Training data
 
@@ -51,8 +54,8 @@ durable checkpoints without moving data ownership into the compute runtime.
   Arrow tensor conversion.
 - **TRAIN-017** When ACT requires image resizing or normalization, the transform
   must match LeRobot behavior.
-- **TRAIN-018** Studio should overlap data preparation with model compute without
-  weakening cancellation or memory bounds.
+- **TRAIN-018** The worker should overlap or pipeline data preparation with
+  model compute without weakening cancellation or memory bounds.
 - **TRAIN-019** Validation must use whole episodes excluded from training.
 
 ## Evidence
@@ -77,7 +80,7 @@ durable checkpoints without moving data ownership into the compute runtime.
   metadata.
 - **TRAIN-028** A checkpoint must declare the exact model, cameras, joints,
   normalization, sample rate, and action horizon.
-- **TRAIN-029** Studio must commit checkpoints to SpiralDB as the run
+- **TRAIN-029** The worker must commit checkpoints directly to SpiralDB as the run
   progresses.
 - **TRAIN-030** A runtime setting change must not retarget an active run.
 - **TRAIN-031** Persisted run history must identify the selected relational
@@ -91,8 +94,10 @@ durable checkpoints without moving data ownership into the compute runtime.
   [`backend/application/training.rs`](../../crates/spiral-robotics-studio-backend/src/backend/application/training.rs)
   and
   [`backend/application/training_execution.rs`](../../crates/spiral-robotics-studio-backend/src/backend/application/training_execution.rs)
-- SpiralDB batch preparation and runtime supervision:
-  [`backend/training`](../../crates/spiral-robotics-studio-backend/src/backend/training/)
+- Studio job supervision:
+  [`backend/training/manager.rs`](../../crates/spiral-robotics-studio-backend/src/backend/training/manager.rs)
+- SpiralDB batch preparation and checkpoint publication:
+  [`training/src/spiral_training_runtime`](../../training/src/spiral_training_runtime/)
 - Training UI:
   [`frontend/screens/training`](../../crates/spiral-robotics-studio/src/frontend/screens/training/)
 - Framework-neutral contracts:

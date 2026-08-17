@@ -8,6 +8,22 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "adbc-driver-manager"
+version = "1.12.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9c/f8/ed6475b49a7cf35ea888d5c95e7d4bc9dc6568f9d741f14c0573d622cc1e/adbc_driver_manager-1.12.0.tar.gz", hash = "sha256:45991f0c2de369d330c6a211ca2edbcce6389c5dc81cde70461bdeb6f8f7b268", size = 217579, upload-time = "2026-07-28T00:43:03.512Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/de/8c/cd3fe16df716719116a6c79e64a768fe994f6ded55d5a8f091bb4f42d6f0/adbc_driver_manager-1.12.0-cp312-cp312-macosx_10_15_x86_64.whl", hash = "sha256:fd02364c65b8b376c5627e3b77410f457fcbbf983e52e8d15ca099da3a7ae314", size = 599054, upload-time = "2026-07-28T00:42:04.072Z" },
+    { url = "https://files.pythonhosted.org/packages/49/4a/2f060ff6bd61420ea1613670e1f85a22a8714934c235186dc3803de8ddac/adbc_driver_manager-1.12.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:d8dcf62621090e8d9c8216e08dfc4043f16331872522186af61a5de9478e9c63", size = 609964, upload-time = "2026-07-28T00:42:05.82Z" },
+    { url = "https://files.pythonhosted.org/packages/8a/f1/0746db149828ae91e4a6cf49f8d0e49210eec20c03ad80044454139c8240/adbc_driver_manager-1.12.0-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:efa5dbbf101962d212b176f25e6fc509dacf07afd4cf70b5027d81ec6871bdec", size = 4685726, upload-time = "2026-07-28T00:42:08.1Z" },
+    { url = "https://files.pythonhosted.org/packages/b9/c3/f8e9c5157b19e986df719259eb3502dad1268df9f7a1034f65ca220ab2ea/adbc_driver_manager-1.12.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:8b340679a005a8adf6b0b58754dbc638dff00db7b2559c140406a1d92678b48c", size = 4768774, upload-time = "2026-07-28T00:42:10.359Z" },
+    { url = "https://files.pythonhosted.org/packages/92/51/f8e625af691e6b4c54945790854524356a02a0a69063e888f7cfee1b2e50/adbc_driver_manager-1.12.0-cp312-cp312-win_amd64.whl", hash = "sha256:47f428a922d224fd486b661deeaf9520e5faec558b3d144832bed09a080cac88", size = 760087, upload-time = "2026-07-28T00:42:11.871Z" },
+]
+
+[[package]]
 name = "annotated-doc"
 version = "0.0.5"
 source = { registry = "https://pypi.org/simple" }
@@ -551,6 +567,15 @@ wheels = [
 ]
 
 [[package]]
+name = "nvidia-ml-py"
+version = "13.610.43"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f0/b5/a8fbc356f768fa5c9cfd646668fd7d34bf55bdd1c6e20754642a64d930d4/nvidia_ml_py-13.610.43.tar.gz", hash = "sha256:65437eb73d68d0c62c931ca4d45038472faff03bd0b8729abba4b899f70d60f2", size = 52109, upload-time = "2026-06-01T18:54:08.829Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/23/45/caa600acfab94560807a20a64b5830d2cd3c3202b7f1328644d70b7d6bd8/nvidia_ml_py-13.610.43-py3-none-any.whl", hash = "sha256:f13c72698edef492f985cc225f14faafe68ae065a2e407f45bdf6f4b9b43fde8", size = 53163, upload-time = "2026-06-01T18:54:07.704Z" },
+]
+
+[[package]]
 name = "nvidia-nccl-cu12"
 version = "2.26.2"
 source = { registry = "https://pypi.org/simple" }
@@ -845,12 +870,15 @@ name = "spiral-training-runtime"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "adbc-driver-manager" },
     { name = "fastapi" },
     { name = "lerobot" },
     { name = "numpy" },
+    { name = "nvidia-ml-py", marker = "sys_platform == 'linux'" },
     { name = "psutil" },
     { name = "pyarrow" },
     { name = "safetensors" },
+    { name = "spiraldb" },
     { name = "torch", version = "2.7.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux'" },
     { name = "torch", version = "2.7.1+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux'" },
     { name = "torchvision", version = "0.22.1", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and sys_platform == 'linux'" },
@@ -869,15 +897,18 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "adbc-driver-manager", specifier = ">=1.7,<2" },
     { name = "fastapi", specifier = ">=0.116,<1" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28,<1" },
     { name = "lerobot", specifier = "==0.6.0" },
     { name = "numpy", specifier = ">=2.0,<2.3" },
+    { name = "nvidia-ml-py", marker = "sys_platform == 'linux'", specifier = ">=12,<14" },
     { name = "psutil", specifier = ">=7,<8" },
     { name = "pyarrow", specifier = ">=21,<30" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4,<10" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.12,<1" },
     { name = "safetensors", specifier = ">=0.4.3,<1" },
+    { name = "spiraldb", specifier = "==0.16.23" },
     { name = "torch", marker = "sys_platform != 'linux'", specifier = ">=2.7,<2.8" },
     { name = "torch", marker = "sys_platform == 'linux'", specifier = ">=2.7,<2.8", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torchvision", marker = "sys_platform != 'linux'", specifier = ">=0.22,<0.23" },
@@ -886,6 +917,21 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.35,<1" },
 ]
 provides-extras = ["dev"]
+
+[[package]]
+name = "spiraldb"
+version = "0.16.23"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "adbc-driver-manager" },
+    { name = "pyarrow" },
+    { name = "tqdm" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e2/7b/c346bfa72dd25da5e3ffd0f5c1c1c5f1ae8ebf447283292361ff4ad17a19/spiraldb-0.16.23-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:287cb8b28668c940bc242069bfaef0930f8c084fb5e985fca07e1d3c24651eca", size = 64383685, upload-time = "2026-08-12T14:54:58.615Z" },
+    { url = "https://files.pythonhosted.org/packages/30/af/f292321feea730781b48f8ee0c165e77949107d4dfc69f74eb9da091eba2/spiraldb-0.16.23-cp311-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:6126a1010bca32bcd3bf889329eeb508edc494704c7c603ce802333f39fcc4e4", size = 74872532, upload-time = "2026-08-12T14:55:05.381Z" },
+    { url = "https://files.pythonhosted.org/packages/48/b9/3a0422fb0b6618c20e5372bdfa806db38163e34e9ab72cd4f6e440808840/spiraldb-0.16.23-cp311-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:becaa0f9051829f000cb23e196ee02c3c7889ee13124f8549e6015bb8389abb0", size = 71156216, upload-time = "2026-08-12T14:55:11.559Z" },
+]
 
 [[package]]
 name = "starlette"

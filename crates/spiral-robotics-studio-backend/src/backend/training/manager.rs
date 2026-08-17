@@ -13,9 +13,10 @@ use spiral_robotics_contracts::api::{
 };
 use spiral_robotics_contracts::spiral;
 use spiral_robotics_training::{
-    ActTrainingConfig, TRAINING_BACKEND_API_VERSION, TrainingBackend, TrainingCheckpointRequest,
-    TrainingInitialization, TrainingModelConfig, TrainingSession, TrainingSessionInfo,
-    TrainingSessionRequest,
+    ActTrainingConfig, ActTrainingJobConfig, PendingTrainingStep, SpiralJobConnection,
+    TRAINING_BACKEND_API_VERSION, TrainingBackend, TrainingCheckpointRequest,
+    TrainingInitialization, TrainingJobPhase, TrainingJobRequest, TrainingJobSnapshot,
+    TrainingModelConfig, TrainingSession, TrainingSessionInfo, TrainingSessionRequest,
 };
 use tokio::sync::{broadcast, mpsc};
 
@@ -37,9 +38,8 @@ use crate::backend::application::training::{
     TrainingRunPhase as ApplicationTrainingRunPhase, TrainingSource as ApplicationTrainingSource,
 };
 use crate::backend::application::training_execution::{
-    self, RunStateChange, RuntimeEventWindow, TrainingCoordinatorPort, TrainingLaunch,
-    TrainingRunIdentity, TrainingRunPort, TrainingRuntimeEvent, TrainingRuntimeOutcome,
-    TrainingRuntimePort, TrainingRuntimeSession,
+    self, RunStateChange, TrainingCoordinatorPort, TrainingLaunch, TrainingRunIdentity,
+    TrainingRunPort, TrainingRuntimeEvent, TrainingRuntimeOutcome, TrainingRuntimePort,
 };
 use crate::backend::application::training_population::NormalizationStats;
 use crate::backend::application::training_runs::{
@@ -47,9 +47,8 @@ use crate::backend::application::training_runs::{
 };
 use crate::backend::storage::manager::StorageManager;
 use crate::backend::storage::repository::RepositoryConnection;
-use crate::backend::training::data::{LoadedActBatch, SpiralActLoader};
+use crate::backend::training::data::{LoadedActBatch, LoaderMetrics, SpiralActLoader};
 
-const STOP_GRACE: Duration = Duration::from_secs(30);
 const PREFETCH_BUFFER_SIZE: usize = 1;
 const LOADER_STALL: Duration = Duration::from_secs(2);
 static RUN_IDS: StableIdSequence = StableIdSequence::new("train", 0);
@@ -128,60 +127,76 @@ impl ActDataContract {
 }
 
 impl TrainingManager {
-    pub(crate) async fn open(
+    /// Construct the in-memory manager without touching external services.
+    pub(crate) fn new(
         storage: Arc<StorageManager>,
         training_backend: Arc<dyn TrainingBackend>,
         ffmpeg: String,
-    ) -> Result<Self, String> {
-        Self::open_with_clock(storage, training_backend, ffmpeg, Arc::new(SystemClock)).await
+    ) -> Self {
+        Self::new_with_clock(storage, training_backend, ffmpeg, Arc::new(SystemClock))
     }
 
-    pub(crate) async fn open_with_clock(
+    fn new_with_clock(
         storage: Arc<StorageManager>,
         training_backend: Arc<dyn TrainingBackend>,
         ffmpeg: String,
         clock: Arc<dyn Clock>,
-    ) -> Result<Self, String> {
-        let mut snapshot = storage.load_training_snapshot().unwrap_or_else(|error| {
-            tracing::warn!("could not load Spiral training history during startup: {error}");
-            TrainingSnapshot::default()
-        });
-        let mut run_registry = registry(&snapshot)?;
-        let recovered = run_registry.recover_after_restart();
-        let retained = run_registry
-            .retained_ids()
-            .map(str::to_owned)
-            .collect::<std::collections::BTreeSet<_>>();
-        snapshot.runs.retain(|run| retained.contains(&run.id));
-        for transition in recovered {
-            let run = snapshot
-                .runs
-                .iter_mut()
-                .find(|run| run.id == transition.id)
-                .expect("the registry was built from this snapshot");
-            run.phase = TrainingRunPhase::Failed;
-            run.finished_ms = Some(clock.now_ms());
-            run.message = Some("The backend restarted while this run was active.".to_owned());
-        }
-        snapshot.readiness = readiness(&storage, &training_backend).await;
-        if storage.is_configured()
-            && let Err(error) = storage.save_training_snapshot(&snapshot)
-        {
-            tracing::warn!("could not save recovered Spiral training history: {error}");
-        }
+    ) -> Self {
         let (updates, _) = broadcast::channel(512);
-        let manager = Self {
+        Self {
             inner: Arc::new(TrainingManagerInner {
                 storage,
                 training_backend,
                 ffmpeg,
                 clock,
-                snapshot: Mutex::new(snapshot),
+                snapshot: Mutex::new(TrainingSnapshot::default()),
                 updates,
                 controls: Mutex::new(BTreeMap::new()),
             }),
-        };
-        Ok(manager)
+        }
+    }
+
+    /// Restore persisted history after the HTTP listener is already serving.
+    pub(crate) async fn hydrate_from_storage(&self) -> Result<(), String> {
+        let storage = self.inner.storage.clone();
+        let mut snapshot = tokio::task::spawn_blocking(move || storage.load_training_snapshot())
+            .await
+            .map_err(|error| format!("training history task stopped: {error}"))??;
+        let run_registry = registry(&snapshot)?;
+        let retained = run_registry
+            .retained_ids()
+            .map(str::to_owned)
+            .collect::<std::collections::BTreeSet<_>>();
+        snapshot.runs.retain(|run| retained.contains(&run.id));
+        // Readiness is live service state, not durable history. Preserve the
+        // concurrently computed value if probes finish before hydration.
+        let mut current = lock(&self.inner.snapshot);
+        snapshot.readiness = current.readiness.clone();
+        *current = snapshot.clone();
+        drop(current);
+        let _ = self.inner.updates.send(TrainingUpdate::Snapshot {
+            snapshot: Box::new(snapshot.clone()),
+        });
+        // A worker-owned job continues while Studio is down. Re-submit the
+        // immutable ID (the runtime treats POST as idempotent) and resume
+        // polling its replayable state instead of marking the run failed.
+        for run in snapshot.runs.into_iter().filter(|run| run.phase.active()) {
+            let cancel = Arc::new(AtomicBool::new(false));
+            lock(&self.inner.controls).insert(run.id.clone(), cancel.clone());
+            let manager = self.clone();
+            tokio::spawn(async move {
+                manager
+                    .run_backend(
+                        TrainingLaunch {
+                            run_id: run.id,
+                            command: application_training_command(run.config),
+                        },
+                        cancel,
+                    )
+                    .await;
+            });
+        }
+        Ok(())
     }
 
     pub(crate) fn snapshot(&self) -> TrainingSnapshot {
@@ -300,72 +315,315 @@ impl TrainingManager {
     }
 
     pub(crate) async fn shutdown(&self) {
-        let controls = std::mem::take(&mut *lock(&self.inner.controls));
-        for (_, cancel) in controls {
-            cancel.store(true, Ordering::Release);
-        }
-        let _ = tokio::time::timeout(STOP_GRACE + Duration::from_secs(2), async {
-            while lock(&self.inner.snapshot).active_run().is_some() {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await;
+        // A Studio shutdown only detaches the orchestration client. The remote worker owns
+        // the job and must keep running so a restarted Studio process can reattach to it.
+        lock(&self.inner.controls).clear();
     }
 
     async fn run_backend(&self, launch: TrainingLaunch, cancel: Arc<AtomicBool>) {
         let run_id = launch.run_id;
-        let request = contract_training_request(launch.command.clone());
-        let mut session = TrainingRuntimeSession::new(run_id.clone(), launch.command);
-
-        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
-        let training_request = request.clone();
-        let training_run_id = run_id.clone();
-        let training_cancel = cancel.clone();
-        let training_clock = self.inner.clock.clone();
-        let ffmpeg = self.inner.ffmpeg.clone();
-        let storage = self.inner.storage.clone();
-        let training_backend = self.inner.training_backend.clone();
-        let namespace = storage.namespace().to_owned();
-        let mut training = Box::pin(storage.run_training_adbc(move |connection| {
-            train_blocking(
-                connection,
-                training_backend.as_ref(),
-                &training_run_id,
-                &training_request,
-                &namespace,
-                &ffmpeg,
-                training_clock,
-                training_cancel,
-                events_tx,
-            )
-        }));
-        let mut events_open = true;
-        let terminal = loop {
-            tokio::select! {
-                result = &mut training => break result,
-                event = events_rx.recv(), if events_open => {
-                    match event {
-                        None => events_open = false,
-                        Some(event) => training_execution::accept_runtime_event(
-                            self,
-                            &mut session,
-                            application_runtime_event(event),
-                            RuntimeEventWindow::Live,
-                        ).await,
-                    }
-                }
+        let request = contract_training_request(launch.command);
+        let credentials = self.inner.storage.spiral_credentials();
+        let job_request = TrainingJobRequest {
+            job_id: run_id.clone(),
+            run_name: request.run_name.clone(),
+            spiral: SpiralJobConnection {
+                api_url: self.inner.storage.spiral_endpoint(),
+                spfs_url: self.inner.storage.spiral_spfs_endpoint(),
+                project_id: self.inner.storage.project_id(),
+                namespace: self.inner.storage.namespace().to_owned(),
+                client_id: credentials
+                    .as_ref()
+                    .map(|credentials| credentials.client_id.clone()),
+                client_secret: credentials
+                    .as_ref()
+                    .map(|credentials| credentials.client_secret.clone()),
+            },
+            sql: request.sql.clone(),
+            state_column: request.state_column.clone(),
+            action_column: request.action_column.clone(),
+            device: request.device.clone(),
+            initialization: if request.act.pretrained_backbone {
+                TrainingInitialization::PretrainedBackbone
+            } else {
+                TrainingInitialization::Random
+            },
+            steps: request.steps,
+            batch_size: request.batch_size,
+            validation_split: request.validation_split,
+            learning_rate: request.learning_rate,
+            checkpoint_every: request.checkpoint_every,
+            chunk_size: request.chunk_size,
+            seed: request.seed,
+            act: ActTrainingJobConfig {
+                camera_streams: request.act.camera_streams.clone(),
+                image_width: request.act.image_width,
+                image_height: request.act.image_height,
+                video_decoder: request.act.video_decoder.clone(),
+                hidden_dimensions: request.act.hidden_dim,
+                latent_dimensions: request.act.latent_dim,
+                attention_heads: request.act.attention_heads,
+                feedforward_dimensions: request.act.feedforward_dim,
+                encoder_layers: request.act.encoder_layers,
+                vae_encoder_layers: request.act.vae_encoder_layers,
+                decoder_layers: request.act.decoder_layers,
+                kl_weight: request.act.kl_weight,
+            },
+        };
+        let backend = self.inner.training_backend.clone();
+        let existing_run_id = run_id.clone();
+        let initial = tokio::task::spawn_blocking(move || match backend.job(&existing_run_id) {
+            Ok(snapshot) => Ok(snapshot),
+            Err(_) => backend.create_job(job_request),
+        })
+        .await;
+        let mut snapshot = match initial {
+            Ok(Ok(snapshot)) => snapshot,
+            Ok(Err(error)) => {
+                self.finish_remote_job(&run_id, TrainingJobPhase::Failed, 0, error.to_string());
+                return;
+            }
+            Err(error) => {
+                self.finish_remote_job(
+                    &run_id,
+                    TrainingJobPhase::Failed,
+                    0,
+                    format!("training job launch task stopped: {error}"),
+                );
+                return;
             }
         };
-        while let Ok(event) = events_rx.try_recv() {
-            training_execution::accept_runtime_event(
-                self,
-                &mut session,
-                application_runtime_event(event),
-                RuntimeEventWindow::Draining,
-            )
+        let persisted_run = lock(&self.inner.snapshot)
+            .runs
+            .iter()
+            .find(|run| run.id == run_id)
+            .cloned();
+        let persisted_metric_step = persisted_run
+            .as_ref()
+            .and_then(|run| run.metrics.iter().map(|metric| metric.step).max())
+            .unwrap_or(0);
+        let persisted_checkpoint_step = persisted_run
+            .as_ref()
+            .and_then(|run| {
+                run.checkpoints
+                    .iter()
+                    .map(|checkpoint| checkpoint.step)
+                    .max()
+            })
+            .unwrap_or(0);
+        let mut metric_count = snapshot
+            .metrics
+            .partition_point(|metric| metric.step <= persisted_metric_step);
+        let mut checkpoint_count = snapshot
+            .checkpoints
+            .partition_point(|checkpoint| checkpoint.step <= persisted_checkpoint_step);
+        let mut log_count = persisted_run
+            .as_ref()
+            .map(|run| {
+                snapshot
+                    .logs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, line)| run.logs.contains(line))
+                    .map(|(index, _)| index + 1)
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        let mut configured = false;
+        let mut stop_sent = false;
+        let mut poll_failures = 0_u64;
+        loop {
+            if let Err(error) = self.apply_remote_job_snapshot(
+                &run_id,
+                &request,
+                &snapshot,
+                &mut metric_count,
+                &mut checkpoint_count,
+                &mut log_count,
+                &mut configured,
+            ) {
+                self.finish_remote_job(
+                    &run_id,
+                    TrainingJobPhase::Failed,
+                    snapshot.current_step,
+                    error,
+                );
+                return;
+            }
+            if snapshot.phase.terminal() {
+                self.finish_remote_job(
+                    &run_id,
+                    snapshot.phase,
+                    snapshot.current_step,
+                    snapshot.message.clone().unwrap_or_default(),
+                );
+                return;
+            }
+            let backend = self.inner.training_backend.clone();
+            let next_run_id = run_id.clone();
+            let should_stop = cancel.load(Ordering::Acquire) && !stop_sent;
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let next = tokio::task::spawn_blocking(move || {
+                if should_stop {
+                    backend.stop_job(&next_run_id)
+                } else {
+                    backend.job(&next_run_id)
+                }
+            })
             .await;
+            snapshot = match next {
+                Ok(Ok(snapshot)) => {
+                    if should_stop {
+                        stop_sent = true;
+                    }
+                    if poll_failures > 0 {
+                        self.push_log(
+                            &run_id,
+                            "Reconnected to the remote training worker.".to_owned(),
+                        );
+                    }
+                    poll_failures = 0;
+                    snapshot
+                }
+                Ok(Err(error)) => {
+                    poll_failures += 1;
+                    if poll_failures == 1 {
+                        self.push_log(
+                            &run_id,
+                            format!(
+                                "Remote training worker is temporarily unavailable; retrying: {error}"
+                            ),
+                        );
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    self.finish_remote_job(
+                        &run_id,
+                        TrainingJobPhase::Failed,
+                        snapshot.current_step,
+                        format!("training job poll task stopped: {error}"),
+                    );
+                    return;
+                }
+            };
         }
-        training_execution::complete_runtime(self, session, terminal);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_remote_job_snapshot(
+        &self,
+        run_id: &str,
+        request: &StartTrainingRequest,
+        snapshot: &TrainingJobSnapshot,
+        metric_count: &mut usize,
+        checkpoint_count: &mut usize,
+        log_count: &mut usize,
+        configured: &mut bool,
+    ) -> Result<(), String> {
+        if snapshot.job_id != run_id {
+            return Err("training runtime returned the wrong job ID".to_owned());
+        }
+        if !*configured && let Some(resolved) = &snapshot.resolved {
+            let mut resolved_request = request.clone();
+            resolved_request.act.camera_streams = resolved.camera_streams.clone();
+            self.apply_update(
+                TrainingUpdate::RunConfigured {
+                    run_id: run_id.to_owned(),
+                    config: Box::new(resolved_request),
+                },
+                true,
+            )?;
+            *configured = true;
+        }
+        if snapshot.phase == TrainingJobPhase::Running
+            && self.phase(run_id) == Some(TrainingRunPhase::Starting)
+        {
+            self.set_phase(
+                run_id,
+                TrainingRunPhase::Running,
+                None,
+                snapshot.message.clone(),
+            )?;
+        }
+        for metric in snapshot.metrics.iter().skip(*metric_count) {
+            self.apply_update(
+                TrainingUpdate::Metric {
+                    run_id: run_id.to_owned(),
+                    point: Box::new(TrainingMetricPoint {
+                        step: metric.step,
+                        train_loss: metric.train_loss,
+                        validation_loss: metric.validation_loss,
+                        learning_rate: metric.learning_rate,
+                        transfer_bytes_per_second: 0.0,
+                        examples_per_second: metric.examples_per_second,
+                        cpu_percent: metric.cpu_percent,
+                        gpu_percent: metric.gpu_percent,
+                        memory_bytes: metric.memory_bytes,
+                        loader_ms: metric.loader_ms,
+                        arrow_encode_ms: None,
+                        upload_ms: None,
+                        device_copy_ms: metric.device_copy_ms,
+                        model_ms: metric.model_ms,
+                        elapsed_seconds: metric.elapsed_seconds,
+                        event: metric.event.clone(),
+                    }),
+                },
+                false,
+            )?;
+        }
+        *metric_count = snapshot.metrics.len();
+        for checkpoint in snapshot.checkpoints.iter().skip(*checkpoint_count) {
+            self.inner.storage.invalidate_idle_connections();
+            self.apply_update(
+                TrainingUpdate::Checkpoint {
+                    run_id: run_id.to_owned(),
+                    checkpoint: TrainingCheckpoint {
+                        step: checkpoint.step,
+                        created_ms: checkpoint.created_ms,
+                        validation_loss: checkpoint.validation_loss,
+                        byte_size: checkpoint.byte_size,
+                        inference_ready: true,
+                        recommended_action_steps: checkpoint.recommended_action_steps,
+                        sample_hz: checkpoint.sample_hz,
+                    },
+                },
+                true,
+            )?;
+        }
+        *checkpoint_count = snapshot.checkpoints.len();
+        for line in snapshot.logs.iter().skip(*log_count) {
+            self.push_log(run_id, line.clone());
+        }
+        *log_count = snapshot.logs.len();
+        Ok(())
+    }
+
+    fn finish_remote_job(
+        &self,
+        run_id: &str,
+        phase: TrainingJobPhase,
+        current_step: u64,
+        message: String,
+    ) {
+        let phase = match phase {
+            TrainingJobPhase::Completed => TrainingRunPhase::Completed,
+            TrainingJobPhase::Stopped => TrainingRunPhase::Stopped,
+            TrainingJobPhase::Stopping => TrainingRunPhase::Stopping,
+            TrainingJobPhase::Starting | TrainingJobPhase::Running | TrainingJobPhase::Failed => {
+                TrainingRunPhase::Failed
+            }
+        };
+        let update = TrainingUpdate::RunState {
+            run_id: run_id.to_owned(),
+            phase,
+            current_step,
+            finished_ms: (!phase.active()).then(|| self.inner.clock.now_ms()),
+            message: (!message.is_empty()).then_some(message),
+        };
+        let _ = self.apply_update(update, true);
+        lock(&self.inner.controls).remove(run_id);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -560,17 +818,12 @@ impl TrainingCoordinatorPort for TrainingManager {
 
     async fn validate_training_query(
         &self,
-        command: &ApplicationStartTrainingCommand,
+        _command: &ApplicationStartTrainingCommand,
     ) -> Result<(), ApplicationError> {
-        self.inner
-            .storage
-            .validate_training_query(
-                &command.query,
-                &command.state_column,
-                &command.action_column,
-            )
-            .await
-            .map_err(ApplicationError::conflict)
+        // The worker owns the Spiral connection and validates the immutable
+        // query while resolving its data contract. Studio does not execute the
+        // training query or read a training batch.
+        Ok(())
     }
 
     fn next_training_identity(&self) -> TrainingRunIdentity {
@@ -744,7 +997,7 @@ fn train_blocking(
         trainer_info.parameter_count as f64 / 1_000_000.0
     )));
     let _ = events.send(BackendEvent::Log(format!(
-        "ACT inputs: state={}, action={}, image={}x{}, chunk={}, cameras={}. Spiral owns the normal decode path; Studio recovers unusable managed indexes from the original MP4 with equivalent resize and ImageNet normalization.",
+        "ACT inputs: state={}, action={}, image={}x{}, chunk={}, cameras={}. Spiral owns the normal decode path; Studio recovers unusable managed indexes from the original MP4 with equivalent resize. Images cross the runtime boundary as HWC RGB bytes and are converted and ImageNet-normalized on the selected device.",
         loader.state_dimensions(),
         loader.action_dimensions(),
         loader.image_width(),
@@ -753,7 +1006,7 @@ fn train_blocking(
         resolved_request.act.camera_streams.join(", ")
     )));
     let _ = events.send(BackendEvent::Log(
-        "ACT input prefetch is active with one completed batch buffered while the training backend runs."
+        "ACT input pipelining is active: Spiral prepares one batch ahead and Studio fills one bounded remote Arrow buffer while the current optimizer step runs."
             .to_owned(),
     ));
 
@@ -865,6 +1118,48 @@ fn receive_prefetched_batch(
     }
 }
 
+struct BufferedTrainingStep {
+    step: u64,
+    loader_metrics: LoaderMetrics,
+    loader_wait: Duration,
+}
+
+struct RunningTrainingStep {
+    buffered: BufferedTrainingStep,
+    pending: Box<dyn PendingTrainingStep>,
+}
+
+fn buffer_prefetched_training_step(
+    receiver: &std_mpsc::Receiver<PrefetchMessage>,
+    trainer: &mut dyn TrainingSession,
+    step: u64,
+) -> Result<Option<BufferedTrainingStep>, String> {
+    let loader_wait_started = Instant::now();
+    let Some(loaded) = receive_prefetched_batch(receiver, step, PrefetchedBatchKind::Training)?
+    else {
+        return Ok(None);
+    };
+    let loader_wait = loader_wait_started.elapsed();
+    trainer
+        .buffer_training_batch(loaded.batch, step)
+        .map_err(|error| error.to_string())?;
+    Ok(Some(BufferedTrainingStep {
+        step,
+        loader_metrics: loaded.metrics,
+        loader_wait,
+    }))
+}
+
+fn begin_buffered_training_step(
+    trainer: &mut dyn TrainingSession,
+    buffered: BufferedTrainingStep,
+) -> Result<RunningTrainingStep, String> {
+    let pending = trainer
+        .begin_training_step(buffered.step)
+        .map_err(|error| error.to_string())?;
+    Ok(RunningTrainingStep { buffered, pending })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn train_prefetched(
     receiver: std_mpsc::Receiver<PrefetchMessage>,
@@ -885,34 +1180,48 @@ fn train_prefetched(
     let mut examples_since_metric = 0_usize;
     let mut last_validation = None;
     let mut last_checkpoint = 0;
-    let mut completed_steps = 0;
-    for step in 1..=request.steps {
-        if cancel.load(Ordering::Acquire) {
-            break;
-        }
-        let loader_wait_started = Instant::now();
-        let Some(loaded) =
-            receive_prefetched_batch(&receiver, step, PrefetchedBatchKind::Training)?
-        else {
-            break;
-        };
-        let loader_wait = loader_wait_started.elapsed();
-        let loader_metrics = loaded.metrics;
-        let loss = trainer
-            .train_step(loaded.batch, step)
+    let mut completed_steps: u64;
+    if cancel.load(Ordering::Acquire) {
+        return Ok(TrainingRuntimeOutcome {
+            steps: 0,
+            stopped: true,
+        });
+    }
+    let Some(first) = buffer_prefetched_training_step(&receiver, trainer, 1)? else {
+        return Ok(TrainingRuntimeOutcome {
+            steps: 0,
+            stopped: cancel.load(Ordering::Acquire),
+        });
+    };
+    let mut running = begin_buffered_training_step(trainer, first)?;
+    loop {
+        let step = running.buffered.step;
+        let validation_due = has_validation && step % validation_every == 0;
+        let next_buffer_result =
+            if step < request.steps && !validation_due && !cancel.load(Ordering::Acquire) {
+                buffer_prefetched_training_step(&receiver, trainer, step + 1)
+            } else {
+                Ok(None)
+            };
+        let output = running
+            .pending
+            .finish()
             .map_err(|error| error.to_string())?;
+        let loader_metrics = running.buffered.loader_metrics;
+        let loader_wait = running.buffered.loader_wait;
+        let usage = output.telemetry;
         completed_steps = step;
         examples_since_metric += request.batch_size;
         let mut event = Vec::new();
-        let validation_loss = if has_validation && step % validation_every == 0 {
+        let validation_loss = if validation_due {
             let batch = receive_prefetched_batch(&receiver, step, PrefetchedBatchKind::Validation)?
                 .ok_or_else(|| {
                     format!("ACT input prefetch stopped before validation at step {step}")
                 })?;
-            let loss = trainer
-                .validation_step(batch.batch)
+            let validation = trainer
+                .validation_step(batch.batch, step)
                 .map_err(|error| error.to_string())?;
-            last_validation = Some(loss.total);
+            last_validation = Some(validation.loss.total);
             event.push("validation");
             last_validation
         } else {
@@ -923,25 +1232,29 @@ fn train_prefetched(
         }
         let now = Instant::now();
         let elapsed = now.duration_since(metric_started).as_secs_f64().max(1.0e-9);
-        let usage = trainer.telemetry().ok();
         let _ = events.send(BackendEvent::Metric(TrainingMetricPoint {
             step,
-            train_loss: loss.total,
+            train_loss: output.loss.total,
             validation_loss,
-            learning_rate: trainer.learning_rate(step),
+            learning_rate: output.learning_rate,
             transfer_bytes_per_second: loader_metrics.source_bytes as f64
                 / loader_metrics.seconds.max(1.0e-9),
             examples_per_second: examples_since_metric as f64 / elapsed,
-            cpu_percent: usage.and_then(|usage| usage.cpu_percent),
-            gpu_percent: usage.and_then(|usage| usage.gpu_percent),
-            memory_bytes: usage.and_then(|usage| usage.memory_bytes),
+            cpu_percent: usage.cpu_percent,
+            gpu_percent: usage.gpu_percent,
+            memory_bytes: usage.memory_bytes,
+            loader_ms: Some(loader_metrics.seconds * 1_000.0),
+            arrow_encode_ms: usage.arrow_encode_ms,
+            upload_ms: usage.upload_ms,
+            device_copy_ms: usage.device_copy_ms,
+            model_ms: usage.model_ms,
             elapsed_seconds: now.duration_since(started).as_secs_f64(),
             event: (!event.is_empty()).then(|| event.join(" · ")),
         }));
         if step == 1 {
             let _ = events.send(BackendEvent::Log(format!(
                 "Loss components at step 1: L1={:.4}, KL={:.4}, pad={:.4}; decoded {} frame(s).",
-                loss.l1, loss.kl, loss.pad, loader_metrics.requested_frames
+                output.loss.l1, output.loss.kl, output.loss.pad, loader_metrics.requested_frames
             )));
         }
         metric_started = now;
@@ -960,6 +1273,21 @@ fn train_prefetched(
             )?;
             last_checkpoint = step;
         }
+        let next_buffered = next_buffer_result?;
+        if step >= request.steps || cancel.load(Ordering::Acquire) {
+            break;
+        }
+        let next_buffered = match next_buffered {
+            Some(buffered) => buffered,
+            None => {
+                let Some(buffered) = buffer_prefetched_training_step(&receiver, trainer, step + 1)?
+                else {
+                    break;
+                };
+                buffered
+            }
+        };
+        running = begin_buffered_training_step(trainer, next_buffered)?;
     }
     if completed_steps > 0 && last_checkpoint != completed_steps {
         send_checkpoint(
@@ -1100,6 +1428,11 @@ fn checkpoint_manifest(
                 "runtime": trainer_info.backend.runtime,
                 "device": trainer_info.device,
             },
+            "training_image_transport": {
+                "dtype": "uint8",
+                "layout": "hwc",
+                "normalization": "runtime_imagenet",
+            },
             "transport": "adbc 0.24 / arrow 58.4",
             "language": "python",
         },
@@ -1121,19 +1454,22 @@ async fn readiness(
     storage: &StorageManager,
     training_backend: &Arc<dyn TrainingBackend>,
 ) -> TrainingReadiness {
-    let backend = probe_training_backend(training_backend).await;
+    let backend_probe = probe_training_backend(training_backend);
+    let spiral_probe = async {
+        tokio::time::timeout(Duration::from_secs(8), storage.test_spiral())
+            .await
+            .unwrap_or_else(|_| ConnectionTestResponse {
+                ok: false,
+                message: "the connection probe timed out after 8 seconds".to_owned(),
+            })
+    };
+    let (backend, connection) = tokio::join!(backend_probe, spiral_probe);
     let runtime = backend.as_ref().ok().map(|info| TrainingRuntimeInfo {
         id: info.id.clone(),
         display_name: info.display_name.clone(),
         runtime: info.runtime.clone(),
         devices: info.devices.clone(),
     });
-    let connection = tokio::time::timeout(Duration::from_secs(8), storage.test_spiral())
-        .await
-        .unwrap_or_else(|_| ConnectionTestResponse {
-            ok: false,
-            message: "the connection probe timed out after 8 seconds".to_owned(),
-        });
     let spiral_ready = connection.ok;
     let ready = spiral_ready && backend.is_ok();
     let summary = match (connection, backend) {
@@ -1393,6 +1729,11 @@ fn application_training_metric(metric: TrainingMetricPoint) -> ApplicationTraini
         cpu_percent: metric.cpu_percent,
         gpu_percent: metric.gpu_percent,
         memory_bytes: metric.memory_bytes,
+        loader_ms: metric.loader_ms,
+        batch_encode_ms: metric.arrow_encode_ms,
+        upload_ms: metric.upload_ms,
+        device_copy_ms: metric.device_copy_ms,
+        model_ms: metric.model_ms,
         elapsed_seconds: metric.elapsed_seconds,
         event: metric.event,
     }
@@ -1409,6 +1750,11 @@ fn contract_training_metric(metric: ApplicationTrainingMetric) -> TrainingMetric
         cpu_percent: metric.cpu_percent,
         gpu_percent: metric.gpu_percent,
         memory_bytes: metric.memory_bytes,
+        loader_ms: metric.loader_ms,
+        arrow_encode_ms: metric.batch_encode_ms,
+        upload_ms: metric.upload_ms,
+        device_copy_ms: metric.device_copy_ms,
+        model_ms: metric.model_ms,
         elapsed_seconds: metric.elapsed_seconds,
         event: metric.event,
     }
@@ -1544,14 +1890,17 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_training::TrainingBatch;
+    use spiral_robotics_training::{
+        TrainingBackendError, TrainingBatch, TrainingCheckpointArtifact, TrainingStepOutput,
+        TrainingTelemetry,
+    };
 
     fn loaded_batch(marker: f32) -> LoadedActBatch {
         LoadedActBatch {
             batch: TrainingBatch {
                 batch_size: 1,
                 states: vec![marker].into(),
-                images: vec![marker].into(),
+                images: vec![marker as u8].into(),
                 actions: vec![marker].into(),
                 action_is_pad: vec![0].into(),
             },
@@ -1575,6 +1924,172 @@ mod tests {
             device: "remote-gpu".to_owned(),
             parameter_count: 42,
         }
+    }
+
+    struct PipelinePendingStep {
+        step: u64,
+        next_step_buffered: Arc<AtomicBool>,
+    }
+
+    impl PendingTrainingStep for PipelinePendingStep {
+        fn finish(self: Box<Self>) -> Result<TrainingStepOutput, TrainingBackendError> {
+            if self.step == 1 && !self.next_step_buffered.load(Ordering::Acquire) {
+                return Err(TrainingBackendError::new(
+                    "step 1 finished before step 2 reached the upload buffer",
+                ));
+            }
+            Ok(TrainingStepOutput {
+                loss: spiral_robotics_training::TrainingLoss {
+                    total: self.step as f64,
+                    l1: self.step as f64,
+                    kl: 0.0,
+                    pad: 0.0,
+                },
+                learning_rate: 1.0e-5,
+                telemetry: TrainingTelemetry {
+                    cpu_percent: None,
+                    gpu_percent: None,
+                    memory_bytes: None,
+                    arrow_encode_ms: Some(1.0),
+                    upload_ms: Some(2.0),
+                    device_copy_ms: Some(3.0),
+                    model_ms: Some(4.0),
+                },
+            })
+        }
+    }
+
+    struct PipelineSession {
+        info: TrainingSessionInfo,
+        buffered_step: Option<u64>,
+        next_step_buffered: Arc<AtomicBool>,
+    }
+
+    impl PipelineSession {
+        fn new() -> Self {
+            Self {
+                info: session_info(),
+                buffered_step: None,
+                next_step_buffered: Arc::new(AtomicBool::new(false)),
+            }
+        }
+    }
+
+    impl TrainingSession for PipelineSession {
+        fn info(&self) -> &TrainingSessionInfo {
+            &self.info
+        }
+
+        fn buffer_training_batch(
+            &mut self,
+            _batch: TrainingBatch<'static>,
+            step: u64,
+        ) -> Result<(), TrainingBackendError> {
+            if self.buffered_step.replace(step).is_some() {
+                return Err(TrainingBackendError::new(
+                    "test buffer was already occupied",
+                ));
+            }
+            if step == 2 {
+                self.next_step_buffered.store(true, Ordering::Release);
+            }
+            Ok(())
+        }
+
+        fn begin_training_step(
+            &mut self,
+            step: u64,
+        ) -> Result<Box<dyn PendingTrainingStep>, TrainingBackendError> {
+            if self.buffered_step.take() != Some(step) {
+                return Err(TrainingBackendError::new("test buffer step mismatch"));
+            }
+            Ok(Box::new(PipelinePendingStep {
+                step,
+                next_step_buffered: self.next_step_buffered.clone(),
+            }))
+        }
+
+        fn validation_step(
+            &mut self,
+            _batch: TrainingBatch<'static>,
+            _after_step: u64,
+        ) -> Result<TrainingStepOutput, TrainingBackendError> {
+            Err(TrainingBackendError::new(
+                "validation was not expected in the pipeline test",
+            ))
+        }
+
+        fn checkpoint(
+            &self,
+            _request: TrainingCheckpointRequest,
+        ) -> Result<TrainingCheckpointArtifact, TrainingBackendError> {
+            Ok(TrainingCheckpointArtifact {
+                format: "safetensors".to_owned(),
+                extension: "safetensors".to_owned(),
+                payload: vec![1],
+            })
+        }
+    }
+
+    #[test]
+    fn remote_upload_buffer_is_filled_before_the_current_step_finishes() {
+        let (sender, receiver) = std_mpsc::sync_channel(2);
+        for step in 1..=2 {
+            sender
+                .send(PrefetchMessage::Batch {
+                    step,
+                    kind: PrefetchedBatchKind::Training,
+                    result: Ok(loaded_batch(step as f32)),
+                })
+                .unwrap();
+        }
+        drop(sender);
+        let request = StartTrainingRequest {
+            steps: 2,
+            batch_size: 1,
+            checkpoint_every: 10,
+            ..Default::default()
+        };
+        let data_contract = ActDataContract {
+            state_dimensions: 1,
+            action_dimensions: 1,
+            image_width: 1,
+            image_height: 1,
+            stats: NormalizationStats::identity(1, 1),
+            joint_names: vec!["joint".to_owned()],
+            robot_type: "test".to_owned(),
+            sample_hz: 30.0,
+        };
+        let (events, mut updates) = mpsc::unbounded_channel();
+        let checkpoint_writer = std::thread::spawn(move || {
+            while let Some(event) = updates.blocking_recv() {
+                if let BackendEvent::Checkpoint(checkpoint) = event {
+                    checkpoint.acknowledged.send(Ok(())).unwrap();
+                    return;
+                }
+            }
+        });
+        let mut trainer = PipelineSession::new();
+
+        let outcome = train_prefetched(
+            receiver,
+            "train-pipeline",
+            &request,
+            &request,
+            &SystemClock,
+            &AtomicBool::new(false),
+            &events,
+            &data_contract,
+            &session_info(),
+            &mut trainer,
+            25,
+            false,
+        )
+        .unwrap();
+
+        checkpoint_writer.join().unwrap();
+        assert_eq!(outcome.steps, 2);
+        assert!(trainer.next_step_buffered.load(Ordering::Acquire));
     }
 
     #[test]

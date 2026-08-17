@@ -17,7 +17,7 @@ use url::Url;
 
 const BACKEND_STATE_FILE: &str = "backend-state.json";
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
 struct BackendState {
     #[serde(default)]
     project_id: String,
@@ -25,6 +25,16 @@ struct BackendState {
     spiral_endpoint: String,
     #[serde(default)]
     spiral_spfs_endpoint: String,
+    #[serde(default)]
+    client_id: String,
+    #[serde(default)]
+    client_secret: String,
+}
+
+#[derive(Clone, Default, Eq, PartialEq)]
+pub(crate) struct SpiralCredentials {
+    pub client_id: String,
+    pub client_secret: String,
 }
 
 /// Private backend-local bootstrap state. Future auth/session metadata may
@@ -79,11 +89,26 @@ impl BackendStateStore {
         (!endpoint.is_empty()).then_some(endpoint)
     }
 
+    pub(crate) fn credentials(&self) -> Option<SpiralCredentials> {
+        let current = lock(&self.current);
+        let client_id = current.client_id.trim().to_owned();
+        let client_secret = current.client_secret.clone();
+        (!client_id.is_empty() && !client_secret.is_empty()).then_some(SpiralCredentials {
+            client_id,
+            client_secret,
+        })
+    }
+
+    pub(crate) fn client_id(&self) -> String {
+        lock(&self.current).client_id.trim().to_owned()
+    }
+
     pub(crate) fn save_connection(
         &self,
         project_id: &str,
         spiral_endpoint: &str,
         spiral_spfs_endpoint: &str,
+        credentials: Option<&SpiralCredentials>,
     ) -> Result<(), String> {
         let project_id = project_id.trim();
         if project_id.is_empty()
@@ -99,6 +124,12 @@ impl BackendStateStore {
             project_id: project_id.to_owned(),
             spiral_endpoint,
             spiral_spfs_endpoint,
+            client_id: credentials
+                .map(|credentials| credentials.client_id.clone())
+                .unwrap_or_default(),
+            client_secret: credentials
+                .map(|credentials| credentials.client_secret.clone())
+                .unwrap_or_default(),
         };
         write_private_json(&self.path, &next)?;
         *lock(&self.current) = next;
@@ -112,6 +143,10 @@ pub(crate) fn normalize_spiral_endpoint(endpoint: &str) -> Result<String, String
 
 pub(crate) fn normalize_spiral_spfs_endpoint(endpoint: &str) -> Result<String, String> {
     normalize_service_endpoint(endpoint, "Spiral SpFS endpoint")
+}
+
+pub(crate) fn normalize_training_runtime_endpoint(endpoint: &str) -> Result<String, String> {
+    normalize_service_endpoint(endpoint, "Training runtime endpoint")
 }
 
 fn normalize_service_endpoint(endpoint: &str, label: &str) -> Result<String, String> {
@@ -173,10 +208,7 @@ impl StudioPreferencesStore {
         video: VideoSettings,
     ) -> Result<StoredStudioPreferences, String> {
         let endpoint = training.endpoint.trim();
-        if !endpoint.starts_with("http://") || endpoint.len() <= "http://".len() {
-            return Err("Training runtime endpoint must be a plain http:// address".to_owned());
-        }
-        training.endpoint = endpoint.to_owned();
+        training.endpoint = normalize_training_runtime_endpoint(endpoint)?;
         Ok(StoredStudioPreferences { training, video })
     }
 
@@ -245,12 +277,18 @@ mod tests {
         assert_eq!(store.project_id(), None);
         assert_eq!(store.spiral_endpoint(), None);
         assert_eq!(store.spiral_spfs_endpoint(), None);
+        assert!(store.credentials().is_none());
 
+        let credentials = SpiralCredentials {
+            client_id: "client-id".to_owned(),
+            client_secret: "client-secret".to_owned(),
+        };
         store
             .save_connection(
                 " project-123 ",
                 " http://127.0.0.1:4279/ ",
                 " http://127.0.0.1:4295/ ",
+                Some(&credentials),
             )
             .unwrap();
         assert_eq!(store.project_id().as_deref(), Some("project-123"));
@@ -262,6 +300,9 @@ mod tests {
             store.spiral_spfs_endpoint().as_deref(),
             Some("http://127.0.0.1:4295")
         );
+        let saved = store.credentials().expect("credentials are saved");
+        assert_eq!(saved.client_id, credentials.client_id);
+        assert_eq!(saved.client_secret, credentials.client_secret);
         let reopened = BackendStateStore::open(path).unwrap();
         assert_eq!(reopened.project_id().as_deref(), Some("project-123"));
         assert_eq!(
@@ -272,6 +313,9 @@ mod tests {
             reopened.spiral_spfs_endpoint().as_deref(),
             Some("http://127.0.0.1:4295")
         );
+        let saved = reopened.credentials().expect("credentials are reopened");
+        assert_eq!(saved.client_id, credentials.client_id);
+        assert_eq!(saved.client_secret, credentials.client_secret);
     }
 
     #[test]
@@ -296,16 +340,16 @@ mod tests {
     }
 
     #[test]
-    fn training_runtime_requires_a_plain_http_endpoint() {
+    fn training_runtime_requires_an_http_or_https_endpoint() {
         let store = StudioPreferencesStore::new(StoredStudioPreferences::default());
         let invalid = TrainingRuntimeSettings {
-            endpoint: "https://runtime.example".to_owned(),
+            endpoint: "ftp://runtime.example".to_owned(),
         };
         assert!(
             store
                 .stage_update(invalid, VideoSettings::default())
                 .unwrap_err()
-                .contains("http://")
+                .contains("http:// or https://")
         );
 
         let valid = TrainingRuntimeSettings {
@@ -313,7 +357,7 @@ mod tests {
         };
         let staged = store
             .stage_update(valid, VideoSettings::default())
-            .expect("remote plaintext HTTP endpoint is accepted");
+            .expect("HTTP runtime endpoint is accepted");
         assert_eq!(staged.training.endpoint, "http://runtime.example:50051");
     }
 }

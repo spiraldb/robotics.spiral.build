@@ -9,7 +9,7 @@ publish = false
 spiral-robotics-inference.workspace = true
 spiral-robotics-training.workspace = true
 arrow-array = "58.4.0"
-arrow-ipc = "58.4.0"
+arrow-ipc = { version = "58.4.0", features = ["zstd"] }
 arrow-schema = "58.4.0"
 reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "json"] }
 serde.workspace = true

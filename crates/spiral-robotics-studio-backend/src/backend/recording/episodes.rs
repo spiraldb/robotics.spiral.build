@@ -271,6 +271,7 @@ impl EpisodeStore {
         let episodes = sql::relation(self.repository.namespace(), Table::Episodes);
         let samples = sql::relation(self.repository.namespace(), Table::JointSamples);
         let episode_value = sql::string_literal(id);
+        let sample_query = sql::episode_samples(self.repository.namespace(), id);
         self.repository
             .run_blocking(move |connection| {
                 if !table_exists(connection, &episodes)? {
@@ -297,16 +298,7 @@ impl EpisodeStore {
                     serde_json::from_str(metadata)
                         .map_err(|error| format!("episode {id:?} metadata is invalid: {error}"))?;
                 let rows = if table_exists(connection, &samples)? {
-                    let result = run_query(
-                        connection,
-                        &format!(
-                            "SELECT * FROM {samples} WHERE {} = '{episode_value}' ORDER BY {}, {}",
-                            db::EPISODE_ID,
-                            db::SAMPLE_INDEX,
-                            db::STREAM_ID
-                        ),
-                        MAX_EPISODE_ROWS,
-                    )?;
+                    let result = run_query(connection, &sample_query, MAX_EPISODE_ROWS)?;
                     if result.truncated {
                         return Err(format!("episode {id:?} exceeds the supported row limit"));
                     }

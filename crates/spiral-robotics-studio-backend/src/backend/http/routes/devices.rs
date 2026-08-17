@@ -1,13 +1,19 @@
 use super::*;
 
-pub(super) fn router() -> Router<AppState> {
+/// Camera discovery and preview do not depend on SpiralDB, so they remain
+/// useful while catalog bootstrap is still running or needs repair.
+pub(super) fn bootstrap_router() -> Router<AppState> {
     Router::new()
-        .route("/ports", get(list_ports))
-        .route("/ports/identify", post(identify_port))
         .route("/cameras", get(list_cameras))
         .route("/cameras/refresh", post(refresh_cameras))
         .route("/cameras/stream.mjpeg", get(camera_stream))
         .route("/cameras/snapshot.jpg", get(camera_snapshot))
+}
+
+pub(super) fn catalog_router() -> Router<AppState> {
+    Router::new()
+        .route("/ports", get(list_ports))
+        .route("/ports/identify", post(identify_port))
         .route("/robots", get(list_robots).post(create_robot))
         .route(
             "/robots/import",

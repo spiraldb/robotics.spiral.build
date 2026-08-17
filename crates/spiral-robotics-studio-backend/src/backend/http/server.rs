@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use crate::backend::http::routes::{self, AppState};
+use crate::backend::http::routes::{self, AppState, BootstrapState};
 use crate::backend::recording::episodes::EpisodeStore;
 use crate::backend::robotics::cameras::CameraManager;
 use crate::backend::robotics::hardware::{
@@ -157,8 +157,6 @@ pub fn run(app: fn() -> dioxus::prelude::Element) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    install_process_spiral_endpoints(&spiral_endpoint, &spiral_spfs_endpoint);
-
     // On macOS this puts up the system camera prompt, which has to happen on
     // the main thread before any runtime starts.
     let camera_access = if args.no_cameras {
@@ -232,26 +230,23 @@ async fn serve(
             std::io::Error::other(
                 "Spiral ADBC driver is required; use --spiral-adbc-driver or SPIRALDB_ADBC_DRIVER",
             )
-        })?, spiral_endpoint, spiral_spfs_endpoint, spiral_project, namespace)
+        })?,
+        spiral_endpoint,
+        spiral_spfs_endpoint,
+        spiral_project,
+        backend_state.credentials(),
+        namespace)
         .map_err(std::io::Error::other)?,
     );
     let workspace = Arc::new(RobotWorkspace::new(repository.clone()));
     let episodes = Arc::new(EpisodeStore::new(repository.clone()));
     let storage = Arc::new(StorageManager::new(repository));
-    let loaded_preferences = storage.load_studio_preferences().unwrap_or_else(|error| {
-        tracing::warn!("could not load Spiral Studio preferences during startup: {error}");
-        Default::default()
-    });
-    let preferences = Arc::new(StudioPreferencesStore::new(loaded_preferences));
-    let training = Arc::new(
-        TrainingManager::open(
-            storage.clone(),
-            Arc::new(ConfiguredHttpTrainingBackend::new(preferences.clone())),
-            args.ffmpeg.clone(),
-        )
-        .await
-        .map_err(std::io::Error::other)?,
-    );
+    let preferences = Arc::new(StudioPreferencesStore::new(Default::default()));
+    let training = Arc::new(TrainingManager::new(
+        storage.clone(),
+        Arc::new(ConfiguredHttpTrainingBackend::new(preferences.clone())),
+        args.ffmpeg.clone(),
+    ));
     let hardware = Arc::new(HardwareHandle::spawn(ControlSettings {
         max_step_counts: args.max_step,
         teleop_max_step_counts: args.teleop_max_step,
@@ -273,11 +268,6 @@ async fn serve(
         cameras.note_issue(format!("camera previews will stay blank: {error}"));
     }
 
-    if !args.no_cameras {
-        let discovery = cameras.clone();
-        tokio::task::spawn_blocking(move || discovery.refresh_blocking()).await?;
-    }
-
     let state = AppState {
         workspace: workspace.clone(),
         episodes: episodes.clone(),
@@ -288,6 +278,7 @@ async fn serve(
         storage,
         training: training.clone(),
         rollout: rollout.clone(),
+        bootstrap: BootstrapState::new(),
         catalog_lease: Arc::new(
             crate::backend::application::catalog_lease::CatalogMutationLease::default(),
         ),
@@ -297,17 +288,17 @@ async fn serve(
             codec: args.video_codec.clone(),
         },
     };
-    tokio::spawn(routes::auto_connect_saved_robots(state.clone()));
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    let address = listener.local_addr()?;
+
+    println!("Spiral Robotics Studio is running at http://{address}");
+
+    let bootstrap = tokio::spawn(bootstrap_services(state.clone(), !args.no_cameras));
     let video_monitor = tokio::spawn(routes::monitor_video_recording(state.clone()));
     let cleanup_state = state.clone();
     let app = dioxus::server::router(app)
         .nest("/api", routes::api_router(state))
         .layer(tower_http::trace::TraceLayer::new_for_http());
-
-    let listener = tokio::net::TcpListener::bind(bind).await?;
-    let address = listener.local_addr()?;
-
-    println!("Spiral Robotics Studio is running at http://{address}");
 
     // Both the server and this task observe the same edge. The server begins
     // graceful draining immediately; this task enforces a deadline because
@@ -357,6 +348,7 @@ async fn serve(
         tracing::warn!("resource cleanup timed out; the operating system will release devices");
     }
     video_monitor.abort();
+    bootstrap.abort();
     signal_task.abort();
     if let Some(result) = server_result {
         result?;
@@ -364,16 +356,87 @@ async fn serve(
     Ok(())
 }
 
-/// The current Spiral ADBC driver reads both service endpoints from the process
-/// environment while constructing a database. Install the saved values before
-/// camera discovery or the Tokio runtime can create another thread.
-fn install_process_spiral_endpoints(api_endpoint: &str, spfs_endpoint: &str) {
-    // SAFETY: `run` calls this during single-threaded process bootstrap, before
-    // camera initialization and before constructing the multi-threaded runtime.
-    unsafe {
-        std::env::set_var("SPIRAL__SERVER__URL", api_endpoint);
-        std::env::set_var("SPIRAL__SPFS__URL", spfs_endpoint);
+/// Warm external services and hydrate durable state after the HTTP listener
+/// is already accepting requests. Catalog and camera I/O are independent and
+/// therefore progress concurrently.
+async fn bootstrap_services(state: AppState, discover_cameras: bool) {
+    let catalog = bootstrap_catalog(state.clone());
+    let camera = async {
+        if !discover_cameras {
+            return;
+        }
+        let cameras = state.cameras.clone();
+        if let Err(error) = tokio::task::spawn_blocking(move || cameras.refresh_blocking()).await {
+            let message = format!("camera discovery task stopped: {error}");
+            tracing::warn!("{message}");
+            state.cameras.note_issue(message);
+        }
+    };
+    tokio::join!(catalog, camera);
+}
+
+async fn bootstrap_catalog(state: AppState) {
+    state
+        .bootstrap
+        .bootstrapping("Connecting to SpiralDB and warming the shared ADBC pool");
+    if let Err(error) = state.storage.prewarm().await {
+        tracing::warn!("could not prewarm SpiralDB during startup: {error}");
+        state.bootstrap.degraded(false, error);
+        return;
     }
+
+    state
+        .bootstrap
+        .bootstrapping("Loading Studio preferences and run history");
+    let preferences = {
+        let state = state.clone();
+        async move {
+            let preferences_storage = state.storage.clone();
+            let loaded =
+                tokio::task::spawn_blocking(move || preferences_storage.load_studio_preferences())
+                    .await;
+            let issue = match loaded {
+                Ok(Ok(preferences)) => {
+                    state.preferences.replace(preferences);
+                    None
+                }
+                Ok(Err(error)) => Some(format!("could not load Studio preferences: {error}")),
+                Err(error) => Some(format!("Studio preferences task stopped: {error}")),
+            };
+            // Runtime selection lives in project preferences. Start both
+            // readiness probes as soon as those preferences resolve, while
+            // the independent history loads may still be running.
+            state.training.refresh_readiness().await;
+            issue
+        }
+    };
+    let training = state.training.hydrate_from_storage();
+    let rollout = {
+        let rollout = state.rollout.clone();
+        tokio::task::spawn_blocking(move || rollout.reload_from_storage())
+    };
+    let (preferences, training, rollout) = tokio::join!(preferences, training, rollout);
+
+    let mut issues = Vec::new();
+    if let Some(issue) = preferences {
+        issues.push(issue);
+    }
+    if let Err(error) = training {
+        issues.push(format!("could not load training history: {error}"));
+    }
+    match rollout {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => issues.push(format!("could not load rollout history: {error}")),
+        Err(error) => issues.push(format!("rollout history task stopped: {error}")),
+    }
+    if issues.is_empty() {
+        state.bootstrap.ready();
+    } else {
+        let detail = issues.join("; ");
+        tracing::warn!("Studio started with reduced history/preferences state: {detail}");
+        state.bootstrap.degraded(true, detail);
+    }
+    routes::auto_connect_saved_robots(state).await;
 }
 
 /// Resolve only Dioxus's declared public-directory contract. This is a guard

@@ -218,12 +218,19 @@ impl Studio {
         #[cfg(all(feature = "web", target_arch = "wasm32"))]
         let mut studio = studio;
 
-        // Catalog data is fetched once for the browser session. Known episode
-        // mutations update this local state; the Episodes panel owns the only
-        // explicit refetch control.
+        // The listener deliberately precedes catalog bootstrap. Wait for its
+        // explicit readiness edge before making the browser session's one
+        // initial catalog request.
         #[cfg(all(feature = "web", target_arch = "wasm32"))]
-        use_future(move || async move {
-            let _ = studio.refresh_episode_catalog().await;
+        let mut catalog_bootstrap_started = use_signal(|| false);
+        #[cfg(all(feature = "web", target_arch = "wasm32"))]
+        use_effect(move || {
+            if studio.snapshot.read().readiness.catalog_available && !catalog_bootstrap_started() {
+                catalog_bootstrap_started.set(true);
+                spawn(async move {
+                    let _ = studio.refresh_episode_catalog().await;
+                });
+            }
         });
 
         // One long-lived task owns the connection and reconnects if the server
@@ -301,7 +308,10 @@ impl Studio {
     /// Normal controls require both an open stream and a recent event.
     pub(crate) fn controls_available(&self) -> bool {
         let age = self.telemetry_age_seconds();
-        (self.live)() && age.is_finite() && age < 2.5
+        (self.live)()
+            && self.snapshot.read().readiness.catalog_available
+            && age.is_finite()
+            && age < 2.5
     }
 
     pub(crate) fn telemetry_age_seconds(&self) -> f64 {

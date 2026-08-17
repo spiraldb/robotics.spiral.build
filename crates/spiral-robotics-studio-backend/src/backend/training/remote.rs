@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use spiral_robotics_training::{
-    TrainingBackend, TrainingBackendError, TrainingBackendInfo, TrainingSession,
-    TrainingSessionRequest,
+    TrainingBackend, TrainingBackendError, TrainingBackendInfo, TrainingJobRequest,
+    TrainingJobSnapshot, TrainingSession, TrainingSessionRequest,
 };
 use spiral_robotics_training_http::HttpTrainingBackend;
 
@@ -36,5 +36,20 @@ impl TrainingBackend for ConfiguredHttpTrainingBackend {
         request: TrainingSessionRequest,
     ) -> Result<Box<dyn TrainingSession>, TrainingBackendError> {
         self.selected().create_session(request)
+    }
+
+    fn create_job(
+        &self,
+        request: TrainingJobRequest,
+    ) -> Result<TrainingJobSnapshot, TrainingBackendError> {
+        self.selected().create_job(request)
+    }
+
+    fn job(&self, job_id: &str) -> Result<TrainingJobSnapshot, TrainingBackendError> {
+        self.selected().job(job_id)
+    }
+
+    fn stop_job(&self, job_id: &str) -> Result<TrainingJobSnapshot, TrainingBackendError> {
+        self.selected().stop_job(job_id)
     }
 }

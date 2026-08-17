@@ -52,6 +52,12 @@ pub struct SpiralSettings {
     #[serde(default = "default_spiral_spfs_endpoint")]
     pub spfs_endpoint: String,
     pub project_id: String,
+    /// Public half of the client-credentials pair used by the backend.
+    #[serde(default)]
+    pub client_id: String,
+    /// The secret is write-only and never crosses back to the browser.
+    #[serde(default)]
+    pub client_secret_configured: bool,
     pub namespace: String,
     #[serde(default)]
     pub endpoint_restart_required: bool,
@@ -63,6 +69,8 @@ impl Default for SpiralSettings {
             endpoint: DEFAULT_SPIRAL_ENDPOINT.to_owned(),
             spfs_endpoint: DEFAULT_SPIRAL_SPFS_ENDPOINT.to_owned(),
             project_id: String::new(),
+            client_id: String::new(),
+            client_secret_configured: false,
             namespace: "spiral_robotics".to_owned(),
             endpoint_restart_required: false,
         }
@@ -93,6 +101,15 @@ pub struct UpdateDataSettingsRequest {
     /// project before project-owned settings can be read.
     #[serde(default)]
     pub project_id: String,
+    /// OAuth client ID passed to SpiralDB as the ADBC database username.
+    #[serde(default)]
+    pub client_id: String,
+    /// Write-only client secret. An empty value preserves the saved secret.
+    #[serde(default)]
+    pub client_secret: String,
+    /// Explicitly remove a previously saved client secret.
+    #[serde(default)]
+    pub clear_client_secret: bool,
     #[serde(default)]
     pub training: TrainingRuntimeSettings,
     pub video: VideoSettings,
@@ -104,6 +121,9 @@ impl Default for UpdateDataSettingsRequest {
             spiral_endpoint: default_spiral_endpoint(),
             spiral_spfs_endpoint: default_spiral_spfs_endpoint(),
             project_id: String::new(),
+            client_id: String::new(),
+            client_secret: String::new(),
+            clear_client_secret: false,
             training: TrainingRuntimeSettings::default(),
             video: VideoSettings::default(),
         }
@@ -431,6 +451,21 @@ pub struct TrainingMetricPoint {
     /// Current resident memory used by the Studio process.
     #[serde(default)]
     pub memory_bytes: Option<u64>,
+    /// Spiral query, frame decode, normalization, and batch assembly time.
+    #[serde(default)]
+    pub loader_ms: Option<f64>,
+    /// Studio-side Arrow IPC materialization time.
+    #[serde(default)]
+    pub arrow_encode_ms: Option<f64>,
+    /// HTTP request/response time outside the remote runtime handler.
+    #[serde(default)]
+    pub upload_ms: Option<f64>,
+    /// Runtime-side conversion and host-to-device transfer time.
+    #[serde(default)]
+    pub device_copy_ms: Option<f64>,
+    /// Runtime-side optimizer or validation compute time.
+    #[serde(default)]
+    pub model_ms: Option<f64>,
     pub elapsed_seconds: f64,
     #[serde(default)]
     pub event: Option<String>,
@@ -520,7 +555,7 @@ pub struct TrainingSnapshot {
 
 const MAX_TRAINING_METRIC_POINTS: usize = 2_400;
 const TRAINING_METRIC_COMPACTION_TARGET: usize = MAX_TRAINING_METRIC_POINTS / 2;
-const TRAINING_METRIC_SERIES_COUNT: usize = 7;
+const TRAINING_METRIC_SERIES_COUNT: usize = 12;
 const MAX_TRAINING_LOG_LINES: usize = 120;
 const MAX_TRAINING_CHECKPOINTS: usize = 1_000;
 pub const MAX_TRAINING_HISTORY_RUNS: usize = 40;
@@ -532,6 +567,10 @@ pub const MAX_TRAINING_HISTORY_RUNS: usize = 40;
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TrainingUpdate {
+    /// Replace the bootstrap placeholder with the state restored from SpiralDB.
+    Snapshot {
+        snapshot: Box<TrainingSnapshot>,
+    },
     Readiness {
         readiness: TrainingReadiness,
     },
@@ -648,6 +687,7 @@ impl TrainingSnapshot {
 
     pub fn apply(&mut self, update: TrainingUpdate) {
         match update {
+            TrainingUpdate::Snapshot { snapshot } => *self = *snapshot,
             TrainingUpdate::Readiness { readiness } => self.readiness = readiness,
             TrainingUpdate::RunAdded { run } => {
                 self.runs.retain(|existing| existing.id != run.id);
@@ -810,6 +850,11 @@ fn training_metric_value(point: &TrainingMetricPoint, series: usize) -> Option<f
         4 => point.cpu_percent,
         5 => point.gpu_percent,
         6 => point.memory_bytes.map(|value| value as f64),
+        7 => point.loader_ms,
+        8 => point.arrow_encode_ms,
+        9 => point.upload_ms,
+        10 => point.device_copy_ms,
+        11 => point.model_ms,
         _ => None,
     }
 }
@@ -828,6 +873,10 @@ pub struct StartSpiralReplayRequest {
 /// connect and then whenever it actually differs.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct StudioSnapshot {
+    /// Whether backend-owned services are still starting, usable, or running
+    /// with a non-fatal bootstrap problem.
+    #[serde(default)]
+    pub readiness: BackendReadiness,
     /// Human-readable name of the active persistent store.
     pub storage: String,
     /// Every robot configuration found in SpiralDB, by ID.
@@ -839,6 +888,36 @@ pub struct StudioSnapshot {
     /// Problems worth showing the operator: invalid robot configurations, cameras
     /// that failed to probe, and similar non-fatal trouble.
     pub issues: Vec<String>,
+}
+
+/// Lifecycle of the backend services needed by the browser application.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackendReadinessState {
+    #[default]
+    Bootstrapping,
+    Ready,
+    Degraded,
+}
+
+/// Browser-visible readiness of the backend and its Spiral catalog boundary.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BackendReadiness {
+    pub state: BackendReadinessState,
+    /// True only when catalog-dependent requests may safely be admitted.
+    pub catalog_available: bool,
+    /// Short operator-facing description of the current phase or problem.
+    pub detail: String,
+}
+
+impl Default for BackendReadiness {
+    fn default() -> Self {
+        Self {
+            state: BackendReadinessState::Bootstrapping,
+            catalog_available: false,
+            detail: "Starting Studio services".to_owned(),
+        }
+    }
 }
 
 /// One robot instance: exactly one arm, stored in SpiralDB.
@@ -2125,5 +2204,23 @@ mod tests {
 
         assert_eq!(snapshot.runs.len(), 1);
         assert_eq!(snapshot.runs[0].id, "run-b");
+    }
+
+    #[test]
+    fn bootstrap_training_snapshot_replaces_the_placeholder_atomically() {
+        let mut snapshot = TrainingSnapshot::default();
+        let restored = TrainingSnapshot {
+            runs: vec![TrainingRun {
+                id: "restored-run".to_owned(),
+                ..TrainingRun::default()
+            }],
+            ..TrainingSnapshot::default()
+        };
+
+        snapshot.apply(TrainingUpdate::Snapshot {
+            snapshot: Box::new(restored.clone()),
+        });
+
+        assert_eq!(snapshot, restored);
     }
 }
