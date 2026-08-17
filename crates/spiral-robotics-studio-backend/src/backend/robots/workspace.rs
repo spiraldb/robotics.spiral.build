@@ -5,7 +5,6 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use adbc_core::{Connection as _, Statement as _};
 use arrow_array::{
     ArrayRef, Int64Array, LargeStringArray, RecordBatch, StringArray, StringViewArray,
 };
@@ -351,7 +350,7 @@ impl RobotWorkspace {
         let relation = sql::relation(self.repository.namespace(), Table::Robots);
         let id = sql::string_literal(id);
         self.repository
-            .run_blocking(move |connection| {
+            .run_invalidating_blocking(move |connection| {
                 if table_exists(connection, &relation)? {
                     execute_update_sql(
                         connection,
@@ -411,7 +410,7 @@ impl RobotWorkspace {
         let id_owned = id.to_owned();
         let id_sql = sql::string_literal(id);
         self.repository
-            .run_blocking(move |connection| {
+            .run_invalidating_blocking(move |connection| {
                 ensure_dataset_namespace(connection, &namespace)?;
                 if table_exists(connection, &relation)? {
                     execute_delete_sql(

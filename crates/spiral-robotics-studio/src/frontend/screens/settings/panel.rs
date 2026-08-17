@@ -46,6 +46,7 @@ pub(crate) fn SettingsPanel(
     let transferring_project = use_signal(|| false);
     let mut test_result = use_signal(|| None::<ConnectionTestResponse>);
     let mut pending_project_file = use_signal(|| None::<dioxus::html::FileData>);
+    let mut project_transfer_error = use_signal(|| None::<String>);
     let mut initial_focus_set = use_signal(|| false);
     let mut studio = studio();
 
@@ -247,6 +248,7 @@ pub(crate) fn SettingsPanel(
                                             aria_busy: transferring_project(),
                                             onchange: move |event: Event<FormData>| {
                                                 let Some(file) = event.files().first().cloned() else { return };
+                                                project_transfer_error.set(None);
                                                 pending_project_file.set(Some(file));
                                             },
                                             "Import project"
@@ -262,6 +264,13 @@ pub(crate) fn SettingsPanel(
                                                 title: "Export every Studio-managed relation from the active SpiralDB project",
                                                 "Export project"
                                             }
+                                        }
+                                    }
+                                    if let Some(error) = project_transfer_error() {
+                                        p {
+                                            class: "connection-test connection-test-failed",
+                                            role: "status",
+                                            "Project import failed. {error}"
                                         }
                                     }
                                 }
@@ -328,6 +337,7 @@ pub(crate) fn SettingsPanel(
                         return;
                     }
                     let file = file.clone();
+                    project_transfer_error.set(None);
                     on_busy_change.call(true);
                     spawn(async move {
                         let Some(outcome) = single_flight(transferring_project, async {
@@ -357,6 +367,7 @@ pub(crate) fn SettingsPanel(
                                 current.set(settings);
                                 on_saved.call(());
                                 pending_project_file.set(None);
+                                project_transfer_error.set(None);
                                 studio.report_success_from(
                                     MessageSource::Settings,
                                     format!(
@@ -366,7 +377,12 @@ pub(crate) fn SettingsPanel(
                                     ),
                                 );
                             }
-                            Err(error) => studio.report_from(MessageSource::Settings, error),
+                            Err(error) => {
+                                pending_project_file.set(None);
+                                project_transfer_error.set(Some(error.clone()));
+                                studio.report_from(MessageSource::Settings, error);
+                                focus_after_render("project-import-input".to_owned());
+                            }
                         }
                         on_busy_change.call(false);
                     });

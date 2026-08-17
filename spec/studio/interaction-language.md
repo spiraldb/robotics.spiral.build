@@ -101,6 +101,18 @@ browser confirmation dialogs.
   owner rather than feature-local copies.
 - **STUDIO-046** Unused components, properties, variants, selectors, tokens,
   and dependency features must be removed when their final consumer is removed.
+- **STUDIO-047** An external-service transport failure must name the unavailable
+  service and configured endpoint, give the next recovery action, and keep the
+  underlying diagnostic in backend logs instead of presenting driver internals
+  as the primary interface message.
+- **STUDIO-048** A transient status-bar message must have a shrink-safe lane and
+  must not render beneath operational state. Rapidly changing numeric telemetry
+  must reserve a stable tabular width so updates do not shift adjacent content.
+- **STUDIO-049** When a blocking operation fails, its confirmation layer must
+  dismiss, return focus to the initiating control, and present the failure in
+  the owning panel so the user can retry or leave without a trapped overlay.
+- **STUDIO-050** Each activity-rail action must center its icon-and-label stack
+  vertically and horizontally within the full navigation target.
 
 ## Implementation ownership
 

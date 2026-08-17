@@ -11,8 +11,6 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Instant;
 
-use adbc_core::{Connection as _, Statement as _};
-use adbc_driver_manager::ManagedConnection;
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BinaryViewArray, BooleanArray, FixedSizeListArray, Float16Array,
     Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, LargeBinaryArray,
@@ -30,6 +28,7 @@ use crate::backend::application::training_population::{
     NormalizationStats, PopulationRow, SampleRange, StreamContract, StreamContractRow,
     TrainingPopulation, flatten_action_chunks, normalize_vectors,
 };
+use crate::backend::storage::repository::RepositoryConnection;
 use crate::backend::storage::sql;
 
 const MAX_MANIFEST_ROWS: usize = 8_192;
@@ -79,7 +78,7 @@ pub(crate) struct LoadedActBatch {
 type ActionBatch = (Vec<f32>, Vec<f32>, Vec<u8>);
 
 pub(crate) struct SpiralActLoader<'a> {
-    connection: &'a mut ManagedConnection,
+    connection: &'a mut RepositoryConnection,
     base_sql: String,
     dataset: String,
     state_column: String,
@@ -108,7 +107,7 @@ pub(crate) struct SpiralActLoader<'a> {
 
 impl<'a> SpiralActLoader<'a> {
     pub(crate) fn open(
-        connection: &'a mut ManagedConnection,
+        connection: &'a mut RepositoryConnection,
         request: &StartTrainingRequest,
         dataset: &str,
         ffmpeg: &str,
@@ -870,7 +869,7 @@ fn validate_image_batch_size(
 }
 
 fn query_batches(
-    connection: &mut ManagedConnection,
+    connection: &mut RepositoryConnection,
     sql: &str,
 ) -> Result<Vec<RecordBatch>, String> {
     let mut statement = connection
@@ -888,7 +887,7 @@ fn query_batches(
 }
 
 pub(crate) fn query_image_batches(
-    connection: &mut ManagedConnection,
+    connection: &mut RepositoryConnection,
     sql: &str,
     width: usize,
     height: usize,

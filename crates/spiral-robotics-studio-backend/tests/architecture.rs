@@ -293,6 +293,98 @@ fn studio_has_one_spiral_persistence_boundary() {
 }
 
 #[test]
+fn robot_mutations_invalidate_pooled_read_snapshots() {
+    let backend = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace = fs::read_to_string(backend.join("src/backend/robots/workspace.rs"))
+        .expect("robot workspace source");
+    for (operation, next) in [
+        ("pub(crate) fn delete", "fn try_list"),
+        ("fn persist", "fn port_value"),
+    ] {
+        let implementation = workspace
+            .split_once(operation)
+            .and_then(|(_, source)| source.split_once(next))
+            .map(|(implementation, _)| implementation)
+            .unwrap_or_else(|| panic!("robot workspace must define {operation}"));
+        assert!(
+            implementation.contains("run_invalidating_blocking"),
+            "robot {operation} must make the next Studio snapshot read fresh state"
+        );
+    }
+
+    let repository = fs::read_to_string(backend.join("src/backend/storage/repository.rs"))
+        .expect("Spiral repository source");
+    let invalidating = repository
+        .split_once("pub(crate) fn run_invalidating_blocking")
+        .and_then(|(_, source)| source.split_once("/// Run a namespace replacement"))
+        .map(|(implementation, _)| implementation)
+        .expect("invalidating repository mutation implementation");
+    assert!(
+        invalidating.contains("write(&self.operation_gate)")
+            && invalidating.contains("lock(&self.hosted).available.clear()")
+            && !invalidating.contains("checkin(connection.into_inner())"),
+        "a robot write must drain readers and leave no pre-write or writer connection in the read pool"
+    );
+}
+
+#[test]
+fn synchronous_adbc_is_confined_to_one_bounded_adapter() {
+    let backend = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source_root = backend.join("src/backend");
+    let repository_path = source_root.join("storage/repository.rs");
+    let mut sources = Vec::new();
+    collect_production_rust_sources(&source_root, &mut sources);
+    for path in sources {
+        if path == repository_path {
+            continue;
+        }
+        let source = fs::read_to_string(&path).expect("backend source must be readable");
+        assert!(
+            !source.contains("adbc_core")
+                && !source.contains("adbc_driver_manager")
+                && !source.contains("ManagedConnection"),
+            "{} bypasses the repository-owned ADBC adapter",
+            path.display()
+        );
+    }
+
+    let repository =
+        fs::read_to_string(repository_path).expect("Spiral repository source must be readable");
+    assert!(
+        repository.contains("struct ConnectionPool")
+            && repository.contains("driver: Option<ManagedDriver>")
+            && repository.contains("database: Option<ManagedDatabase>")
+            && repository.contains("available: Vec<ManagedConnection>")
+            && repository.contains("if self.database.is_none()")
+            && repository.contains("Semaphore::new(HOSTED_ADBC_CONNECTIONS)"),
+        "the adapter must share one driver/database and bound its connection pool"
+    );
+    for operation in [
+        "pub(crate) async fn run",
+        "pub(crate) async fn run_dedicated",
+        "pub(crate) fn run_blocking",
+        "pub(crate) fn run_invalidating_blocking",
+        "pub(crate) fn run_exclusive_blocking",
+    ] {
+        let implementation = repository
+            .split_once(operation)
+            .map(|(_, implementation)| implementation)
+            .expect("repository operation must exist");
+        let next_operation = implementation
+            .find("pub(crate) fn ")
+            .into_iter()
+            .chain(implementation.find("pub(crate) async fn "))
+            .min()
+            .unwrap_or(implementation.len());
+        let implementation = &implementation[..next_operation];
+        assert!(
+            implementation.contains("hosted_slots"),
+            "{operation} must consume the shared pool capacity gate"
+        );
+    }
+}
+
+#[test]
 fn application_associated_types_are_only_closed_loop_capability_tokens() {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/backend/application");
     let allowed = BTreeSet::from([

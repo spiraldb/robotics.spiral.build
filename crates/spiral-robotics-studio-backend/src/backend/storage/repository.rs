@@ -7,11 +7,26 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
-use adbc_core::options::{AdbcVersion, OptionConnection, OptionDatabase};
-use adbc_core::{Database as _, Driver as _};
-use adbc_driver_manager::{ManagedConnection, ManagedDatabase, ManagedDriver};
+use adbc_core::error::Status as AdbcStatus;
+use adbc_core::options::{
+    AdbcVersion, IngestMode, ObjectDepth, OptionConnection, OptionDatabase, OptionStatement,
+    OptionValue,
+};
+use adbc_core::{Connection as _, Database as _, Driver as _, Optionable as _, Statement as _};
+use adbc_driver_manager::{ManagedConnection, ManagedDatabase, ManagedDriver, ManagedStatement};
+use arrow_array::{RecordBatch, RecordBatchReader};
+use arrow_schema::Schema;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const HOSTED_ADBC_CONNECTIONS: usize = 4;
+const SPIRAL_UNAVAILABLE_PREFIX: &str = "SpiralDB is unavailable at ";
+const TRANSPORT_FAILURE_MARKERS: [&str; 5] = [
+    "error sending request for url",
+    "connection refused",
+    "failed to connect",
+    "tcp connect error",
+    "dns error",
+];
 
 #[derive(Clone)]
 struct ConnectionConfig {
@@ -19,10 +34,152 @@ struct ConnectionConfig {
     project_id: String,
 }
 
-struct CachedConnection {
-    _driver: ManagedDriver,
-    _database: ManagedDatabase,
-    connection: ManagedConnection,
+/// The only connection type visible to Studio code.
+///
+/// It deliberately exposes the operations Studio needs rather than the raw
+/// synchronous ADBC handle. Every instance is checked out through the same
+/// bounded repository pool; async jobs additionally run away from Tokio's
+/// async worker threads.
+pub(crate) struct RepositoryConnection {
+    inner: ManagedConnection,
+}
+
+impl RepositoryConnection {
+    fn into_inner(self) -> ManagedConnection {
+        self.inner
+    }
+
+    pub(crate) fn new_statement(&mut self) -> Result<RepositoryStatement, String> {
+        self.inner
+            .new_statement()
+            .map(|inner| RepositoryStatement { inner })
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn table_schema(&self, table: &str) -> Result<Option<Schema>, String> {
+        match self.inner.get_table_schema(None, None, table) {
+            Ok(schema) => Ok(Some(schema)),
+            Err(error) if error.status == AdbcStatus::NotFound => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    pub(crate) fn check_catalog_table(&self, project: &str, table: &str) -> Result<(), String> {
+        let reader = self
+            .inner
+            .get_objects(
+                ObjectDepth::Tables,
+                Some("spiraldb"),
+                Some(project),
+                Some(table),
+                Some(vec!["TABLE"]),
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        for batch in reader {
+            batch.map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_autocommit(&mut self, enabled: bool) -> Result<(), String> {
+        self.inner
+            .set_option(OptionConnection::AutoCommit, OptionValue::from(enabled))
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn commit(&mut self) -> Result<(), String> {
+        self.inner.commit().map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn rollback(&mut self) -> Result<(), String> {
+        self.inner.rollback().map_err(|error| error.to_string())
+    }
+}
+
+/// A statement whose synchronous ADBC implementation remains private to this
+/// adapter. Callers can compose repository work without importing ADBC.
+pub(crate) struct RepositoryStatement {
+    inner: ManagedStatement,
+}
+
+impl RepositoryStatement {
+    pub(crate) fn set_sql_query(&mut self, sql: impl AsRef<str>) -> Result<(), String> {
+        self.inner
+            .set_sql_query(sql)
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn configure_ingest(&mut self, target: &str) -> Result<(), String> {
+        self.inner
+            .set_option(OptionStatement::TargetTable, target.into())
+            .map_err(|error| error.to_string())?;
+        self.inner
+            .set_option(OptionStatement::IngestMode, IngestMode::CreateAppend.into())
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn bind(&mut self, batch: RecordBatch) -> Result<(), String> {
+        self.inner.bind(batch).map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn prepare(&mut self) -> Result<(), String> {
+        self.inner.prepare().map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn execute(
+        &mut self,
+    ) -> Result<Box<dyn RecordBatchReader + Send + 'static>, String> {
+        self.inner.execute().map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn execute_update(&mut self) -> Result<Option<i64>, String> {
+        self.inner
+            .execute_update()
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[derive(Default)]
+struct ConnectionPool {
+    driver: Option<ManagedDriver>,
+    database: Option<ManagedDatabase>,
+    available: Vec<ManagedConnection>,
+}
+
+impl ConnectionPool {
+    fn checkout(&mut self, config: &ConnectionConfig) -> Result<ManagedConnection, String> {
+        if let Some(connection) = self.available.pop() {
+            return Ok(connection);
+        }
+        if self.database.is_none() {
+            let (driver, database) = open_database(config)?;
+            self.driver = Some(driver);
+            self.database = Some(database);
+        }
+        self.database
+            .as_ref()
+            .expect("an initialized ADBC pool has one database")
+            .new_connection_with_opts([(
+                OptionConnection::CurrentSchema,
+                config.project_id.clone().into(),
+            )])
+            .map_err(|error| format!("connecting Spiral ADBC database: {error}"))
+    }
+
+    fn checkin(&mut self, connection: ManagedConnection) {
+        debug_assert!(
+            self.available.len() < HOSTED_ADBC_CONNECTIONS,
+            "the bounded checkout gate prevents an oversized idle pool"
+        );
+        self.available.push(connection);
+    }
+
+    fn reset(&mut self) {
+        self.available.clear();
+        self.database = None;
+        self.driver = None;
+    }
 }
 
 pub(crate) struct SpiralRepository {
@@ -31,8 +188,8 @@ pub(crate) struct SpiralRepository {
     spfs_endpoint: String,
     project_id: Arc<RwLock<Option<String>>>,
     namespace: String,
-    hosted: Arc<Mutex<Vec<CachedConnection>>>,
-    hosted_slots: Arc<tokio::sync::Semaphore>,
+    hosted: Arc<Mutex<ConnectionPool>>,
+    hosted_slots: Arc<Semaphore>,
     operation_gate: Arc<RwLock<()>>,
 }
 
@@ -59,8 +216,8 @@ impl SpiralRepository {
             spfs_endpoint,
             project_id: Arc::new(RwLock::new(project_id)),
             namespace,
-            hosted: Arc::new(Mutex::new(Vec::new())),
-            hosted_slots: Arc::new(tokio::sync::Semaphore::new(HOSTED_ADBC_CONNECTIONS)),
+            hosted: Arc::new(Mutex::new(ConnectionPool::default())),
+            hosted_slots: Arc::new(Semaphore::new(HOSTED_ADBC_CONNECTIONS)),
             operation_gate: Arc::new(RwLock::new(())),
         })
     }
@@ -88,7 +245,7 @@ impl SpiralRepository {
         let project_id = validate_project_id(project_id)?;
         let _operation = write(&self.operation_gate);
         *write(&self.project_id) = Some(project_id);
-        lock(&self.hosted).clear();
+        lock(&self.hosted).reset();
         Ok(())
     }
 
@@ -99,7 +256,7 @@ impl SpiralRepository {
     pub(crate) async fn run<T, F>(&self, operation: F) -> Result<T, String>
     where
         T: Send + 'static,
-        F: FnOnce(&mut ManagedConnection) -> Result<T, String> + Send + 'static,
+        F: FnOnce(&mut RepositoryConnection) -> Result<T, String> + Send + 'static,
     {
         let permit = self
             .hosted_slots
@@ -111,40 +268,55 @@ impl SpiralRepository {
         let operation_gate = self.operation_gate.clone();
         let driver_path = self.driver_path.clone();
         let project_id = self.project_id.clone();
+        let endpoint = self.endpoint.clone();
         tokio::task::spawn_blocking(move || {
             let _operation = read(&operation_gate);
             let connection = connection_config(driver_path, &project_id)?;
-            let mut connection = {
-                let mut available = lock(&hosted);
-                available.pop()
-            }
-            .map(Ok)
-            .unwrap_or_else(|| open(connection))?;
-            let result = operation(&mut connection.connection);
+            let connection = lock(&hosted)
+                .checkout(&connection)
+                .map_err(|error| present_error(&endpoint, error))?;
+            let mut connection = RepositoryConnection { inner: connection };
+            let result = operation(&mut connection);
             if result.is_ok() {
-                lock(&hosted).push(connection);
+                lock(&hosted).checkin(connection.into_inner());
             }
             drop(permit);
-            result
+            result.map_err(|error| present_error(&endpoint, error))
         })
         .await
         .map_err(|error| format!("Spiral ADBC task failed: {error}"))?
     }
 
-    /// Use a dedicated connection for a long-lived stream such as training.
+    /// Reserve one pooled connection for a long-lived stream such as training.
     pub(crate) async fn run_dedicated<T, F>(&self, operation: F) -> Result<T, String>
     where
         T: Send + 'static,
-        F: FnOnce(&mut ManagedConnection) -> Result<T, String> + Send + 'static,
+        F: FnOnce(&mut RepositoryConnection) -> Result<T, String> + Send + 'static,
     {
+        let hosted = self.hosted.clone();
         let driver_path = self.driver_path.clone();
         let project_id = self.project_id.clone();
         let operation_gate = self.operation_gate.clone();
+        let endpoint = self.endpoint.clone();
+        let permit = self
+            .hosted_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| "Spiral ADBC connection pool is shutting down".to_owned())?;
         tokio::task::spawn_blocking(move || {
             let _operation = read(&operation_gate);
             let connection = connection_config(driver_path, &project_id)?;
-            let mut connection = open(connection)?;
-            operation(&mut connection.connection)
+            let connection = lock(&hosted)
+                .checkout(&connection)
+                .map_err(|error| present_error(&endpoint, error))?;
+            let mut connection = RepositoryConnection { inner: connection };
+            let result = operation(&mut connection);
+            if result.is_ok() {
+                lock(&hosted).checkin(connection.into_inner());
+            }
+            drop(permit);
+            result.map_err(|error| present_error(&endpoint, error))
         })
         .await
         .map_err(|error| format!("Spiral dedicated ADBC task failed: {error}"))?
@@ -154,43 +326,89 @@ impl SpiralRepository {
     /// path. Callers must never invoke this on an async executor thread.
     pub(crate) fn run_blocking<T>(
         &self,
-        operation: impl FnOnce(&mut ManagedConnection) -> Result<T, String>,
+        operation: impl FnOnce(&mut RepositoryConnection) -> Result<T, String>,
     ) -> Result<T, String> {
+        let _permit = acquire_blocking(self.hosted_slots.clone())?;
         let _operation = read(&self.operation_gate);
         let connection = connection_config(self.driver_path.clone(), &self.project_id)?;
-        let mut connection = {
-            let mut available = lock(&self.hosted);
-            available.pop()
-        }
-        .map(Ok)
-        .unwrap_or_else(|| open(connection))?;
-        let result = operation(&mut connection.connection);
+        let connection = lock(&self.hosted)
+            .checkout(&connection)
+            .map_err(|error| present_error(&self.endpoint, error))?;
+        let mut connection = RepositoryConnection { inner: connection };
+        let result = operation(&mut connection);
         if result.is_ok() {
-            lock(&self.hosted).push(connection);
+            lock(&self.hosted).checkin(connection.into_inner());
         }
-        result
+        result.map_err(|error| present_error(&self.endpoint, error))
+    }
+
+    /// Run a durable mutation after draining repository readers, with no
+    /// pooled connection surviving across the write.
+    ///
+    /// Spiral connections can retain a read snapshot across statements. A
+    /// later setup poll on one of those connections would otherwise keep
+    /// projecting the robot document from before a successful write until the
+    /// server recreated its pool. Mutations whose result is immediately
+    /// exposed through Studio state use this path to provide read-your-writes
+    /// behavior without giving up pooling for ordinary reads.
+    pub(crate) fn run_invalidating_blocking<T>(
+        &self,
+        operation: impl FnOnce(&mut RepositoryConnection) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _permit = acquire_blocking(self.hosted_slots.clone())?;
+        let _operation = write(&self.operation_gate);
+        let connection = connection_config(self.driver_path.clone(), &self.project_id)?;
+        lock(&self.hosted).available.clear();
+        let connection = lock(&self.hosted)
+            .checkout(&connection)
+            .map_err(|error| present_error(&self.endpoint, error))?;
+        let mut connection = RepositoryConnection { inner: connection };
+        let result = operation(&mut connection);
+        result.map_err(|error| present_error(&self.endpoint, error))
     }
 
     /// Run a namespace replacement without allowing another repository call to
     /// observe its intermediate state.
     pub(crate) fn run_exclusive_blocking<T>(
         &self,
-        operation: impl FnOnce(&mut ManagedConnection) -> Result<T, String>,
+        operation: impl FnOnce(&mut RepositoryConnection) -> Result<T, String>,
     ) -> Result<T, String> {
+        let _permit = acquire_blocking(self.hosted_slots.clone())?;
         let _operation = write(&self.operation_gate);
         let connection = connection_config(self.driver_path.clone(), &self.project_id)?;
-        let mut connection = {
-            let mut available = lock(&self.hosted);
-            available.pop()
-        }
-        .map(Ok)
-        .unwrap_or_else(|| open(connection))?;
-        let result = operation(&mut connection.connection);
+        let connection = lock(&self.hosted)
+            .checkout(&connection)
+            .map_err(|error| present_error(&self.endpoint, error))?;
+        let mut connection = RepositoryConnection { inner: connection };
+        let result = operation(&mut connection);
         if result.is_ok() {
-            lock(&self.hosted).push(connection);
+            lock(&self.hosted).checkin(connection.into_inner());
         }
-        result
+        result.map_err(|error| present_error(&self.endpoint, error))
     }
+}
+
+/// Identify the stable operator-facing form so delivery adapters can use an
+/// availability status instead of misclassifying the failure as bad input.
+pub(crate) fn is_unavailable_error(message: &str) -> bool {
+    message.starts_with(SPIRAL_UNAVAILABLE_PREFIX)
+}
+
+fn present_error(endpoint: &str, error: String) -> String {
+    if is_unavailable_error(&error) {
+        return error;
+    }
+    let normalized = error.to_ascii_lowercase();
+    if !TRANSPORT_FAILURE_MARKERS
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
+        return error;
+    }
+    tracing::warn!(spiral_endpoint = endpoint, detail = %error, "SpiralDB transport failed");
+    format!(
+        "{SPIRAL_UNAVAILABLE_PREFIX}{endpoint}. Start the service or update Settings → SpiralDB, then try again."
+    )
 }
 
 fn validate_project_id(project_id: &str) -> Result<String, String> {
@@ -218,7 +436,7 @@ fn connection_config(
     })
 }
 
-fn open(config: ConnectionConfig) -> Result<CachedConnection, String> {
+fn open_database(config: &ConnectionConfig) -> Result<(ManagedDriver, ManagedDatabase), String> {
     let mut driver = ManagedDriver::load_dynamic_from_filename(
         &config.driver_path,
         Some(b"AdbcDriverSpiraldbInit"),
@@ -234,14 +452,12 @@ fn open(config: ConnectionConfig) -> Result<CachedConnection, String> {
     let database = driver
         .new_database_with_opts([(OptionDatabase::Uri, database_uri.clone().into())])
         .map_err(|error| format!("opening Spiral ADBC database {database_uri}: {error}"))?;
-    let connection = database
-        .new_connection_with_opts([(OptionConnection::CurrentSchema, config.project_id.into())])
-        .map_err(|error| format!("connecting Spiral ADBC database: {error}"))?;
-    Ok(CachedConnection {
-        _driver: driver,
-        _database: database,
-        connection,
-    })
+    Ok((driver, database))
+}
+
+fn acquire_blocking(semaphore: Arc<Semaphore>) -> Result<OwnedSemaphorePermit, String> {
+    futures::executor::block_on(semaphore.acquire_owned())
+        .map_err(|_| "Spiral ADBC connection pool is shutting down".to_owned())
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -302,5 +518,50 @@ mod tests {
 
         assert!(repository.configure_project("not/a/project").is_err());
         assert!(!repository.is_configured());
+    }
+
+    #[test]
+    fn transport_failures_become_actionable_without_rewriting_validation() {
+        let unavailable = present_error(
+            "http://127.0.0.1:4279",
+            "pinning project failed: error sending request for url".to_owned(),
+        );
+        assert_eq!(
+            unavailable,
+            "SpiralDB is unavailable at http://127.0.0.1:4279. Start the service or update Settings → SpiralDB, then try again."
+        );
+        assert!(is_unavailable_error(&unavailable));
+
+        let invalid = "episode bundle has the wrong format".to_owned();
+        assert_eq!(
+            present_error("http://127.0.0.1:4279", invalid.clone()),
+            invalid
+        );
+    }
+
+    #[test]
+    fn blocking_and_async_checkouts_share_one_capacity_gate() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let semaphore = Arc::new(Semaphore::new(1));
+        let async_permit = semaphore
+            .clone()
+            .try_acquire_owned()
+            .expect("the async checkout takes the only slot");
+        let (finished, receiver) = mpsc::sync_channel(1);
+        let waiting = semaphore.clone();
+        let worker = std::thread::spawn(move || {
+            let permit = acquire_blocking(waiting).expect("the shared pool remains open");
+            finished.send(()).unwrap();
+            drop(permit);
+        });
+
+        assert!(receiver.recv_timeout(Duration::from_millis(25)).is_err());
+        drop(async_permit);
+        receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("releasing the async slot wakes the blocking checkout");
+        worker.join().unwrap();
     }
 }

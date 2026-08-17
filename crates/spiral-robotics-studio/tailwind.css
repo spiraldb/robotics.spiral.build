@@ -125,6 +125,11 @@
 .studio-activity-rail .activity-rail-item {
   padding-inline: 2px;
   font-size: 10px;
+  /* Row actions normally lead from the inline edge. In the activity rail the
+     same action is a vertical icon-and-label stack, so the main axis is vertical
+     and must be centred explicitly at this unlayered cascade boundary. */
+  justify-content: center;
+  text-align: center;
   /*
     The layered `min-h-14` above never took: `.ui-action--compact` is unlayered
     and set a 24px floor, so the items collapsed to the 32px their own contents
@@ -481,7 +486,10 @@
   }
 
   .studio-status-bar {
-    @apply relative z-40 flex min-h-5 shrink-0 items-center justify-between gap-3 border-t border-line bg-surface px-2 text-[10px] text-ink-soft;
+    @apply relative z-40 min-h-5 shrink-0 items-center border-t border-line bg-surface px-2 text-[10px] text-ink-soft;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 32rem) max-content;
+    column-gap: 0.75rem;
   }
 
   /* The left group carries context and the right group carries state, so when
@@ -493,6 +501,7 @@
 
   .status-bar-group-right {
     @apply shrink-0 justify-end;
+    grid-column: 3;
   }
 
   /*
@@ -518,8 +527,15 @@
     color: var(--tone-caution);
   }
 
+  .status-bar-rate {
+    @apply justify-end font-mono tabular-nums;
+    min-width: 10ch;
+  }
+
   .status-bar-message {
-    @apply inline-flex min-w-0 max-w-[32rem] items-center truncate border-l border-line px-2 text-[10px];
+    @apply inline-flex min-w-0 items-center truncate border-l border-line px-2 text-[10px];
+    grid-column: 2;
+    width: 100%;
   }
 
   .status-bar-message.message-success { color: var(--tone-good); }
@@ -1529,8 +1545,15 @@
      side — the labels stopped reading as centred and started reading as cut. */
 
   .studio-status-bar {
+    display: flex;
     justify-content: flex-start;
     overflow-x: auto;
+  }
+
+  .status-bar-message {
+    width: min(32rem, 50vw);
+    max-width: min(32rem, 50vw);
+    flex: 0 0 min(32rem, 50vw);
   }
 
   .status-bar-group,

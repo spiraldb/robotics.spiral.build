@@ -81,6 +81,17 @@ fn feature_routers_preserve_every_public_path_exactly_once() {
     }
 }
 
+#[test]
+fn imports_distinguish_unavailable_storage_from_invalid_files() {
+    let unavailable = Failure::import(
+        "SpiralDB is unavailable at http://127.0.0.1:4279. Start the service or update Settings → SpiralDB, then try again.",
+    );
+    assert_eq!(unavailable.0, StatusCode::SERVICE_UNAVAILABLE);
+
+    let invalid = Failure::import("episode bundle has the wrong format");
+    assert_eq!(invalid.0, StatusCode::BAD_REQUEST);
+}
+
 fn status(id: &str) -> CameraStatus {
     CameraStatus {
         id: id.to_owned(),

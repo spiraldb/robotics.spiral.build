@@ -4,10 +4,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use adbc_core::error::Status as AdbcStatus;
-use adbc_core::options::{IngestMode, ObjectDepth, OptionStatement};
-use adbc_core::{Connection as _, Optionable as _, Statement as _};
-use adbc_driver_manager::ManagedConnection;
 use arrow_array::{
     Array as _, ArrayRef, BinaryArray, BinaryViewArray, Float64Array, Int64Array, LargeBinaryArray,
     LargeStringArray, RecordBatch, StringArray, StringViewArray, UInt32Array, UInt64Array,
@@ -33,7 +29,7 @@ use crate::backend::recording::spiral::{
 };
 use crate::backend::robotics::video::VideoAsset;
 use crate::backend::storage::bundle;
-use crate::backend::storage::repository::SpiralRepository;
+use crate::backend::storage::repository::{RepositoryConnection, SpiralRepository};
 use crate::backend::storage::settings::StoredStudioPreferences;
 use crate::backend::storage::sql::{self, ReadOnlyMode};
 
@@ -319,21 +315,9 @@ impl StorageManager {
         if let Err(error) = self
             .repository
             .run(move |connection| {
-                let reader = connection
-                    .get_objects(
-                        ObjectDepth::Tables,
-                        Some("spiraldb"),
-                        Some(&catalog_project),
-                        Some(&table_filter),
-                        Some(vec!["TABLE"]),
-                        None,
-                    )
-                    .map_err(|error| format!("checking the managed project catalog: {error}"))?;
-                for batch in reader {
-                    batch
-                        .map_err(|error| format!("reading the managed project catalog: {error}"))?;
-                }
-                Ok(())
+                connection
+                    .check_catalog_table(&catalog_project, &table_filter)
+                    .map_err(|error| format!("checking the managed project catalog: {error}"))
             })
             .await
         {
@@ -408,7 +392,7 @@ impl StorageManager {
     pub(crate) async fn run_training_adbc<T, F>(&self, operation: F) -> Result<T, String>
     where
         T: Send + 'static,
-        F: FnOnce(&mut ManagedConnection) -> Result<T, String> + Send + 'static,
+        F: FnOnce(&mut RepositoryConnection) -> Result<T, String> + Send + 'static,
     {
         self.repository.run_dedicated(operation).await
     }
@@ -587,7 +571,7 @@ impl CheckpointRepository for StorageManager {
 }
 
 pub(crate) fn replace_episode_blocking(
-    connection: &mut ManagedConnection,
+    connection: &mut RepositoryConnection,
     namespace: &str,
     episode: &CompletedEpisode,
     videos: &[VideoAsset],
@@ -719,23 +703,23 @@ pub(crate) fn replace_episode_blocking(
 /// a standalone namespace resource, a tiny durable root table is the parent
 /// container for every Spiral Robotics table, view, and managed Dataset.
 pub(crate) fn ensure_dataset_namespace(
-    connection: &mut ManagedConnection,
+    connection: &mut RepositoryConnection,
     dataset: &str,
 ) -> Result<(), String> {
-    match connection.get_table_schema(None, None, dataset) {
-        Ok(schema)
+    match connection.table_schema(dataset) {
+        Ok(Some(schema))
             if schema
                 .field_with_name(spiral::DATASET_NAMESPACE_MARKER)
                 .is_ok() =>
         {
             return Ok(());
         }
-        Ok(_) => {
+        Ok(Some(_)) => {
             return Err(format!(
                 "SpiralDB namespace {dataset} exists but is not managed by Spiral Robotics; choose a new namespace or remove that resource"
             ));
         }
-        Err(error) if error.status == AdbcStatus::NotFound => {}
+        Ok(None) => {}
         Err(error) => {
             return Err(format!("checking SpiralDB namespace {dataset}: {error}"));
         }
@@ -745,7 +729,7 @@ pub(crate) fn ensure_dataset_namespace(
 }
 
 pub(crate) fn clear_episode_rows(
-    connection: &mut ManagedConnection,
+    connection: &mut RepositoryConnection,
     namespace: &str,
     episode_id: &str,
 ) -> Result<(), String> {
@@ -761,7 +745,7 @@ pub(crate) fn clear_episode_rows(
 }
 
 fn table_has_dataset(
-    connection: &mut ManagedConnection,
+    connection: &mut RepositoryConnection,
     target: &str,
     dataset_id: &str,
 ) -> Result<bool, String> {
@@ -773,7 +757,7 @@ fn table_has_dataset(
 }
 
 pub(crate) fn ingest_batch(
-    connection: &mut ManagedConnection,
+    connection: &mut RepositoryConnection,
     target: &str,
     batch: RecordBatch,
 ) -> Result<(), String> {
@@ -781,11 +765,8 @@ pub(crate) fn ingest_batch(
         .new_statement()
         .map_err(|error| format!("opening ADBC ingest for {target}: {error}"))?;
     statement
-        .set_option(OptionStatement::TargetTable, target.into())
-        .map_err(|error| format!("configuring ADBC ingest target {target}: {error}"))?;
-    statement
-        .set_option(OptionStatement::IngestMode, IngestMode::CreateAppend.into())
-        .map_err(|error| format!("configuring ADBC ingest mode for {target}: {error}"))?;
+        .configure_ingest(target)
+        .map_err(|error| format!("configuring ADBC ingest for {target}: {error}"))?;
     statement
         .bind(batch)
         .map_err(|error| format!("binding Spiral table {target}: {error}"))?;
@@ -925,16 +906,18 @@ fn training_checkpoint_schema() -> Arc<Schema> {
     ]))
 }
 
-pub(crate) fn table_exists(connection: &ManagedConnection, target: &str) -> Result<bool, String> {
-    match connection.get_table_schema(None, None, target) {
-        Ok(_) => Ok(true),
-        Err(error) if error.status == AdbcStatus::NotFound => Ok(false),
-        Err(error) => Err(format!("checking Spiral table {target}: {error}")),
-    }
+pub(crate) fn table_exists(
+    connection: &RepositoryConnection,
+    target: &str,
+) -> Result<bool, String> {
+    connection
+        .table_schema(target)
+        .map(|schema| schema.is_some())
+        .map_err(|error| format!("checking Spiral table {target}: {error}"))
 }
 
 pub(crate) fn execute_update_sql(
-    connection: &mut ManagedConnection,
+    connection: &mut RepositoryConnection,
     sql: &str,
 ) -> Result<(), String> {
     let mut statement = connection
@@ -950,7 +933,7 @@ pub(crate) fn execute_update_sql(
 /// Spiral reports a no-op DELETE as an execution error. Replacement and
 /// cleanup callers intentionally treat that driver-specific result as success.
 pub(crate) fn execute_delete_sql(
-    connection: &mut ManagedConnection,
+    connection: &mut RepositoryConnection,
     sql: &str,
 ) -> Result<(), String> {
     match execute_update_sql(connection, sql) {
@@ -1049,7 +1032,7 @@ fn video_assets_schema() -> Arc<Schema> {
 }
 
 pub(crate) fn run_query(
-    connection: &mut ManagedConnection,
+    connection: &mut RepositoryConnection,
     sql: &str,
     max_rows: usize,
 ) -> Result<SpiralQueryResponse, String> {
@@ -1057,7 +1040,7 @@ pub(crate) fn run_query(
 }
 
 fn run_query_with_byte_limit(
-    connection: &mut ManagedConnection,
+    connection: &mut RepositoryConnection,
     sql: &str,
     max_rows: usize,
     max_bytes: usize,
@@ -1142,7 +1125,7 @@ fn push_query_row(
     Ok(true)
 }
 
-fn run_binary_query(connection: &mut ManagedConnection, sql: &str) -> Result<Vec<u8>, String> {
+fn run_binary_query(connection: &mut RepositoryConnection, sql: &str) -> Result<Vec<u8>, String> {
     let mut statement = connection
         .new_statement()
         .map_err(|error| format!("opening Spiral ADBC video query: {error}"))?;
@@ -1181,7 +1164,7 @@ fn run_binary_query(connection: &mut ManagedConnection, sql: &str) -> Result<Vec
 }
 
 fn run_training_checkpoint_query(
-    connection: &mut ManagedConnection,
+    connection: &mut RepositoryConnection,
     sql: &str,
 ) -> Result<CheckpointArtifact, String> {
     let mut statement = connection

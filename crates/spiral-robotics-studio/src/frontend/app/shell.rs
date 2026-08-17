@@ -262,15 +262,16 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                     }
                     span { class: "status-bar-item", "{training_runs_label}" }
                 }
-                div { class: "status-bar-group status-bar-group-right",
-                    if let Some(message) = latest.clone() {
-                        span {
-                            class: "status-bar-message {message.severity.class_name()}",
-                            role: if message.severity == crate::frontend::app::notifications::MessageSeverity::Error { "alert" } else { "status" },
-                            "aria-live": if message.severity == crate::frontend::app::notifications::MessageSeverity::Error { "assertive" } else { "polite" },
-                            "{message.text}"
-                        }
+                if let Some(message) = latest.clone() {
+                    span {
+                        class: "status-bar-message {message.severity.class_name()}",
+                        title: "{message.text}",
+                        role: if message.severity == crate::frontend::app::notifications::MessageSeverity::Error { "alert" } else { "status" },
+                        "aria-live": if message.severity == crate::frontend::app::notifications::MessageSeverity::Error { "assertive" } else { "polite" },
+                        "{message.text}"
                     }
+                }
+                div { class: "status-bar-group status-bar-group-right",
                     if let Some(phase) = training_phase { span { class: "status-bar-item", "{phase}" } }
                     if let Some(step) = training_step { span { class: "status-bar-item", "{step}" } }
                     span { class: "status-bar-item", "{training_problems_label}" }
@@ -288,21 +289,22 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                     span { class: "status-bar-item", "Physical hardware" }
                     span { class: "status-bar-item", "{arms_label}" }
                 }
-                div { class: "status-bar-group status-bar-group-right",
-                    if let Some(message) = latest {
-                        span {
-                            class: "status-bar-message {message.severity.class_name()}",
-                            role: if message.severity == crate::frontend::app::notifications::MessageSeverity::Error { "alert" } else { "status" },
-                            "aria-live": if message.severity == crate::frontend::app::notifications::MessageSeverity::Error { "assertive" } else { "polite" },
-                            "{message.text}"
-                        }
+                if let Some(message) = latest {
+                    span {
+                        class: "status-bar-message {message.severity.class_name()}",
+                        title: "{message.text}",
+                        role: if message.severity == crate::frontend::app::notifications::MessageSeverity::Error { "alert" } else { "status" },
+                        "aria-live": if message.severity == crate::frontend::app::notifications::MessageSeverity::Error { "assertive" } else { "polite" },
+                        "{message.text}"
                     }
+                }
+                div { class: "status-bar-group status-bar-group-right",
                     if let Some(recording_label) = recording_label {
                         span { class: "status-bar-item status-bar-danger", "{recording_label}" }
                     }
                     if holding > 0 { span { class: "status-bar-item status-bar-danger", "{holding} holding" } }
                     span { class: "status-bar-item status-bar-accent", "{status_mode}" }
-                    if telemetry.target_hz > 0.0 { span { class: "status-bar-item", "{rate_label}" } }
+                    if telemetry.target_hz > 0.0 { span { class: "status-bar-item status-bar-rate", "{rate_label}" } }
                     if let Some(robot_problems_label) = robot_problems_label {
                         span { class: "status-bar-item status-bar-caution", "{robot_problems_label}" }
                     }

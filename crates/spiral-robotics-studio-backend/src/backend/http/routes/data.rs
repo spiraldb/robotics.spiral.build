@@ -95,7 +95,7 @@ async fn import_project(
     let summary = tokio::task::spawn_blocking(move || storage.import_project_bundle(&bytes))
         .await
         .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
-        .map_err(Failure::bad_request)?;
+        .map_err(Failure::import)?;
     state.preferences.replace(
         state
             .storage
@@ -181,7 +181,7 @@ async fn import_episodes(
         tokio::task::spawn_blocking(move || storage.import_episode_bundle(&dataset_id, &bytes))
             .await
             .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
-            .map_err(Failure::bad_request)?;
+            .map_err(Failure::import)?;
     Ok(Json(summary))
 }
 

@@ -5,9 +5,6 @@ use std::io::{self, Cursor, Read as _};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use adbc_core::options::{OptionConnection, OptionValue};
-use adbc_core::{Connection as _, Optionable as _, Statement as _};
-use adbc_driver_manager::ManagedConnection;
 use arrow_array::{ArrayRef, LargeStringArray, RecordBatch, StringArray, StringViewArray};
 use arrow_ipc::reader::StreamReader;
 use arrow_ipc::writer::StreamWriter;
@@ -19,6 +16,7 @@ use crate::backend::storage::manager::{
     ensure_dataset_namespace, execute_delete_sql, execute_update_sql, ingest_batch, run_query,
     table_exists,
 };
+use crate::backend::storage::repository::RepositoryConnection;
 use crate::backend::storage::sql;
 
 const PROJECT_MAGIC: &[u8; 8] = b"SPRPROJ1";
@@ -79,7 +77,7 @@ struct ExportedBundle {
 }
 
 pub(crate) fn export(
-    connection: &mut ManagedConnection,
+    connection: &mut RepositoryConnection,
     namespace: &str,
 ) -> Result<Vec<u8>, String> {
     let mut queries = Vec::new();
@@ -94,7 +92,7 @@ pub(crate) fn export(
 }
 
 pub(crate) fn export_episodes(
-    connection: &mut ManagedConnection,
+    connection: &mut RepositoryConnection,
     namespace: &str,
     dataset_id: &str,
 ) -> Result<Vec<u8>, String> {
@@ -143,7 +141,7 @@ pub(crate) fn export_episodes(
 }
 
 fn export_queries(
-    connection: &mut ManagedConnection,
+    connection: &mut RepositoryConnection,
     queries: Vec<(Table, String)>,
     spec: BundleSpec,
 ) -> Result<ExportedBundle, String> {
@@ -238,7 +236,7 @@ fn build_bundle(entries: Vec<(String, Vec<u8>)>, spec: BundleSpec) -> Result<Vec
 }
 
 pub(crate) fn import(
-    connection: &mut ManagedConnection,
+    connection: &mut RepositoryConnection,
     namespace: &str,
     bundle: &[u8],
 ) -> Result<ProjectImportSummary, String> {
@@ -246,7 +244,7 @@ pub(crate) fn import(
     sort_relations(&mut decoded, &Table::ALL);
 
     connection
-        .set_option(OptionConnection::AutoCommit, OptionValue::from(false))
+        .set_autocommit(false)
         .map_err(|error| format!("starting project import transaction: {error}"))?;
     let outcome = (|| {
         // Retire only relations absent from the incoming project. Relations in
@@ -285,7 +283,7 @@ pub(crate) fn import(
 }
 
 pub(crate) fn import_episodes(
-    connection: &mut ManagedConnection,
+    connection: &mut RepositoryConnection,
     namespace: &str,
     dataset_id: &str,
     bundle: &[u8],
@@ -298,7 +296,7 @@ pub(crate) fn import_episodes(
     ensure_dataset_namespace(connection, namespace)?;
 
     connection
-        .set_option(OptionConnection::AutoCommit, OptionValue::from(false))
+        .set_autocommit(false)
         .map_err(|error| format!("starting episode import transaction: {error}"))?;
     let outcome = (|| {
         let datasets = sql::relation(namespace, Table::Datasets);
@@ -369,7 +367,7 @@ fn decode_entries(
 }
 
 fn finish_transaction<T>(
-    connection: &mut ManagedConnection,
+    connection: &mut RepositoryConnection,
     outcome: Result<T, String>,
     operation: &str,
 ) -> Result<T, String> {
@@ -387,7 +385,7 @@ fn finish_transaction<T>(
         }
     };
     let autocommit = connection
-        .set_option(OptionConnection::AutoCommit, OptionValue::from(true))
+        .set_autocommit(true)
         .map_err(|error| format!("restoring Spiral autocommit after {operation}: {error}"));
     match (final_result, autocommit) {
         (Ok(value), Ok(())) => Ok(value),
@@ -529,7 +527,7 @@ fn replace_utf8_column(batch: RecordBatch, name: &str, value: &str) -> Result<Re
 }
 
 fn reject_existing_episodes(
-    connection: &mut ManagedConnection,
+    connection: &mut RepositoryConnection,
     namespace: &str,
     episode_ids: &[String],
 ) -> Result<(), String> {
@@ -1290,7 +1288,7 @@ mod tests {
     }
 
     fn seed_episode(
-        connection: &mut ManagedConnection,
+        connection: &mut RepositoryConnection,
         namespace: &str,
         dataset_id: &str,
         episode_id: &str,
@@ -1331,7 +1329,7 @@ mod tests {
     }
 
     fn drop_studio_relations(
-        connection: &mut ManagedConnection,
+        connection: &mut RepositoryConnection,
         namespace: &str,
     ) -> Result<(), String> {
         for table in Table::ALL.into_iter().rev() {

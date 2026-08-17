@@ -31,10 +31,11 @@
   not overwrite an existing robot.
 - **SETUP-011** Reapply calibration must update recorded positions only through
   an explicit, validated operation.
+- **SETUP-012** A successful camera assignment must update the active Live
+  camera panels without a browser refresh or backend restart.
 
 ## Related features
 
 - [Live control](control.md) uses the connected and calibrated instance.
 - [Recording](../recording/README.md) captures the configured cameras and arms.
 - [Rollout](../rollout/README.md) accepts only a compatible calibrated follower.
-

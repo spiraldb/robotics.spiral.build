@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 
-use adbc_driver_manager::ManagedConnection;
 use spiral_robotics_contracts::api::{
     ConnectionTestResponse, MAX_ROLLOUT_ACTION_STEPS, MAX_TRAINING_HISTORY_RUNS,
     StartTrainingRequest, TrainingCheckpoint, TrainingMetricPoint, TrainingReadiness, TrainingRun,
@@ -47,6 +46,7 @@ use crate::backend::application::training_runs::{
     RunPhase as ApplicationRunPhase, RunRecord, TrainingRunRegistry,
 };
 use crate::backend::storage::manager::StorageManager;
+use crate::backend::storage::repository::RepositoryConnection;
 use crate::backend::training::data::{LoadedActBatch, SpiralActLoader};
 
 const STOP_GRACE: Duration = Duration::from_secs(30);
@@ -687,7 +687,7 @@ impl TrainingRuntimePort for TrainingManager {
 
 #[allow(clippy::too_many_arguments)]
 fn train_blocking(
-    connection: &mut ManagedConnection,
+    connection: &mut RepositoryConnection,
     training_backend: &dyn TrainingBackend,
     run_id: &str,
     request: &StartTrainingRequest,

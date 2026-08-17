@@ -269,6 +269,16 @@ impl Failure {
         Self(StatusCode::BAD_REQUEST, message.into())
     }
 
+    fn import(message: impl Into<String>) -> Self {
+        let message = message.into();
+        let status = if crate::backend::storage::repository::is_unavailable_error(&message) {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        Self(status, message)
+    }
+
     fn conflict(message: impl Into<String>) -> Self {
         Self(StatusCode::CONFLICT, message.into())
     }

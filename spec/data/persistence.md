@@ -114,6 +114,14 @@ flowchart TD
   project and never replace an existing episode.
 - **PERSIST-036** `.spiral-project` and `.spiral-episodes` must have distinct
   format identities and must not be accepted by the other's import path.
+- **PERSIST-037** The synchronous ADBC API must remain private to the shared
+  Spiral repository adapter. For each active project, that adapter must own one
+  loaded driver and one database/engine runtime, expose only repository-owned
+  connection and statement operations, run asynchronous calls on bounded
+  blocking workers, and apply the same fixed connection limit to ordinary,
+  long-lived, exclusive, invalidating, and synchronous-worker checkouts. No
+  domain or delivery module may construct an ADBC database or bypass that
+  capacity gate.
 
 The confirmed SQL example remains in the
 [SpiralDB section of `notes.md`](../../notes.md#spiraldb).
@@ -152,6 +160,10 @@ The confirmed SQL example remains in the
   dataset, import it into an existing target dataset, prove the target's prior
   episodes survive and imported rows are retargeted, and prove a repeated
   import is refused rather than overwriting an episode.
+- **PERSIST-TEST-006** Architecture tests must prove that raw ADBC types occur
+  only in the shared repository adapter and that every repository checkout
+  mode consumes its one capacity gate. A concurrency test must prove a
+  synchronous worker waits while the same gate is occupied asynchronously.
 
 ## Implementation ownership
 
