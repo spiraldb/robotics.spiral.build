@@ -65,7 +65,7 @@ Recorded inspection is defined by
 ## Implementation ownership
 
 - Recording use case:
-  [`backend/application/recording.rs`](../../crates/spiral-robotics-studio-backend/src/backend/application/recording.rs)
+  [`spiral-robotics-studio-application/src/recording.rs`](../../crates/spiral-robotics-studio-application/src/recording.rs)
 - Hardware capture:
   [`backend/robotics`](../../crates/spiral-robotics-studio-backend/src/backend/robotics/)
 - Episode and media adapters:

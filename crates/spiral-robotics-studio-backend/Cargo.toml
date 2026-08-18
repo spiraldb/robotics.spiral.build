@@ -9,6 +9,7 @@ publish = false
 spiral-robotics.workspace = true
 spiral-robotics-contracts.workspace = true
 spiral-robotics-core.workspace = true
+spiral-robotics-studio-application.workspace = true
 spiral-robotics-training.workspace = true
 spiral-robotics-training-http.workspace = true
 clap.workspace = true

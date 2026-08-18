@@ -1,5 +1,5 @@
 use super::*;
-use crate::backend::application::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken};
+use spiral_robotics_studio_application::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken};
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()

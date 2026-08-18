@@ -49,6 +49,10 @@ struct Args {
     #[arg(long, value_name = "ADDR:PORT")]
     bind: Option<SocketAddr>,
 
+    /// Permit the unauthenticated Studio control API to listen beyond loopback.
+    #[arg(long, requires = "bind")]
+    allow_remote_access: bool,
+
     /// Skip camera discovery entirely.
     #[arg(long)]
     no_cameras: bool,
@@ -208,6 +212,7 @@ async fn serve(
     let bind = args
         .bind
         .unwrap_or_else(dioxus::cli_config::fullstack_address_or_localhost);
+    validate_bind_address(bind, args.allow_remote_access)?;
     let spiral_project = args
         .spiral_project
         .clone()
@@ -245,7 +250,6 @@ async fn serve(
     let training = Arc::new(TrainingManager::new(
         storage.clone(),
         Arc::new(ConfiguredHttpTrainingBackend::new(preferences.clone())),
-        args.ffmpeg.clone(),
     ));
     let hardware = Arc::new(HardwareHandle::spawn(ControlSettings {
         max_step_counts: args.max_step,
@@ -280,7 +284,7 @@ async fn serve(
         rollout: rollout.clone(),
         bootstrap: BootstrapState::new(),
         catalog_lease: Arc::new(
-            crate::backend::application::catalog_lease::CatalogMutationLease::default(),
+            spiral_robotics_studio_application::catalog_lease::CatalogMutationLease::default(),
         ),
         recording_video: Arc::new(tokio::sync::Mutex::new(None)),
         video_encoder: VideoEncoderSettings {
@@ -354,6 +358,19 @@ async fn serve(
         result?;
     }
     Ok(())
+}
+
+fn validate_bind_address(bind: SocketAddr, allow_remote_access: bool) -> Result<()> {
+    if bind.ip().is_loopback() || allow_remote_access {
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!(
+            "refusing to expose the unauthenticated Studio control API on {bind}; use a loopback address or pass --allow-remote-access explicitly"
+        ),
+    )
+    .into())
 }
 
 /// Warm external services and hydrate durable state after the HTTP listener
@@ -483,6 +500,16 @@ async fn shutdown_requested(mut shutdown: tokio::sync::watch::Receiver<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_control_bind_requires_explicit_opt_in() {
+        let loopback = "127.0.0.1:8080".parse().unwrap();
+        let remote = "0.0.0.0:8080".parse().unwrap();
+
+        assert!(validate_bind_address(loopback, false).is_ok());
+        assert!(validate_bind_address(remote, false).is_err());
+        assert!(validate_bind_address(remote, true).is_ok());
+    }
 
     #[tokio::test]
     async fn shutdown_waiters_release_when_the_signal_is_published() {

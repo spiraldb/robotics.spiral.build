@@ -10,7 +10,7 @@ use super::error::ApplicationError;
 const MAX_QUERY_ROWS: usize = 1_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SpiralDestinationSettings {
+pub struct SpiralDestinationSettings {
     pub endpoint: String,
     pub spfs_endpoint: String,
     pub project_id: String,
@@ -21,7 +21,7 @@ pub(crate) struct SpiralDestinationSettings {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct UpdateDataSettingsCommand {
+pub struct UpdateDataSettingsCommand {
     pub spiral_endpoint: String,
     pub spiral_spfs_endpoint: String,
     pub project_id: String,
@@ -33,20 +33,20 @@ pub(crate) struct UpdateDataSettingsCommand {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DataSettingsView {
+pub struct DataSettingsView {
     pub spiral: SpiralDestinationSettings,
     pub training_endpoint: String,
     pub video_enabled: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ConnectionCheck {
+pub struct ConnectionCheck {
     pub ok: bool,
     pub message: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum QueryValue {
+pub enum QueryValue {
     Null,
     Bool(bool),
     Signed(i64),
@@ -58,14 +58,14 @@ pub(crate) enum QueryValue {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct QueryColumn {
+pub struct QueryColumn {
     pub name: String,
     pub data_type: String,
     pub nullable: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct QueryResult {
+pub struct QueryResult {
     pub columns: Vec<QueryColumn>,
     pub rows: Vec<BTreeMap<String, QueryValue>>,
     pub truncated: bool,
@@ -73,33 +73,33 @@ pub(crate) struct QueryResult {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct QueryCommand {
+pub struct QueryCommand {
     pub statement: String,
     pub max_rows: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct StartSpiralReplayCommand {
+pub struct StartSpiralReplayCommand {
     pub episode: String,
     pub robot: String,
     pub stream: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ReplayTrajectory {
+pub struct ReplayTrajectory {
     pub sample_hz: f64,
     pub frames: Vec<BTreeMap<String, f64>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct VideoAssetQuery {
+pub struct VideoAssetQuery {
     pub episode: String,
     pub stream: String,
     pub segment: Option<u32>,
 }
 
 /// Data-catalog consequences expressed only in application-owned models.
-pub(crate) trait DataCatalogPort: Send + Sync {
+pub trait DataCatalogPort: Send + Sync {
     fn settings(&self) -> DataSettingsView;
     fn update_settings(
         &self,
@@ -117,7 +117,7 @@ pub(crate) trait DataCatalogPort: Send + Sync {
     async fn video_asset(&self, query: VideoAssetQuery) -> Result<Vec<u8>, ApplicationError>;
 }
 
-pub(crate) async fn video_asset<P: DataCatalogPort + ?Sized>(
+pub async fn video_asset<P: DataCatalogPort + ?Sized>(
     port: &P,
     query: VideoAssetQuery,
 ) -> Result<Vec<u8>, ApplicationError> {
@@ -128,7 +128,7 @@ pub(crate) async fn video_asset<P: DataCatalogPort + ?Sized>(
 
 /// Control consequence for a trajectory already admitted and loaded by the
 /// data-catalog action.
-pub(crate) trait SpiralReplayPort: Send + Sync {
+pub trait SpiralReplayPort: Send + Sync {
     async fn start_spiral_replay(
         &self,
         command: StartSpiralReplayCommand,
@@ -136,11 +136,11 @@ pub(crate) trait SpiralReplayPort: Send + Sync {
     ) -> Result<(), ApplicationError>;
 }
 
-pub(crate) fn get_settings<P: DataCatalogPort + ?Sized>(port: &P) -> DataSettingsView {
+pub fn get_settings<P: DataCatalogPort + ?Sized>(port: &P) -> DataSettingsView {
     port.settings()
 }
 
-pub(crate) async fn update_settings<P: DataCatalogPort + ?Sized>(
+pub async fn update_settings<P: DataCatalogPort + ?Sized>(
     port: &P,
     command: UpdateDataSettingsCommand,
 ) -> Result<DataSettingsView, ApplicationError> {
@@ -152,11 +152,11 @@ pub(crate) async fn update_settings<P: DataCatalogPort + ?Sized>(
     Ok(settings)
 }
 
-pub(crate) async fn test_connection<P: DataCatalogPort + ?Sized>(port: &P) -> ConnectionCheck {
+pub async fn test_connection<P: DataCatalogPort + ?Sized>(port: &P) -> ConnectionCheck {
     port.test_connection().await
 }
 
-pub(crate) async fn query<P: DataCatalogPort + ?Sized>(
+pub async fn query<P: DataCatalogPort + ?Sized>(
     port: &P,
     mut command: QueryCommand,
 ) -> Result<QueryResult, ApplicationError> {
@@ -166,7 +166,7 @@ pub(crate) async fn query<P: DataCatalogPort + ?Sized>(
     port.query(command).await
 }
 
-pub(crate) async fn start_spiral_replay<D, R>(
+pub async fn start_spiral_replay<D, R>(
     data: &D,
     replay: &R,
     command: StartSpiralReplayCommand,

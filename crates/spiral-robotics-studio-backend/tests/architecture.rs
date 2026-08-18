@@ -33,67 +33,45 @@ fn declares_local_dependency(manifest: &str, dependency: &str) -> bool {
 }
 
 #[test]
-fn application_policy_does_not_import_delivery_or_adapter_details() {
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/backend/application");
-    let forbidden = [
+fn application_policy_is_a_separate_compile_time_boundary() {
+    let backend = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let application = backend
+        .parent()
+        .expect("workspace crates directory")
+        .join("spiral-robotics-studio-application");
+    assert!(application.join("src/lib.rs").is_file());
+    assert!(
+        !backend.join("src/backend/application").exists(),
+        "application policy must not drift back into the delivery crate"
+    );
+
+    let manifest =
+        fs::read_to_string(application.join("Cargo.toml")).expect("application manifest");
+    for forbidden in [
         "axum",
         "dioxus",
         "serde",
-        "serde_json",
-        "tokio",
-        "bytes::",
-        "arrow_",
-        "adbc_",
-        "parquet::",
-        "zip::",
-        "safetensors::",
-        "spiral_robotics::",
-        "spiral_robotics_inference",
-        "spiral_robotics_contracts",
-        "backend::http",
-        "backend::storage",
-        "backend::robotics",
-        "backend::recording",
-        "backend::robots",
-        "std::fs",
-        "std::env",
-        "std::io",
-        "std::net",
-        "std::process",
-        "std::path",
-        "SystemTime",
-        "PathBuf",
-        "StatusCode",
-        "checkpoint_relation",
-        "checkpoint_table",
-        "spiral_table",
-    ];
-
-    let mut sources = Vec::new();
-    collect_production_rust_sources(&directory, &mut sources);
-    assert!(!sources.is_empty(), "application policy sources must exist");
-    for path in sources {
-        let source = fs::read_to_string(&path).expect("application source must be readable");
-        // Test adapters may use an async runtime. Only production policy is
-        // part of this dependency assertion.
-        let production = source.split("#[cfg(test)]").next().unwrap_or(&source);
-        for outward in forbidden {
-            assert!(
-                !production.contains(outward),
-                "{} imports outward detail {outward:?}",
-                path.display()
-            );
-        }
+        "arrow",
+        "adbc",
+        "spiral-robotics-contracts",
+        "spiral-robotics-inference",
+        "spiral-robotics-training",
+    ] {
+        assert!(
+            !manifest
+                .lines()
+                .any(|line| line.trim_start().starts_with(forbidden)),
+            "application crate depends on outward detail {forbidden:?}"
+        );
     }
 }
-
 #[test]
 fn read_controllers_delegate_selection_and_admission_to_application_use_cases() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/backend/http");
     let routes = fs::read_to_string(root.join("routes.rs")).expect("routes source");
     for seam in [
         "robots::list(&robot_adapter)",
-        "device_discovery::list_cameras(&state.cameras)",
+        "device_discovery::list_cameras(&devices::CameraDiscoveryAdapter(",
     ] {
         assert!(routes.contains(seam), "state snapshot bypasses {seam}");
     }
@@ -315,8 +293,13 @@ fn studio_has_one_spiral_persistence_boundary() {
         );
     }
 
-    let checkpoints = fs::read_to_string(backend.join("src/backend/application/checkpoints.rs"))
-        .expect("checkpoint boundary source");
+    let checkpoints = fs::read_to_string(
+        backend
+            .parent()
+            .expect("workspace crates directory")
+            .join("spiral-robotics-studio-application/src/checkpoints.rs"),
+    )
+    .expect("checkpoint boundary source");
     for retired in ["CheckpointSource", "register_run_source"] {
         assert!(
             !checkpoints.contains(retired),
@@ -402,7 +385,6 @@ fn synchronous_adbc_is_confined_to_one_bounded_adapter() {
     );
     for operation in [
         "pub(crate) async fn run",
-        "pub(crate) async fn run_dedicated",
         "pub(crate) fn run_blocking",
         "pub(crate) fn run_invalidating_blocking",
         "pub(crate) fn run_exclusive_blocking",
@@ -427,16 +409,15 @@ fn synchronous_adbc_is_confined_to_one_bounded_adapter() {
 
 #[test]
 fn application_associated_types_are_only_closed_loop_capability_tokens() {
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/backend/application");
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace crates directory")
+        .join("spiral-robotics-studio-application/src");
     let allowed = BTreeSet::from([
         ("recording.rs".to_owned(), "MediaCapture".to_owned()),
         ("recording.rs".to_owned(), "MediaOutput".to_owned()),
         ("recording.rs".to_owned(), "RecordingDraft".to_owned()),
         ("robots.rs".to_owned(), "CameraConfiguration".to_owned()),
-        (
-            "training_execution.rs".to_owned(),
-            "CheckpointEnvelope".to_owned(),
-        ),
     ]);
 
     let mut declared = BTreeSet::new();
@@ -543,6 +524,11 @@ fn workspace_crate_dependencies_point_toward_policy() {
             ][..],
         ),
         (
+            "spiral-robotics-studio-application",
+            "crates/spiral-robotics-studio-application/Cargo.toml",
+            &["spiral-robotics-core"][..],
+        ),
+        (
             "spiral-robotics-studio-backend",
             "crates/spiral-robotics-studio-backend/Cargo.toml",
             &[
@@ -550,6 +536,7 @@ fn workspace_crate_dependencies_point_toward_policy() {
                 "spiral-robotics-contracts",
                 "spiral-robotics-core",
                 "spiral-robotics-inference",
+                "spiral-robotics-studio-application",
                 "spiral-robotics-training",
                 "spiral-robotics-training-http",
             ][..],
@@ -584,14 +571,14 @@ fn studio_training_owns_only_the_remote_backend_trait_boundary() {
     .expect("training manager source");
     let job_loop = manager
         .split_once("async fn run_backend")
-        .and_then(|(_, source)| source.split_once("async fn save_checkpoint_bytes"))
+        .and_then(|(_, source)| source.split_once("fn apply_remote_job_snapshot"))
         .map(|(source, _)| source)
         .expect("training manager must have one explicit worker-job loop");
     assert!(
         manager.contains("training_backend: Arc<dyn TrainingBackend>")
             && job_loop.contains("create_job(job_request)")
-            && job_loop.contains("backend.job(&next_run_id)")
-            && job_loop.contains("backend.stop_job(&next_run_id)"),
+            && job_loop.contains("backend.job(&next_run_id, cursor)")
+            && job_loop.contains("backend.stop_job(&next_run_id, cursor)"),
         "Studio must orchestrate a backend-neutral worker job"
     );
     for forbidden_data_plane in [

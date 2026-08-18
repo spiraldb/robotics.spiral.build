@@ -29,12 +29,6 @@ use spiral_robotics::bus::{
 };
 use spiral_robotics::feetech::FeetechBus;
 
-use crate::backend::application::control_session::{
-    self, CalibrationAdmission, ControlMode, ControlState, Decision as ControlDecision,
-    Effect as ControlEffect, Event as ControlEvent, Intent as ControlIntent,
-    ReplayDecision as ReplayPolicyDecision, ReplayEvent as ReplayPolicyEvent,
-    ReplayState as ReplayPolicyState, RobotAdmission,
-};
 use crate::backend::recording::episodes::{
     ArmConditionSummary, EpisodeCheckpoint, EpisodeWriter, Sample,
 };
@@ -49,6 +43,12 @@ use spiral_robotics_core::calibration::{
     Calibration, CalibrationError, CalibrationInput, Direction, MotorCalibration, MotorSpec,
     RangeTracker, denormalize_centered_raw, normalize_centered_raw,
     validate_calibration_for_motors, validate_motor_specs,
+};
+use spiral_robotics_studio_application::control_session::{
+    self, CalibrationAdmission, ControlMode, ControlState, Decision as ControlDecision,
+    Effect as ControlEffect, Event as ControlEvent, Intent as ControlIntent,
+    ReplayDecision as ReplayPolicyDecision, ReplayEvent as ReplayPolicyEvent,
+    ReplayState as ReplayPolicyState, RobotAdmission,
 };
 use tokio::sync::{oneshot, watch};
 

@@ -1,0 +1,15 @@
+{
+  "format_version": 1,
+  "spiral_schema": {
+    "current": 7
+  },
+  "training_api": {
+    "id": "spiral.robotics.training",
+    "major": 6,
+    "minor": 0,
+    "spiral_schema": {
+      "minimum": 7,
+      "maximum": 7
+    }
+  }
+}

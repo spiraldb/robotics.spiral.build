@@ -4523,6 +4523,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "spiral-robotics-studio-application"
+version = "0.1.0"
+dependencies = [
+ "spiral-robotics-core",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "spiral-robotics-studio-backend"
 version = "0.1.0"
 dependencies = [
@@ -4548,6 +4557,7 @@ dependencies = [
  "spiral-robotics-contracts",
  "spiral-robotics-core",
  "spiral-robotics-inference",
+ "spiral-robotics-studio-application",
  "spiral-robotics-training",
  "spiral-robotics-training-http",
  "tempfile",
@@ -4564,6 +4574,7 @@ name = "spiral-robotics-training"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
  "thiserror 2.0.19",
 ]
 

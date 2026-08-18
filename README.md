@@ -32,7 +32,7 @@ remote compute host). It owns PyTorch for both training and rollout inference:
 ```console
 cd training
 uv sync --extra dev
-uv run spiral-training-runtime --host 0.0.0.0 --port 50051
+uv run spiral-training-runtime --port 50051
 ```
 
 For a fresh Lambda Stack machine, clone the repository and run
@@ -42,6 +42,10 @@ for the runtime and Lambda workflow.
 In Studio, open **Settings → Training**, enter the runtime's `http://` endpoint,
 and choose **Save and connect**. New training and rollout sessions use that
 endpoint; an active session keeps its existing connection.
+
+Both Studio and the policy runtime refuse non-loopback listeners by default.
+Use SSH forwarding for a remote worker. `--allow-remote-access` is reserved for
+deployments placed behind an authenticated TLS proxy.
 
 To connect Studio to a local SpiralDB stack:
 
@@ -56,8 +60,8 @@ Spiral API endpoint, SpFS endpoint, and project ID. The hosted services are the
 defaults; for the local stack use `http://127.0.0.1:4279` and
 `http://127.0.0.1:4295`. The backend remembers these three bootstrap pointers
 in one private JSON file. Project-only switches apply immediately while Studio
-is idle. A service-endpoint change is activated on the next Studio launch
-because the ADBC driver selects both endpoints when it starts.
+is idle. Service-endpoint and credential changes also apply live while Studio
+is idle, after the old repository pool drains.
 `--spiral-project` or `SPIRAL_PROJECT_ID` may still provide an initial project
 override.
 `SPIRAL_ROBOTICS_BACKEND_STATE` overrides the JSON file path for development

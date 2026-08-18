@@ -10,12 +10,12 @@ use spiral_robotics_core::operation::MAX_ROLLOUT_ACTION_STEPS;
 
 use super::error::ApplicationError;
 
-pub(crate) const ACT_ARTIFACT_FORMAT: &str = "spiral_robotics.act.safetensors.v2";
-pub(crate) const ACT_TENSOR_NAMESPACE: &str = "lerobot_act_state_dict_v1";
+pub const ACT_ARTIFACT_FORMAT: &str = "spiral_robotics.act.safetensors.v2";
+pub const ACT_TENSOR_NAMESPACE: &str = "lerobot_act_state_dict_v1";
 const LEGACY_BURN_ACT_TENSOR_NAMESPACE: &str = "burn_act_state_dict_v1";
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ArtifactIdentity {
+pub struct ArtifactIdentity {
     pub format: String,
     pub purpose: String,
     pub run_id: String,
@@ -24,7 +24,7 @@ pub(crate) struct ArtifactIdentity {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct PolicyDataContract {
+pub struct PolicyDataContract {
     pub value_space: String,
     pub robot_type: String,
     pub joint_names: Vec<String>,
@@ -38,7 +38,7 @@ pub(crate) struct PolicyDataContract {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PolicyModelContract {
+pub struct PolicyModelContract {
     pub state_dimensions: usize,
     pub action_dimensions: usize,
     pub action_chunk_size: usize,
@@ -47,7 +47,7 @@ pub(crate) struct PolicyModelContract {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TargetRobotContract {
+pub struct TargetRobotContract {
     pub id: String,
     pub robot_type: Option<String>,
     pub joint_names: Vec<String>,
@@ -58,13 +58,13 @@ pub(crate) struct TargetRobotContract {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CameraBindingContract {
+pub struct CameraBindingContract {
     pub role: String,
     pub camera_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ValidatedRolloutContract {
+pub struct ValidatedRolloutContract {
     pub joint_names: Vec<String>,
     pub camera_bindings: Vec<ResolvedCameraBinding>,
     pub sample_hz: f64,
@@ -73,12 +73,12 @@ pub(crate) struct ValidatedRolloutContract {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ResolvedCameraBinding {
+pub struct ResolvedCameraBinding {
     pub stream: String,
     pub camera_id: String,
 }
 
-pub(crate) fn validate_artifact_identity(
+pub fn validate_artifact_identity(
     actual: &ArtifactIdentity,
     expected_run: &str,
     expected_step: u64,
@@ -98,7 +98,7 @@ pub(crate) fn validate_artifact_identity(
 }
 
 /// Bind persisted artifact policy, loaded-model shape, and live robot setup.
-pub(crate) fn validate_rollout_contract(
+pub fn validate_rollout_contract(
     data: PolicyDataContract,
     model: &PolicyModelContract,
     target: &TargetRobotContract,
@@ -203,12 +203,12 @@ pub(crate) fn validate_rollout_contract(
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ObservationFreshness {
+pub struct ObservationFreshness {
     pub source: String,
     pub age: Option<Duration>,
 }
 
-pub(crate) fn require_fresh_observations(
+pub fn require_fresh_observations(
     observations: &[ObservationFreshness],
     maximum_age: Duration,
 ) -> Result<(), ApplicationError> {
@@ -227,13 +227,13 @@ pub(crate) fn require_fresh_observations(
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct PreparedActionGoals {
+pub struct PreparedActionGoals {
     pub goals: BTreeMap<String, f64>,
     pub clamps: Vec<ActionClamp>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ActionClamp {
+pub struct ActionClamp {
     pub index: usize,
     pub joint: String,
     pub requested: f32,
@@ -244,7 +244,7 @@ pub(crate) struct ActionClamp {
 ///
 /// Finite values outside the normalized range are safe to saturate at the
 /// calibrated endpoint. Shape mismatches and non-finite values remain fatal.
-pub(crate) fn prepare_action_goals(
+pub fn prepare_action_goals(
     joint_names: &[String],
     action: &[f32],
 ) -> Result<PreparedActionGoals, ApplicationError> {
@@ -278,13 +278,13 @@ pub(crate) fn prepare_action_goals(
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct JointObservation {
+pub struct JointObservation {
     pub joint: String,
     pub normalized: Option<f64>,
 }
 
 /// Order live telemetry exactly as the model contract declares it.
-pub(crate) fn prepare_observation_state(
+pub fn prepare_observation_state(
     joint_names: &[String],
     observations: &[JointObservation],
 ) -> Result<Vec<f32>, ApplicationError> {
@@ -319,18 +319,18 @@ pub(crate) fn prepare_observation_state(
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ControlOwner {
+pub enum ControlOwner {
     Policy { robot: String, session: String },
     Other(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum PolicyOwnership {
+pub enum PolicyOwnership {
     Retained,
     Replaced(String),
 }
 
-pub(crate) fn assess_policy_ownership(
+pub fn assess_policy_ownership(
     owner: &ControlOwner,
     hardware_error: Option<&str>,
     expected_robot: &str,

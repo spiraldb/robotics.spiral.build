@@ -97,8 +97,7 @@ async fn import_project(
         ));
     }
     let storage = state.storage.clone();
-    let bytes = body.to_vec();
-    let summary = tokio::task::spawn_blocking(move || storage.import_project_bundle(&bytes))
+    let summary = tokio::task::spawn_blocking(move || storage.import_project_bundle(&body))
         .await
         .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
         .map_err(Failure::import)?;
@@ -182,9 +181,8 @@ async fn import_episodes(
     }
     let storage = state.storage.clone();
     let dataset_id = query.dataset_id;
-    let bytes = body.to_vec();
     let summary =
-        tokio::task::spawn_blocking(move || storage.import_episode_bundle(&dataset_id, &bytes))
+        tokio::task::spawn_blocking(move || storage.import_episode_bundle(&dataset_id, &body))
             .await
             .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
             .map_err(Failure::import)?;
@@ -206,7 +204,10 @@ fn require_import_idle(state: &AppState, subject: &str) -> Result<(), Failure> {
             .iter()
             .any(|run| run.phase.active())
         || matches!(
-            state.rollout.snapshot().phase,
+            rollout_application::snapshot(&super::training_rollout::RolloutHttpAdapter(
+                state.rollout.clone(),
+            ))
+            .phase,
             ApplicationRolloutPhase::Loading
                 | ApplicationRolloutPhase::WarmingUp
                 | ApplicationRolloutPhase::Running
@@ -625,7 +626,10 @@ async fn update_data_settings(
                 .any(|connection| connection.connected)
             || training_is_active
             || matches!(
-                state.rollout.snapshot().phase,
+                rollout_application::snapshot(&super::training_rollout::RolloutHttpAdapter(
+                    state.rollout.clone(),
+                ))
+                .phase,
                 ApplicationRolloutPhase::Loading
                     | ApplicationRolloutPhase::WarmingUp
                     | ApplicationRolloutPhase::Running

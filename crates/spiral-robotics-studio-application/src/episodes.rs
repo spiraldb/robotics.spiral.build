@@ -7,30 +7,30 @@ use super::error::ApplicationError;
 
 /// Current episode use that makes deletion unsafe.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct EpisodeActivity {
+pub struct EpisodeActivity {
     pub recording: Option<String>,
     pub replaying: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct JudgeEpisodeCommand {
+pub struct JudgeEpisodeCommand {
     pub episode: String,
     pub discarded: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DeleteEpisodeCommand {
+pub struct DeleteEpisodeCommand {
     pub episode: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct EpisodeMutationResult {
+pub struct EpisodeMutationResult {
     pub episode: String,
 }
 
 /// Consequences required by episode catalog actions.
 ///
-pub(crate) trait EpisodeCatalogPort {
+pub trait EpisodeCatalogPort {
     fn activity(&self) -> EpisodeActivity;
     async fn judge_episode(
         &self,
@@ -41,7 +41,7 @@ pub(crate) trait EpisodeCatalogPort {
     async fn delete_episode(&self, episode: String) -> Result<(), ApplicationError>;
 }
 
-pub(crate) async fn judge<P: EpisodeCatalogPort + ?Sized>(
+pub async fn judge<P: EpisodeCatalogPort + ?Sized>(
     port: &P,
     command: JudgeEpisodeCommand,
 ) -> Result<EpisodeMutationResult, ApplicationError> {
@@ -55,7 +55,7 @@ pub(crate) async fn judge<P: EpisodeCatalogPort + ?Sized>(
 /// storage adapter therefore cannot remove a recording or a trajectory that is
 /// currently driving an arm. Related-row cleanup belongs inside the repository
 /// transaction.
-pub(crate) async fn delete<P: EpisodeCatalogPort + ?Sized>(
+pub async fn delete<P: EpisodeCatalogPort + ?Sized>(
     port: &P,
     command: DeleteEpisodeCommand,
 ) -> Result<(), ApplicationError> {

@@ -30,76 +30,18 @@ use serde_json::{Map, Value};
 use spiral_robotics::serial_ports::{available_ports, port_description, port_kind};
 use spiral_robotics_contracts::api::{
     ApiError, BackendReadiness, BackendReadinessState, CalibrationReapplyResponse, CameraStatus,
-    ConnectionTestResponse, CreateRobotRequest, DataSettings, EpisodeCatalogResponse,
-    EpisodeSummary, GoalRequest, IdentifyPortRequest, IdentifyPortResponse, JudgeEpisodeRequest,
-    ModeSelection, PortSettings, RobotSummary, RolloutSnapshot, SerialPortSummary,
-    SetRecordingPausedRequest, SetReplayPausedRequest, SpiralQueryRequest, SpiralQueryResponse,
-    SpiralSettings as ContractSpiralSettings, StartRecordingRequest, StartReplayRequest,
-    StartRolloutRequest, StartSpiralReplayRequest, StartTrainingRequest, StopRecordingRequest,
-    StudioSnapshot, TrainingPolicy as ContractTrainingPolicy, TrainingRun, TrainingSnapshot,
-    UpdateDataSettingsRequest, UpdateRobotRequest, VideoSettings, default_teleoperation_pair,
+    ConnectionStatus, ConnectionTestResponse, CreateRobotRequest, DataSettings,
+    EpisodeCatalogResponse, EpisodeSummary, GoalRequest, IdentifyPortRequest, IdentifyPortResponse,
+    JudgeEpisodeRequest, ModeSelection, PortSettings, RobotSummary, RolloutSnapshot,
+    SerialPortSummary, SetRecordingPausedRequest, SetReplayPausedRequest, SpiralQueryRequest,
+    SpiralQueryResponse, SpiralSettings as ContractSpiralSettings, StartRecordingRequest,
+    StartReplayRequest, StartRolloutRequest, StartSpiralReplayRequest, StartTrainingRequest,
+    StopRecordingRequest, StudioSnapshot, TrainingPolicy as ContractTrainingPolicy, TrainingRun,
+    TrainingSnapshot, UpdateDataSettingsRequest, UpdateRobotRequest, VideoSettings,
+    default_teleoperation_pair,
 };
 use spiral_robotics_core::calibration::{Calibration, CalibrationInput, MotorSpec};
 
-use crate::backend::application::calibration::{
-    self, CalibrationControlPort, CalibrationHistoryActivity, CalibrationHistoryPort,
-    ReappliedPositions, RobotCalibrationRepository,
-};
-use crate::backend::application::catalog_lease::{
-    CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease,
-};
-use crate::backend::application::data::{
-    self as data_application, ConnectionCheck, DataCatalogPort, DataSettingsView,
-    QueryColumn as ApplicationQueryColumn, QueryCommand, QueryResult as ApplicationQueryResult,
-    QueryValue, ReplayTrajectory as SpiralReplayTrajectory, SpiralDestinationSettings,
-    SpiralReplayPort, StartSpiralReplayCommand, UpdateDataSettingsCommand, VideoAssetQuery,
-};
-use crate::backend::application::device_discovery::{
-    self as device_discovery, CameraDiscoveryPort, DiscoveredCamera, IdentifySerialPortCommand,
-    SerialPortInventory, SerialPortQueryPort, SerialPortView,
-};
-use crate::backend::application::episode_queries::{
-    self, EpisodeArmView, EpisodeQueryPort, EpisodeTimelineView, EpisodeTraceQuery, EpisodeView,
-    RecordingGapView, TimelineArmSampleView, TimelineMetadataView, TimelineSampleView,
-    TimelineTraceLaneView, TimelineTracePointView, TimelineTraceSeriesView, TimelineTracesView,
-    VideoAssetView,
-};
-use crate::backend::application::episode_seek::{
-    self, ActiveRecording, HistoricalSample, HistoricalSeekState, PhysicalSeekPlan,
-    PhysicalSeekPort, SampledArm, SeekActivity, SeekControlMode, SeekEpisodeCommand, SeekTarget,
-    SeekableEpisode,
-};
-use crate::backend::application::episodes::{
-    self as episode_catalog, DeleteEpisodeCommand, EpisodeActivity, EpisodeCatalogPort,
-    EpisodeMutationResult, JudgeEpisodeCommand,
-};
-use crate::backend::application::error::ApplicationError;
-use crate::backend::application::mode_control::{self, ModeControlPort, OperatorMode};
-use crate::backend::application::recording::{
-    self, RecordingContext, RecordingPort, RecordingResult, ReplayEpisode, ReplayPlan, ReplayPort,
-    ReplayTrajectory, SetRecordingPausedCommand, SetReplayPausedCommand, StartRecordingCommand,
-    StartReplayCommand, StopRecordingCommand, TeleoperationPair,
-};
-use crate::backend::application::robot_control::{self, RobotControlCommand, RobotControlPort};
-use crate::backend::application::robots::{
-    self, AutoConnectStatus, CameraAssignment, CreateRobotCommand, ExportedRobotDocument, NewRobot,
-    RobotConnectionPort, RobotConnectionSpec, RobotRepository, RobotUpdate, SavedRobot,
-    SerialPortConfiguration, UpdateRobotCommand,
-};
-use crate::backend::application::rollout::{
-    self as rollout_application, RolloutMetrics as ApplicationRolloutMetrics,
-    RolloutPhase as ApplicationRolloutPhase, RolloutRequest, RolloutSessionPort,
-    RolloutSnapshot as ApplicationRolloutSnapshot,
-};
-use crate::backend::application::training::{
-    self as training_application, ActTrainingSettings, DeleteTrainingRunCommand,
-    StartTrainingCommand, TrainingCheckpoint as ApplicationTrainingCheckpoint,
-    TrainingCheckpointStatus, TrainingMetric as ApplicationTrainingMetric,
-    TrainingPolicy as ApplicationTrainingPolicy, TrainingPort,
-    TrainingReadiness as ApplicationTrainingReadiness, TrainingRun as ApplicationTrainingRun,
-    TrainingRunActivity, TrainingRunPhase as ApplicationTrainingRunPhase, TrainingRunStatus,
-    TrainingSnapshot as ApplicationTrainingSnapshot, TrainingSource as ApplicationTrainingSource,
-};
 use crate::backend::recording::episodes::{
     ArmCondition, EpisodeError, EpisodeStore, EpisodeWriter, TimelineMetadata, TimelineSample,
     TimelineTraces, build_arms,
@@ -109,12 +51,73 @@ use crate::backend::robotics::hardware::{HardwareHandle, RobotSpec};
 use crate::backend::robotics::video::{
     CameraCaptureSpec, VideoAsset, VideoAssetMetadata, VideoCapture, VideoEncoderSettings,
 };
-use crate::backend::robots::workspace::{RobotWorkspace, WorkspaceError};
+use crate::backend::robots::workspace::{RobotRecord, RobotWorkspace, WorkspaceError};
 use crate::backend::rollout::manager::RolloutManager;
 use crate::backend::storage::manager::StorageManager;
 use crate::backend::storage::settings::BackendStateStore;
 use crate::backend::storage::settings::StudioPreferencesStore;
 use crate::backend::training::manager::TrainingManager;
+use spiral_robotics_studio_application::calibration::{
+    self, CalibrationControlPort, CalibrationHistoryActivity, CalibrationHistoryPort,
+    ReappliedPositions, RobotCalibrationRepository,
+};
+use spiral_robotics_studio_application::catalog_lease::{
+    CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease,
+};
+use spiral_robotics_studio_application::data::{
+    self as data_application, ConnectionCheck, DataCatalogPort, DataSettingsView,
+    QueryColumn as ApplicationQueryColumn, QueryCommand, QueryResult as ApplicationQueryResult,
+    QueryValue, ReplayTrajectory as SpiralReplayTrajectory, SpiralDestinationSettings,
+    SpiralReplayPort, StartSpiralReplayCommand, UpdateDataSettingsCommand, VideoAssetQuery,
+};
+use spiral_robotics_studio_application::device_discovery::{
+    self as device_discovery, CameraDiscoveryPort, DiscoveredCamera, IdentifySerialPortCommand,
+    SerialPortInventory, SerialPortQueryPort, SerialPortView,
+};
+use spiral_robotics_studio_application::episode_queries::{
+    self, EpisodeArmView, EpisodeQueryPort, EpisodeTimelineView, EpisodeTraceQuery, EpisodeView,
+    RecordingGapView, TimelineArmSampleView, TimelineMetadataView, TimelineSampleView,
+    TimelineTraceLaneView, TimelineTracePointView, TimelineTraceSeriesView, TimelineTracesView,
+    VideoAssetView,
+};
+use spiral_robotics_studio_application::episode_seek::{
+    self, ActiveRecording, HistoricalSample, HistoricalSeekState, PhysicalSeekPlan,
+    PhysicalSeekPort, SampledArm, SeekActivity, SeekControlMode, SeekEpisodeCommand, SeekTarget,
+    SeekableEpisode,
+};
+use spiral_robotics_studio_application::episodes::{
+    self as episode_catalog, DeleteEpisodeCommand, EpisodeActivity, EpisodeCatalogPort,
+    EpisodeMutationResult, JudgeEpisodeCommand,
+};
+use spiral_robotics_studio_application::error::ApplicationError;
+use spiral_robotics_studio_application::mode_control::{self, ModeControlPort, OperatorMode};
+use spiral_robotics_studio_application::recording::{
+    self, RecordingContext, RecordingPort, RecordingResult, ReplayEpisode, ReplayPlan, ReplayPort,
+    ReplayTrajectory, SetRecordingPausedCommand, SetReplayPausedCommand, StartRecordingCommand,
+    StartReplayCommand, StopRecordingCommand, TeleoperationPair,
+};
+use spiral_robotics_studio_application::robot_control::{
+    self, RobotControlCommand, RobotControlPort,
+};
+use spiral_robotics_studio_application::robots::{
+    self, AutoConnectStatus, CameraAssignment, CreateRobotCommand, ExportedRobotDocument, NewRobot,
+    RobotConnectionPort, RobotConnectionSpec, RobotRepository, RobotUpdate, SavedRobot,
+    SerialPortConfiguration, UpdateRobotCommand,
+};
+use spiral_robotics_studio_application::rollout::{
+    self as rollout_application, RolloutMetrics as ApplicationRolloutMetrics,
+    RolloutPhase as ApplicationRolloutPhase, RolloutRequest, RolloutSessionPort,
+    RolloutSnapshot as ApplicationRolloutSnapshot,
+};
+use spiral_robotics_studio_application::training::{
+    self as training_application, ActTrainingSettings, DeleteTrainingRunCommand,
+    StartTrainingCommand, TrainingCheckpoint as ApplicationTrainingCheckpoint,
+    TrainingCheckpointStatus, TrainingMetric as ApplicationTrainingMetric,
+    TrainingPolicy as ApplicationTrainingPolicy, TrainingPort,
+    TrainingReadiness as ApplicationTrainingReadiness, TrainingRun as ApplicationTrainingRun,
+    TrainingRunActivity, TrainingRunPhase as ApplicationTrainingRunPhase, TrainingRunStatus,
+    TrainingSnapshot as ApplicationTrainingSnapshot, TrainingSource as ApplicationTrainingSource,
+};
 
 /// Boundary marker separating parts of an MJPEG response.
 const MJPEG_BOUNDARY: &str = "spiral-robotics-frame";
@@ -123,7 +126,7 @@ const MJPEG_BOUNDARY: &str = "spiral-robotics-frame";
 const TELEMETRY_INTERVAL: Duration = Duration::from_millis(50);
 
 /// How often the setup-level snapshot is rebuilt and diffed.
-const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(400);
+const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(2);
 
 /// A short debounce keeps a just-started recording from being mistaken for an
 /// automatic stop before the next telemetry snapshot is published.
@@ -192,7 +195,7 @@ impl BootstrapState {
 
     fn catalog_unavailable(&self) -> Option<String> {
         let current = self.current();
-        (!current.catalog_available).then(|| current.detail)
+        (!current.catalog_available).then_some(current.detail)
     }
 }
 
@@ -455,7 +458,7 @@ pub(crate) fn build_snapshot(state: &AppState) -> StudioSnapshot {
     let hardware = state.hardware.state();
     let readiness = state.bootstrap.current();
     let robots = if readiness.catalog_available {
-        let robot_adapter = devices::RobotHttpAdapter::new(state);
+        let robot_adapter = devices::RobotHttpAdapter::prefetched(state);
         robots::list(&robot_adapter)
             .into_iter()
             .filter_map(|saved| {
@@ -464,7 +467,7 @@ pub(crate) fn build_snapshot(state: &AppState) -> StudioSnapshot {
                     .get(&saved.id)
                     .cloned()
                     .unwrap_or_default();
-                let mut summary = state.workspace.get(&saved.id).ok()?.summary(connection);
+                let mut summary = robot_adapter.summary(&saved.id, connection).ok()?;
                 // Limits come from the motors, not the saved configuration, so they
                 // are folded in here after loading the SpiralDB row.
                 if let Some(limits) = hardware.limits.get(&saved.id) {
@@ -495,19 +498,21 @@ pub(crate) fn build_snapshot(state: &AppState) -> StudioSnapshot {
         readiness,
         storage: "SpiralDB".to_owned(),
         robots,
-        cameras: device_discovery::list_cameras(&state.cameras)
-            .into_iter()
-            .map(|camera| CameraStatus {
-                id: camera.id,
-                name: camera.name,
-                width: camera.width,
-                height: camera.height,
-                fps: camera.fps,
-                streaming: camera.streaming,
-                frames: camera.frames,
-                error: camera.error,
-            })
-            .collect(),
+        cameras: device_discovery::list_cameras(&devices::CameraDiscoveryAdapter(
+            state.cameras.clone(),
+        ))
+        .into_iter()
+        .map(|camera| CameraStatus {
+            id: camera.id,
+            name: camera.name,
+            width: camera.width,
+            height: camera.height,
+            fps: camera.fps,
+            streaming: camera.streaming,
+            frames: camera.frames,
+            error: camera.error,
+        })
+        .collect(),
         mode: hardware.mode,
         issues,
     }
@@ -526,6 +531,7 @@ async fn events(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stream = async_stream::stream! {
         let mut snapshot_timer = tokio::time::interval(SNAPSHOT_INTERVAL);
+        snapshot_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut telemetry_timer = tokio::time::interval(TELEMETRY_INTERVAL);
         let (initial_training, mut training) = state.training.subscription();
         let initial_rollout = RolloutManager::snapshot(state.rollout.as_ref());

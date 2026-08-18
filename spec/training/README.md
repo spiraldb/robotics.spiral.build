@@ -13,8 +13,8 @@ durable checkpoints through a worker that reads and writes SpiralDB directly.
    immutable job specification.
 3. The worker opens SpiralDB, resolves the data contract, and trains without
    sending samples through Studio.
-4. Studio polls replayable job evidence and shows learning, validation,
-   throughput, resource, and loader evidence.
+4. Studio polls cursor-based job deltas with bounded retry backoff and shows
+   learning, validation, throughput, resource, and loader evidence.
 5. The worker commits checkpoints directly to SpiralDB while training
    continues.
 6. The user may stop, inspect, resume from a checkpoint, or delete the run.
@@ -51,7 +51,9 @@ durable checkpoints through a worker that reads and writes SpiralDB directly.
 - **TRAIN-015** Camera frame selection must use camera frame indices and stream
   rates, not joint sample frequency.
 - **TRAIN-016** SpiralDB must perform supported frame selection, decode, and
-  Arrow tensor conversion.
+  Arrow tensor conversion. A worker may fall back to decoding the authoritative
+  MP4 payload read directly from SpiralDB when an imported or legacy managed
+  video relation is unavailable; the fallback must remain worker-owned.
 - **TRAIN-017** When ACT requires image resizing or normalization, the transform
   must match LeRobot behavior.
 - **TRAIN-018** The worker should overlap or pipeline data preparation with
@@ -70,7 +72,8 @@ durable checkpoints through a worker that reads and writes SpiralDB directly.
 - **TRAIN-024** Related charts must use linear axes and shared or equivalent
   data zoom.
 - **TRAIN-025** Temporary sleep, disconnection, or missing telemetry must not
-  erase earlier metric points.
+  erase earlier metric points. Worker compaction gaps must be visible rather
+  than silently presented as complete history.
 - **TRAIN-026** Primary UI labels must use user concepts such as dataset,
   samples, cameras, and checkpoints instead of implementation history.
 
@@ -91,9 +94,9 @@ durable checkpoints through a worker that reads and writes SpiralDB directly.
 ## Implementation ownership
 
 - Training feature policy:
-  [`backend/application/training.rs`](../../crates/spiral-robotics-studio-backend/src/backend/application/training.rs)
+  [`spiral-robotics-studio-application/src/training.rs`](../../crates/spiral-robotics-studio-application/src/training.rs)
   and
-  [`backend/application/training_execution.rs`](../../crates/spiral-robotics-studio-backend/src/backend/application/training_execution.rs)
+  [`spiral-robotics-studio-application/src/training_execution.rs`](../../crates/spiral-robotics-studio-application/src/training_execution.rs)
 - Studio job supervision:
   [`backend/training/manager.rs`](../../crates/spiral-robotics-studio-backend/src/backend/training/manager.rs)
 - SpiralDB batch preparation and checkpoint publication:

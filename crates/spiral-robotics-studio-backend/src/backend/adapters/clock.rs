@@ -2,7 +2,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::backend::application::clock::Clock;
+use spiral_robotics_studio_application::clock::Clock;
 
 #[derive(Debug, Default)]
 pub(crate) struct SystemClock;

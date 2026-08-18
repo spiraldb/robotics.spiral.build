@@ -9,3 +9,9 @@ publish = false
 [dependencies]
 serde.workspace = true
 thiserror = "2"
+
+[build-dependencies]
+serde_json.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

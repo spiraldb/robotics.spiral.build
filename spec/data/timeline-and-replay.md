@@ -49,8 +49,8 @@ follower without making visual scrubbing dangerous.
 - Historical camera panel:
   [`frontend/panels/camera.rs`](../../crates/spiral-robotics-studio/src/frontend/panels/camera.rs)
 - Seek and replay policy:
-  [`backend/application/episode_seek.rs`](../../crates/spiral-robotics-studio-backend/src/backend/application/episode_seek.rs)
+  [`spiral-robotics-studio-application/src/episode_seek.rs`](../../crates/spiral-robotics-studio-application/src/episode_seek.rs)
   and
-  [`backend/application/robot_control.rs`](../../crates/spiral-robotics-studio-backend/src/backend/application/robot_control.rs)
+  [`spiral-robotics-studio-application/src/robot_control.rs`](../../crates/spiral-robotics-studio-application/src/robot_control.rs)
 - Hardware replay:
   [`backend/robotics/hardware.rs`](../../crates/spiral-robotics-studio-backend/src/backend/robotics/hardware.rs)

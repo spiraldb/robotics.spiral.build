@@ -10,7 +10,7 @@ use super::catalog_lease::CatalogLeaseToken;
 use super::error::ApplicationError;
 
 /// Saved robot configuration required by the calibration action.
-pub(crate) trait RobotCalibrationRepository {
+pub trait RobotCalibrationRepository {
     fn motor_specs(&self, robot: &str) -> Result<BTreeMap<String, MotorSpec>, ApplicationError>;
 
     fn save_calibration(
@@ -22,7 +22,7 @@ pub(crate) trait RobotCalibrationRepository {
 }
 
 /// Live sweep operations required by the calibration action.
-pub(crate) trait CalibrationControlPort {
+pub trait CalibrationControlPort {
     async fn start_calibration(&self, robot: &str) -> Result<(), ApplicationError>;
 
     async fn calibration_input(&self, robot: &str) -> Result<CalibrationInput, ApplicationError>;
@@ -38,7 +38,7 @@ pub(crate) trait CalibrationControlPort {
 
 /// Work that would make rewriting completed episode state inconsistent.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct CalibrationHistoryActivity {
+pub struct CalibrationHistoryActivity {
     pub recording: Option<String>,
     pub replaying: Option<String>,
     pub training_active: bool,
@@ -46,7 +46,7 @@ pub(crate) struct CalibrationHistoryActivity {
 
 /// Changes committed directly to the historical rows in SpiralDB.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ReappliedPositions {
+pub struct ReappliedPositions {
     pub updated_episode_ids: Vec<String>,
     pub frames_updated: u64,
     pub episodes_unchanged: u64,
@@ -56,7 +56,7 @@ pub(crate) struct ReappliedPositions {
 
 /// Result presented to the delivery layer after SpiralDB is durable.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ReapplyCalibrationOutput {
+pub struct ReapplyCalibrationOutput {
     pub episodes_updated: u64,
     pub frames_updated: u64,
     pub episodes_unchanged: u64,
@@ -65,7 +65,7 @@ pub(crate) struct ReapplyCalibrationOutput {
 }
 
 /// Historical episode boundary for applying a robot's current calibration.
-pub(crate) trait CalibrationHistoryPort {
+pub trait CalibrationHistoryPort {
     fn reserve_catalog_mutation(&self) -> Option<CatalogLeaseToken>;
     fn release_catalog_mutation(&self, token: CatalogLeaseToken);
     fn activity(&self) -> CalibrationHistoryActivity;
@@ -90,7 +90,7 @@ impl<P: CalibrationHistoryPort + ?Sized> Drop for CalibrationHistoryReservation<
 }
 
 /// Begin a hand-guided calibration sweep.
-pub(crate) async fn start<C>(control: &C, robot: &str) -> Result<(), ApplicationError>
+pub async fn start<C>(control: &C, robot: &str) -> Result<(), ApplicationError>
 where
     C: CalibrationControlPort + ?Sized,
 {
@@ -98,7 +98,7 @@ where
 }
 
 /// Abandon a calibration sweep and return the robot to normal operation.
-pub(crate) async fn cancel<C>(control: &C, robot: &str) -> Result<(), ApplicationError>
+pub async fn cancel<C>(control: &C, robot: &str) -> Result<(), ApplicationError>
 where
     C: CalibrationControlPort + ?Sized,
 {
@@ -107,7 +107,7 @@ where
 
 /// A calibration was durably saved. Any warning concerns only its live refresh.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct FinishCalibrationOutput {
+pub struct FinishCalibrationOutput {
     pub calibration: Calibration,
     pub live_warning: Option<String>,
 }
@@ -118,7 +118,7 @@ pub(crate) struct FinishCalibrationOutput {
 /// keeps the sweep alive so the operator does not lose collected motion. Once
 /// persistence succeeds, later adapter failures become warnings because the
 /// next connection can load the already-correct SpiralDB row.
-pub(crate) async fn finish<R, C>(
+pub async fn finish<R, C>(
     repository: &R,
     control: &C,
     robot: &str,
@@ -161,7 +161,7 @@ where
 /// are replaced atomically, and only then are changed takes queued for remote
 /// synchronization. Actions remain untouched because old takes do not retain
 /// the raw commanded goal needed to transform them faithfully.
-pub(crate) async fn reapply_history<P>(
+pub async fn reapply_history<P>(
     port: &P,
     robot: &str,
 ) -> Result<ReapplyCalibrationOutput, ApplicationError>
@@ -215,7 +215,7 @@ mod tests {
     use spiral_robotics_core::calibration::{CalibrationError, Direction, MotorReading};
 
     use super::*;
-    use crate::backend::application::catalog_lease::{CatalogLeaseOwner, CatalogMutationLease};
+    use crate::catalog_lease::{CatalogLeaseOwner, CatalogMutationLease};
 
     fn motors() -> BTreeMap<String, MotorSpec> {
         BTreeMap::from([(

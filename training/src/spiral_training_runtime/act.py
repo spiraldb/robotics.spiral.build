@@ -20,6 +20,7 @@ from safetensors.torch import save as save_safetensors
 from .arrow import InferenceArrays, TrainingArrays
 from .config import PolicyConfig, TrainingConfig
 from .errors import RuntimeRequestError
+from .protocol import BOUNDARIES
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -38,7 +39,11 @@ def backend_info() -> dict[str, Any]:
     if torch.backends.mps.is_available():
         devices.insert(0, "MPS")
     return {
-        "api_version": 4,
+        "api_id": BOUNDARIES.training_api.id,
+        "api_version": BOUNDARIES.training_api.major,
+        "api_revision": BOUNDARIES.training_api.minor,
+        "spiral_schema_minimum": BOUNDARIES.training_api.spiral_schema.minimum,
+        "spiral_schema_maximum": BOUNDARIES.training_api.spiral_schema.maximum,
         "id": "pytorch.lerobot",
         "display_name": "PyTorch ACT",
         "runtime": f"PyTorch {torch.__version__} / LeRobot {version('lerobot')}",

@@ -1,0 +1,13 @@
+[package]
+name = "spiral-robotics-studio-application"
+version.workspace = true
+edition.workspace = true
+description = "Framework-free application policy for Spiral Robotics Studio"
+publish = false
+
+[dependencies]
+spiral-robotics-core.workspace = true
+url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

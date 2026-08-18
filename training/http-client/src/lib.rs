@@ -5,7 +5,7 @@
 //! Studio can never pull a tensor framework into its process.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use arrow_array::{ArrayRef, FixedSizeListArray, Float32Array, RecordBatch, UInt8Array};
 use arrow_ipc::CompressionType;
@@ -18,16 +18,12 @@ use spiral_robotics_inference::{
     PolicyLoader, PolicySpecification,
 };
 use spiral_robotics_training::{
-    PendingTrainingStep, TrainingBackend, TrainingBackendError, TrainingBackendInfo, TrainingBatch,
-    TrainingCheckpointArtifact, TrainingCheckpointRequest, TrainingJobRequest, TrainingJobSnapshot,
-    TrainingLoss, TrainingSession, TrainingSessionInfo, TrainingSessionRequest, TrainingStepOutput,
-    TrainingTelemetry,
+    TrainingBackend, TrainingBackendError, TrainingBackendInfo, TrainingJobCursor,
+    TrainingJobRequest, TrainingJobSnapshot,
 };
 
 const ARROW_STREAM_CONTENT_TYPE: &str = "application/vnd.apache.arrow.stream";
 const POLICY_ARTIFACT_CONTENT_TYPE: &str = "application/vnd.spiral.policy-artifact";
-const CHECKPOINT_FORMAT_HEADER: &str = "x-spiral-checkpoint-format";
-const CHECKPOINT_EXTENSION_HEADER: &str = "x-spiral-checkpoint-extension";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const SHORT_REQUEST_TIMEOUT: Duration = Duration::from_secs(7);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -74,25 +70,6 @@ impl TrainingBackend for HttpTrainingBackend {
         self.get_json("/v1/health")
     }
 
-    fn create_session(
-        &self,
-        request: TrainingSessionRequest,
-    ) -> Result<Box<dyn TrainingSession>, TrainingBackendError> {
-        let response = self
-            .client
-            .post(self.url("/v1/sessions")?)
-            .json(&request)
-            .send()
-            .map_err(|error| backend_error(format!("creating training session: {error}")))?;
-        let response: CreateSessionResponse = decode_json_response(response, "creating session")?;
-        Ok(Box::new(HttpTrainingSession {
-            backend: self.clone(),
-            session_id: response.session_id,
-            info: response.info,
-            buffered_training: None,
-        }))
-    }
-
     fn create_job(
         &self,
         request: TrainingJobRequest,
@@ -106,12 +83,20 @@ impl TrainingBackend for HttpTrainingBackend {
         decode_json_response(response, "creating training job")
     }
 
-    fn job(&self, job_id: &str) -> Result<TrainingJobSnapshot, TrainingBackendError> {
-        self.get_json(&format!("/v1/jobs/{job_id}"))
+    fn job(
+        &self,
+        job_id: &str,
+        cursor: TrainingJobCursor,
+    ) -> Result<TrainingJobSnapshot, TrainingBackendError> {
+        self.get_json(&job_path(job_id, "", cursor))
     }
 
-    fn stop_job(&self, job_id: &str) -> Result<TrainingJobSnapshot, TrainingBackendError> {
-        let path = format!("/v1/jobs/{job_id}/stop");
+    fn stop_job(
+        &self,
+        job_id: &str,
+        cursor: TrainingJobCursor,
+    ) -> Result<TrainingJobSnapshot, TrainingBackendError> {
+        let path = job_path(job_id, "/stop", cursor);
         let response = self
             .client
             .post(self.url(&path)?)
@@ -120,6 +105,13 @@ impl TrainingBackend for HttpTrainingBackend {
             .map_err(|error| backend_error(format!("stopping training job: {error}")))?;
         decode_json_response(response, "stopping training job")
     }
+}
+
+fn job_path(job_id: &str, suffix: &str, cursor: TrainingJobCursor) -> String {
+    format!(
+        "/v1/jobs/{job_id}{suffix}?after_metric_step={}&after_checkpoint_step={}&after_log_offset={}",
+        cursor.metric_step, cursor.checkpoint_step, cursor.log_offset
+    )
 }
 
 /// Materializes a policy on the selected remote compute runtime.
@@ -241,204 +233,6 @@ impl Drop for HttpPolicy {
                 .send();
         }
     }
-}
-
-struct HttpTrainingSession {
-    backend: HttpTrainingBackend,
-    session_id: String,
-    info: TrainingSessionInfo,
-    buffered_training: Option<(u64, UploadTiming)>,
-}
-
-#[derive(Clone, Copy)]
-struct UploadTiming {
-    arrow_encode_ms: f64,
-    upload_ms: f64,
-}
-
-struct HttpPendingTrainingStep {
-    worker: std::thread::JoinHandle<Result<TrainingStepOutput, TrainingBackendError>>,
-}
-
-impl PendingTrainingStep for HttpPendingTrainingStep {
-    fn finish(self: Box<Self>) -> Result<TrainingStepOutput, TrainingBackendError> {
-        self.worker
-            .join()
-            .map_err(|_| backend_error("remote optimizer request worker panicked"))?
-    }
-}
-
-impl HttpTrainingSession {
-    fn path(&self, suffix: &str) -> String {
-        format!("/v1/sessions/{}{suffix}", self.session_id)
-    }
-
-    fn buffer(
-        &self,
-        kind: &str,
-        step: u64,
-        batch: TrainingBatch<'static>,
-    ) -> Result<UploadTiming, TrainingBackendError> {
-        let encode_started = Instant::now();
-        let body = encode_training_batch(batch)?;
-        let arrow_encode_ms = encode_started.elapsed().as_secs_f64() * 1_000.0;
-        let path = self.path(&format!("/buffer?kind={kind}&step={step}"));
-        let request_started = Instant::now();
-        let response = self
-            .backend
-            .client
-            .post(self.backend.url(&path)?)
-            .header(CONTENT_TYPE, ARROW_STREAM_CONTENT_TYPE)
-            .body(body)
-            .send()
-            .map_err(|error| backend_error(format!("buffering {kind} batch: {error}")))?;
-        let response: BufferResponse = decode_json_response(response, "buffering training batch")?;
-        let round_trip_ms = request_started.elapsed().as_secs_f64() * 1_000.0;
-        Ok(UploadTiming {
-            arrow_encode_ms,
-            upload_ms: (round_trip_ms - response.runtime_ms).max(0.0),
-        })
-    }
-
-    fn execute(
-        backend: HttpTrainingBackend,
-        path: String,
-        timing: UploadTiming,
-        context: &'static str,
-    ) -> Result<TrainingStepOutput, TrainingBackendError> {
-        let response = backend
-            .client
-            .post(backend.url(&path)?)
-            .send()
-            .map_err(|error| backend_error(format!("{context}: {error}")))?;
-        let mut response: StepResponse = decode_json_response(response, context)?;
-        response.telemetry.arrow_encode_ms = Some(timing.arrow_encode_ms);
-        response.telemetry.upload_ms = Some(timing.upload_ms);
-        Ok(TrainingStepOutput {
-            loss: response.loss,
-            learning_rate: response.learning_rate,
-            telemetry: response.telemetry,
-        })
-    }
-}
-
-impl TrainingSession for HttpTrainingSession {
-    fn info(&self) -> &TrainingSessionInfo {
-        &self.info
-    }
-
-    fn buffer_training_batch(
-        &mut self,
-        batch: TrainingBatch<'static>,
-        step: u64,
-    ) -> Result<(), TrainingBackendError> {
-        if let Some((buffered_step, _)) = self.buffered_training {
-            return Err(backend_error(format!(
-                "training batch {buffered_step} is still buffered while preparing step {step}"
-            )));
-        }
-        let timing = self.buffer("training", step, batch)?;
-        self.buffered_training = Some((step, timing));
-        Ok(())
-    }
-
-    fn begin_training_step(
-        &mut self,
-        step: u64,
-    ) -> Result<Box<dyn PendingTrainingStep>, TrainingBackendError> {
-        let Some((buffered_step, timing)) = self.buffered_training.take() else {
-            return Err(backend_error(format!(
-                "optimizer step {step} has no buffered training batch"
-            )));
-        };
-        if buffered_step != step {
-            self.buffered_training = Some((buffered_step, timing));
-            return Err(backend_error(format!(
-                "optimizer step {step} cannot consume buffered step {buffered_step}"
-            )));
-        }
-        let backend = self.backend.clone();
-        let path = self.path(&format!("/train?step={step}"));
-        let worker = std::thread::Builder::new()
-            .name(format!("training-step-{step}"))
-            .spawn(move || Self::execute(backend, path, timing, "running optimizer step"))
-            .map_err(|error| backend_error(format!("starting optimizer request: {error}")))?;
-        Ok(Box::new(HttpPendingTrainingStep { worker }))
-    }
-
-    fn validation_step(
-        &mut self,
-        batch: TrainingBatch<'static>,
-        after_step: u64,
-    ) -> Result<TrainingStepOutput, TrainingBackendError> {
-        let timing = self.buffer("validation", after_step, batch)?;
-        Self::execute(
-            self.backend.clone(),
-            self.path(&format!("/validate?step={after_step}")),
-            timing,
-            "running validation step",
-        )
-    }
-
-    fn checkpoint(
-        &self,
-        request: TrainingCheckpointRequest,
-    ) -> Result<TrainingCheckpointArtifact, TrainingBackendError> {
-        let path = self.path("/checkpoint");
-        let response = self
-            .backend
-            .client
-            .post(self.backend.url(&path)?)
-            .json(&request)
-            .send()
-            .map_err(|error| backend_error(format!("requesting checkpoint: {error}")))?;
-        let response = require_success(response, "requesting checkpoint")?;
-        let format = response_header(&response, CHECKPOINT_FORMAT_HEADER)?;
-        let extension = response_header(&response, CHECKPOINT_EXTENSION_HEADER)?;
-        let payload = response
-            .bytes()
-            .map_err(|error| backend_error(format!("reading checkpoint: {error}")))?
-            .to_vec();
-        Ok(TrainingCheckpointArtifact {
-            format,
-            extension,
-            payload,
-        })
-    }
-}
-
-impl Drop for HttpTrainingSession {
-    fn drop(&mut self) {
-        if let Ok(url) = self
-            .backend
-            .url(&format!("/v1/sessions/{}", self.session_id))
-        {
-            let _ = self
-                .backend
-                .client
-                .delete(url)
-                .timeout(SHORT_REQUEST_TIMEOUT)
-                .send();
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct CreateSessionResponse {
-    session_id: String,
-    info: TrainingSessionInfo,
-}
-
-#[derive(Deserialize)]
-struct StepResponse {
-    loss: TrainingLoss,
-    learning_rate: f64,
-    telemetry: TrainingTelemetry,
-}
-
-#[derive(Deserialize)]
-struct BufferResponse {
-    runtime_ms: f64,
 }
 
 #[derive(Deserialize)]
@@ -564,37 +358,6 @@ fn encode_inference_input(
     encode_arrow_record(&record).map_err(inference_error)
 }
 
-fn encode_training_batch(batch: TrainingBatch<'_>) -> Result<Vec<u8>, TrainingBackendError> {
-    let TrainingBatch {
-        batch_size,
-        states,
-        images,
-        actions,
-        action_is_pad,
-    } = batch;
-    let arrays = [
-        (
-            "states",
-            fixed_f32(states.into_owned(), batch_size, "states")?,
-        ),
-        (
-            "images",
-            fixed_u8(images.into_owned(), batch_size, "images")?,
-        ),
-        (
-            "actions",
-            fixed_f32(actions.into_owned(), batch_size, "actions")?,
-        ),
-        (
-            "action_is_pad",
-            fixed_u8(action_is_pad.into_owned(), batch_size, "action_is_pad")?,
-        ),
-    ];
-    let record = RecordBatch::try_from_iter(arrays)
-        .map_err(|error| backend_error(format!("building Arrow training batch: {error}")))?;
-    encode_arrow_record(&record).map_err(backend_error)
-}
-
 fn encode_arrow_record(record: &RecordBatch) -> Result<Vec<u8>, String> {
     let mut body = Vec::new();
     let options = IpcWriteOptions::default()
@@ -612,11 +375,7 @@ fn encode_arrow_record(record: &RecordBatch) -> Result<Vec<u8>, String> {
     Ok(body)
 }
 
-fn fixed_f32(
-    values: Vec<f32>,
-    batch_size: usize,
-    name: &str,
-) -> Result<ArrayRef, TrainingBackendError> {
+fn fixed_f32(values: Vec<f32>, batch_size: usize, name: &str) -> Result<ArrayRef, String> {
     fixed_list(
         Arc::new(Float32Array::from(values)),
         DataType::Float32,
@@ -625,11 +384,7 @@ fn fixed_f32(
     )
 }
 
-fn fixed_u8(
-    values: Vec<u8>,
-    batch_size: usize,
-    name: &str,
-) -> Result<ArrayRef, TrainingBackendError> {
+fn fixed_u8(values: Vec<u8>, batch_size: usize, name: &str) -> Result<ArrayRef, String> {
     fixed_list(
         Arc::new(UInt8Array::from(values)),
         DataType::UInt8,
@@ -643,16 +398,15 @@ fn fixed_list(
     data_type: DataType,
     batch_size: usize,
     name: &str,
-) -> Result<ArrayRef, TrainingBackendError> {
+) -> Result<ArrayRef, String> {
     if batch_size == 0 || !values.len().is_multiple_of(batch_size) {
-        return Err(backend_error(format!(
+        return Err(format!(
             "{name} has {} values for batch size {batch_size}",
             values.len()
-        )));
+        ));
     }
     let width = values.len() / batch_size;
-    let width = i32::try_from(width)
-        .map_err(|_| backend_error(format!("{name} row is too wide for Arrow")))?;
+    let width = i32::try_from(width).map_err(|_| format!("{name} row is too wide for Arrow"))?;
     FixedSizeListArray::try_new(
         Arc::new(Field::new("item", data_type, false)),
         width,
@@ -660,7 +414,7 @@ fn fixed_list(
         None,
     )
     .map(|array| Arc::new(array) as ArrayRef)
-    .map_err(|error| backend_error(format!("building {name} Arrow tensor: {error}")))
+    .map_err(|error| format!("building {name} Arrow tensor: {error}"))
 }
 
 fn decode_json_response<T: DeserializeOwned>(
@@ -709,19 +463,6 @@ fn require_success(
     )))
 }
 
-fn response_header(
-    response: &reqwest::blocking::Response,
-    name: &str,
-) -> Result<String, TrainingBackendError> {
-    response
-        .headers()
-        .get(name)
-        .ok_or_else(|| backend_error(format!("checkpoint response is missing {name}")))?
-        .to_str()
-        .map(str::to_owned)
-        .map_err(|error| backend_error(format!("checkpoint response has invalid {name}: {error}")))
-}
-
 fn backend_error(message: impl Into<String>) -> TrainingBackendError {
     TrainingBackendError::new(message)
 }
@@ -737,100 +478,7 @@ fn duration_from_millis(milliseconds: f64) -> spiral_robotics_inference::Result<
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
-
-    use arrow_array::{Array, FixedSizeListArray, Float32Array, UInt8Array};
-    use arrow_ipc::reader::StreamReader;
-
     use super::*;
-
-    #[test]
-    fn training_batch_uses_fixed_size_list_tensor_columns() {
-        let body = encode_training_batch(TrainingBatch::owned(
-            2,
-            vec![1.0, 2.0, 3.0, 4.0],
-            vec![128; 12],
-            vec![5.0; 8],
-            vec![0, 1, 0, 0],
-        ))
-        .unwrap();
-        let mut reader = StreamReader::try_new(Cursor::new(body), None).unwrap();
-        let batch = reader.next().unwrap().unwrap();
-        assert!(reader.next().is_none());
-        assert_eq!(batch.num_rows(), 2);
-
-        let states = batch
-            .column_by_name("states")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<FixedSizeListArray>()
-            .unwrap();
-        assert_eq!(states.value_length(), 2);
-        let values = states
-            .values()
-            .as_any()
-            .downcast_ref::<Float32Array>()
-            .unwrap();
-        assert_eq!(values.values().as_ref(), &[1.0, 2.0, 3.0, 4.0]);
-
-        let images = batch
-            .column_by_name("images")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<FixedSizeListArray>()
-            .unwrap();
-        assert_eq!(images.value_length(), 6);
-        let values = images
-            .values()
-            .as_any()
-            .downcast_ref::<UInt8Array>()
-            .unwrap();
-        assert_eq!(values.values().as_ref(), &[128; 12]);
-
-        let padding = batch
-            .column_by_name("action_is_pad")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<FixedSizeListArray>()
-            .unwrap();
-        let values = padding
-            .values()
-            .as_any()
-            .downcast_ref::<UInt8Array>()
-            .unwrap();
-        assert_eq!(values.values().as_ref(), &[0, 1, 0, 0]);
-    }
-
-    #[test]
-    fn arrow_tensor_buffers_are_zstd_compressed() {
-        let image_bytes = 3 * 640 * 360 * 2;
-        let body = encode_training_batch(TrainingBatch::owned(
-            2,
-            vec![0.0; 4],
-            vec![0; image_bytes],
-            vec![0.0; 8],
-            vec![0; 4],
-        ))
-        .unwrap();
-
-        assert!(
-            body.len() < image_bytes / 10,
-            "compressed Arrow body was {} bytes for {image_bytes} image bytes",
-            body.len()
-        );
-        let batch = StreamReader::try_new(Cursor::new(body), None)
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap();
-        let images = batch
-            .column_by_name("images")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<FixedSizeListArray>()
-            .unwrap();
-        assert_eq!(images.values().len(), image_bytes);
-    }
 
     #[test]
     fn empty_runtime_endpoints_are_rejected_before_network_io() {

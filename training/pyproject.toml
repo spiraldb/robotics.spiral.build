@@ -38,6 +38,9 @@ spiral-training-runtime = "spiral_training_runtime.__main__:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/spiral_training_runtime"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"../contracts/boundaries.json" = "spiral_training_runtime/boundaries.json"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

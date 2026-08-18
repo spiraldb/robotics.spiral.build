@@ -5,7 +5,7 @@ import json
 import math
 import threading
 import time
-from copy import deepcopy
+from collections import deque
 from typing import Any
 
 from .act import TrainingSession, backend_info
@@ -14,6 +14,9 @@ from .errors import RuntimeRequestError
 from .spiral import SpiralActDataset
 
 MAX_ROLLOUT_ACTION_STEPS = 100
+MAX_METRIC_HISTORY = 4_096
+MAX_CHECKPOINT_HISTORY = 256
+MAX_LOG_HISTORY = 512
 
 
 class TrainingJob:
@@ -34,9 +37,13 @@ class TrainingJob:
         self.finished_ms: int | None = None
         self.message: str | None = "Opening SpiralDB and resolving the ACT data contract…"
         self.resolved: dict[str, Any] | None = None
-        self.metrics: list[dict[str, Any]] = []
-        self.checkpoints: list[dict[str, Any]] = []
-        self.logs: list[str] = []
+        self.metrics: deque[dict[str, Any]] = deque(maxlen=MAX_METRIC_HISTORY)
+        self.checkpoints: deque[dict[str, Any]] = deque(maxlen=MAX_CHECKPOINT_HISTORY)
+        self.logs: deque[dict[str, Any]] = deque(maxlen=MAX_LOG_HISTORY)
+        self.metric_floor = 0
+        self.checkpoint_floor = 0
+        self.log_floor = 0
+        self.next_log_offset = 1
         self.secret = str(request.get("spiral", {}).get("client_secret") or "")
         self.thread = threading.Thread(
             target=self._run, args=(request,), name=f"training-{job_id}", daemon=True
@@ -58,19 +65,69 @@ class TrainingJob:
                 self.phase = "stopping"
                 self.message = "Finishing the current Spiral read or optimizer step…"
 
-    def snapshot(self) -> dict[str, Any]:
+    def terminal(self) -> bool:
         with self.lock:
+            return self.phase in {"completed", "stopped", "failed"}
+
+    def snapshot(
+        self,
+        after_metric_step: int = 0,
+        after_checkpoint_step: int = 0,
+        after_log_offset: int = 0,
+    ) -> dict[str, Any]:
+        with self.lock:
+            gaps = []
+            if after_metric_step < self.metric_floor:
+                gaps.append(f"metrics through step {self.metric_floor} are no longer retained")
+            if after_checkpoint_step < self.checkpoint_floor:
+                gaps.append(
+                    f"checkpoints through step {self.checkpoint_floor} are no longer retained"
+                )
+            if after_log_offset < self.log_floor:
+                gaps.append(f"logs through offset {self.log_floor} are no longer retained")
+            metric_step = self.metrics[-1]["step"] if self.metrics else self.metric_floor
+            checkpoint_step = (
+                self.checkpoints[-1]["step"] if self.checkpoints else self.checkpoint_floor
+            )
             return {
                 "job_id": self.job_id,
                 "phase": self.phase,
                 "current_step": self.current_step,
                 "finished_ms": self.finished_ms,
                 "message": self.message,
-                "resolved": deepcopy(self.resolved),
-                "metrics": deepcopy(self.metrics),
-                "checkpoints": deepcopy(self.checkpoints),
-                "logs": list(self.logs),
+                "resolved": dict(self.resolved) if self.resolved is not None else None,
+                "metrics": [
+                    dict(metric) for metric in self.metrics if metric["step"] > after_metric_step
+                ],
+                "checkpoints": [
+                    dict(checkpoint)
+                    for checkpoint in self.checkpoints
+                    if checkpoint["step"] > after_checkpoint_step
+                ],
+                "logs": [dict(log) for log in self.logs if log["offset"] > after_log_offset],
+                "cursor": {
+                    "metric_step": metric_step,
+                    "checkpoint_step": checkpoint_step,
+                    "log_offset": self.next_log_offset - 1,
+                },
+                "history_gap": "; ".join(gaps) if gaps else None,
             }
+
+    def _append_metric_locked(self, metric: dict[str, Any]) -> None:
+        if len(self.metrics) == MAX_METRIC_HISTORY:
+            self.metric_floor = int(self.metrics[0]["step"])
+        self.metrics.append(metric)
+
+    def _append_checkpoint_locked(self, checkpoint: dict[str, Any]) -> None:
+        if len(self.checkpoints) == MAX_CHECKPOINT_HISTORY:
+            self.checkpoint_floor = int(self.checkpoints[0]["step"])
+        self.checkpoints.append(checkpoint)
+
+    def _append_log_locked(self, line: str) -> None:
+        if len(self.logs) == MAX_LOG_HISTORY:
+            self.log_floor = int(self.logs[0]["offset"])
+        self.logs.append({"offset": self.next_log_offset, "line": line})
+        self.next_log_offset += 1
 
     def _run(self, request: dict[str, Any]) -> None:
         dataset = None
@@ -97,7 +154,7 @@ class TrainingJob:
                     f"Vision ACT is running on {session.info['device']}: {dataset.summary}; "
                     f"{session.parameter_count / 1_000_000.0:.1f}M parameters."
                 )
-                self.logs.append(
+                self._append_log_locked(
                     "The worker owns SpiralDB reads, SPQL image decode, model execution, "
                     "and checkpoint writes; Studio carries no training batches."
                 )
@@ -140,7 +197,7 @@ class TrainingJob:
                 }
                 with self.lock:
                     self.current_step = step
-                    self.metrics.append(metric)
+                    self._append_metric_locked(metric)
                 if step % int(request["checkpoint_every"]) == 0:
                     self._checkpoint(dataset, session, request, step, last_validation)
                     last_checkpoint = step
@@ -162,7 +219,7 @@ class TrainingJob:
                 self.phase = "failed"
                 self.finished_ms = _now_ms()
                 self.message = detail
-                self.logs.append(f"Training failed: {detail}")
+                self._append_log_locked(f"Training failed: {detail}")
         finally:
             self.secret = ""
             request.get("spiral", {}).pop("client_secret", None)
@@ -206,8 +263,8 @@ class TrainingJob:
             "sample_hz": dataset.sample_hz,
         }
         with self.lock:
-            self.checkpoints.append(checkpoint)
-            self.logs.append(
+            self._append_checkpoint_locked(checkpoint)
+            self._append_log_locked(
                 f"Checkpoint {step} committed directly to {dataset.namespace}.training_checkpoints."
             )
 
@@ -247,6 +304,7 @@ def _checkpoint_manifest(
     step: int,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     act = request["act"]
+    backend = backend_info()
     input_features: dict[str, Any] = {
         "observation.state": {"type": "STATE", "shape": [dataset.state_dimensions]}
     }
@@ -296,13 +354,15 @@ def _checkpoint_manifest(
             "image_layout": "chw",
             "image_normalization": "imagenet",
             "frame_alignment": "fixed_fps",
-            "spiral_schema_version": 4,
+            "spiral_schema_version": int(request["spiral_schema_version"]),
         },
         "runtime": {
             "training_backend": {
-                "api_version": backend_info()["api_version"],
-                "id": backend_info()["id"],
-                "runtime": backend_info()["runtime"],
+                "api_id": backend["api_id"],
+                "api_version": backend["api_version"],
+                "api_revision": backend["api_revision"],
+                "id": backend["id"],
+                "runtime": backend["runtime"],
                 "device": session.info["device"],
             },
             "transport": "direct SpiralDB ADBC / Arrow",

@@ -13,7 +13,8 @@ use spiral_robotics_contracts::api::{EpisodeImportSummary, ProjectImportSummary}
 use spiral_robotics_contracts::spiral::{self, Table, column};
 
 use crate::backend::storage::manager::{
-    ensure_dataset_namespace, execute_delete_sql, execute_update_sql, ingest_batch, run_query,
+    commit_catalog_transaction, ensure_dataset_namespace, episode_video_dataset_exists,
+    execute_delete_sql, execute_update_sql, ingest_batch, rebuild_episode_video_dataset, run_query,
     table_exists,
 };
 use crate::backend::storage::repository::RepositoryConnection;
@@ -26,7 +27,10 @@ const EPISODES_FORMAT: &str = "spiral-robotics-episodes";
 const FORMAT_VERSION: u32 = 1;
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_ENTRY_NAME_BYTES: usize = 256;
-pub(crate) const MAX_PROJECT_BUNDLE_BYTES: usize = 1024 * 1024 * 1024;
+/// Browser transfers are memory-backed at the Axum/storage boundary. Keep the
+/// cap low enough that one import and its decoded Arrow batch cannot exhaust a
+/// typical Studio workstation.
+pub(crate) const MAX_PROJECT_BUNDLE_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const MAX_EPISODE_BUNDLE_BYTES: usize = MAX_PROJECT_BUNDLE_BYTES;
 
 const EPISODE_TABLES: [Table; 5] = [
@@ -188,8 +192,9 @@ fn export_queries(
             .saturating_add(spec.magic.len() + 4 + MAX_MANIFEST_BYTES);
         if projected_size > spec.max_bytes {
             return Err(format!(
-                "{} export exceeds the 1 GiB portable-file limit",
-                spec.label
+                "{} export exceeds the {} MiB portable-file limit",
+                spec.label,
+                spec.max_bytes / (1024 * 1024),
             ));
         }
         row_counts.push((table, rows));
@@ -228,8 +233,9 @@ fn build_bundle(entries: Vec<(String, Vec<u8>)>, spec: BundleSpec) -> Result<Vec
     bundle.extend_from_slice(&0_u16.to_le_bytes());
     if bundle.len() > spec.max_bytes {
         return Err(format!(
-            "{} export exceeds the 1 GiB portable-file limit",
-            spec.label
+            "{} export exceeds the {} MiB portable-file limit",
+            spec.label,
+            spec.max_bytes / (1024 * 1024),
         ));
     }
     Ok(bundle)
@@ -242,6 +248,8 @@ pub(crate) fn import(
 ) -> Result<ProjectImportSummary, String> {
     let mut decoded = decode_entries(parse(bundle)?, PROJECT_SPEC)?;
     sort_relations(&mut decoded, &Table::ALL);
+    let imported_video_episodes = video_episode_ids(&decoded)?;
+    let existing_video_episodes = stored_video_episode_ids(connection, namespace)?;
 
     connection
         .set_autocommit(false)
@@ -272,6 +280,11 @@ pub(crate) fn import(
                     .map_err(|error| format!("clearing project relation {relation}: {error}"))?;
             }
             for batch in batches {
+                let batch = if table == Table::VideoAssets {
+                    retarget_video_media_relations(batch, namespace)?
+                } else {
+                    batch
+                };
                 summary.rows = summary.rows.saturating_add(batch.num_rows() as u64);
                 ingest_batch(connection, &relation, batch)?;
             }
@@ -279,7 +292,34 @@ pub(crate) fn import(
         Ok(summary)
     })();
 
-    finish_transaction(connection, outcome, "project import")
+    let (mut summary, transaction_warning) =
+        finish_transaction(connection, outcome, "project import")?;
+    let can_reconcile = transaction_warning.is_none();
+    if let Some(warning) = transaction_warning {
+        summary.warnings.push(warning);
+    }
+    // ADBC ingest can create a relation inside the import transaction, but
+    // Spiral's SQL binder cannot resolve that new relation until the commit is
+    // published. Keep the repository's exclusive checkout while reconciling
+    // the derived MP4 resources immediately after the durable rows commit.
+    if can_reconcile {
+        if let Err(error) = reconcile_project_video_datasets(
+            connection,
+            namespace,
+            &existing_video_episodes,
+            &imported_video_episodes,
+        ) {
+            summary.warnings.push(format!(
+                "project rows committed, but derived video datasets need repair: {error}"
+            ));
+        }
+    } else {
+        summary.warnings.push(
+            "project rows committed, but derived video reconciliation was skipped because the transaction connection could not be reused"
+                .to_owned(),
+        );
+    }
+    Ok(summary)
 }
 
 pub(crate) fn import_episodes(
@@ -292,6 +332,7 @@ pub(crate) fn import_episodes(
     let mut decoded = decode_entries(parse_bundle(bundle, EPISODES_SPEC)?, EPISODES_SPEC)?;
     sort_relations(&mut decoded, &EPISODE_TABLES);
     let episode_ids = validate_episode_relations(&decoded)?;
+    let video_episode_ids = video_episode_ids(&decoded)?;
     reject_existing_episodes(connection, namespace, &episode_ids)?;
     ensure_dataset_namespace(connection, namespace)?;
 
@@ -309,6 +350,7 @@ pub(crate) fn import_episodes(
             episodes: episode_ids.len() as u64,
             rows: 0,
             first_episode: episode_ids.first().cloned(),
+            warnings: Vec::new(),
         };
         for (table, batches) in decoded {
             if table == Table::Datasets && dataset_exists {
@@ -320,6 +362,7 @@ pub(crate) fn import_episodes(
                     Table::Datasets | Table::Episodes => {
                         replace_utf8_column(batch, column::DATASET_ID, dataset_id)?
                     }
+                    Table::VideoAssets => retarget_video_media_relations(batch, namespace)?,
                     _ => batch,
                 };
                 summary.rows = summary.rows.saturating_add(batch.num_rows() as u64);
@@ -328,7 +371,32 @@ pub(crate) fn import_episodes(
         }
         Ok(summary)
     })();
-    finish_transaction(connection, outcome, "episode import")
+    let (mut summary, transaction_warning) =
+        finish_transaction(connection, outcome, "episode import")?;
+    let can_reconcile = transaction_warning.is_none();
+    if let Some(warning) = transaction_warning {
+        summary.warnings.push(warning);
+    }
+    if can_reconcile {
+        for episode_id in &video_episode_ids {
+            let result = episode_video_dataset_exists(connection, namespace, episode_id).and_then(
+                |dataset_exists| {
+                    rebuild_episode_video_dataset(connection, namespace, episode_id, dataset_exists)
+                },
+            );
+            if let Err(error) = result {
+                summary.warnings.push(format!(
+                    "episode {episode_id} rows committed, but its derived video dataset needs repair: {error}"
+                ));
+            }
+        }
+    } else if !video_episode_ids.is_empty() {
+        summary.warnings.push(
+            "episode rows committed, but derived video reconciliation was skipped because the transaction connection could not be reused"
+                .to_owned(),
+        );
+    }
+    Ok(summary)
 }
 
 fn decode_entries(
@@ -370,10 +438,9 @@ fn finish_transaction<T>(
     connection: &mut RepositoryConnection,
     outcome: Result<T, String>,
     operation: &str,
-) -> Result<T, String> {
+) -> Result<(T, Option<String>), String> {
     let final_result = match outcome {
-        Ok(value) => connection
-            .commit()
+        Ok(value) => commit_catalog_transaction(connection)
             .map(|()| value)
             .map_err(|error| format!("committing {operation}: {error}")),
         Err(error) => {
@@ -388,9 +455,20 @@ fn finish_transaction<T>(
         .set_autocommit(true)
         .map_err(|error| format!("restoring Spiral autocommit after {operation}: {error}"));
     match (final_result, autocommit) {
-        (Ok(value), Ok(())) => Ok(value),
+        (Ok(value), Ok(())) => Ok((value, None)),
         (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
+        (Ok(value), Err(error)) => {
+            // The data is already durable. Report that truth to the operator,
+            // but never return the connection to the pool with unknown
+            // transaction state.
+            connection.discard();
+            Ok((
+                value,
+                Some(format!(
+                    "{operation} committed, but its Spiral connection was discarded: {error}"
+                )),
+            ))
+        }
     }
 }
 
@@ -475,6 +553,91 @@ fn validate_episode_relations(
     Ok(episode_ids.into_iter().collect())
 }
 
+fn video_episode_ids(decoded: &[(Table, Vec<RecordBatch>)]) -> Result<BTreeSet<String>, String> {
+    let mut episode_ids = BTreeSet::new();
+    for (_, batches) in decoded
+        .iter()
+        .filter(|(table, _)| *table == Table::VideoAssets)
+    {
+        for batch in batches {
+            for episode_id in utf8_values(batch, column::EPISODE_ID)? {
+                validate_episode_id(&episode_id)?;
+                episode_ids.insert(episode_id);
+            }
+        }
+    }
+    Ok(episode_ids)
+}
+
+fn stored_video_episode_ids(
+    connection: &mut RepositoryConnection,
+    namespace: &str,
+) -> Result<BTreeSet<String>, String> {
+    const MAX_VIDEO_EPISODES: usize = 100_000;
+
+    let assets = sql::relation(namespace, Table::VideoAssets);
+    if !table_exists(connection, &assets)? {
+        return Ok(BTreeSet::new());
+    }
+    let result = run_query(
+        connection,
+        &format!(
+            "SELECT DISTINCT {episode_id} FROM {assets}",
+            episode_id = column::EPISODE_ID
+        ),
+        MAX_VIDEO_EPISODES,
+    )?;
+    if result.truncated {
+        return Err(format!(
+            "project has more than {MAX_VIDEO_EPISODES} video episodes; refusing an incomplete derived-resource replacement"
+        ));
+    }
+    result
+        .rows
+        .into_iter()
+        .map(|row| {
+            let episode_id = row
+                .get(column::EPISODE_ID)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "stored video asset has no valid episode ID".to_owned())?
+                .to_owned();
+            validate_episode_id(&episode_id)?;
+            Ok(episode_id)
+        })
+        .collect()
+}
+
+fn reconcile_project_video_datasets(
+    connection: &mut RepositoryConnection,
+    namespace: &str,
+    previous: &BTreeSet<String>,
+    imported: &BTreeSet<String>,
+) -> Result<(), String> {
+    for episode_id in previous.difference(imported) {
+        if episode_video_dataset_exists(connection, namespace, episode_id)? {
+            drop_episode_video_dataset(connection, namespace, episode_id)?;
+        }
+    }
+    for episode_id in imported {
+        let dataset_exists = episode_video_dataset_exists(connection, namespace, episode_id)?;
+        rebuild_episode_video_dataset(connection, namespace, episode_id, dataset_exists)?;
+    }
+    Ok(())
+}
+
+fn drop_episode_video_dataset(
+    connection: &mut RepositoryConnection,
+    namespace: &str,
+    episode_id: &str,
+) -> Result<(), String> {
+    let dataset = sql::video_dataset_relation(namespace, episode_id);
+    execute_update_sql(connection, &sql::drop_video_dataset(&dataset))
+        .map_err(|error| format!("dropping stale Spiral MP4 dataset for {episode_id}: {error}"))?;
+    let sources = sql::video_sources_relation(namespace, episode_id, true);
+    execute_update_sql(connection, &sql::drop_video_sources(&sources))
+        .map_err(|error| format!("dropping stale Spiral video source for {episode_id}: {error}"))
+}
+
 fn utf8_values(batch: &RecordBatch, name: &str) -> Result<Vec<String>, String> {
     let index = batch
         .schema()
@@ -524,6 +687,48 @@ fn replace_utf8_column(batch: RecordBatch, name: &str, value: &str) -> Result<Re
     };
     RecordBatch::try_new(batch.schema(), columns)
         .map_err(|error| format!("retargeting episode bundle dataset: {error}"))
+}
+
+fn retarget_video_media_relations(
+    batch: RecordBatch,
+    namespace: &str,
+) -> Result<RecordBatch, String> {
+    let episode_ids = utf8_values(&batch, column::EPISODE_ID)?;
+    let media_relations = episode_ids
+        .iter()
+        .map(|episode_id| sql::video_dataset_output(namespace, episode_id))
+        .collect::<Vec<_>>();
+    let index = batch
+        .schema()
+        .index_of(column::MEDIA_RELATION)
+        .map_err(|error| {
+            format!(
+                "episode bundle is missing column {}: {error}",
+                column::MEDIA_RELATION
+            )
+        })?;
+    let mut columns = batch.columns().to_vec();
+    let source = &columns[index];
+    columns[index] = if source.as_any().is::<StringArray>() {
+        Arc::new(StringArray::from_iter_values(
+            media_relations.iter().map(String::as_str),
+        )) as ArrayRef
+    } else if source.as_any().is::<LargeStringArray>() {
+        Arc::new(LargeStringArray::from_iter_values(
+            media_relations.iter().map(String::as_str),
+        )) as ArrayRef
+    } else if source.as_any().is::<StringViewArray>() {
+        Arc::new(StringViewArray::from_iter_values(
+            media_relations.iter().map(String::as_str),
+        )) as ArrayRef
+    } else {
+        return Err(format!(
+            "episode bundle column {} is not UTF-8 text",
+            column::MEDIA_RELATION
+        ));
+    };
+    RecordBatch::try_new(batch.schema(), columns)
+        .map_err(|error| format!("retargeting episode bundle media relations: {error}"))
 }
 
 fn reject_existing_episodes(
@@ -588,8 +793,9 @@ fn parse(bundle: &[u8]) -> Result<Vec<(Table, Vec<u8>)>, String> {
 fn parse_bundle(bundle: &[u8], spec: BundleSpec) -> Result<Vec<(Table, Vec<u8>)>, String> {
     if bundle.len() > spec.max_bytes {
         return Err(format!(
-            "{} file exceeds the 1 GiB import limit",
-            spec.label
+            "{} file exceeds the {} MiB import limit",
+            spec.label,
+            spec.max_bytes / (1024 * 1024),
         ));
     }
     let mut source = Cursor::new(bundle);
@@ -723,8 +929,9 @@ impl io::Write for LimitedPayload {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
             return Err(io::Error::other(format!(
-                "{} export exceeds the 1 GiB portable-file limit",
-                self.label
+                "{} export exceeds the {} MiB portable-file limit",
+                self.label,
+                self.limit / (1024 * 1024),
             )));
         }
         self.bytes.extend_from_slice(bytes);
@@ -781,10 +988,12 @@ fn unix_millis() -> i64 {
 mod tests {
     use std::io::Write as _;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::sync::{Arc, Mutex};
 
     use arrow_array::{
-        ArrayRef, Float64Array, Int64Array, LargeBinaryArray, StringArray, UInt64Array,
+        ArrayRef, BinaryArray, Float64Array, Int64Array, LargeBinaryArray, StringArray,
+        UInt32Array, UInt64Array,
     };
     use arrow_schema::{DataType, Field, Schema};
 
@@ -973,6 +1182,31 @@ mod tests {
     }
 
     #[test]
+    fn imported_video_assets_are_retargeted_to_the_destination_namespace() {
+        let batch = text_batch(&[
+            (column::EPISODE_ID, &["episode_a", "episode-b"]),
+            (
+                column::MEDIA_RELATION,
+                &["source.video_a.assets", "source.video_b.assets"],
+            ),
+        ]);
+
+        let retargeted = retarget_video_media_relations(batch, "destination").unwrap();
+
+        assert_eq!(
+            utf8_values(&retargeted, column::MEDIA_RELATION).unwrap(),
+            vec![
+                sql::video_dataset_output("destination", "episode_a"),
+                sql::video_dataset_output("destination", "episode-b"),
+            ]
+        );
+        assert_eq!(
+            video_episode_ids(&[(Table::VideoAssets, vec![retargeted])]).unwrap(),
+            BTreeSet::from(["episode-b".to_owned(), "episode_a".to_owned()])
+        );
+    }
+
+    #[test]
     fn forged_payload_length_is_rejected_before_allocation() {
         let name = Table::Datasets.name().to_owned();
         let mut bundle = envelope(manifest(vec![name.clone()]), &[(name.as_str(), b"")]);
@@ -991,7 +1225,7 @@ mod tests {
                 .write_all(b"d")
                 .unwrap_err()
                 .to_string()
-                .contains("1 GiB")
+                .contains("portable-file limit")
         );
     }
 
@@ -1023,10 +1257,10 @@ mod tests {
         let repository = Arc::new(
             SpiralRepository::new(
                 driver,
-                environment_spiral_endpoint(),
-                environment_spiral_spfs_endpoint(),
+                configured_spiral_endpoint(),
+                configured_spiral_spfs_endpoint(),
                 Some(project),
-                None,
+                stored_credentials(),
                 namespace,
             )
             .expect("the Spiral E2E repository must be valid"),
@@ -1124,10 +1358,10 @@ mod tests {
         let repository = Arc::new(
             SpiralRepository::new(
                 driver,
-                environment_spiral_endpoint(),
-                environment_spiral_spfs_endpoint(),
+                configured_spiral_endpoint(),
+                configured_spiral_spfs_endpoint(),
                 Some(project),
-                None,
+                stored_credentials(),
                 namespace,
             )
             .expect("the Spiral episode E2E repository must be valid"),
@@ -1206,6 +1440,125 @@ mod tests {
         assert!(collision.contains("never overwrites existing episodes"));
     }
 
+    /// Run with the same real-Spiral environment as the project transfer E2E.
+    #[test]
+    #[ignore = "requires a real SpiralDB server, SpFS, ADBC driver, disposable project access, and FFmpeg"]
+    fn spiral_project_import_rebuilds_managed_video_datasets() {
+        let _serial = SPIRAL_E2E
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let driver = required_path("SPIRALDB_ADBC_DRIVER");
+        let project = required_project();
+        let namespace = format!(
+            "spiral_robotics_video_transfer_e2e_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock must be after the Unix epoch")
+                .as_nanos()
+        );
+        let repository = Arc::new(
+            SpiralRepository::new(
+                driver,
+                configured_spiral_endpoint(),
+                configured_spiral_spfs_endpoint(),
+                Some(project),
+                stored_credentials(),
+                namespace,
+            )
+            .expect("the Spiral video import E2E repository must be valid"),
+        );
+        let _cleanup = TestNamespace::new(repository.clone());
+        let storage = StorageManager::new(repository.clone());
+        let episode_id = "episode_video_import";
+        let start = EpisodeStart {
+            id: episode_id.to_owned(),
+            dataset_id: "video-transfer".to_owned(),
+            started_ms: 10,
+            sample_hz: 2.0,
+            source: "transfer-e2e".to_owned(),
+            note: None,
+            arms: vec![spiral_robotics_contracts::api::EpisodeArm {
+                id: "follower".to_owned(),
+                robot_type: Some("test".to_owned()),
+                joints: vec!["joint".to_owned()],
+            }],
+            condition: Vec::new(),
+        };
+        let completion = EpisodeCompletion {
+            duration_seconds: 1.0,
+            recording_gaps: Vec::new(),
+            max_follow_error_degrees: None,
+            discarded: false,
+            condition: Vec::new(),
+        };
+        let mp4 = test_mp4();
+
+        repository
+            .run_exclusive_blocking(|connection| {
+                ensure_dataset_namespace(connection, repository.namespace())?;
+                ingest_batch(
+                    connection,
+                    &sql::relation(repository.namespace(), Table::Datasets),
+                    dataset_batch(&start).map_err(|error| error.to_string())?,
+                )?;
+                ingest_batch(
+                    connection,
+                    &sql::relation(repository.namespace(), Table::Episodes),
+                    episode_completion_batch(&start, &completion, 0)
+                        .map_err(|error| error.to_string())?,
+                )?;
+                ingest_batch(
+                    connection,
+                    &sql::relation(repository.namespace(), Table::VideoAssets),
+                    video_asset_batch(episode_id, &mp4),
+                )
+            })
+            .expect("seeding durable video rows must succeed without derived resources");
+        let exported = storage
+            .export_project_bundle()
+            .expect("exporting the video project must succeed");
+        repository
+            .run_exclusive_blocking(|connection| {
+                drop_studio_relations(connection, repository.namespace())
+            })
+            .expect("clearing the relational fixture before import must succeed");
+
+        storage
+            .import_project_bundle(&exported)
+            .expect("importing a video project must rebuild its managed datasets");
+        storage
+            .import_project_bundle(&exported)
+            .expect("re-importing a video project must replace its managed dataset outputs");
+
+        repository
+            .run_blocking(|connection| {
+                let output = sql::video_dataset_output(repository.namespace(), episode_id);
+                let rows = run_query(connection, &sql::count_rows(&output), 1)?;
+                assert_eq!(
+                    rows.rows[0].get("rows").and_then(serde_json::Value::as_u64),
+                    Some(1)
+                );
+                let frames = run_query(
+                    connection,
+                    &format!(
+                        "SELECT COUNT(*) AS count FROM {output} AS asset, \
+                         LATERAL spql.video.frames(asset.media, \
+                         spql.video.frame_indices(ARRAY[0])) AS frame"
+                    ),
+                    1,
+                )?;
+                assert_eq!(
+                    frames.rows[0]
+                        .get("count")
+                        .and_then(serde_json::Value::as_u64),
+                    Some(1)
+                );
+                Ok(())
+            })
+            .expect("the rebuilt managed dataset must serve an indexed video frame");
+    }
+
     fn required_env(name: &str) -> String {
         std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set for the Spiral E2E test"))
     }
@@ -1218,6 +1571,24 @@ mod tests {
             .expect(
                 "SPIRAL_PROJECT_ID or a project saved in Studio Settings is required for the Spiral E2E test",
             )
+    }
+
+    fn stored_credentials() -> Option<crate::backend::storage::settings::SpiralCredentials> {
+        BackendStateStore::open_default().ok()?.credentials()
+    }
+
+    fn configured_spiral_endpoint() -> String {
+        BackendStateStore::open_default()
+            .ok()
+            .and_then(|store| store.spiral_endpoint())
+            .unwrap_or_else(environment_spiral_endpoint)
+    }
+
+    fn configured_spiral_spfs_endpoint() -> String {
+        BackendStateStore::open_default()
+            .ok()
+            .and_then(|store| store.spiral_spfs_endpoint())
+            .unwrap_or_else(environment_spiral_spfs_endpoint)
     }
 
     fn required_path(name: &str) -> PathBuf {
@@ -1325,6 +1696,72 @@ mod tests {
         )
     }
 
+    fn test_mp4() -> Vec<u8> {
+        let ffmpeg = std::env::var("FFMPEG").unwrap_or_else(|_| "ffmpeg".to_owned());
+        let output = Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=16x16:r=2:d=1",
+                "-an",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "frag_keyframe+empty_moov+default_base_moof",
+                "-f",
+                "mp4",
+                "pipe:1",
+            ])
+            .output()
+            .unwrap_or_else(|error| panic!("could not run {ffmpeg:?}: {error}"));
+        assert!(
+            output.status.success(),
+            "FFmpeg fixture failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!output.stdout.is_empty(), "FFmpeg fixture emitted no MP4");
+        output.stdout
+    }
+
+    fn video_asset_batch(episode_id: &str, payload: &[u8]) -> RecordBatch {
+        record_batch(
+            vec![
+                Field::new(spiral::column::EPISODE_ID, DataType::Utf8, false),
+                Field::new(spiral::column::STREAM_ID, DataType::Utf8, false),
+                Field::new(spiral::column::SEGMENT_INDEX, DataType::UInt32, false),
+                Field::new(spiral::column::TIMELINE_OFFSET_NS, DataType::UInt64, true),
+                Field::new(spiral::column::CAMERA_ID, DataType::Utf8, false),
+                Field::new(spiral::column::PAYLOAD, DataType::Binary, false),
+                Field::new(spiral::column::BYTE_SIZE, DataType::UInt64, false),
+                Field::new(spiral::column::WIDTH, DataType::UInt32, false),
+                Field::new(spiral::column::HEIGHT, DataType::UInt32, false),
+                Field::new(spiral::column::FPS, DataType::UInt32, false),
+                Field::new(spiral::column::FRAMES, DataType::UInt64, false),
+                Field::new(spiral::column::MEDIA_RELATION, DataType::Utf8, false),
+            ],
+            vec![
+                Arc::new(StringArray::from(vec![episode_id])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["camera.main"])) as ArrayRef,
+                Arc::new(UInt32Array::from(vec![0])) as ArrayRef,
+                Arc::new(UInt64Array::from(vec![Some(0)])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["camera-e2e"])) as ArrayRef,
+                Arc::new(BinaryArray::from_iter_values([payload])) as ArrayRef,
+                Arc::new(UInt64Array::from(vec![payload.len() as u64])) as ArrayRef,
+                Arc::new(UInt32Array::from(vec![16])) as ArrayRef,
+                Arc::new(UInt32Array::from(vec![16])) as ArrayRef,
+                Arc::new(UInt32Array::from(vec![2])) as ArrayRef,
+                Arc::new(UInt64Array::from(vec![2])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["source.wrong.assets"])) as ArrayRef,
+            ],
+        )
+    }
+
     fn record_batch(fields: Vec<Field>, columns: Vec<ArrayRef>) -> RecordBatch {
         RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
             .expect("the E2E fixture batch must match its schema")
@@ -1334,6 +1771,11 @@ mod tests {
         connection: &mut RepositoryConnection,
         namespace: &str,
     ) -> Result<(), String> {
+        for episode_id in stored_video_episode_ids(connection, namespace)? {
+            if episode_video_dataset_exists(connection, namespace, &episode_id)? {
+                drop_episode_video_dataset(connection, namespace, &episode_id)?;
+            }
+        }
         for table in Table::ALL.into_iter().rev() {
             let relation = sql::relation(namespace, table);
             if table_exists(connection, &relation)? {

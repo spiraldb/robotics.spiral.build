@@ -374,9 +374,10 @@ pub(crate) fn SettingsPanel(
                                 studio.report_success_from(
                                     MessageSource::Settings,
                                     format!(
-                                        "Project restored from {} relations ({} rows).",
+                                        "Project restored from {} relations ({} rows).{}",
                                         result.relations,
                                         result.rows,
+                                        import_warning_suffix(&result.warnings),
                                     ),
                                 );
                             }
@@ -393,6 +394,14 @@ pub(crate) fn SettingsPanel(
                 on_cancel: move |_| pending_project_file.set(None),
             }
         }
+    }
+}
+
+fn import_warning_suffix(warnings: &[String]) -> String {
+    if warnings.is_empty() {
+        String::new()
+    } else {
+        format!(" Warning: {}", warnings.join(" "))
     }
 }
 

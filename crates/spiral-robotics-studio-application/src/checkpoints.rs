@@ -5,39 +5,27 @@ use std::pin::Pin;
 
 /// Keep one model cell below Spiral's 256 MiB operation limit, with headroom
 /// for the row's metadata and Arrow buffers.
-pub(crate) const MAX_CHECKPOINT_ARTIFACT_BYTES: usize = 240 * 1024 * 1024;
+pub const MAX_CHECKPOINT_ARTIFACT_BYTES: usize = 240 * 1024 * 1024;
 /// Configuration is small JSON policy metadata, never a second weight blob.
-pub(crate) const MAX_CHECKPOINT_CONFIG_BYTES: usize = 1024 * 1024;
+pub const MAX_CHECKPOINT_CONFIG_BYTES: usize = 1024 * 1024;
 
 /// Identity selected by the rollout use case.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CheckpointKey {
+pub struct CheckpointKey {
     pub run_id: String,
     pub step: u64,
-}
-
-/// Trainer-produced artifact and metadata ready for a durable write.
-pub(crate) struct CheckpointWrite {
-    pub run_id: String,
-    pub run_name: String,
-    pub policy: String,
-    pub step: u64,
-    pub created_ms: i64,
-    pub validation_loss: Option<f64>,
-    pub config_json: String,
-    pub payload: Vec<u8>,
 }
 
 /// Opaque model material loaded for native rollout.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CheckpointArtifact {
+pub struct CheckpointArtifact {
     pub config_json: Vec<u8>,
     pub payload: Vec<u8>,
 }
 
 /// Validate opaque artifact sizes before adapters copy or materialize them a
 /// second time. Overflow and oversized external rows fail closed.
-pub(crate) fn validate_checkpoint_artifact_size(
+pub fn validate_checkpoint_artifact_size(
     config_bytes: usize,
     payload_bytes: usize,
 ) -> Result<(), String> {
@@ -57,14 +45,11 @@ pub(crate) fn validate_checkpoint_artifact_size(
     Ok(())
 }
 
-pub(crate) type CheckpointFuture<'a, T> =
-    Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
+pub type CheckpointFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
 
-/// Checkpoint operations used by training and rollout policy. The concrete
+/// Checkpoint operations used by rollout policy. The concrete
 /// Studio implementation always addresses its one process-owned Spiral project.
-pub(crate) trait CheckpointRepository: Send + Sync {
-    fn save_checkpoint(&self, write: CheckpointWrite) -> CheckpointFuture<'_, ()>;
-
+pub trait CheckpointRepository: Send + Sync {
     fn load_checkpoint(&self, key: CheckpointKey) -> CheckpointFuture<'_, CheckpointArtifact>;
 
     fn delete_run_checkpoints(&self, run_id: String) -> CheckpointFuture<'_, ()>;

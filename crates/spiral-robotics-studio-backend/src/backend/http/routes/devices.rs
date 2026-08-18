@@ -92,17 +92,29 @@ impl SerialPortQueryPort for SerialPortQueryAdapter<'_> {
     }
 }
 
-impl CameraDiscoveryPort for Arc<CameraManager> {
+#[derive(Clone)]
+pub(super) struct CameraDiscoveryAdapter(pub(super) Arc<CameraManager>);
+
+impl CameraDiscoveryPort for CameraDiscoveryAdapter {
     fn cameras(&self) -> Vec<DiscoveredCamera> {
-        self.statuses().into_iter().map(discovered_camera).collect()
+        self.0
+            .statuses()
+            .into_iter()
+            .map(discovered_camera)
+            .collect()
     }
 
     async fn refresh_cameras(&self) -> Result<Vec<DiscoveredCamera>, ApplicationError> {
-        let cameras = self.clone();
+        let cameras = self.0.clone();
         tokio::task::spawn_blocking(move || cameras.refresh_blocking())
             .await
             .map_err(|error| ApplicationError::Internal(error.to_string()))?;
-        Ok(self.statuses().into_iter().map(discovered_camera).collect())
+        Ok(self
+            .0
+            .statuses()
+            .into_iter()
+            .map(discovered_camera)
+            .collect())
     }
 }
 
@@ -125,6 +137,7 @@ pub(super) fn discovered_camera(camera: CameraStatus) -> DiscoveredCamera {
 pub(super) struct RobotHttpAdapter<'a> {
     state: &'a AppState,
     import_document: Option<Bytes>,
+    saved_records: Option<Vec<RobotRecord>>,
 }
 
 impl<'a> RobotHttpAdapter<'a> {
@@ -132,6 +145,15 @@ impl<'a> RobotHttpAdapter<'a> {
         Self {
             state,
             import_document: None,
+            saved_records: None,
+        }
+    }
+
+    pub(super) fn prefetched(state: &'a AppState) -> Self {
+        Self {
+            state,
+            import_document: None,
+            saved_records: Some(state.workspace.list()),
         }
     }
 
@@ -139,7 +161,24 @@ impl<'a> RobotHttpAdapter<'a> {
         Self {
             state,
             import_document: Some(document),
+            saved_records: None,
         }
+    }
+
+    pub(super) fn summary(
+        &self,
+        robot: &str,
+        connection: ConnectionStatus,
+    ) -> Result<RobotSummary, WorkspaceError> {
+        let record = match &self.saved_records {
+            Some(records) => records
+                .iter()
+                .find(|record| record.id == robot)
+                .cloned()
+                .ok_or_else(|| WorkspaceError::NotFound(robot.to_owned()))?,
+            None => self.state.workspace.get(robot)?,
+        };
+        Ok(record.summary(connection))
     }
 }
 
@@ -241,12 +280,16 @@ impl RobotRepository for RobotHttpAdapter<'_> {
     }
 
     fn saved_robot_ids(&self) -> Vec<String> {
-        self.state
-            .workspace
-            .list()
-            .into_iter()
-            .map(|record| record.id)
-            .collect()
+        match &self.saved_records {
+            Some(records) => records.iter().map(|record| record.id.clone()).collect(),
+            None => self
+                .state
+                .workspace
+                .list()
+                .into_iter()
+                .map(|record| record.id)
+                .collect(),
+        }
     }
 
     fn connection_spec(&self, robot: &str) -> Result<RobotConnectionSpec, ApplicationError> {
@@ -531,7 +574,7 @@ async fn identify_port(
 
 async fn list_cameras(State(state): State<AppState>) -> Json<Vec<CameraStatus>> {
     Json(
-        device_discovery::list_cameras(&state.cameras)
+        device_discovery::list_cameras(&CameraDiscoveryAdapter(state.cameras.clone()))
             .into_iter()
             .map(|camera| CameraStatus {
                 id: camera.id,
@@ -551,7 +594,7 @@ async fn refresh_cameras(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<CameraStatus>>, Failure> {
     Ok(Json(
-        device_discovery::refresh_cameras(&state.cameras)
+        device_discovery::refresh_cameras(&CameraDiscoveryAdapter(state.cameras.clone()))
             .await?
             .into_iter()
             .map(|camera| CameraStatus {
@@ -657,11 +700,19 @@ pub(super) fn multipart_part(frame: &Frame) -> Bytes {
 }
 
 async fn list_robots(State(state): State<AppState>) -> Json<Vec<RobotSummary>> {
-    let adapter = RobotHttpAdapter::new(&state);
+    let adapter = RobotHttpAdapter::prefetched(&state);
+    let hardware = state.hardware.state();
     Json(
         robots::list(&adapter)
             .into_iter()
-            .filter_map(|robot| present_saved_robot(&state, robot).ok())
+            .filter_map(|robot| {
+                let connection = hardware
+                    .connections
+                    .get(&robot.id)
+                    .cloned()
+                    .unwrap_or_default();
+                adapter.summary(&robot.id, connection).ok()
+            })
             .collect(),
     )
 }

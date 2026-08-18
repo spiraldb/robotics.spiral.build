@@ -20,25 +20,25 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
 
 use crate::backend::adapters::clock::SystemClock;
-use crate::backend::application::checkpoints::{
-    CheckpointArtifact, CheckpointKey, CheckpointRepository,
-};
-use crate::backend::application::clock::{Clock, StableIdSequence};
-use crate::backend::application::policy_runtime::{
-    ArtifactIdentity, CameraBindingContract, ControlOwner, JointObservation, ObservationFreshness,
-    PolicyDataContract, PolicyModelContract, TargetRobotContract, prepare_action_goals,
-    prepare_observation_state, require_fresh_observations, validate_artifact_identity,
-    validate_rollout_contract,
-};
-use crate::backend::application::rollout::{
-    CompletionReason, ControlDecision, ExecutionOutcome, RolloutCoordinator, RolloutEventPort,
-    RolloutMetrics, RolloutPhase, RolloutRequest, RolloutSnapshot,
-};
 use crate::backend::robotics::cameras::{CameraManager, Frame};
 use crate::backend::robotics::hardware::{HardwareHandle, HardwareState};
 use crate::backend::robots::workspace::RobotWorkspace;
 use crate::backend::storage::manager::StorageManager;
 use crate::backend::storage::settings::StudioPreferencesStore;
+use spiral_robotics_studio_application::checkpoints::{
+    CheckpointArtifact, CheckpointKey, CheckpointRepository,
+};
+use spiral_robotics_studio_application::clock::{Clock, StableIdSequence};
+use spiral_robotics_studio_application::policy_runtime::{
+    ArtifactIdentity, CameraBindingContract, ControlOwner, JointObservation, ObservationFreshness,
+    PolicyDataContract, PolicyModelContract, TargetRobotContract, prepare_action_goals,
+    prepare_observation_state, require_fresh_observations, validate_artifact_identity,
+    validate_rollout_contract,
+};
+use spiral_robotics_studio_application::rollout::{
+    CompletionReason, ControlDecision, ExecutionOutcome, RolloutCoordinator, RolloutEventPort,
+    RolloutMetrics, RolloutPhase, RolloutRequest, RolloutSnapshot,
+};
 
 const INPUT_STALE_AFTER: Duration = Duration::from_millis(350);
 const INITIAL_CAMERA_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1288,19 +1288,19 @@ mod tests {
         spawn_inference, stop_and_join_active, take_active_rollout, validate_manifest,
         wait_for_policy_admission,
     };
-    use crate::backend::application::checkpoints::{
-        CheckpointArtifact, CheckpointFuture, CheckpointKey, CheckpointRepository, CheckpointWrite,
-    };
-    use crate::backend::application::policy_runtime::{
-        ACT_ARTIFACT_FORMAT, ACT_TENSOR_NAMESPACE, CameraBindingContract, PolicyDataContract,
-        PolicyModelContract, TargetRobotContract, validate_rollout_contract,
-    };
     use crate::backend::robotics::hardware::HardwareState;
     use bytes::Bytes;
     use spiral_robotics_contracts::api::{ModeSelection, ModeStatus, StartRolloutRequest};
     use spiral_robotics_inference::{
         ActionChunk, InferenceInput, InferenceStats, ModelIdentity, Policy, PolicyKind,
         PolicySpecification,
+    };
+    use spiral_robotics_studio_application::checkpoints::{
+        CheckpointArtifact, CheckpointFuture, CheckpointKey, CheckpointRepository,
+    };
+    use spiral_robotics_studio_application::policy_runtime::{
+        ACT_ARTIFACT_FORMAT, ACT_TENSOR_NAMESPACE, CameraBindingContract, PolicyDataContract,
+        PolicyModelContract, TargetRobotContract, validate_rollout_contract,
     };
     use std::sync::{Arc, Mutex, mpsc};
     use std::time::{Duration, Instant};
@@ -1552,10 +1552,6 @@ mod tests {
     }
 
     impl CheckpointRepository for FakeCheckpointRepository {
-        fn save_checkpoint(&self, _write: CheckpointWrite) -> CheckpointFuture<'_, ()> {
-            Box::pin(async { Err("rollout must not publish checkpoints".to_owned()) })
-        }
-
         fn load_checkpoint(&self, key: CheckpointKey) -> CheckpointFuture<'_, CheckpointArtifact> {
             self.loads.lock().unwrap().push(key);
             let artifact = self.artifact.clone();

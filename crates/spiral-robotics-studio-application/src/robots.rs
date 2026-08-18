@@ -11,13 +11,13 @@ const MAX_ROBOT_ID_LENGTH: usize = 64;
 const MAX_CAMERA_ROLE_LENGTH: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SerialPortConfiguration {
+pub struct SerialPortConfiguration {
     pub path: String,
     pub baud_rate: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CreateRobotCommand {
+pub struct CreateRobotCommand {
     pub id: String,
     pub robot_type: Option<String>,
     pub port: Option<String>,
@@ -25,20 +25,20 @@ pub(crate) struct CreateRobotCommand {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct NewRobot {
+pub struct NewRobot {
     pub id: String,
     pub robot_type: Option<String>,
     pub port: Option<SerialPortConfiguration>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CameraAssignment {
+pub struct CameraAssignment {
     pub role: String,
     pub device_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct UpdateRobotCommand {
+pub struct UpdateRobotCommand {
     pub id: String,
     pub robot_type: Option<String>,
     pub port: Option<SerialPortConfiguration>,
@@ -46,7 +46,7 @@ pub(crate) struct UpdateRobotCommand {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RobotUpdate<C> {
+pub struct RobotUpdate<C> {
     pub id: String,
     pub robot_type: Option<String>,
     pub port: Option<SerialPortConfiguration>,
@@ -55,7 +55,7 @@ pub(crate) struct RobotUpdate<C> {
 
 /// Plain information required to connect a saved robot.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RobotConnectionSpec {
+pub struct RobotConnectionSpec {
     pub id: String,
     pub port: SerialPortConfiguration,
     pub motors: BTreeMap<String, MotorSpec>,
@@ -63,12 +63,12 @@ pub(crate) struct RobotConnectionSpec {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SavedRobot {
+pub struct SavedRobot {
     pub id: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ExportedRobotDocument {
+pub struct ExportedRobotDocument {
     pub bytes: Vec<u8>,
 }
 
@@ -76,7 +76,7 @@ pub(crate) struct ExportedRobotDocument {
 ///
 /// Camera patches are adapter-minted capabilities consumed by the same
 /// repository after application validation.
-pub(crate) trait RobotRepository {
+pub trait RobotRepository {
     type CameraConfiguration;
 
     fn create(&self, robot: NewRobot) -> Result<SavedRobot, ApplicationError>;
@@ -106,7 +106,7 @@ pub(crate) trait RobotRepository {
 }
 
 /// Live hardware operations needed by robot-configuration actions.
-pub(crate) trait RobotConnectionPort {
+pub trait RobotConnectionPort {
     fn is_connected(&self, robot: &str) -> bool;
 
     async fn connect(&self, specification: RobotConnectionSpec) -> Result<(), ApplicationError>;
@@ -117,7 +117,7 @@ pub(crate) trait RobotConnectionPort {
     async fn forget(&self, robot: &str) -> Result<(), ApplicationError>;
 }
 
-pub(crate) fn create<R: RobotRepository + ?Sized>(
+pub fn create<R: RobotRepository + ?Sized>(
     repository: &R,
     mut command: CreateRobotCommand,
 ) -> Result<SavedRobot, ApplicationError> {
@@ -142,14 +142,14 @@ pub(crate) fn create<R: RobotRepository + ?Sized>(
     })
 }
 
-pub(crate) fn import_configuration<R: RobotRepository + ?Sized>(
+pub fn import_configuration<R: RobotRepository + ?Sized>(
     repository: &R,
 ) -> Result<SavedRobot, ApplicationError> {
     repository.import_configuration()
 }
 
 /// Select saved robot identities for a read presenter.
-pub(crate) fn list<R: RobotRepository + ?Sized>(repository: &R) -> Vec<SavedRobot> {
+pub fn list<R: RobotRepository + ?Sized>(repository: &R) -> Vec<SavedRobot> {
     repository
         .saved_robot_ids()
         .into_iter()
@@ -158,7 +158,7 @@ pub(crate) fn list<R: RobotRepository + ?Sized>(repository: &R) -> Vec<SavedRobo
 }
 
 /// Admit one saved identity before an outer presenter hydrates its view.
-pub(crate) fn get<R: RobotRepository + ?Sized>(
+pub fn get<R: RobotRepository + ?Sized>(
     repository: &R,
     robot: String,
 ) -> Result<SavedRobot, ApplicationError> {
@@ -167,14 +167,14 @@ pub(crate) fn get<R: RobotRepository + ?Sized>(
     Ok(SavedRobot { id: robot })
 }
 
-pub(crate) fn export_configuration<R: RobotRepository + ?Sized>(
+pub fn export_configuration<R: RobotRepository + ?Sized>(
     repository: &R,
     robot: &str,
 ) -> Result<ExportedRobotDocument, ApplicationError> {
     repository.export_configuration(robot)
 }
 
-pub(crate) fn update<R, C>(
+pub fn update<R, C>(
     repository: &R,
     control: &C,
     mut command: UpdateRobotCommand,
@@ -257,11 +257,7 @@ fn validate_plain_name(label: &str, value: &str, maximum: usize) -> Result<(), A
 /// tear down a bus. Once it passes, failure is deliberately biased toward a
 /// saved-but-disconnected robot: deleting the SpiralDB row first could leave a
 /// live bus that no configuration or UI card can identify and stop.
-pub(crate) async fn delete<R, C>(
-    repository: &R,
-    control: &C,
-    robot: &str,
-) -> Result<(), ApplicationError>
+pub async fn delete<R, C>(repository: &R, control: &C, robot: &str) -> Result<(), ApplicationError>
 where
     R: RobotRepository + ?Sized,
     C: RobotConnectionPort + ?Sized,
@@ -271,11 +267,7 @@ where
     repository.delete(robot)
 }
 
-pub(crate) async fn connect<R, C>(
-    repository: &R,
-    control: &C,
-    robot: &str,
-) -> Result<(), ApplicationError>
+pub async fn connect<R, C>(repository: &R, control: &C, robot: &str) -> Result<(), ApplicationError>
 where
     R: RobotRepository + ?Sized,
     C: RobotConnectionPort + ?Sized,
@@ -284,7 +276,7 @@ where
     control.connect(specification).await
 }
 
-pub(crate) async fn disconnect<C: RobotConnectionPort + ?Sized>(
+pub async fn disconnect<C: RobotConnectionPort + ?Sized>(
     control: &C,
     robot: &str,
 ) -> Result<(), ApplicationError> {
@@ -292,21 +284,21 @@ pub(crate) async fn disconnect<C: RobotConnectionPort + ?Sized>(
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum AutoConnectStatus {
+pub enum AutoConnectStatus {
     Connected,
     Skipped(String),
     Failed(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AutoConnectOutcome {
+pub struct AutoConnectOutcome {
     pub robot: String,
     pub status: AutoConnectStatus,
 }
 
 /// Try every saved robot independently; one invalid or absent arm must not
 /// prevent other usable arms or the Studio itself from starting.
-pub(crate) async fn auto_connect<R, C>(repository: &R, control: &C) -> Vec<AutoConnectOutcome>
+pub async fn auto_connect<R, C>(repository: &R, control: &C) -> Vec<AutoConnectOutcome>
 where
     R: RobotRepository + ?Sized,
     C: RobotConnectionPort + ?Sized,

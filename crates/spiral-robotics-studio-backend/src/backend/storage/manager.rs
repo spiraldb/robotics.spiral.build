@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use arrow_array::{
-    Array as _, ArrayRef, BinaryArray, BinaryViewArray, Float64Array, Int64Array, LargeBinaryArray,
+    Array as _, ArrayRef, BinaryArray, BinaryViewArray, Int64Array, LargeBinaryArray,
     LargeStringArray, RecordBatch, StringArray, StringViewArray, UInt32Array, UInt64Array,
 };
 use arrow_json::writer::{JsonArray, WriterBuilder};
@@ -18,10 +18,6 @@ use spiral_robotics_contracts::api::{
 };
 use spiral_robotics_contracts::spiral::{self, Table, column as db};
 
-use crate::backend::application::checkpoints::{
-    CheckpointArtifact, CheckpointFuture, CheckpointKey, CheckpointRepository, CheckpointWrite,
-    validate_checkpoint_artifact_size,
-};
 use crate::backend::recording::episodes::CompletedEpisode;
 use crate::backend::recording::spiral::{
     SpiralEpisodeEncoder, VideoStreamRow, dataset_batch, episode_completion_batch,
@@ -32,6 +28,10 @@ use crate::backend::storage::bundle;
 use crate::backend::storage::repository::{RepositoryConnection, SpiralRepository};
 use crate::backend::storage::settings::StoredStudioPreferences;
 use crate::backend::storage::sql::{self, ReadOnlyMode};
+use spiral_robotics_studio_application::checkpoints::{
+    CheckpointArtifact, CheckpointFuture, CheckpointKey, CheckpointRepository,
+    validate_checkpoint_artifact_size,
+};
 
 const MAX_QUERY_ROWS: usize = 1_000;
 const MAX_QUERY_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -92,10 +92,6 @@ impl StorageManager {
 
     pub(crate) async fn prewarm(&self) -> Result<(), String> {
         self.repository.prewarm().await
-    }
-
-    pub(crate) fn configure_project(&self, project_id: &str) -> Result<(), String> {
-        self.repository.configure_project(project_id)
     }
 
     pub(crate) fn configure_connection(
@@ -386,62 +382,6 @@ impl StorageManager {
     /// Resolve the query and its Arrow contract before starting the trainer.
     /// Unknown relations and renamed fields therefore fail the start request,
     /// rather than becoming an asynchronous training-task failure.
-    pub(crate) async fn validate_training_query(
-        &self,
-        query: &str,
-        state_column: &str,
-        action_column: &str,
-    ) -> Result<(), String> {
-        sql::ensure_read_only(query, ReadOnlyMode::Training)?;
-        let query = query.to_owned();
-        let state_column = state_column.to_owned();
-        let action_column = action_column.to_owned();
-        let dataset = self.repository.namespace().to_owned();
-        self.repository
-            .run(move |connection| {
-                let mut statement = connection
-                    .new_statement()
-                    .map_err(|error| format!("opening the Spiral training preflight: {error}"))?;
-                statement
-                    .set_sql_query(&query)
-                    .map_err(|error| format!("binding the Spiral training preflight: {error}"))?;
-                let reader = statement.execute().map_err(|error| {
-                format!(
-                    "training query does not resolve in configured namespace {dataset:?}: {error}"
-                )
-            })?;
-                validate_training_schema(reader.schema().as_ref(), &state_column, &action_column)
-            })
-            .await
-    }
-
-    /// Run one training session on its own ADBC connection.
-    ///
-    /// Training performs long-running frame and action reads. Keeping this
-    /// connection separate prevents those reads from blocking Studio query
-    /// previews or checkpoint writes on the cached control connection.
-    pub(crate) async fn run_training_adbc<T, F>(&self, operation: F) -> Result<T, String>
-    where
-        T: Send + 'static,
-        F: FnOnce(&mut RepositoryConnection) -> Result<T, String> + Send + 'static,
-    {
-        self.repository.run_dedicated(operation).await
-    }
-
-    /// Save a trainer-produced artifact through the backend's trusted ADBC
-    /// control path. Checkpoint writes remain separate from the training read
-    /// connection, so persistence cannot deadlock a streaming batch read.
-    async fn save_checkpoint_artifact(&self, write: CheckpointWrite) -> Result<(), String> {
-        let target = sql::relation(self.repository.namespace(), Table::TrainingCheckpoints);
-        self.repository
-            .run(move |connection| {
-                let batch = training_checkpoint_batch(write)?;
-                ingest_batch(connection, &target, batch)
-                    .map_err(|error| format!("saving training checkpoint to {target}: {error}"))
-            })
-            .await
-    }
-
     async fn load_checkpoint_artifact(
         &self,
         key: CheckpointKey,
@@ -588,10 +528,6 @@ fn decode_trajectory(
 }
 
 impl CheckpointRepository for StorageManager {
-    fn save_checkpoint(&self, write: CheckpointWrite) -> CheckpointFuture<'_, ()> {
-        Box::pin(async move { self.save_checkpoint_artifact(write).await })
-    }
-
     fn load_checkpoint(&self, key: CheckpointKey) -> CheckpointFuture<'_, CheckpointArtifact> {
         Box::pin(async move { self.load_checkpoint_artifact(key).await })
     }
@@ -674,6 +610,8 @@ pub(crate) fn replace_episode_blocking(
         )?;
     }
     if !videos.is_empty() {
+        let video_dataset_exists =
+            episode_video_dataset_exists(connection, namespace, &episode.start.id)?;
         let media_relation = sql::video_dataset_output(namespace, &episode.start.id);
         let batch = video_assets_batch(&episode.start.id, videos, &media_relation)?;
         ingest_batch(
@@ -681,42 +619,12 @@ pub(crate) fn replace_episode_blocking(
             &sql::relation(namespace, Table::VideoAssets),
             batch,
         )?;
-        // The view turns durable binary MP4 payloads into Spiral Blob values;
-        // the managed dataset then persists the MP4/video index used by
-        // `spql.video.*` frame selection and decode.
-        let sources = sql::video_sources_relation(namespace, &episode.start.id, true);
-        let assets = sql::relation(namespace, Table::VideoAssets);
-        let dataset = sql::video_dataset_relation(namespace, &episode.start.id);
-        execute_update_sql(
+        rebuild_episode_video_dataset(
             connection,
-            &sql::create_video_sources(&sources, &assets, Some(episode.start.id.as_str())),
-        )
-        .map_err(|error| format!("creating Spiral video source view: {error}"))?;
-        // Completed episodes are immutable, so each has one immutable managed
-        // MP4 Dataset. This avoids flattening the native VideoIndex extension
-        // through ADBC metadata or relying on output replacement.
-        let created =
-            execute_update_sql(connection, &sql::create_video_dataset(&dataset, &sources));
-        let needs_refresh = match created {
-            Ok(()) => true,
-            Err(error) if error.contains("already exists") => {
-                let output = sql::video_dataset_output(namespace, &episode.start.id);
-                match run_query(connection, &sql::count_rows(&output), 1) {
-                    Ok(_) => false,
-                    Err(error) if error.contains("unknown table") => true,
-                    Err(error) => {
-                        return Err(format!(
-                            "checking Spiral MP4 dataset output {output}: {error}"
-                        ));
-                    }
-                }
-            }
-            Err(error) => return Err(format!("creating Spiral MP4 dataset: {error}")),
-        };
-        if needs_refresh {
-            execute_update_sql(connection, &sql::refresh_dataset(&dataset))
-                .map_err(|error| format!("refreshing Spiral MP4 dataset: {error}"))?;
-        }
+            namespace,
+            &episode.start.id,
+            video_dataset_exists,
+        )?;
     }
     // Inserted last: readers never see an episode whose streams or media only
     // partially arrived.
@@ -727,6 +635,58 @@ pub(crate) fn replace_episode_blocking(
             .map_err(|error| error.to_string())?,
     )?;
     Ok(())
+}
+
+/// Rebuild the managed MP4 index derived from the durable `video_assets` rows.
+///
+/// The output is deliberately refreshed even when the Dataset already exists.
+/// Project import replaces those source rows in place, so merely observing an
+/// existing output does not prove that its video index matches the imported
+/// payloads.
+pub(crate) fn rebuild_episode_video_dataset(
+    connection: &mut RepositoryConnection,
+    namespace: &str,
+    episode_id: &str,
+    dataset_exists: bool,
+) -> Result<(), String> {
+    // The view turns durable binary MP4 payloads into Spiral Blob values; the
+    // managed dataset then persists the MP4/video index used by
+    // `spql.video.*` frame selection and decode.
+    let sources = sql::video_sources_relation(namespace, episode_id, true);
+    let assets = sql::relation(namespace, Table::VideoAssets);
+    let dataset = sql::video_dataset_relation(namespace, episode_id);
+    execute_update_sql(
+        connection,
+        &sql::create_video_sources(&sources, &assets, Some(episode_id)),
+    )
+    .map_err(|error| format!("creating Spiral video source view for {episode_id}: {error}"))?;
+    if !dataset_exists {
+        execute_update_sql(connection, &sql::create_video_dataset(&dataset, &sources))
+            .map_err(|error| format!("creating Spiral MP4 dataset for {episode_id}: {error}"))?;
+    }
+    execute_update_sql(connection, &sql::refresh_dataset(&dataset))
+        .map_err(|error| format!("refreshing Spiral MP4 dataset for {episode_id}: {error}"))
+}
+
+pub(crate) fn episode_video_dataset_exists(
+    connection: &mut RepositoryConnection,
+    namespace: &str,
+    episode_id: &str,
+) -> Result<bool, String> {
+    let dataset = sql::video_dataset_relation(namespace, episode_id);
+    match run_query(connection, &format!("DESCRIBE {dataset}"), 1) {
+        Ok(_) => Ok(true),
+        Err(error)
+            if error.contains("unknown resource")
+                || error.contains("does not exist")
+                || error.contains("unknown relation") =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(format!(
+            "checking Spiral MP4 dataset for {episode_id}: {error}"
+        )),
+    }
 }
 
 /// Spiral's managed catalog is a resource tree: `spiral_robotics.episodes` can only
@@ -807,123 +767,17 @@ pub(crate) fn ingest_batch(
     Ok(())
 }
 
-fn validate_training_schema(
-    schema: &Schema,
-    state_column: &str,
-    action_column: &str,
-) -> Result<(), String> {
-    let missing = [
-        db::EPISODE_ID,
-        db::STREAM_ID,
-        db::SAMPLE_INDEX,
-        db::EPISODE_TIME_NS,
-        db::SAMPLE_HZ,
-        db::EPISODE_FRAMES,
-        db::ROBOT_TYPE,
-        db::JOINT_NAMES,
-        state_column,
-        action_column,
-    ]
-    .into_iter()
-    .filter(|name| schema.field_with_name(name).is_err())
-    .collect::<Vec<_>>();
-    if !missing.is_empty() {
-        Err(format!(
-            "the Spiral training query is missing required columns: {}",
-            missing.join(", ")
-        ))?;
-    }
-
-    let expect = |name: &str, accepted: &dyn Fn(&DataType) -> bool, label: &str| {
-        let field = schema
-            .field_with_name(name)
-            .expect("required training field was checked above");
-        if accepted(field.data_type()) {
-            Ok(())
-        } else {
-            Err(format!(
-                "training column {name:?} must be {label}, got {}",
-                field.data_type()
-            ))
-        }
-    };
-    // Spiral preserves its zero-copy string representation through ADBC as
-    // Arrow Utf8View. It has the same logical UTF-8 contract as the offset-
-    // based Utf8 and LargeUtf8 arrays, so schema validation must accept all
-    // three physical representations.
-    let utf8 = |kind: &DataType| {
-        matches!(
-            kind,
-            DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8
-        )
-    };
-    let integer = |kind: &DataType| {
-        matches!(
-            kind,
-            DataType::Int8
-                | DataType::Int16
-                | DataType::Int32
-                | DataType::Int64
-                | DataType::UInt8
-                | DataType::UInt16
-                | DataType::UInt32
-                | DataType::UInt64
-        )
-    };
-    let floating = |kind: &DataType| {
-        matches!(
-            kind,
-            DataType::Float16 | DataType::Float32 | DataType::Float64
-        )
-    };
-    let numeric_vector = |kind: &DataType| match kind {
-        DataType::List(item) | DataType::LargeList(item) | DataType::FixedSizeList(item, _) => {
-            matches!(
-                item.data_type(),
-                DataType::Float16 | DataType::Float32 | DataType::Float64
-            )
-        }
-        _ => false,
-    };
-    let string_list = |kind: &DataType| match kind {
-        DataType::List(item) | DataType::LargeList(item) | DataType::FixedSizeList(item, _) => {
-            utf8(item.data_type())
-        }
-        _ => false,
-    };
-
-    expect(db::EPISODE_ID, &utf8, "UTF-8 text")?;
-    expect(db::STREAM_ID, &utf8, "UTF-8 text")?;
-    expect(db::SAMPLE_INDEX, &integer, "an integer")?;
-    expect(db::EPISODE_TIME_NS, &integer, "an integer")?;
-    expect(db::SAMPLE_HZ, &floating, "a floating-point rate")?;
-    expect(db::EPISODE_FRAMES, &integer, "an integer")?;
-    expect(db::ROBOT_TYPE, &utf8, "UTF-8 text")?;
-    expect(db::JOINT_NAMES, &string_list, "a list of UTF-8 joint names")?;
-    expect(state_column, &numeric_vector, "a floating-point vector")?;
-    expect(action_column, &numeric_vector, "a floating-point vector")?;
-    Ok(())
+pub(crate) fn table_exists(
+    connection: &RepositoryConnection,
+    target: &str,
+) -> Result<bool, String> {
+    connection
+        .table_schema(target)
+        .map(|schema| schema.is_some())
+        .map_err(|error| format!("checking Spiral table {target}: {error}"))
 }
 
-fn training_checkpoint_batch(checkpoint: CheckpointWrite) -> Result<RecordBatch, String> {
-    validate_checkpoint_artifact_size(checkpoint.config_json.len(), checkpoint.payload.len())?;
-    let schema = training_checkpoint_schema();
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from(vec![checkpoint.run_id])),
-        Arc::new(StringArray::from(vec![checkpoint.run_name])),
-        Arc::new(StringArray::from(vec![checkpoint.policy])),
-        Arc::new(UInt64Array::from(vec![checkpoint.step])),
-        Arc::new(Int64Array::from(vec![checkpoint.created_ms])),
-        Arc::new(Float64Array::from(vec![checkpoint.validation_loss])),
-        Arc::new(StringArray::from(vec![checkpoint.config_json])),
-        Arc::new(LargeBinaryArray::from_iter_values([checkpoint
-            .payload
-            .as_slice()])),
-    ];
-    RecordBatch::try_new(schema, columns)
-        .map_err(|error| format!("building the training checkpoint batch: {error}"))
-}
-
+#[cfg(test)]
 fn training_checkpoint_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new(db::RUN_ID, DataType::Utf8, false),
@@ -937,16 +791,6 @@ fn training_checkpoint_schema() -> Arc<Schema> {
     ]))
 }
 
-pub(crate) fn table_exists(
-    connection: &RepositoryConnection,
-    target: &str,
-) -> Result<bool, String> {
-    connection
-        .table_schema(target)
-        .map(|schema| schema.is_some())
-        .map_err(|error| format!("checking Spiral table {target}: {error}"))
-}
-
 pub(crate) fn execute_update_sql(
     connection: &mut RepositoryConnection,
     sql: &str,
@@ -957,8 +801,30 @@ pub(crate) fn execute_update_sql(
     statement
         .set_sql_query(sql)
         .and_then(|()| statement.execute_update())
-        .map_err(|error| error.to_string())?;
-    Ok(())
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// Finish a Spiral transaction, rebasing its optimistic project mutation when
+/// a concurrently published managed artifact advances the project head.
+pub(crate) fn commit_catalog_transaction(
+    connection: &mut RepositoryConnection,
+) -> Result<(), String> {
+    const MAX_COMMIT_ATTEMPTS: usize = 16;
+
+    for attempt in 1..=MAX_COMMIT_ATTEMPTS {
+        match connection.commit() {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if error.contains("project namespace compare-and-swap conflict")
+                    && attempt < MAX_COMMIT_ATTEMPTS =>
+            {
+                std::thread::yield_now();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the bounded commit loop returns on its final attempt")
 }
 
 /// Spiral reports a no-op DELETE as an execution error. Replacement and

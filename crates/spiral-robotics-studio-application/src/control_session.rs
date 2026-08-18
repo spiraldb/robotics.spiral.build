@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ControlMode {
+pub enum ControlMode {
     Idle,
     Manual { robot: String },
     Teleoperate { leader: String, follower: String },
@@ -40,27 +40,27 @@ impl ControlMode {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum CalibrationAdmission {
+pub enum CalibrationAdmission {
     Missing,
     Invalid(String),
     Ready(BTreeSet<String>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RobotAdmission {
+pub struct RobotAdmission {
     pub calibration: CalibrationAdmission,
     pub calibration_in_progress: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ControlState {
+pub struct ControlState {
     pub mode: ControlMode,
     /// Connected robots only. Absence is the connection fact.
     pub robots: BTreeMap<String, RobotAdmission>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Intent {
+pub enum Intent {
     Select(ControlMode),
     Hold { robot: String },
     Release { robot: String },
@@ -70,7 +70,7 @@ pub(crate) enum Intent {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Event {
+pub enum Event {
     ReplayLost,
     TeleoperationUnavailable,
     ReplayFinished,
@@ -79,7 +79,7 @@ pub(crate) enum Event {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum FailureAction {
+pub enum FailureAction {
     /// A partially applied ownership change is not a truthful control mode.
     /// Surrender ownership and remove queued motion before reporting it.
     AbandonTransition,
@@ -95,7 +95,7 @@ pub(crate) enum FailureAction {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Effect {
+pub enum Effect {
     ClearReplay,
     ResetAllTargets,
     ResetTargets {
@@ -118,12 +118,12 @@ pub(crate) enum Effect {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Decision {
+pub struct Decision {
     pub effects: Vec<Effect>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum AdmissionError {
+pub enum AdmissionError {
     CalibrationInProgress(Vec<String>),
     NotConnected(String),
     MissingCalibration(String),
@@ -170,7 +170,7 @@ impl fmt::Display for AdmissionError {
 }
 
 /// Decide one complete control-session transition.
-pub(crate) fn decide(state: &ControlState, intent: Intent) -> Result<Decision, AdmissionError> {
+pub fn decide(state: &ControlState, intent: Intent) -> Result<Decision, AdmissionError> {
     match intent {
         Intent::Select(mode) => select(state, mode),
         Intent::Hold { robot } => {
@@ -223,7 +223,7 @@ pub(crate) fn decide(state: &ControlState, intent: Intent) -> Result<Decision, A
 }
 
 /// Decide the ownership consequence of an observed outer-layer event.
-pub(crate) fn decide_event(state: &ControlState, event: Event) -> Decision {
+pub fn decide_event(state: &ControlState, event: Event) -> Decision {
     match event {
         Event::ReplayLost => Decision {
             effects: vec![
@@ -380,13 +380,13 @@ fn ready_joints<'a>(
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct FailureDecision {
+pub struct FailureDecision {
     pub effects: Vec<Effect>,
     pub error: String,
 }
 
 /// Decide the state consequence of a physical effect failure.
-pub(crate) fn effect_failed(action: FailureAction, cause: String) -> FailureDecision {
+pub fn effect_failed(action: FailureAction, cause: String) -> FailureDecision {
     match action {
         FailureAction::AbandonTransition => FailureDecision {
             effects: idle_effects(),
@@ -420,13 +420,13 @@ fn idle_effects() -> Vec<Effect> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ReplayState {
+pub enum ReplayState {
     Seeking,
     Playing,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ReplayEvent {
+pub enum ReplayEvent {
     Paused,
     SeekObserved { arrived: bool },
     PlaybackObserved { finished: bool },
@@ -434,7 +434,7 @@ pub(crate) enum ReplayEvent {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ReplayDecision {
+pub enum ReplayDecision {
     Keep,
     EnterPlaying,
     FinishToIdle,
@@ -442,14 +442,14 @@ pub(crate) enum ReplayDecision {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ReplayTransitionError {
+pub enum ReplayTransitionError {
     PlaybackObservedWhileSeeking,
     SeekObservedWhilePlaying,
 }
 
 /// Own the legal replay lifecycle; clocks, positions, and target conversion
 /// remain observations supplied by the hardware adapter.
-pub(crate) fn decide_replay(
+pub fn decide_replay(
     state: ReplayState,
     event: ReplayEvent,
 ) -> Result<ReplayDecision, ReplayTransitionError> {

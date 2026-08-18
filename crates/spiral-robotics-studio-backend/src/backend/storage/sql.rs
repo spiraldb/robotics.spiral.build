@@ -12,6 +12,7 @@ pub(crate) fn relation(dataset: &str, table: Table) -> String {
     spiral::relation(dataset, table)
 }
 
+#[cfg(test)]
 pub(crate) fn count_rows(relation: &str) -> String {
     format!("SELECT COUNT(*) AS rows FROM {relation}")
 }
@@ -183,6 +184,14 @@ pub(crate) fn create_video_dataset(dataset: &str, sources: &str) -> String {
 
 pub(crate) fn refresh_dataset(dataset: &str) -> String {
     format!("REFRESH DATASET {dataset}")
+}
+
+pub(crate) fn drop_video_dataset(dataset: &str) -> String {
+    format!("DROP DATASET IF EXISTS {dataset}")
+}
+
+pub(crate) fn drop_video_sources(sources: &str) -> String {
+    format!("DROP VIEW IF EXISTS {sources}")
 }
 
 pub(crate) fn ensure_read_only(sql: &str, mode: ReadOnlyMode) -> Result<(), String> {

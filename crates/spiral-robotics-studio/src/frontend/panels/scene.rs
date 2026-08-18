@@ -430,7 +430,7 @@ pub(crate) fn Viewport(
                     // already in the status bar and the notification centre.
                     div {
                         class: "scene-source-note",
-                        title: reason.clone().unwrap_or_default(),
+                        title: reason.unwrap_or_default(),
                         if loading { "Loading recorded scene…" } else { "Recorded scene unavailable" }
                     }
                 }

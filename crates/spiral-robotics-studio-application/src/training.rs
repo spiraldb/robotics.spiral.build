@@ -6,12 +6,12 @@ use spiral_robotics_core::identity::DatasetId;
 use spiral_robotics_core::operation::rollout_duration_is_valid;
 use spiral_robotics_core::query::{ReadOnlyMode, ensure_read_only, is_identifier};
 
-use crate::backend::application::error::ApplicationError;
-use crate::backend::application::rollout::RolloutRequest;
+use crate::error::ApplicationError;
+use crate::rollout::RolloutRequest;
 
 /// One image batch expanded to f32 model inputs must leave enough memory for
 /// model activations, optimizer state, and the hardware-control process itself.
-pub(crate) const MAX_TRAINING_IMAGE_BATCH_BYTES: usize = 256 * 1024 * 1024;
+pub const MAX_TRAINING_IMAGE_BATCH_BYTES: usize = 256 * 1024 * 1024;
 
 /// Aggregate ACT compute-session budget. Independently valid dimensions must
 /// not combine into a multi-gigabyte optimizer allocation that can terminate
@@ -24,12 +24,12 @@ const ACT_IMAGE_RUNTIME_MULTIPLIER: usize = 4;
 const ACT_TRAINING_BYTES_PER_TRANSFORMER_PARAMETER: usize = 5 * std::mem::size_of::<f32>();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TrainingPolicy {
+pub enum TrainingPolicy {
     Act,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ActTrainingSettings {
+pub struct ActTrainingSettings {
     pub camera_streams: Vec<String>,
     pub image_width: usize,
     pub image_height: usize,
@@ -46,7 +46,7 @@ pub(crate) struct ActTrainingSettings {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct StartTrainingCommand {
+pub struct StartTrainingCommand {
     pub run_name: String,
     pub dataset_id: String,
     pub policy: TrainingPolicy,
@@ -65,30 +65,30 @@ pub(crate) struct StartTrainingCommand {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct TrainingCheckpointStatus {
+pub struct TrainingCheckpointStatus {
     pub step: u64,
     pub inference_ready: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TrainingRunStatus {
+pub struct TrainingRunStatus {
     pub active: bool,
     pub checkpoints: Vec<TrainingCheckpointStatus>,
 }
 
 /// Other live work that can still depend on a completed run's artifacts.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct TrainingRunActivity {
+pub struct TrainingRunActivity {
     pub rollout: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DeleteTrainingRunCommand {
+pub struct DeleteTrainingRunCommand {
     pub run_id: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum TrainingRunPhase {
+pub enum TrainingRunPhase {
     #[default]
     Starting,
     Running,
@@ -99,7 +99,7 @@ pub(crate) enum TrainingRunPhase {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct TrainingMetric {
+pub struct TrainingMetric {
     pub step: u64,
     pub train_loss: f64,
     pub validation_loss: Option<f64>,
@@ -119,7 +119,7 @@ pub(crate) struct TrainingMetric {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct TrainingCheckpoint {
+pub struct TrainingCheckpoint {
     pub step: u64,
     pub created_ms: i64,
     pub validation_loss: Option<f64>,
@@ -130,12 +130,12 @@ pub(crate) struct TrainingCheckpoint {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct TrainingSource {
+pub struct TrainingSource {
     pub dataset_id: String,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct TrainingReadiness {
+pub struct TrainingReadiness {
     pub ready: bool,
     pub spiral_ready: bool,
     pub runtime: Option<TrainingRuntimeInfo>,
@@ -143,7 +143,7 @@ pub(crate) struct TrainingReadiness {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct TrainingRuntimeInfo {
+pub struct TrainingRuntimeInfo {
     pub id: String,
     pub display_name: String,
     pub runtime: String,
@@ -151,7 +151,7 @@ pub(crate) struct TrainingRuntimeInfo {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TrainingRun {
+pub struct TrainingRun {
     pub id: String,
     pub config: StartTrainingCommand,
     pub source: TrainingSource,
@@ -166,12 +166,12 @@ pub(crate) struct TrainingRun {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct TrainingSnapshot {
+pub struct TrainingSnapshot {
     pub readiness: TrainingReadiness,
     pub runs: Vec<TrainingRun>,
 }
 
-pub(crate) trait TrainingPort: Send + Sync {
+pub trait TrainingPort: Send + Sync {
     fn training_snapshot(&self) -> TrainingSnapshot;
 
     fn training_run_status(&self, run_id: &str) -> Option<TrainingRunStatus>;
@@ -186,11 +186,11 @@ pub(crate) trait TrainingPort: Send + Sync {
     async fn delete_training(&self, run_id: String) -> Result<(), ApplicationError>;
 }
 
-pub(crate) fn list_training<P: TrainingPort + ?Sized>(port: &P) -> TrainingSnapshot {
+pub fn list_training<P: TrainingPort + ?Sized>(port: &P) -> TrainingSnapshot {
     port.training_snapshot()
 }
 
-pub(crate) async fn start_training<P: TrainingPort + ?Sized>(
+pub async fn start_training<P: TrainingPort + ?Sized>(
     port: &P,
     command: StartTrainingCommand,
 ) -> Result<TrainingRun, ApplicationError> {
@@ -198,7 +198,7 @@ pub(crate) async fn start_training<P: TrainingPort + ?Sized>(
     port.start_training(command).await
 }
 
-pub(crate) fn stop_training<P: TrainingPort + ?Sized>(
+pub fn stop_training<P: TrainingPort + ?Sized>(
     port: &P,
     run_id: &str,
 ) -> Result<(), ApplicationError> {
@@ -209,7 +209,7 @@ pub(crate) fn stop_training<P: TrainingPort + ?Sized>(
 ///
 /// Admission checks happen before crossing the deletion boundary so the
 /// adapter never removes a checkpoint that is training or driving an arm.
-pub(crate) async fn delete_training<P: TrainingPort + ?Sized>(
+pub async fn delete_training<P: TrainingPort + ?Sized>(
     port: &P,
     activity: TrainingRunActivity,
     command: DeleteTrainingRunCommand,
@@ -233,7 +233,7 @@ pub(crate) async fn delete_training<P: TrainingPort + ?Sized>(
     port.delete_training(run_id).await
 }
 
-pub(crate) fn admit_rollout<T>(
+pub fn admit_rollout<T>(
     training: &T,
     command: RolloutRequest,
 ) -> Result<RolloutRequest, ApplicationError>

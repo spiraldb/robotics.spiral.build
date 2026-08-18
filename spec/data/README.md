@@ -77,6 +77,6 @@ the durable results of recording and training.
 - Episode import/export and the shared repository:
   [`backend/storage`](../../crates/spiral-robotics-studio-backend/src/backend/storage/)
 - Dataset and episode use cases:
-  [`backend/application`](../../crates/spiral-robotics-studio-backend/src/backend/application/)
+  [`spiral-robotics-studio-application`](../../crates/spiral-robotics-studio-application/src/)
 - Stable relation names:
   [`spiral-robotics-contracts/src/spiral.rs`](../../crates/spiral-robotics-contracts/src/spiral.rs)

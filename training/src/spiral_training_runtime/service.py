@@ -2,53 +2,39 @@ from __future__ import annotations
 
 import os
 import threading
-import time
 import uuid
-from typing import Annotated, Any, Literal
+from collections import OrderedDict
+from typing import Annotated, Any
 
 from fastapi import Body, FastAPI, Query, Request, Response
 from fastapi.responses import JSONResponse
 
-from .act import PolicySession, TrainingSession, backend_info
-from .arrow import decode_inference_input, decode_training_batch
-from .config import TrainingConfig
+from .act import PolicySession, backend_info
+from .arrow import decode_inference_input
 from .errors import RuntimeRequestError
 from .jobs import TrainingJob
+from .models import TrainingBackendInfoModel, TrainingJobRequestModel, TrainingJobSnapshotModel
+from .protocol import BOUNDARIES
 
 ARROW_STREAM_CONTENT_TYPE = "application/vnd.apache.arrow.stream"
 POLICY_ARTIFACT_CONTENT_TYPE = "application/vnd.spiral.policy-artifact"
 MAX_REQUEST_BYTES = 520 * 1024 * 1024
+MAX_ACTIVE_JOBS = 4
+MAX_RETAINED_TERMINAL_JOBS = 64
 
 
 class RuntimeState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
-        self.sessions: dict[str, TrainingSession] = {}
-        self.jobs: dict[str, TrainingJob] = {}
+        self.jobs: OrderedDict[str, TrainingJob] = OrderedDict()
         self.policies: dict[str, PolicySession] = {}
-
-    def add_session(self, session: TrainingSession) -> str:
-        session_id = f"session-{uuid.uuid4().hex}"
-        with self.lock:
-            self.sessions[session_id] = session
-        return session_id
-
-    def session(self, session_id: str) -> TrainingSession:
-        with self.lock:
-            session = self.sessions.get(session_id)
-        if session is None:
-            raise RuntimeRequestError(f"training session {session_id!r} does not exist", 404)
-        return session
-
-    def remove_session(self, session_id: str) -> None:
-        with self.lock:
-            self.sessions.pop(session_id, None)
 
     def add_job(self, request: dict[str, Any]) -> TrainingJob:
         job_id = request.get("job_id")
         if not isinstance(job_id, str) or not job_id:
             raise RuntimeRequestError("training job_id must be non-empty", 422)
         with self.lock:
+            self._prune_jobs_locked()
             existing = self.jobs.get(job_id)
             if existing is not None:
                 if not existing.matches(request):
@@ -57,6 +43,11 @@ class RuntimeState:
                         409,
                     )
                 return existing
+            active_jobs = sum(not job.terminal() for job in self.jobs.values())
+            if active_jobs >= MAX_ACTIVE_JOBS:
+                raise RuntimeRequestError(
+                    f"runtime already owns {MAX_ACTIVE_JOBS} active training jobs", 429
+                )
             job = TrainingJob(request)
             self.jobs[job_id] = job
         job.start()
@@ -64,10 +55,16 @@ class RuntimeState:
 
     def job(self, job_id: str) -> TrainingJob:
         with self.lock:
+            self._prune_jobs_locked()
             job = self.jobs.get(job_id)
         if job is None:
             raise RuntimeRequestError(f"training job {job_id!r} does not exist", 404)
         return job
+
+    def _prune_jobs_locked(self) -> None:
+        terminal_ids = [job_id for job_id, job in self.jobs.items() if job.terminal()]
+        for job_id in terminal_ids[:-MAX_RETAINED_TERMINAL_JOBS]:
+            self.jobs.pop(job_id, None)
 
     def add_policy(self, policy: PolicySession) -> str:
         policy_id = f"policy-{uuid.uuid4().hex}"
@@ -90,7 +87,7 @@ class RuntimeState:
 def create_app(policy_device: str | None = None) -> FastAPI:
     app = FastAPI(
         title="Spiral Robotics PyTorch Runtime",
-        version="4",
+        version=BOUNDARIES.training_api.display_version,
         docs_url="/docs",
         redoc_url=None,
     )
@@ -101,23 +98,35 @@ def create_app(policy_device: str | None = None) -> FastAPI:
     async def runtime_error(_request: Request, error: RuntimeRequestError) -> JSONResponse:
         return JSONResponse(status_code=error.status_code, content={"error": str(error)})
 
-    @app.get("/v1/health")
+    @app.get("/v1/health", response_model=TrainingBackendInfoModel)
     def health() -> dict[str, Any]:
         return backend_info()
 
-    @app.post("/v1/jobs", status_code=201)
-    def create_job(request: dict[str, Any]) -> dict[str, Any]:
-        return state.add_job(request).snapshot()
+    @app.post("/v1/jobs", status_code=201, response_model=TrainingJobSnapshotModel)
+    def create_job(request: TrainingJobRequestModel) -> dict[str, Any]:
+        return state.add_job(request.model_dump(exclude_none=True)).snapshot()
 
-    @app.get("/v1/jobs/{job_id}")
-    def get_job(job_id: str) -> dict[str, Any]:
-        return state.job(job_id).snapshot()
+    @app.get("/v1/jobs/{job_id}", response_model=TrainingJobSnapshotModel)
+    def get_job(
+        job_id: str,
+        after_metric_step: Annotated[int, Query(ge=0)] = 0,
+        after_checkpoint_step: Annotated[int, Query(ge=0)] = 0,
+        after_log_offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> dict[str, Any]:
+        return state.job(job_id).snapshot(
+            after_metric_step, after_checkpoint_step, after_log_offset
+        )
 
-    @app.post("/v1/jobs/{job_id}/stop")
-    def stop_job(job_id: str) -> dict[str, Any]:
+    @app.post("/v1/jobs/{job_id}/stop", response_model=TrainingJobSnapshotModel)
+    def stop_job(
+        job_id: str,
+        after_metric_step: Annotated[int, Query(ge=0)] = 0,
+        after_checkpoint_step: Annotated[int, Query(ge=0)] = 0,
+        after_log_offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> dict[str, Any]:
         job = state.job(job_id)
         job.stop()
-        return job.snapshot()
+        return job.snapshot(after_metric_step, after_checkpoint_step, after_log_offset)
 
     @app.get("/v1/jobs/{job_id}/telemetry")
     def job_telemetry(job_id: str) -> dict[str, Any]:
@@ -127,69 +136,6 @@ def create_app(policy_device: str | None = None) -> FastAPI:
             "current_step": snapshot["current_step"],
             "latest": snapshot["metrics"][-1] if snapshot["metrics"] else None,
         }
-
-    @app.post("/v1/sessions", status_code=201)
-    def create_session(request: dict[str, Any]) -> dict[str, Any]:
-        session = TrainingSession(TrainingConfig.from_request(request))
-        session_id = state.add_session(session)
-        return {"session_id": session_id, "info": session.info}
-
-    @app.delete("/v1/sessions/{session_id}", status_code=204)
-    def delete_session(session_id: str) -> Response:
-        state.remove_session(session_id)
-        return Response(status_code=204)
-
-    @app.get("/v1/sessions/{session_id}/telemetry")
-    def telemetry(session_id: str) -> dict[str, Any]:
-        return state.session(session_id).telemetry()
-
-    @app.post("/v1/sessions/{session_id}/buffer", status_code=202)
-    def buffer_batch(
-        session_id: str,
-        request: Request,
-        body: Annotated[bytes, Body(media_type=ARROW_STREAM_CONTENT_TYPE)],
-        kind: Annotated[Literal["training", "validation"], Query()],
-        step: Annotated[int, Query(gt=0)],
-    ) -> dict[str, Any]:
-        _require_content_type(request, ARROW_STREAM_CONTENT_TYPE, "Arrow tensor requests")
-        _require_body_size(body)
-        started = time.perf_counter()
-        session = state.session(session_id)
-        session.buffer_batch(decode_training_batch(body, session.config), kind, step)
-        return {"runtime_ms": (time.perf_counter() - started) * 1_000.0}
-
-    @app.post("/v1/sessions/{session_id}/train")
-    def train(
-        session_id: str,
-        step: Annotated[int, Query(gt=0)],
-    ) -> dict[str, Any]:
-        started = time.perf_counter()
-        response = state.session(session_id).train_buffered(step)
-        response["runtime_ms"] = (time.perf_counter() - started) * 1_000.0
-        return response
-
-    @app.post("/v1/sessions/{session_id}/validate")
-    def validate(
-        session_id: str,
-        step: Annotated[int, Query(gt=0)],
-    ) -> dict[str, Any]:
-        started = time.perf_counter()
-        response = state.session(session_id).validate_buffered(step)
-        response["runtime_ms"] = (time.perf_counter() - started) * 1_000.0
-        return response
-
-    @app.post("/v1/sessions/{session_id}/checkpoint")
-    def checkpoint(session_id: str, request: dict[str, Any]) -> Response:
-        payload = state.session(session_id).checkpoint(request)
-        return Response(
-            content=payload,
-            media_type="application/octet-stream",
-            headers={
-                "content-disposition": "attachment; filename=checkpoint.safetensors",
-                "x-spiral-checkpoint-format": "safetensors",
-                "x-spiral-checkpoint-extension": "safetensors",
-            },
-        )
 
     @app.post("/v1/policies", status_code=201)
     def create_policy(

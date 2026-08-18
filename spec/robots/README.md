@@ -41,6 +41,6 @@ the intended source of truth.
 - Hardware and camera adapters:
   [`backend/robotics`](../../crates/spiral-robotics-studio-backend/src/backend/robotics/)
 - Robot use cases:
-  [`backend/application`](../../crates/spiral-robotics-studio-backend/src/backend/application/)
+  [`spiral-robotics-studio-application`](../../crates/spiral-robotics-studio-application/src/)
 - Settings UI:
   [`frontend/screens/settings/robots`](../../crates/spiral-robotics-studio/src/frontend/screens/settings/robots/)

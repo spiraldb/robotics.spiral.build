@@ -1653,6 +1653,10 @@ pub struct StartReplayRequest {
 pub struct ProjectImportSummary {
     pub relations: u64,
     pub rows: u64,
+    /// Non-transactional derived resources that still need repair after the
+    /// durable relational replacement committed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// What merging a portable episode bundle into one dataset imported.
@@ -1662,6 +1666,10 @@ pub struct EpisodeImportSummary {
     pub episodes: u64,
     pub rows: u64,
     pub first_episode: Option<String>,
+    /// Non-transactional derived resources that still need repair after the
+    /// durable episode rows committed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Create a new robot instance in SpiralDB.

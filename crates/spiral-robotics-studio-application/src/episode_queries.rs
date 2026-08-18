@@ -8,20 +8,20 @@ const MAX_TRACE_BUCKETS: usize = 2_048;
 const MAX_TIMELINE_BUCKETS: usize = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct EpisodeArmView {
+pub struct EpisodeArmView {
     pub id: String,
     pub robot_type: Option<String>,
     pub joints: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct RecordingGapView {
+pub struct RecordingGapView {
     pub after_seconds: f64,
     pub duration_seconds: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct EpisodeView {
+pub struct EpisodeView {
     pub id: String,
     pub dataset_id: String,
     pub arms: Vec<EpisodeArmView>,
@@ -37,20 +37,20 @@ pub(crate) struct EpisodeView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct EpisodeTraceQuery {
+pub struct EpisodeTraceQuery {
     pub episode: String,
     pub buckets: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TimelineMetadataView {
+pub struct TimelineMetadataView {
     pub samples: u64,
     pub first_seconds: Option<f64>,
     pub last_seconds: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct VideoAssetView {
+pub struct VideoAssetView {
     pub stream_id: String,
     pub camera_id: String,
     pub width: u32,
@@ -63,14 +63,14 @@ pub(crate) struct VideoAssetView {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct EpisodeTimelineView {
+pub struct EpisodeTimelineView {
     pub episode: EpisodeView,
     pub samples: TimelineMetadataView,
     pub videos: Vec<VideoAssetView>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TimelineArmSampleView {
+pub struct TimelineArmSampleView {
     pub arm: String,
     pub normalized: BTreeMap<String, Option<f64>>,
     pub raw: BTreeMap<String, i64>,
@@ -80,7 +80,7 @@ pub(crate) struct TimelineArmSampleView {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TimelineSampleView {
+pub struct TimelineSampleView {
     pub frame: u64,
     pub seconds: f64,
     pub follow_error_degrees: Option<f64>,
@@ -88,7 +88,7 @@ pub(crate) struct TimelineSampleView {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TimelineTracesView {
+pub struct TimelineTracesView {
     pub episode: String,
     pub samples: u64,
     pub buckets: usize,
@@ -98,24 +98,24 @@ pub(crate) struct TimelineTracesView {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TimelineTraceLaneView {
+pub struct TimelineTraceLaneView {
     pub joint: String,
     pub series: Vec<TimelineTraceSeriesView>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TimelineTraceSeriesView {
+pub struct TimelineTraceSeriesView {
     pub arm: String,
     pub points: Vec<TimelineTracePointView>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct TimelineTracePointView {
+pub struct TimelineTracePointView {
     pub seconds: f64,
     pub value: Option<f64>,
 }
 
-pub(crate) trait EpisodeQueryPort: Send + Sync {
+pub trait EpisodeQueryPort: Send + Sync {
     fn episodes(&self) -> Vec<EpisodeView>;
     fn ensure_episode_exists(&self, episode: &str) -> Result<(), ApplicationError>;
     fn follow_error_trace(
@@ -134,7 +134,7 @@ pub(crate) trait EpisodeQueryPort: Send + Sync {
     ) -> Result<TimelineSampleView, ApplicationError>;
 }
 
-pub(crate) fn authorize_asset<P: EpisodeQueryPort + ?Sized>(
+pub fn authorize_asset<P: EpisodeQueryPort + ?Sized>(
     port: &P,
     episode: String,
 ) -> Result<(), ApplicationError> {
@@ -142,11 +142,11 @@ pub(crate) fn authorize_asset<P: EpisodeQueryPort + ?Sized>(
     port.ensure_episode_exists(&episode)
 }
 
-pub(crate) fn list<P: EpisodeQueryPort + ?Sized>(port: &P) -> Vec<EpisodeView> {
+pub fn list<P: EpisodeQueryPort + ?Sized>(port: &P) -> Vec<EpisodeView> {
     port.episodes()
 }
 
-pub(crate) fn follow_error_trace<P: EpisodeQueryPort + ?Sized>(
+pub fn follow_error_trace<P: EpisodeQueryPort + ?Sized>(
     port: &P,
     mut query: EpisodeTraceQuery,
 ) -> Result<Vec<Option<f64>>, ApplicationError> {
@@ -155,7 +155,7 @@ pub(crate) fn follow_error_trace<P: EpisodeQueryPort + ?Sized>(
     port.follow_error_trace(query)
 }
 
-pub(crate) fn timeline_traces<P: EpisodeQueryPort + ?Sized>(
+pub fn timeline_traces<P: EpisodeQueryPort + ?Sized>(
     port: &P,
     mut query: EpisodeTraceQuery,
 ) -> Result<TimelineTracesView, ApplicationError> {
@@ -164,14 +164,14 @@ pub(crate) fn timeline_traces<P: EpisodeQueryPort + ?Sized>(
     port.timeline_traces(query)
 }
 
-pub(crate) fn timeline<P: EpisodeQueryPort + ?Sized>(
+pub fn timeline<P: EpisodeQueryPort + ?Sized>(
     port: &P,
     episode: String,
 ) -> Result<EpisodeTimelineView, ApplicationError> {
     port.timeline(validate_episode_id(episode)?)
 }
 
-pub(crate) fn timeline_sample<P: EpisodeQueryPort + ?Sized>(
+pub fn timeline_sample<P: EpisodeQueryPort + ?Sized>(
     port: &P,
     episode: String,
     seconds: f64,

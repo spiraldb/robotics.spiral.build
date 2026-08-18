@@ -28,8 +28,9 @@ flowchart LR
   checkpoint writes.
 - **RUNTIME-003** No training state, action, image, or Arrow batch may pass
   through Studio.
-- **RUNTIME-004** SpiralDB must remain the durable store; the worker may retain
-  live job state in memory and must expose a replayable snapshot by job ID.
+- **RUNTIME-004** SpiralDB must remain the durable store. The worker may retain
+  live job state in memory, but retained jobs, metrics, checkpoints, and logs
+  must have explicit bounds and expose compaction gaps to callers.
 - **RUNTIME-005** A Studio shutdown must detach without stopping the worker. A
   restart must fetch and reattach to the active job, replay only evidence not
   already persisted, and tolerate temporary polling disconnections.
@@ -43,7 +44,7 @@ flowchart LR
 
 ## Training job protocol
 
-- **RUNTIME-009** API version 4 must expose `POST /v1/jobs`,
+- **RUNTIME-009** The versioned training API must expose `POST /v1/jobs`,
   `GET /v1/jobs/{id}`, `POST /v1/jobs/{id}/stop`, and
   `GET /v1/jobs/{id}/telemetry`.
 - **RUNTIME-010** `POST /v1/jobs` must be idempotent when a caller-selected job
@@ -52,21 +53,42 @@ flowchart LR
   reattaching so it does not need to resend credentials.
 - **RUNTIME-011** The immutable job request must include the Spiral API and
   SpFS endpoints, project, namespace, optional client credentials, read-only
-  SQL, state/action columns, camera/decode settings, model configuration,
-  seed, step count, validation split, and checkpoint cadence.
+  SQL, state/action columns, the selected Spiral schema version,
+  camera/decode settings, model configuration, seed, step count, validation
+  split, and checkpoint cadence.
 - **RUNTIME-012** Job snapshots must include phase, current step, resolved data
-  contract, append-only metrics, checkpoint metadata, and logs, but no secret.
+  contract, append-only metrics, checkpoint metadata, logs, and the next
+  replay cursor, but no secret. Polls must accept metric, checkpoint, and log
+  cursors and return only newer evidence. A cursor older than worker retention
+  must return an explicit history-gap description.
 - **RUNTIME-013** The worker must append each SafeTensors checkpoint directly
   to the configured namespace's `training_checkpoints` relation before
   publishing its checkpoint event.
 - **RUNTIME-014** Worker-side SpiralDB connections must use per-database ADBC
   `username`, `password`, `spiral.api_url`, and `spiral.spfs_url` options; they
   must not mutate process-global endpoint or credential environment variables.
-- **RUNTIME-015** The worker must use the `spiraldb` Python package and SPQL
-  video frame selection, decode, optional resize, and Arrow image tensor
-  conversion.
+- **RUNTIME-015** The worker must use the `spiraldb` Python package and prefer
+  SPQL video frame selection, decode, optional resize, and Arrow image tensor
+  conversion. When legacy or imported video metadata references a managed MP4
+  relation that is unavailable, the worker must query the authoritative MP4
+  payload directly from SpiralDB and decode only the requested frames with its
+  local FFmpeg runtime; Studio must not proxy or stage the payload. The worker
+  must consume SPQL tensors through their canonical Arrow `data` and `shape`
+  storage fields rather than treating the extension struct as a flat array.
 - **RUNTIME-016** The protocol must support more than one runtime
   implementation and must not require gRPC, Arrow Flight, Docker, or Compose.
+- **RUNTIME-031** GPU bootstrap must validate that SpiralDB's packaged video
+  runtime can be loaded and provision ABI-compatible FFmpeg shared libraries
+  when the host libraries do not satisfy it. Checkpoint ingestion must keep the
+  Spiral namespace in the qualified table path, remain in the configured
+  project, and create the checkpoint relation on its first write.
+- **RUNTIME-032** One machine-readable boundary descriptor must own the current
+  Spiral schema, training API major and minor revisions, and the worker's
+  supported Spiral schema range. Rust constants and Python health metadata
+  must derive from that descriptor. A different API major, an older runtime
+  minor, or a current schema outside the advertised range must block job
+  creation with a precise compatibility error. Major revisions are for
+  breaking wire changes; minor revisions are additive and backward compatible.
 
 ## Rollout protocol
 
@@ -90,15 +112,32 @@ flowchart LR
 - **RUNTIME-024** The runtime must bind to loopback by default. SSH local
   forwarding is the standard remote path, providing encryption for the job
   request that carries Spiral credentials; a directly reachable deployment
-  must use HTTPS and service authentication.
-- **RUNTIME-025** Device strings must begin with the compact session device
+  must require explicit remote-access opt-in and sit behind HTTPS and service
+  authentication. Studio's unauthenticated control listener must enforce the
+  same loopback-by-default rule.
+- **RUNTIME-025** Device strings must begin with the compact runtime device
   identifier and the runtime owns availability validation.
 - **RUNTIME-026** Every optimizer metric must retain worker loader, device-copy,
   and model timing. Studio-side Arrow encode and upload timings are absent for
   worker-owned training jobs because there is no training data upload.
+- **RUNTIME-027** One worker batch must request all required indexed video
+  frames in one SPQL statement, even when the samples span several videos.
+  Missing or unusable managed video relations must retain the raw-MP4 fallback.
+- **RUNTIME-028** Lambda bootstrap must prefer a colocated
+  `libadbc_driver_spiraldb.so` over the driver inside the locked Python package,
+  so a credential-capable deployment driver is not replaced during `uv sync`.
+- **RUNTIME-029** Worker batch sampling must choose an episode through a
+  uniformly sampled anchor and draw the batch from that episode. This preserves
+  each anchor's marginal sampling probability while bounding the number of
+  distinct video segments opened by one optimizer step.
+- **RUNTIME-030** Successful polling must use a bounded cadence. Consecutive
+  transport failures must use exponential backoff with a fixed upper bound and
+  recovery must be visible in the run log.
 
 ## Implementation ownership
 
+- Authoritative versions and bump policy:
+  [`contracts`](../../contracts/)
 - Versioned contracts: [`training/contracts`](../../training/contracts/)
 - Studio job client: [`training/http-client`](../../training/http-client/)
 - Worker job lifecycle: [`training/src/spiral_training_runtime/jobs.py`](../../training/src/spiral_training_runtime/jobs.py)

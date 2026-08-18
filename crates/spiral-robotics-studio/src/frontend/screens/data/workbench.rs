@@ -184,10 +184,11 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                                             studio.selected_episode.set(Some(episode));
                                         }
                                         studio.report_success(format!(
-                                            "Imported {} episodes into {} ({} rows).",
+                                            "Imported {} episodes into {} ({} rows).{}",
                                             result.episodes,
                                             result.dataset_id,
                                             result.rows,
+                                            import_warning_suffix(&result.warnings),
                                         ));
                                         Ok(())
                                     }
@@ -295,6 +296,14 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                 }
             }
         }
+    }
+}
+
+fn import_warning_suffix(warnings: &[String]) -> String {
+    if warnings.is_empty() {
+        String::new()
+    } else {
+        format!(" Warning: {}", warnings.join(" "))
     }
 }
 

@@ -47,11 +47,18 @@ struct ConnectionConfig {
 /// async worker threads.
 pub(crate) struct RepositoryConnection {
     inner: ManagedConnection,
+    reusable: bool,
 }
 
 impl RepositoryConnection {
-    fn into_inner(self) -> ManagedConnection {
-        self.inner
+    fn into_reusable_inner(self) -> Option<ManagedConnection> {
+        self.reusable.then_some(self.inner)
+    }
+
+    /// Prevent a connection with uncertain session state from returning to
+    /// the shared pool. Dropping the wrapper then closes that handle.
+    pub(crate) fn discard(&mut self) {
+        self.reusable = false;
     }
 
     pub(crate) fn new_statement(&mut self) -> Result<RepositoryStatement, String> {
@@ -126,10 +133,6 @@ impl RepositoryStatement {
 
     pub(crate) fn bind(&mut self, batch: RecordBatch) -> Result<(), String> {
         self.inner.bind(batch).map_err(|error| error.to_string())
-    }
-
-    pub(crate) fn prepare(&mut self) -> Result<(), String> {
-        self.inner.prepare().map_err(|error| error.to_string())
     }
 
     pub(crate) fn execute(
@@ -264,6 +267,7 @@ impl SpiralRepository {
     /// Change the bootstrap pointer without introducing another data store.
     /// The exclusive gate drains active repository work before stale pooled
     /// connections are discarded.
+    #[cfg(test)]
     pub(crate) fn configure_project(&self, project_id: &str) -> Result<(), String> {
         let project_id = validate_project_id(project_id)?;
         let _operation = write(&self.operation_gate);
@@ -335,60 +339,21 @@ impl SpiralRepository {
             let connection = lock(&hosted)
                 .checkout(&connection)
                 .map_err(|error| present_error(&display_endpoint, error))?;
-            let mut connection = RepositoryConnection { inner: connection };
+            let mut connection = RepositoryConnection {
+                inner: connection,
+                reusable: true,
+            };
             let result = operation(&mut connection);
-            if result.is_ok() {
-                lock(&hosted).checkin(connection.into_inner());
+            if result.is_ok()
+                && let Some(connection) = connection.into_reusable_inner()
+            {
+                lock(&hosted).checkin(connection);
             }
             drop(permit);
             result.map_err(|error| present_error(&display_endpoint, error))
         })
         .await
         .map_err(|error| format!("Spiral ADBC task failed: {error}"))?
-    }
-
-    /// Reserve one pooled connection for a long-lived stream such as training.
-    pub(crate) async fn run_dedicated<T, F>(&self, operation: F) -> Result<T, String>
-    where
-        T: Send + 'static,
-        F: FnOnce(&mut RepositoryConnection) -> Result<T, String> + Send + 'static,
-    {
-        let hosted = self.hosted.clone();
-        let driver_path = self.driver_path.clone();
-        let project_id = self.project_id.clone();
-        let operation_gate = self.operation_gate.clone();
-        let endpoint = self.endpoint.clone();
-        let spfs_endpoint = self.spfs_endpoint.clone();
-        let credentials = self.credentials.clone();
-        let permit = self
-            .hosted_slots
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| "Spiral ADBC connection pool is shutting down".to_owned())?;
-        tokio::task::spawn_blocking(move || {
-            let _operation = read(&operation_gate);
-            let connection = connection_config(
-                driver_path,
-                &project_id,
-                &endpoint,
-                &spfs_endpoint,
-                &credentials,
-            )?;
-            let display_endpoint = connection.endpoint.clone();
-            let connection = lock(&hosted)
-                .checkout(&connection)
-                .map_err(|error| present_error(&display_endpoint, error))?;
-            let mut connection = RepositoryConnection { inner: connection };
-            let result = operation(&mut connection);
-            if result.is_ok() {
-                lock(&hosted).checkin(connection.into_inner());
-            }
-            drop(permit);
-            result.map_err(|error| present_error(&display_endpoint, error))
-        })
-        .await
-        .map_err(|error| format!("Spiral dedicated ADBC task failed: {error}"))?
     }
 
     /// Synchronous access for bounded workers owned by the hardware recording
@@ -410,10 +375,15 @@ impl SpiralRepository {
         let connection = lock(&self.hosted)
             .checkout(&connection)
             .map_err(|error| present_error(&endpoint, error))?;
-        let mut connection = RepositoryConnection { inner: connection };
+        let mut connection = RepositoryConnection {
+            inner: connection,
+            reusable: true,
+        };
         let result = operation(&mut connection);
-        if result.is_ok() {
-            lock(&self.hosted).checkin(connection.into_inner());
+        if result.is_ok()
+            && let Some(connection) = connection.into_reusable_inner()
+        {
+            lock(&self.hosted).checkin(connection);
         }
         result.map_err(|error| present_error(&endpoint, error))
     }
@@ -445,7 +415,10 @@ impl SpiralRepository {
         let connection = lock(&self.hosted)
             .checkout(&connection)
             .map_err(|error| present_error(&endpoint, error))?;
-        let mut connection = RepositoryConnection { inner: connection };
+        let mut connection = RepositoryConnection {
+            inner: connection,
+            reusable: true,
+        };
         let result = operation(&mut connection);
         result.map_err(|error| present_error(&endpoint, error))
     }
@@ -466,13 +439,26 @@ impl SpiralRepository {
             &self.credentials,
         )?;
         let endpoint = connection.endpoint.clone();
-        let connection = lock(&self.hosted)
-            .checkout(&connection)
-            .map_err(|error| present_error(&endpoint, error))?;
-        let mut connection = RepositoryConnection { inner: connection };
+        let connection = {
+            let mut hosted = lock(&self.hosted);
+            // The shared ADBC database pins project catalog state as well as
+            // its connections. Once the exclusive gate is held there can be
+            // no live repository readers, so reset both layers and start the
+            // replacement from the latest project version.
+            hosted.reset();
+            hosted
+                .checkout(&connection)
+                .map_err(|error| present_error(&endpoint, error))?
+        };
+        let mut connection = RepositoryConnection {
+            inner: connection,
+            reusable: true,
+        };
         let result = operation(&mut connection);
-        if result.is_ok() {
-            lock(&self.hosted).checkin(connection.into_inner());
+        if result.is_ok()
+            && let Some(connection) = connection.into_reusable_inner()
+        {
+            lock(&self.hosted).checkin(connection);
         }
         result.map_err(|error| present_error(&endpoint, error))
     }

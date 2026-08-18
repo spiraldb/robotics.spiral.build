@@ -13,7 +13,7 @@ use super::error::ApplicationError;
 use super::policy_runtime::{ControlOwner, PolicyOwnership, assess_policy_ownership};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RolloutRequest {
+pub struct RolloutRequest {
     pub run_id: String,
     pub checkpoint_step: u64,
     pub robot: String,
@@ -22,14 +22,14 @@ pub(crate) struct RolloutRequest {
 
 /// Publication seam. Delivery adapters map this semantic snapshot to their
 /// own DTO or event protocol.
-pub(crate) trait RolloutEventPort: Send + Sync {
+pub trait RolloutEventPort: Send + Sync {
     fn publish(&self, snapshot: &RolloutSnapshot);
 }
 
 /// Application-facing execution seam implemented by the backend runtime.
 /// The runtime may use Tokio, model libraries, cameras, and hardware drivers,
 /// but only semantic rollout state crosses this boundary.
-pub(crate) trait RolloutSessionPort: Send + Sync {
+pub trait RolloutSessionPort: Send + Sync {
     fn snapshot(&self) -> RolloutSnapshot;
 
     async fn start(&self, request: RolloutRequest) -> Result<RolloutSnapshot, ApplicationError>;
@@ -37,23 +37,23 @@ pub(crate) trait RolloutSessionPort: Send + Sync {
     async fn stop(&self) -> Result<(), ApplicationError>;
 }
 
-pub(crate) fn snapshot<P: RolloutSessionPort + ?Sized>(port: &P) -> RolloutSnapshot {
+pub fn snapshot<P: RolloutSessionPort + ?Sized>(port: &P) -> RolloutSnapshot {
     port.snapshot()
 }
 
-pub(crate) async fn start<P: RolloutSessionPort + ?Sized>(
+pub async fn start<P: RolloutSessionPort + ?Sized>(
     port: &P,
     request: RolloutRequest,
 ) -> Result<RolloutSnapshot, ApplicationError> {
     port.start(request).await
 }
 
-pub(crate) async fn stop<P: RolloutSessionPort + ?Sized>(port: &P) -> Result<(), ApplicationError> {
+pub async fn stop<P: RolloutSessionPort + ?Sized>(port: &P) -> Result<(), ApplicationError> {
     port.stop().await
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum RolloutPhase {
+pub enum RolloutPhase {
     #[default]
     Idle,
     Loading,
@@ -64,7 +64,7 @@ pub(crate) enum RolloutPhase {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct RolloutMetrics {
+pub struct RolloutMetrics {
     pub inference_count: u64,
     pub command_count: u64,
     pub missed_deadlines: u64,
@@ -75,7 +75,7 @@ pub(crate) struct RolloutMetrics {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct RolloutSnapshot {
+pub struct RolloutSnapshot {
     pub phase: RolloutPhase,
     pub session_id: Option<String>,
     pub run_id: Option<String>,
@@ -90,13 +90,13 @@ pub(crate) struct RolloutSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum ExecutionOutcome {
+pub enum ExecutionOutcome {
     Completed(CompletionReason),
     Failed(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum CompletionReason {
+pub enum CompletionReason {
     StoppedBeforeModel,
     StoppedBeforeControl,
     StoppedSafely,
@@ -105,20 +105,20 @@ pub(crate) enum CompletionReason {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ControlDecision {
+pub enum ControlDecision {
     Continue,
     Finish(CompletionReason),
     Fail(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct StopSignal {
+pub struct StopSignal {
     pub session: String,
     pub newly_requested: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CleanupTicket {
+pub struct CleanupTicket {
     session: String,
 }
 
@@ -148,14 +148,14 @@ enum StopStage {
     Running,
 }
 
-pub(crate) struct RolloutCoordinator {
+pub struct RolloutCoordinator {
     active: Option<ActiveSession>,
     snapshot: RolloutSnapshot,
     events: Arc<dyn RolloutEventPort>,
 }
 
 impl RolloutCoordinator {
-    pub(crate) fn new(events: Arc<dyn RolloutEventPort>) -> Self {
+    pub fn new(events: Arc<dyn RolloutEventPort>) -> Self {
         Self {
             active: None,
             snapshot: RolloutSnapshot::default(),
@@ -163,7 +163,7 @@ impl RolloutCoordinator {
         }
     }
 
-    pub(crate) fn admit(
+    pub fn admit(
         &mut self,
         session: String,
         started_ms: i64,
@@ -202,7 +202,7 @@ impl RolloutCoordinator {
         Ok(self.snapshot.clone())
     }
 
-    pub(crate) fn request_stop(&mut self) -> Result<StopSignal, String> {
+    pub fn request_stop(&mut self) -> Result<StopSignal, String> {
         let active = self
             .active
             .as_mut()
@@ -225,7 +225,7 @@ impl RolloutCoordinator {
         })
     }
 
-    pub(crate) fn stopped_outcome(&self, session: &str) -> Result<ExecutionOutcome, String> {
+    pub fn stopped_outcome(&self, session: &str) -> Result<ExecutionOutcome, String> {
         let active = self.session(session)?;
         if !active.stop_requested {
             return Err(format!("policy session {session:?} was not asked to stop"));
@@ -243,7 +243,7 @@ impl RolloutCoordinator {
         Ok(ExecutionOutcome::Completed(reason))
     }
 
-    pub(crate) fn warming_up(&mut self, session: &str) -> Result<bool, String> {
+    pub fn warming_up(&mut self, session: &str) -> Result<bool, String> {
         let active = self.session(session)?;
         if active.stop_requested {
             return Ok(false);
@@ -261,7 +261,7 @@ impl RolloutCoordinator {
         Ok(true)
     }
 
-    pub(crate) fn record_warmup(
+    pub fn record_warmup(
         &mut self,
         session: &str,
         latency_ms: f64,
@@ -282,7 +282,7 @@ impl RolloutCoordinator {
         Ok(())
     }
 
-    pub(crate) fn awaiting_control(&mut self, session: &str) -> Result<bool, String> {
+    pub fn awaiting_control(&mut self, session: &str) -> Result<bool, String> {
         let active = self.session(session)?;
         if active.stop_requested {
             return Ok(false);
@@ -299,7 +299,7 @@ impl RolloutCoordinator {
         Ok(true)
     }
 
-    pub(crate) fn running(
+    pub fn running(
         &mut self,
         session: &str,
         sample_hz: f64,
@@ -325,7 +325,7 @@ impl RolloutCoordinator {
         Ok(true)
     }
 
-    pub(crate) fn observe_control(
+    pub fn observe_control(
         &self,
         session: &str,
         owner: &ControlOwner,
@@ -341,7 +341,7 @@ impl RolloutCoordinator {
         }
     }
 
-    pub(crate) fn record_inference(
+    pub fn record_inference(
         &mut self,
         session: &str,
         latency_ms: f64,
@@ -374,11 +374,7 @@ impl RolloutCoordinator {
         Ok(())
     }
 
-    pub(crate) fn record_command(
-        &mut self,
-        session: &str,
-        missed_deadline: bool,
-    ) -> Result<(), String> {
+    pub fn record_command(&mut self, session: &str, missed_deadline: bool) -> Result<(), String> {
         let active = self.session(session)?;
         if active.phase != SessionPhase::Running
             && !(active.phase == SessionPhase::Stopping
@@ -394,7 +390,7 @@ impl RolloutCoordinator {
         Ok(())
     }
 
-    pub(crate) fn record_action_clamp_warning(
+    pub fn record_action_clamp_warning(
         &mut self,
         session: &str,
         warning: String,
@@ -416,7 +412,7 @@ impl RolloutCoordinator {
         Ok(true)
     }
 
-    pub(crate) fn begin_cleanup(
+    pub fn begin_cleanup(
         &mut self,
         session: &str,
         outcome: ExecutionOutcome,
@@ -438,7 +434,7 @@ impl RolloutCoordinator {
         })
     }
 
-    pub(crate) fn finish_cleanup(
+    pub fn finish_cleanup(
         &mut self,
         ticket: CleanupTicket,
         finished_ms: i64,

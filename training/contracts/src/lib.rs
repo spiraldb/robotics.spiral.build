@@ -1,20 +1,27 @@
 //! Backend-neutral model-training boundary.
 //!
 //! Studio owns orchestration and the visible run history. A job backend owns
-//! SpiralDB reads, model execution, telemetry, and artifact publication. The
-//! older session/batch types remain for rollout compatibility and isolated
-//! runtime tests; no framework tensor type crosses this seam.
+//! SpiralDB reads, model execution, telemetry, and artifact publication.
+//! Rollout inference has a separate HTTP + Arrow boundary; no framework tensor
+//! type crosses this training seam.
 
-use std::borrow::Cow;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-pub const TRAINING_BACKEND_API_VERSION: u32 = 4;
+include!(concat!(env!("OUT_DIR"), "/training_boundary.rs"));
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TrainingBackendInfo {
+    #[serde(default)]
+    pub api_id: String,
     pub api_version: u32,
+    #[serde(default)]
+    pub api_revision: u32,
+    #[serde(default)]
+    pub spiral_schema_minimum: u32,
+    #[serde(default)]
+    pub spiral_schema_maximum: u32,
     pub id: String,
     pub display_name: String,
     pub runtime: String,
@@ -30,33 +37,52 @@ impl TrainingBackendInfo {
             self.devices.join(" + ")
         )
     }
+
+    /// Return a precise incompatibility instead of relying on scattered exact
+    /// integer comparisons. Minor revisions are additive: a newer runtime of
+    /// the same major may serve an older Studio client.
+    pub fn compatibility_error(&self, spiral_schema_version: u32) -> Option<String> {
+        if self.api_version != TRAINING_BACKEND_API_VERSION {
+            return Some(format!(
+                "training backend API major {} is incompatible with Studio major {}",
+                self.api_version, TRAINING_BACKEND_API_VERSION
+            ));
+        }
+        if self.api_id != TRAINING_BACKEND_API_ID {
+            return Some(format!(
+                "training backend API ID {:?} is incompatible with {:?}",
+                self.api_id, TRAINING_BACKEND_API_ID
+            ));
+        }
+        if !revision_is_compatible(self.api_revision, TRAINING_BACKEND_API_REVISION) {
+            return Some(format!(
+                "training backend API {}.{} is older than Studio's required {}.{}",
+                self.api_version,
+                self.api_revision,
+                TRAINING_BACKEND_API_VERSION,
+                TRAINING_BACKEND_API_REVISION
+            ));
+        }
+        if self.spiral_schema_minimum > self.spiral_schema_maximum {
+            return Some(format!(
+                "training backend advertised an invalid Spiral schema range {}..={}",
+                self.spiral_schema_minimum, self.spiral_schema_maximum
+            ));
+        }
+        if !(self.spiral_schema_minimum..=self.spiral_schema_maximum)
+            .contains(&spiral_schema_version)
+        {
+            return Some(format!(
+                "training backend supports Spiral schema {}..={}, but Studio uses {}",
+                self.spiral_schema_minimum, self.spiral_schema_maximum, spiral_schema_version
+            ));
+        }
+        None
+    }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "policy", rename_all = "snake_case")]
-pub enum TrainingModelConfig {
-    Act(ActTrainingConfig),
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ActTrainingConfig {
-    pub state_dimensions: usize,
-    pub action_dimensions: usize,
-    pub camera_streams: Vec<String>,
-    pub image_width: usize,
-    pub image_height: usize,
-    pub chunk_size: usize,
-    pub hidden_dimensions: usize,
-    pub latent_dimensions: usize,
-    pub attention_heads: usize,
-    pub feedforward_dimensions: usize,
-    pub encoder_layers: usize,
-    pub vae_encoder_layers: usize,
-    pub decoder_layers: usize,
-    pub kl_weight: f64,
-    pub learning_rate: f64,
-    pub total_steps: u64,
-    pub seed: u64,
+const fn revision_is_compatible(runtime: u32, required: u32) -> bool {
+    runtime >= required
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -64,13 +90,6 @@ pub struct ActTrainingConfig {
 pub enum TrainingInitialization {
     Random,
     PretrainedBackbone,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct TrainingSessionRequest {
-    pub model: TrainingModelConfig,
-    pub device: String,
-    pub initialization: TrainingInitialization,
 }
 
 /// One immutable connection selection sent only to the training worker. The
@@ -129,6 +148,10 @@ pub struct TrainingJobRequest {
     pub sql: String,
     pub state_column: String,
     pub action_column: String,
+    /// The relational contract used to select this job's data. The worker
+    /// records the received value in every checkpoint rather than maintaining
+    /// a second schema-version constant.
+    pub spiral_schema_version: u32,
     pub device: String,
     pub initialization: TrainingInitialization,
     pub steps: u64,
@@ -199,8 +222,26 @@ pub struct TrainingJobCheckpoint {
     pub sample_hz: f64,
 }
 
-/// Complete, replayable worker state. Collections are append-only for the
-/// lifetime of a job, allowing Studio to reattach after a restart.
+/// Append-only worker history position. Callers send the last observed cursor
+/// so polling transfers only new state.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TrainingJobCursor {
+    pub metric_step: u64,
+    pub checkpoint_step: u64,
+    pub log_offset: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TrainingJobLog {
+    pub offset: u64,
+    pub line: String,
+}
+
+/// Current worker state plus replay deltas after the requested cursor.
+///
+/// Collections are append-only but retained within worker-side bounds. A
+/// caller that falls behind those bounds receives `history_gap` alongside the
+/// oldest still-available deltas and can continue from `cursor`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TrainingJobSnapshot {
     pub job_id: String,
@@ -211,118 +252,13 @@ pub struct TrainingJobSnapshot {
     pub resolved: Option<TrainingJobResolved>,
     pub metrics: Vec<TrainingJobMetric>,
     pub checkpoints: Vec<TrainingJobCheckpoint>,
-    pub logs: Vec<String>,
-}
-
-#[derive(Debug, PartialEq)]
-pub struct TrainingBatch<'a> {
-    pub batch_size: usize,
-    pub states: Cow<'a, [f32]>,
-    /// Interleaved HWC RGB pixels. The runtime owns device-side conversion,
-    /// CHW permutation, float32 casting, and model normalization.
-    pub images: Cow<'a, [u8]>,
-    pub actions: Cow<'a, [f32]>,
-    /// One byte per action timestep: `0` for data and `1` for padding.
-    pub action_is_pad: Cow<'a, [u8]>,
-}
-
-impl TrainingBatch<'static> {
-    pub fn owned(
-        batch_size: usize,
-        states: Vec<f32>,
-        images: Vec<u8>,
-        actions: Vec<f32>,
-        action_is_pad: Vec<u8>,
-    ) -> Self {
-        Self {
-            batch_size,
-            states: Cow::Owned(states),
-            images: Cow::Owned(images),
-            actions: Cow::Owned(actions),
-            action_is_pad: Cow::Owned(action_is_pad),
-        }
-    }
-}
-
-impl<'a> TrainingBatch<'a> {
-    pub fn borrowed(
-        batch_size: usize,
-        states: &'a [f32],
-        images: &'a [u8],
-        actions: &'a [f32],
-        action_is_pad: &'a [u8],
-    ) -> Self {
-        Self {
-            batch_size,
-            states: Cow::Borrowed(states),
-            images: Cow::Borrowed(images),
-            actions: Cow::Borrowed(actions),
-            action_is_pad: Cow::Borrowed(action_is_pad),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct TrainingLoss {
-    pub total: f64,
-    pub l1: f64,
-    pub kl: f64,
-    pub pad: f64,
-}
-
-/// Latest process and accelerator evidence reported by a training runtime.
-///
-/// Every field is optional because not every framework or device exposes the
-/// same counters. A remote adapter forwards these values from the process that
-/// actually owns the optimizer rather than sampling the Studio process.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct TrainingTelemetry {
-    pub cpu_percent: Option<f64>,
-    pub gpu_percent: Option<f64>,
-    pub memory_bytes: Option<u64>,
-    /// Studio-side Arrow IPC materialization for the most recent batch.
+    pub logs: Vec<TrainingJobLog>,
+    /// Cursor after all deltas in this response.
     #[serde(default)]
-    pub arrow_encode_ms: Option<f64>,
-    /// HTTP request/response time outside the remote runtime handler. For a
-    /// remote endpoint this is dominated by request-body upload.
-    #[serde(default)]
-    pub upload_ms: Option<f64>,
-    /// Runtime-side conversion and host-to-device transfer.
-    #[serde(default)]
-    pub device_copy_ms: Option<f64>,
-    /// Runtime-side optimizer or validation compute after inputs reach the device.
-    #[serde(default)]
-    pub model_ms: Option<f64>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct TrainingStepOutput {
-    pub loss: TrainingLoss,
-    pub learning_rate: f64,
-    pub telemetry: TrainingTelemetry,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct TrainingCheckpointRequest {
-    pub manifest_json: String,
-    pub state_mean: Vec<f32>,
-    pub state_std: Vec<f32>,
-    pub action_mean: Vec<f32>,
-    pub action_std: Vec<f32>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct TrainingCheckpointArtifact {
-    pub format: String,
-    pub extension: String,
-    pub payload: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct TrainingSessionInfo {
-    pub backend: TrainingBackendInfo,
-    pub device: String,
-    pub parameter_count: usize,
+    pub cursor: TrainingJobCursor,
+    /// Present when the requested cursor predates bounded worker retention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_gap: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -346,11 +282,6 @@ impl TrainingBackendError {
 pub trait TrainingBackend: Send + Sync {
     fn health(&self) -> Result<TrainingBackendInfo, TrainingBackendError>;
 
-    fn create_session(
-        &self,
-        request: TrainingSessionRequest,
-    ) -> Result<Box<dyn TrainingSession>, TrainingBackendError>;
-
     fn create_job(
         &self,
         _request: TrainingJobRequest,
@@ -360,76 +291,47 @@ pub trait TrainingBackend: Send + Sync {
         ))
     }
 
-    fn job(&self, _job_id: &str) -> Result<TrainingJobSnapshot, TrainingBackendError> {
-        Err(TrainingBackendError::new(
-            "this training backend does not support worker-owned jobs",
-        ))
-    }
-
-    fn stop_job(&self, _job_id: &str) -> Result<TrainingJobSnapshot, TrainingBackendError> {
-        Err(TrainingBackendError::new(
-            "this training backend does not support worker-owned jobs",
-        ))
-    }
-}
-
-/// A remotely executing optimizer step. Starting a step releases the session
-/// handle so Studio can fill its bounded upload buffer while compute runs.
-pub trait PendingTrainingStep: Send {
-    fn finish(self: Box<Self>) -> Result<TrainingStepOutput, TrainingBackendError>;
-}
-
-/// One stateful optimizer session. No framework tensor type crosses this seam.
-pub trait TrainingSession: Send {
-    fn info(&self) -> &TrainingSessionInfo;
-
-    /// Upload and retain exactly one batch for a future optimizer step.
-    fn buffer_training_batch(
-        &mut self,
-        batch: TrainingBatch<'static>,
-        step: u64,
-    ) -> Result<(), TrainingBackendError>;
-
-    /// Consume the buffered batch and begin the optimizer step asynchronously.
-    fn begin_training_step(
-        &mut self,
-        step: u64,
-    ) -> Result<Box<dyn PendingTrainingStep>, TrainingBackendError>;
-
-    fn validation_step(
-        &mut self,
-        batch: TrainingBatch<'static>,
-        after_step: u64,
-    ) -> Result<TrainingStepOutput, TrainingBackendError>;
-
-    fn checkpoint(
+    fn job(
         &self,
-        request: TrainingCheckpointRequest,
-    ) -> Result<TrainingCheckpointArtifact, TrainingBackendError>;
+        _job_id: &str,
+        _cursor: TrainingJobCursor,
+    ) -> Result<TrainingJobSnapshot, TrainingBackendError> {
+        Err(TrainingBackendError::new(
+            "this training backend does not support worker-owned jobs",
+        ))
+    }
+
+    fn stop_job(
+        &self,
+        _job_id: &str,
+        _cursor: TrainingJobCursor,
+    ) -> Result<TrainingJobSnapshot, TrainingBackendError> {
+        Err(TrainingBackendError::new(
+            "this training backend does not support worker-owned jobs",
+        ))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::de::DeserializeOwned;
 
     struct RemoteBackend;
 
     impl TrainingBackend for RemoteBackend {
         fn health(&self) -> Result<TrainingBackendInfo, TrainingBackendError> {
             Ok(TrainingBackendInfo {
+                api_id: TRAINING_BACKEND_API_ID.to_owned(),
                 api_version: TRAINING_BACKEND_API_VERSION,
+                api_revision: TRAINING_BACKEND_API_REVISION,
+                spiral_schema_minimum: TRAINING_BACKEND_MIN_SPIRAL_SCHEMA_VERSION,
+                spiral_schema_maximum: TRAINING_BACKEND_MAX_SPIRAL_SCHEMA_VERSION,
                 id: "remote.test".to_owned(),
                 display_name: "Remote test backend".to_owned(),
                 runtime: "HTTP".to_owned(),
                 devices: vec!["remote".to_owned()],
             })
-        }
-
-        fn create_session(
-            &self,
-            _request: TrainingSessionRequest,
-        ) -> Result<Box<dyn TrainingSession>, TrainingBackendError> {
-            Err(TrainingBackendError::new("not connected"))
         }
     }
 
@@ -454,16 +356,105 @@ mod tests {
         assert!(!debug.contains("do-not-log-this"));
     }
 
+    fn backend_info(
+        revision: u32,
+        schema_minimum: u32,
+        schema_maximum: u32,
+    ) -> TrainingBackendInfo {
+        TrainingBackendInfo {
+            api_id: TRAINING_BACKEND_API_ID.to_owned(),
+            api_version: TRAINING_BACKEND_API_VERSION,
+            api_revision: revision,
+            spiral_schema_minimum: schema_minimum,
+            spiral_schema_maximum: schema_maximum,
+            id: "remote.test".to_owned(),
+            display_name: "Remote test backend".to_owned(),
+            runtime: "HTTP".to_owned(),
+            devices: vec!["remote".to_owned()],
+        }
+    }
+
     #[test]
-    fn batches_can_own_or_borrow_framework_neutral_buffers() {
-        let owned = TrainingBatch::owned(1, vec![0.25], vec![128], vec![0.75], vec![0]);
-        let borrowed = TrainingBatch::borrowed(
-            1,
-            owned.states.as_ref(),
-            owned.images.as_ref(),
-            owned.actions.as_ref(),
-            owned.action_is_pad.as_ref(),
+    fn compatibility_uses_major_minor_and_schema_range_rules() {
+        assert!(revision_is_compatible(2, 1));
+        assert!(!revision_is_compatible(1, 2));
+        let current_schema = TRAINING_BACKEND_MIN_SPIRAL_SCHEMA_VERSION;
+        assert_eq!(
+            backend_info(
+                TRAINING_BACKEND_API_REVISION,
+                current_schema,
+                current_schema
+            )
+            .compatibility_error(current_schema),
+            None
         );
-        assert_eq!(borrowed, owned);
+        assert_eq!(
+            backend_info(
+                TRAINING_BACKEND_API_REVISION + 1,
+                current_schema,
+                current_schema
+            )
+            .compatibility_error(current_schema),
+            None,
+            "a newer additive runtime revision remains compatible"
+        );
+
+        let mut wrong_major = backend_info(
+            TRAINING_BACKEND_API_REVISION,
+            current_schema,
+            current_schema,
+        );
+        wrong_major.api_version += 1;
+        assert!(
+            wrong_major
+                .compatibility_error(current_schema)
+                .is_some_and(|error| error.contains("major"))
+        );
+
+        assert!(
+            backend_info(
+                TRAINING_BACKEND_API_REVISION,
+                current_schema + 1,
+                current_schema + 1
+            )
+            .compatibility_error(current_schema)
+            .is_some_and(|error| error.contains("Spiral schema"))
+        );
+    }
+
+    #[test]
+    fn canonical_wire_fixtures_round_trip_through_rust_contracts() {
+        let health: TrainingBackendInfo =
+            serde_json::from_str(include_str!("../fixtures/health.json")).unwrap();
+        assert_eq!(health.api_id, TRAINING_BACKEND_API_ID);
+        assert_eq!(health.api_version, TRAINING_BACKEND_API_VERSION);
+        assert_eq!(health.api_revision, TRAINING_BACKEND_API_REVISION);
+        assert_eq!(
+            health.spiral_schema_minimum,
+            TRAINING_BACKEND_MIN_SPIRAL_SCHEMA_VERSION
+        );
+        assert_eq!(
+            health.spiral_schema_maximum,
+            TRAINING_BACKEND_MAX_SPIRAL_SCHEMA_VERSION
+        );
+        let request: TrainingJobRequest =
+            serde_json::from_str(include_str!("../fixtures/job-request.json")).unwrap();
+        assert_eq!(
+            request.spiral_schema_version,
+            TRAINING_CURRENT_SPIRAL_SCHEMA_VERSION
+        );
+
+        assert_fixture::<TrainingBackendInfo>(include_str!("../fixtures/health.json"));
+        assert_fixture::<TrainingJobRequest>(include_str!("../fixtures/job-request.json"));
+        assert_fixture::<TrainingJobSnapshot>(include_str!("../fixtures/job-snapshot.json"));
+    }
+
+    fn assert_fixture<T>(source: &str)
+    where
+        T: DeserializeOwned + Serialize,
+    {
+        let expected: serde_json::Value = serde_json::from_str(source).unwrap();
+        let contract: T = serde_json::from_value(expected.clone()).unwrap();
+        assert_eq!(serde_json::to_value(contract).unwrap(), expected);
     }
 }

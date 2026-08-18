@@ -6,8 +6,7 @@
 
 use std::fmt;
 
-/// Schema version written into every completed episode row.
-pub const SCHEMA_VERSION: u32 = 7;
+include!(concat!(env!("OUT_DIR"), "/spiral_boundary.rs"));
 
 /// Marker used to distinguish Spiral Robotics' managed dataset namespace resource.
 pub const DATASET_NAMESPACE_MARKER: &str = "_spiral_robotics_dataset_key_v1";

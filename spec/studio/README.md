@@ -82,6 +82,21 @@ panels to be arranged spatially.
   bootstrapping. Catalog-dependent routes must return HTTP 503 with a retry
   hint until the catalog is available, and setup snapshots must not perform
   catalog I/O during that interval.
+- **STUDIO-052** A setup snapshot must materialize every saved robot from one
+  catalog read rather than reloading the robot relation per row. Periodic
+  snapshot refresh must run no more often than every two seconds and skip
+  missed ticks instead of replaying an overdue polling backlog.
+- **STUDIO-053** The unauthenticated hardware-control listener must accept
+  loopback addresses by default and reject non-loopback binds unless the
+  operator supplies an explicit remote-access opt-in.
+- **STUDIO-054** Framework-neutral application policy must live in its own
+  crate. Cargo dependencies, not source-text conventions, must prevent that
+  crate from importing HTTP, UI, database, hardware, or model-runtime adapters.
+- **STUDIO-055** Dependencies must point inward: domain rules are independent,
+  application use cases depend only on domain types and injected ports, and
+  backend/UI crates adapt those ports to HTTP, hardware, persistence, and
+  presentation. Cross-process work must use versioned neutral contracts rather
+  than importing another process's implementation.
 
 ## Feature relationships
 
@@ -106,6 +121,10 @@ panels to be arranged spatially.
   [`spiral-robotics-panels`](../../crates/spiral-robotics-panels/)
 - Shared interaction primitives:
   [`spiral-robotics-ui`](../../crates/spiral-robotics-ui/)
+- Framework-neutral application use cases:
+  [`spiral-robotics-studio-application`](../../crates/spiral-robotics-studio-application/)
+- HTTP, hardware, persistence, and runtime adapters:
+  [`spiral-robotics-studio-backend`](../../crates/spiral-robotics-studio-backend/)
 - URDF and rendering:
   [`spiral-robotics-viewport`](../../crates/spiral-robotics-viewport/)
 

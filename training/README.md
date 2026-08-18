@@ -74,8 +74,11 @@ options. Until a wheel containing that scoped-option driver is published, set
 
 ## Stable protocol
 
-The current training protocol is API version 4. Studio rejects runtimes with a
-different API version before creating a job.
+The authoritative training API version and Spiral schema compatibility range
+live in [`../contracts/boundaries.json`](../contracts/boundaries.json). Studio
+accepts the same API major at its required minor revision or newer, and rejects
+unsupported Spiral schemas before creating a job. See the
+[bump policy](../contracts/README.md) for the major/minor rules.
 
 Control plane:
 
@@ -84,56 +87,39 @@ Control plane:
 - `GET /v1/jobs/{id}`
 - `POST /v1/jobs/{id}/stop`
 - `GET /v1/jobs/{id}/telemetry`
-- `POST /v1/sessions`
-- `DELETE /v1/sessions/{id}`
-- `GET /v1/sessions/{id}/telemetry`
-- `POST /v1/sessions/{id}/checkpoint`
 - `POST /v1/policies`
 - `DELETE /v1/policies/{id}`
 - `POST /v1/policies/{id}/warm-up`
 
-The job request is the training control plane and carries the immutable
-SpiralDB destination, optional client credentials, SQL/data contract, and
-model/run configuration. The runtime opens SpiralDB itself, uses SPQL to load
+The immutable job request carries the SpiralDB destination, optional client
+credentials, SQL/data contract, selected Spiral schema version, and model/run
+configuration. The runtime opens SpiralDB itself, uses SPQL to load
 training-ready Arrow data, and appends SafeTensors directly to
-`training_checkpoints`. Job snapshots never return credentials. `POST
-/v1/jobs` is idempotent only when the job ID and complete immutable
-specification match; conflicting reuse returns HTTP 409. Studio tries `GET`
-first when reattaching, so it does not resend credentials after restarting.
+`training_checkpoints`. It records the request's schema version in the
+checkpoint manifest rather than maintaining another constant. Job snapshots
+never return credentials. `POST /v1/jobs` is idempotent only when the job ID and
+complete specification match; conflicting reuse returns HTTP 409.
 
-Rollout/legacy session data plane:
+Job lookup and stop accept `after_metric_step`,
+`after_checkpoint_step`, and `after_log_offset`. Responses contain only
+newer evidence plus the next cursor. Worker replay windows and retained
+terminal jobs are bounded; a request older than retention gets an explicit
+`history_gap`. Studio uses exponential polling backoff during transport
+failures.
 
-- `POST /v1/sessions/{id}/buffer?kind=training&step=N`
-- `POST /v1/sessions/{id}/train?step=N`
-- `POST /v1/sessions/{id}/buffer?kind=validation&step=N`
-- `POST /v1/sessions/{id}/validate?step=N`
+Rollout data plane:
+
 - `POST /v1/policies/{id}/infer`
 
-Buffer and inference bodies are one `application/vnd.apache.arrow.stream`
-record batch. Train and validation execution requests are bodyless and consume
-the exact buffered kind and step. Tensor columns are non-null `FixedSizeList`
-arrays. Studio writes Arrow IPC metadata V5 with lossless Zstandard buffer
-compression; PyArrow decompresses those buffers transparently, then exposes
-their child buffers as zero-copy NumPy views. `torch.from_numpy` shares that
-decompressed CPU storage.
-Training state and action children are `Float32`; image children are packed HWC
-RGB `UInt8`; action-padding children are `UInt8`. The runtime transfers the
-byte images to the selected device, then permutes to CHW, converts to `Float32`,
-divides by 255, and applies ImageNet normalization. A batch therefore sends one
-byte per image channel instead of four, while model inputs retain the same
-normalized values. Moving a batch to CUDA still necessarily performs one
-host-to-device transfer.
+Inference bodies contain one `application/vnd.apache.arrow.stream` record
+batch. Tensor columns are non-null `FixedSizeList` arrays. Studio writes Arrow
+IPC metadata V5 with lossless Zstandard buffer compression; PyArrow
+decompresses those buffers transparently and exposes their child buffers as
+zero-copy NumPy views. State children are `Float32`; image children are packed
+HWC RGB `UInt8`. The runtime transfers image bytes to the selected device,
+then permutes to CHW, converts to `Float32`, divides by 255, and applies
+ImageNet normalization.
 
-The session endpoints remain for compatibility and rollout-focused testing;
-Studio's production training path does not call them. Each legacy training
-session has one queued-batch slot protected independently from
-the model lock. After Studio starts optimizer step N, it uploads batch N+1 into
-that slot while PyTorch computes N. Studio never starts N+1 before N completes,
-so checkpoints retain exact step semantics. Validation is an explicit barrier
-and uses the same slot before the following training batch is admitted.
-
-Legacy session checkpoints are raw SafeTensors bytes with format metadata in
-`x-spiral-checkpoint-format` and `x-spiral-checkpoint-extension` headers.
-Worker-owned job checkpoints are committed directly to SpiralDB before their
-metadata appears in the job snapshot. Studio owns admission and its mirrored
-run history; the worker owns the active training data path.
+There is no public optimizer-session or training-batch upload API. Training is
+only a worker-owned job, and job checkpoints are committed directly to
+SpiralDB before their metadata appears in a snapshot.

@@ -57,23 +57,25 @@ impl TrainingPort for TrainingManager {
     }
 }
 
-impl RolloutSessionPort for Arc<RolloutManager> {
+pub(super) struct RolloutHttpAdapter(pub(super) Arc<RolloutManager>);
+
+impl RolloutSessionPort for RolloutHttpAdapter {
     fn snapshot(&self) -> ApplicationRolloutSnapshot {
-        application_rollout_snapshot(RolloutManager::snapshot(self.as_ref()))
+        application_rollout_snapshot(RolloutManager::snapshot(self.0.as_ref()))
     }
 
     async fn start(
         &self,
         command: RolloutRequest,
     ) -> Result<ApplicationRolloutSnapshot, ApplicationError> {
-        RolloutManager::start(self, rollout_request(command))
+        RolloutManager::start(&self.0, rollout_request(command))
             .await
             .map(application_rollout_snapshot)
             .map_err(ApplicationError::conflict)
     }
 
     async fn stop(&self) -> Result<(), ApplicationError> {
-        RolloutManager::stop(self.as_ref())
+        RolloutManager::stop(self.0.as_ref())
             .await
             .map_err(ApplicationError::conflict)
     }
@@ -336,7 +338,7 @@ pub(super) fn application_training_snapshot(
             ready: snapshot.readiness.ready,
             spiral_ready: snapshot.readiness.spiral_ready,
             runtime: snapshot.readiness.runtime.map(|runtime| {
-                crate::backend::application::training::TrainingRuntimeInfo {
+                spiral_robotics_studio_application::training::TrainingRuntimeInfo {
                     id: runtime.id,
                     display_name: runtime.display_name,
                     runtime: runtime.runtime,
@@ -501,7 +503,7 @@ async fn delete_training(
 
 async fn get_rollout(State(state): State<AppState>) -> Json<RolloutSnapshot> {
     Json(contract_rollout_snapshot(rollout_application::snapshot(
-        &state.rollout,
+        &RolloutHttpAdapter(state.rollout.clone()),
     )))
 }
 
@@ -511,7 +513,8 @@ async fn start_rollout(
 ) -> Result<(StatusCode, Json<RolloutSnapshot>), Failure> {
     let request =
         training_application::admit_rollout(state.training.as_ref(), rollout_command(request))?;
-    let snapshot = rollout_application::start(&state.rollout, request).await?;
+    let snapshot =
+        rollout_application::start(&RolloutHttpAdapter(state.rollout.clone()), request).await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(contract_rollout_snapshot(snapshot)),
@@ -519,6 +522,6 @@ async fn start_rollout(
 }
 
 async fn stop_rollout(State(state): State<AppState>) -> Result<StatusCode, Failure> {
-    rollout_application::stop(&state.rollout).await?;
+    rollout_application::stop(&RolloutHttpAdapter(state.rollout.clone())).await?;
     Ok(StatusCode::ACCEPTED)
 }

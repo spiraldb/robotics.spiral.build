@@ -54,6 +54,13 @@ jobs:
       - name: Install locked Python runtime
         run: nix develop .#ci --command uv sync --project training --frozen --extra dev
 
+      - name: Verify packaged boundary descriptor
+        run: |
+          wheel_dir="${RUNNER_TEMP}/spiral-training-wheel"
+          mkdir -p "$wheel_dir"
+          nix develop .#ci --command uv build --project training --wheel --out-dir "$wheel_dir"
+          unzip -p "$wheel_dir"/*.whl spiral_training_runtime/boundaries.json | cmp - contracts/boundaries.json
+
       - name: Check Python runtime
         run: |
           nix develop .#ci --command uv run --project training ruff check training

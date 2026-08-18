@@ -58,8 +58,6 @@ a nested document only when the feature itself has a large subfeature.
 - Human instructions are the primary source for requirements.
 - A behavior inferred from code becomes a requirement only after a human
   confirms it.
-- [`notes.md`](../notes.md) remains the source of truth when existing material
-  conflicts.
 - Current code may reveal a gap. It does not override a confirmed requirement.
 - Assistant proposals, abandoned designs, implementation accidents, and stale
   screenshots are not requirements.

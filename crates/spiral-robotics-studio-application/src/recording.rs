@@ -14,33 +14,33 @@ use super::episode_arms::select_recorded_arm;
 use super::error::ApplicationError;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct StartRecordingCommand {
+pub struct StartRecordingCommand {
     pub dataset_id: String,
     pub arms: Vec<String>,
     pub note: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TeleoperationPair {
+pub struct TeleoperationPair {
     pub leader: String,
     pub follower: String,
 }
 
 /// Live facts needed to admit one new take.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RecordingContext {
+pub struct RecordingContext {
     pub connected_arms: Vec<String>,
     pub sample_hz: f64,
     pub media_finalizing: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct StopRecordingCommand {
+pub struct StopRecordingCommand {
     pub keep: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct SetRecordingPausedCommand {
+pub struct SetRecordingPausedCommand {
     pub paused: bool,
 }
 
@@ -49,11 +49,11 @@ pub(crate) struct SetRecordingPausedCommand {
 /// `MediaCapture` and `MediaOutput` remain opaque so video libraries and media
 /// formats cannot leak into application policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RecordingResult {
+pub struct RecordingResult {
     pub episode: String,
 }
 
-pub(crate) trait RecordingPort {
+pub trait RecordingPort {
     type RecordingDraft;
     type MediaCapture;
     type MediaOutput;
@@ -156,7 +156,7 @@ impl<P: RecordingPort + ?Sized> Drop for RecordingStopReservation<'_, P> {
 /// If any edge assembly fails after the mode transition, returning to idle is
 /// mandatory compensation. A failed rollback is retained in the operator
 /// error because an unnoticed live teleoperation session is safety-relevant.
-pub(crate) async fn start_recording<P: RecordingPort + ?Sized>(
+pub async fn start_recording<P: RecordingPort + ?Sized>(
     port: &P,
     command: StartRecordingCommand,
 ) -> Result<RecordingResult, ApplicationError> {
@@ -266,7 +266,7 @@ async fn start_reserved<P: RecordingPort + ?Sized>(
 /// Media is claimed before the hardware stop so an automatic-stop observer
 /// cannot race this explicit action. The idle transition is attempted even if
 /// finalizing the recording fails.
-pub(crate) async fn stop_recording<P: RecordingPort + ?Sized>(
+pub async fn stop_recording<P: RecordingPort + ?Sized>(
     port: &P,
     command: StopRecordingCommand,
 ) -> Result<RecordingResult, ApplicationError> {
@@ -315,7 +315,7 @@ pub(crate) async fn stop_recording<P: RecordingPort + ?Sized>(
 }
 
 /// Pause/resume joint and media capture in a fail-safe order.
-pub(crate) async fn set_recording_paused<P: RecordingPort + ?Sized>(
+pub async fn set_recording_paused<P: RecordingPort + ?Sized>(
     port: &P,
     command: SetRecordingPausedCommand,
 ) -> Result<(), ApplicationError> {
@@ -332,7 +332,7 @@ pub(crate) async fn set_recording_paused<P: RecordingPort + ?Sized>(
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct StartReplayCommand {
+pub struct StartReplayCommand {
     pub episode: String,
     pub robot: String,
     pub source_arm: Option<String>,
@@ -340,26 +340,26 @@ pub(crate) struct StartReplayCommand {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct SetReplayPausedCommand {
+pub struct SetReplayPausedCommand {
     pub paused: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ReplayEpisode {
+pub struct ReplayEpisode {
     pub id: String,
     pub arms: Vec<String>,
     pub sample_hz: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ReplayTrajectory {
+pub struct ReplayTrajectory {
     pub frames: Vec<BTreeMap<String, f64>>,
     pub start_frame: usize,
     pub resolved_start_seconds: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ReplayPlan {
+pub struct ReplayPlan {
     pub robot: String,
     pub episode: String,
     pub frames: Vec<BTreeMap<String, f64>>,
@@ -368,7 +368,7 @@ pub(crate) struct ReplayPlan {
     pub resolved_start_seconds: f64,
 }
 
-pub(crate) trait ReplayPort {
+pub trait ReplayPort {
     fn replay_episode(&self, episode: &str) -> Result<ReplayEpisode, ApplicationError>;
     async fn load_trajectory(
         &self,
@@ -381,7 +381,7 @@ pub(crate) trait ReplayPort {
 }
 
 /// Resolve the recorded arm, load the validated trajectory, then admit replay.
-pub(crate) async fn start_replay<P: ReplayPort + ?Sized>(
+pub async fn start_replay<P: ReplayPort + ?Sized>(
     port: &P,
     command: StartReplayCommand,
 ) -> Result<(), ApplicationError> {
@@ -440,7 +440,7 @@ pub(crate) async fn start_replay<P: ReplayPort + ?Sized>(
     .await
 }
 
-pub(crate) async fn set_replay_paused<P: ReplayPort + ?Sized>(
+pub async fn set_replay_paused<P: ReplayPort + ?Sized>(
     port: &P,
     command: SetReplayPausedCommand,
 ) -> Result<(), ApplicationError> {
@@ -458,7 +458,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::backend::application::catalog_lease::{CatalogLeaseOwner, CatalogMutationLease};
+    use crate::catalog_lease::{CatalogLeaseOwner, CatalogMutationLease};
 
     struct FakePort {
         events: Mutex<Vec<String>>,

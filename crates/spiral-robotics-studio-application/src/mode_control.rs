@@ -7,17 +7,17 @@ use super::error::ApplicationError;
 /// Replay and policy sessions are deliberately absent: their use cases must
 /// load and validate an episode or checkpoint before control can change.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum OperatorMode {
+pub enum OperatorMode {
     Idle,
     Manual { robot: String },
     Teleoperate { leader: String, follower: String },
 }
 
-pub(crate) trait ModeControlPort {
+pub trait ModeControlPort {
     async fn set_operator_mode(&self, mode: OperatorMode) -> Result<(), ApplicationError>;
 }
 
-pub(crate) async fn set_mode<P: ModeControlPort + ?Sized>(
+pub async fn set_mode<P: ModeControlPort + ?Sized>(
     control: &P,
     mode: OperatorMode,
 ) -> Result<(), ApplicationError> {

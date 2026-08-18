@@ -90,11 +90,24 @@ flowchart TD
 - **PERSIST-028** Import must replace the active project in one exclusive
   transaction and roll back on failure. Rows in included relations must be
   replaced, Studio-owned relations absent from the file must be removed, and
-  import must not stage through the local filesystem.
+  import must not stage through the local filesystem. Before the exclusive
+  operation returns, imported video assets must be retargeted to the active
+  namespace and their managed MP4 datasets must be created or refreshed from
+  the committed durable rows; managed video datasets absent from the imported
+  project must be removed.
+  Derived-resource reconciliation happens after the relational commit because
+  newly ingested relations are not bindable before publication. A repair
+  failure must therefore return a successful committed-row summary with an
+  explicit warning; it must never report the durable import as rolled back.
+  If restoring autocommit after a successful commit fails, Studio must likewise
+  return the committed summary with a warning and discard the uncertain
+  connection rather than returning it to the pool.
 - **PERSIST-029** Import must be refused while robots are connected or recording,
   replay, rollout, training, or another catalog mutation is active.
-- **PERSIST-030** Project transfer may use a bounded in-memory request/response
-  buffer, currently limited to 1 GiB; that buffer is not durable storage.
+- **PERSIST-030** Project transfer may use one bounded in-memory
+  request/response buffer, currently limited to 256 MiB; that buffer is not
+  durable storage. HTTP import must move the received buffer into storage work
+  without cloning the entire archive.
 - **PERSIST-031** One private backend-local JSON file may persist only the
   bootstrap state needed before Spiral can be opened: the API endpoint, SpFS
   endpoint, selected project ID, and optional client ID and client secret. It
@@ -129,9 +142,10 @@ flowchart TD
   project-owned preferences and run history, and those independent loads must
   run concurrently on bounded blocking workers rather than delaying listener
   startup or occupying async executor threads.
-
-The confirmed SQL example remains in the
-[SpiralDB section of `notes.md`](../../notes.md#spiraldb).
+- **PERSIST-039** The current relational schema version must be generated from
+  the shared machine-readable boundary descriptor. External workers must
+  receive the selected version through their request boundary and must not
+  maintain a copied schema-version literal.
 
 ## Schema changes
 
@@ -162,7 +176,10 @@ The confirmed SQL example remains in the
   namespace containing relational JSON and binary checkpoint data, replace it
   with conflicting data, import the exported bundle, and prove that the
   exported state is restored exactly. Relations and rows created only after
-  export must be absent after import.
+  export must be absent after import. A real-SpiralDB video-transfer regression
+  must also begin with only durable MP4 rows, prove import rebuilds the managed
+  MP4 output and can read an indexed frame, then re-import the same project and
+  prove the output is atomically replaced rather than rejected or duplicated.
 - **PERSIST-TEST-005** A real-SpiralDB episode-transfer test must export one
   dataset, import it into an existing target dataset, prove the target's prior
   episodes survive and imported rows are retargeted, and prove a repeated

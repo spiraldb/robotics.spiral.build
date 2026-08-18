@@ -2,41 +2,41 @@
 
 use super::error::ApplicationError;
 
-pub(crate) trait SerialPortInventory: Send + Sync {
+pub trait SerialPortInventory: Send + Sync {
     async fn available_port_paths(&self) -> Result<Vec<String>, ApplicationError>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SerialPortView {
+pub struct SerialPortView {
     pub path: String,
     pub kind: String,
     pub description: Option<String>,
     pub used_by: Option<String>,
 }
 
-pub(crate) trait SerialPortQueryPort: Send + Sync {
+pub trait SerialPortQueryPort: Send + Sync {
     async fn serial_ports(&self) -> Result<Vec<SerialPortView>, ApplicationError>;
 }
 
-pub(crate) async fn list_serial_ports<P: SerialPortQueryPort + ?Sized>(
+pub async fn list_serial_ports<P: SerialPortQueryPort + ?Sized>(
     query: &P,
 ) -> Result<Vec<SerialPortView>, ApplicationError> {
     query.serial_ports().await
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct IdentifySerialPortCommand {
+pub struct IdentifySerialPortCommand {
     pub before: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SerialPortIdentification {
+pub struct SerialPortIdentification {
     pub port: Option<String>,
     pub removed: Vec<String>,
     pub guidance: String,
 }
 
-pub(crate) async fn identify_serial_port<P: SerialPortInventory + ?Sized>(
+pub async fn identify_serial_port<P: SerialPortInventory + ?Sized>(
     inventory: &P,
     command: IdentifySerialPortCommand,
 ) -> Result<SerialPortIdentification, ApplicationError> {
@@ -75,7 +75,7 @@ pub(crate) async fn identify_serial_port<P: SerialPortInventory + ?Sized>(
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DiscoveredCamera {
+pub struct DiscoveredCamera {
     pub id: String,
     pub name: String,
     pub width: u32,
@@ -86,18 +86,16 @@ pub(crate) struct DiscoveredCamera {
     pub error: Option<String>,
 }
 
-pub(crate) trait CameraDiscoveryPort: Send + Sync {
+pub trait CameraDiscoveryPort: Send + Sync {
     fn cameras(&self) -> Vec<DiscoveredCamera>;
     async fn refresh_cameras(&self) -> Result<Vec<DiscoveredCamera>, ApplicationError>;
 }
 
-pub(crate) fn list_cameras<P: CameraDiscoveryPort + ?Sized>(
-    discovery: &P,
-) -> Vec<DiscoveredCamera> {
+pub fn list_cameras<P: CameraDiscoveryPort + ?Sized>(discovery: &P) -> Vec<DiscoveredCamera> {
     discovery.cameras()
 }
 
-pub(crate) async fn refresh_cameras<P: CameraDiscoveryPort + ?Sized>(
+pub async fn refresh_cameras<P: CameraDiscoveryPort + ?Sized>(
     discovery: &P,
 ) -> Result<Vec<DiscoveredCamera>, ApplicationError> {
     discovery.refresh_cameras().await

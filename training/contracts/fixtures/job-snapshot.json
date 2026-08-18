@@ -1,0 +1,67 @@
+{
+  "job_id": "train-fixture",
+  "phase": "running",
+  "current_step": 5,
+  "finished_ms": null,
+  "message": "Training",
+  "resolved": {
+    "camera_streams": [
+      "observation.images.wrist"
+    ],
+    "state_dimensions": 6,
+    "action_dimensions": 6,
+    "image_width": 32,
+    "image_height": 32,
+    "sample_hz": 30.0,
+    "robot_type": "so101_follower",
+    "joint_names": [
+      "shoulder_pan",
+      "shoulder_lift",
+      "elbow_flex",
+      "wrist_flex",
+      "wrist_roll",
+      "gripper"
+    ],
+    "parameter_count": 1000,
+    "device": "cpu"
+  },
+  "metrics": [
+    {
+      "step": 5,
+      "train_loss": 0.5,
+      "validation_loss": null,
+      "learning_rate": 0.00001,
+      "examples_per_second": 10.0,
+      "cpu_percent": 20.0,
+      "gpu_percent": null,
+      "memory_bytes": 1024,
+      "loader_ms": 1.0,
+      "device_copy_ms": 2.0,
+      "model_ms": 3.0,
+      "elapsed_seconds": 4.0,
+      "event": null
+    }
+  ],
+  "checkpoints": [
+    {
+      "step": 5,
+      "created_ms": 1000,
+      "validation_loss": null,
+      "byte_size": 2048,
+      "recommended_action_steps": 4,
+      "sample_hz": 30.0
+    }
+  ],
+  "logs": [
+    {
+      "offset": 1,
+      "line": "Training started"
+    }
+  ],
+  "cursor": {
+    "metric_step": 5,
+    "checkpoint_step": 5,
+    "log_offset": 1
+  },
+  "history_gap": "fixture gap"
+}

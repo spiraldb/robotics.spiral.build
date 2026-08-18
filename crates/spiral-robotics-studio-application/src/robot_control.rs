@@ -8,7 +8,7 @@ use super::error::ApplicationError;
 
 /// Consequential robot-control actions shared by every delivery mechanism.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum RobotControlCommand {
+pub enum RobotControlCommand {
     Hold {
         robot: String,
     },
@@ -22,7 +22,7 @@ pub(crate) enum RobotControlCommand {
 }
 
 /// The application-owned boundary implemented by a robot-control adapter.
-pub(crate) trait RobotControlPort {
+pub trait RobotControlPort {
     async fn hold(&self, robot: &str) -> Result<(), String>;
     async fn release(&self, robot: &str) -> Result<(), String>;
     async fn set_joint_goals(
@@ -33,7 +33,7 @@ pub(crate) trait RobotControlPort {
 }
 
 /// Execute operator-facing robot-control actions as one control-thread command.
-pub(crate) async fn execute<P: RobotControlPort + ?Sized>(
+pub async fn execute<P: RobotControlPort + ?Sized>(
     control: &P,
     command: RobotControlCommand,
 ) -> Result<(), ApplicationError> {

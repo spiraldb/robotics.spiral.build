@@ -3,7 +3,7 @@
 /// Stable failure categories that delivery adapters may present as HTTP,
 /// desktop, CLI, or other transport-specific responses.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ApplicationError {
+pub enum ApplicationError {
     InvalidInput(String),
     NotFound(String),
     Conflict(String),
@@ -12,11 +12,11 @@ pub(crate) enum ApplicationError {
 }
 
 impl ApplicationError {
-    pub(crate) fn conflict(message: impl Into<String>) -> Self {
+    pub fn conflict(message: impl Into<String>) -> Self {
         Self::Conflict(message.into())
     }
 
-    pub(crate) fn message(&self) -> &str {
+    pub fn message(&self) -> &str {
         match self {
             Self::InvalidInput(message)
             | Self::NotFound(message)

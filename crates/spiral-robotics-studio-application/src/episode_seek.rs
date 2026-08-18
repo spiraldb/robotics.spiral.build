@@ -10,7 +10,7 @@ use super::episode_arms::select_recorded_arm;
 use super::error::ApplicationError;
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct SeekEpisodeCommand {
+pub struct SeekEpisodeCommand {
     pub episode: String,
     pub robot: String,
     pub source_arm: Option<String>,
@@ -18,26 +18,26 @@ pub(crate) struct SeekEpisodeCommand {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SeekControlMode {
+pub enum SeekControlMode {
     Idle,
     Replay,
     Other,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ActiveRecording {
+pub struct ActiveRecording {
     pub episode: String,
     pub paused: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SeekActivity {
+pub struct SeekActivity {
     pub recording: Option<ActiveRecording>,
     pub mode: SeekControlMode,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SeekTarget {
+pub struct SeekTarget {
     pub id: String,
     pub robot_type: Option<String>,
     pub connected: bool,
@@ -46,7 +46,7 @@ pub(crate) struct SeekTarget {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct SeekableEpisode {
+pub struct SeekableEpisode {
     pub id: String,
     pub arms: Vec<String>,
     pub sample_hz: f64,
@@ -55,20 +55,20 @@ pub(crate) struct SeekableEpisode {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct SampledArm {
+pub struct SampledArm {
     pub id: String,
     pub normalized: BTreeMap<String, Option<f64>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct HistoricalSample {
+pub struct HistoricalSample {
     pub seconds: f64,
     pub frame: u64,
     pub arms: Vec<SampledArm>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct PhysicalSeekPlan {
+pub struct PhysicalSeekPlan {
     pub ticket: u64,
     pub robot: String,
     pub episode: String,
@@ -77,13 +77,13 @@ pub(crate) struct PhysicalSeekPlan {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum HistoricalSeekState {
+pub enum HistoricalSeekState {
     Seeking,
     Coalesced,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct HistoricalSeekResult {
+pub struct HistoricalSeekResult {
     pub state: HistoricalSeekState,
     pub episode: String,
     pub robot: String,
@@ -93,7 +93,7 @@ pub(crate) struct HistoricalSeekResult {
     pub frame: u64,
 }
 
-pub(crate) trait PhysicalSeekPort {
+pub trait PhysicalSeekPort {
     fn activity(&self) -> SeekActivity;
     fn target(&self, robot: &str) -> Result<Option<SeekTarget>, ApplicationError>;
     fn episode(&self, episode: &str) -> Result<SeekableEpisode, ApplicationError>;
@@ -110,7 +110,7 @@ pub(crate) trait PhysicalSeekPort {
     async fn commit_if_current(&self, plan: PhysicalSeekPlan) -> Result<bool, ApplicationError>;
 }
 
-pub(crate) async fn seek<P: PhysicalSeekPort + ?Sized>(
+pub async fn seek<P: PhysicalSeekPort + ?Sized>(
     port: &P,
     command: SeekEpisodeCommand,
 ) -> Result<HistoricalSeekResult, ApplicationError> {
