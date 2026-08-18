@@ -63,6 +63,32 @@ pub struct VideoAssetView {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct EpisodeInspectionView {
+    pub episode: EpisodeView,
+    pub sample_times_seconds: Vec<f64>,
+    pub follow_error_degrees: Vec<Option<f64>>,
+    pub arms: Vec<EpisodeInspectionArmView>,
+    pub videos: Vec<VideoAssetView>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EpisodeInspectionArmView {
+    pub arm: String,
+    pub joints: Vec<String>,
+    pub normalized: Vec<Option<f64>>,
+    pub raw: Vec<i64>,
+    pub velocity: OptionalFrameMatrixView,
+    pub effort: OptionalFrameMatrixView,
+    pub action: OptionalFrameMatrixView,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OptionalFrameMatrixView {
+    pub present: Vec<bool>,
+    pub values: Vec<Option<f64>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct EpisodeTimelineView {
     pub episode: EpisodeView,
     pub samples: TimelineMetadataView,
@@ -127,6 +153,7 @@ pub trait EpisodeQueryPort: Send + Sync {
         query: EpisodeTraceQuery,
     ) -> Result<TimelineTracesView, ApplicationError>;
     fn timeline(&self, episode: String) -> Result<EpisodeTimelineView, ApplicationError>;
+    fn inspection(&self, episode: String) -> Result<EpisodeInspectionView, ApplicationError>;
     fn timeline_sample(
         &self,
         episode: String,
@@ -169,6 +196,13 @@ pub fn timeline<P: EpisodeQueryPort + ?Sized>(
     episode: String,
 ) -> Result<EpisodeTimelineView, ApplicationError> {
     port.timeline(validate_episode_id(episode)?)
+}
+
+pub fn inspection<P: EpisodeQueryPort + ?Sized>(
+    port: &P,
+    episode: String,
+) -> Result<EpisodeInspectionView, ApplicationError> {
+    port.inspection(validate_episode_id(episode)?)
 }
 
 pub fn timeline_sample<P: EpisodeQueryPort + ?Sized>(
@@ -258,6 +292,14 @@ mod tests {
             Err(ApplicationError::NotFound(episode))
         }
 
+        fn inspection(&self, episode: String) -> Result<EpisodeInspectionView, ApplicationError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("inspection:{episode}"));
+            Err(ApplicationError::NotFound(episode))
+        }
+
         fn timeline_sample(
             &self,
             episode: String,
@@ -293,6 +335,8 @@ mod tests {
         let sample = timeline_sample(&queries, "episode_000001".to_owned(), 0.5).unwrap();
         assert_eq!(sample.seconds, 0.5);
         assert!(timeline_sample(&queries, "episode_000001".to_owned(), f64::NAN).is_err());
+        assert!(inspection(&queries, "episode_000001".to_owned()).is_err());
+        assert!(inspection(&queries, "../episode".to_owned()).is_err());
         authorize_asset(&queries, "episode_000001".to_owned()).unwrap();
         assert!(authorize_asset(&queries, "../episode".to_owned()).is_err());
         assert!(authorize_asset(&queries, " episode".to_owned()).is_err());
@@ -301,6 +345,7 @@ mod tests {
             [
                 "trace:episode_000001:2048",
                 "sample:episode_000001:0.5",
+                "inspection:episode_000001",
                 "exists:episode_000001",
             ]
         );

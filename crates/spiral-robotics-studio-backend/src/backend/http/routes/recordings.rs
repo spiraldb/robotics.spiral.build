@@ -12,6 +12,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/episodes/{id}", axum::routing::delete(delete_episode))
         .route("/episodes/{id}/judge", post(judge_episode))
         .route("/episodes/{id}/trace", get(episode_trace))
+        .route("/episodes/{id}/inspection", get(episode_inspection))
         .route("/episodes/{id}/timeline", get(episode_timeline))
         .route(
             "/episodes/{id}/timeline/traces",
@@ -501,6 +502,14 @@ impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
         })
     }
 
+    fn inspection(&self, episode: String) -> Result<EpisodeInspectionView, ApplicationError> {
+        self.state
+            .episodes
+            .inspection(&episode)
+            .map(application_episode_inspection)
+            .map_err(episode_application_error)
+    }
+
     fn timeline_sample(
         &self,
         episode: String,
@@ -592,6 +601,109 @@ fn application_video_asset(video: VideoAssetMetadata) -> VideoAssetView {
     }
 }
 
+fn application_episode_inspection(inspection: EpisodeInspection) -> EpisodeInspectionView {
+    let samples = &inspection.episode.samples;
+    let arms = inspection
+        .episode
+        .start
+        .arms
+        .iter()
+        .enumerate()
+        .map(|(arm_index, arm)| {
+            let joint_count = arm.joints.len();
+            EpisodeInspectionArmView {
+                arm: arm.id.clone(),
+                joints: arm.joints.clone(),
+                normalized: samples
+                    .iter()
+                    .flat_map(|sample| sample.normalized[arm_index].iter().copied())
+                    .collect(),
+                raw: samples
+                    .iter()
+                    .flat_map(|sample| sample.raw[arm_index].iter().copied())
+                    .collect(),
+                velocity: application_optional_frame_matrix(
+                    samples,
+                    arm_index,
+                    joint_count,
+                    |sample, index| {
+                        sample
+                            .velocity
+                            .as_ref()
+                            .and_then(|arms| arms.get(index))
+                            .map(Vec::as_slice)
+                    },
+                ),
+                effort: application_optional_frame_matrix(
+                    samples,
+                    arm_index,
+                    joint_count,
+                    |sample, index| {
+                        sample
+                            .effort
+                            .as_ref()
+                            .and_then(|arms| arms.get(index))
+                            .map(Vec::as_slice)
+                    },
+                ),
+                action: application_optional_frame_matrix(
+                    samples,
+                    arm_index,
+                    joint_count,
+                    |sample, index| {
+                        sample
+                            .action
+                            .get(index)
+                            .and_then(Option::as_ref)
+                            .map(Vec::as_slice)
+                    },
+                ),
+            }
+        })
+        .collect();
+    EpisodeInspectionView {
+        episode: application_episode(inspection.summary),
+        sample_times_seconds: samples.iter().map(|sample| sample.seconds).collect(),
+        follow_error_degrees: samples
+            .iter()
+            .map(|sample| sample.follow_error_degrees)
+            .collect(),
+        arms,
+        videos: inspection
+            .videos
+            .into_iter()
+            .map(application_video_asset)
+            .collect(),
+    }
+}
+
+fn application_optional_frame_matrix(
+    samples: &[crate::backend::recording::episodes::Sample],
+    arm_index: usize,
+    joint_count: usize,
+    values_at: impl for<'a> Fn(
+        &'a crate::backend::recording::episodes::Sample,
+        usize,
+    ) -> Option<&'a [Option<f64>]>,
+) -> OptionalFrameMatrixView {
+    let mut present = Vec::with_capacity(samples.len());
+    let mut values = Vec::with_capacity(samples.len().saturating_mul(joint_count));
+    for sample in samples {
+        match values_at(sample, arm_index) {
+            Some(frame) => {
+                debug_assert_eq!(frame.len(), joint_count);
+                present.push(true);
+                values.extend(frame.iter().copied());
+            }
+            None => {
+                present.push(false);
+                values.extend(std::iter::repeat_n(None, joint_count));
+            }
+        }
+    }
+    OptionalFrameMatrixView { present, values }
+}
+
 fn contract_video_asset(video: VideoAssetView) -> VideoAssetMetadata {
     VideoAssetMetadata {
         stream_id: video.stream_id,
@@ -603,6 +715,49 @@ fn contract_video_asset(video: VideoAssetView) -> VideoAssetMetadata {
         duration_seconds: video.duration_seconds,
         segment_index: video.segment_index,
         timeline_offset_seconds: video.timeline_offset_seconds,
+    }
+}
+
+fn contract_episode_inspection(inspection: EpisodeInspectionView) -> EpisodeInspectionSnapshot {
+    EpisodeInspectionSnapshot {
+        episode: contract_episode(inspection.episode),
+        sample_times_seconds: inspection.sample_times_seconds,
+        follow_error_degrees: inspection.follow_error_degrees,
+        arms: inspection
+            .arms
+            .into_iter()
+            .map(|arm| EpisodeInspectionArm {
+                arm: arm.arm,
+                joints: arm.joints,
+                normalized: arm.normalized,
+                raw: arm.raw,
+                velocity: contract_optional_frame_matrix(arm.velocity),
+                effort: contract_optional_frame_matrix(arm.effort),
+                action: contract_optional_frame_matrix(arm.action),
+            })
+            .collect(),
+        videos: inspection
+            .videos
+            .into_iter()
+            .map(|video| EpisodeVideoAssetMetadata {
+                stream_id: video.stream_id,
+                camera_id: video.camera_id,
+                width: video.width,
+                height: video.height,
+                fps: video.fps,
+                frames: video.frames,
+                duration_seconds: video.duration_seconds,
+                segment_index: video.segment_index,
+                timeline_offset_seconds: video.timeline_offset_seconds,
+            })
+            .collect(),
+    }
+}
+
+fn contract_optional_frame_matrix(matrix: OptionalFrameMatrixView) -> EpisodeOptionalFrameMatrix {
+    EpisodeOptionalFrameMatrix {
+        present: matrix.present,
+        values: matrix.values,
     }
 }
 
@@ -1144,6 +1299,19 @@ async fn episode_timeline_traces(
     .await
     .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
     Ok(Json(traces))
+}
+
+async fn episode_inspection(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<EpisodeInspectionSnapshot>, Failure> {
+    let inspection = tokio::task::spawn_blocking(move || {
+        episode_queries::inspection(&EpisodeHttpAdapter::catalog(&state), id)
+            .map(contract_episode_inspection)
+    })
+    .await
+    .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+    Ok(Json(inspection))
 }
 
 #[derive(Debug, Serialize)]

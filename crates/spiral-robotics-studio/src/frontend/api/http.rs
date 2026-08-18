@@ -15,6 +15,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use spiral_robotics_contracts::api::{ApiError, EpisodeSummary};
+pub(crate) use spiral_robotics_contracts::api::{
+    EpisodeInspectionSnapshot, EpisodeVideoAssetMetadata as VideoAssetMetadata,
+};
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
 use spiral_robotics_contracts::api::{
     RolloutSnapshot, StudioSnapshot, TelemetryFrame, TrainingSnapshot, TrainingUpdate,
@@ -61,20 +64,6 @@ pub(crate) async fn send_json_abortable<B: Serialize, T: DeserializeOwned>(
 /// POST with no request body.
 pub(crate) async fn post(path: &str) -> Result<(), String> {
     send::<()>(Method::POST, path, None).await
-}
-
-/// Filesystem-free metadata for one locally recorded camera stream.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-pub(crate) struct VideoAssetMetadata {
-    pub stream_id: String,
-    pub camera_id: String,
-    pub width: u32,
-    pub height: u32,
-    pub fps: u32,
-    pub frames: u64,
-    pub duration_seconds: f64,
-    pub segment_index: u32,
-    pub timeline_offset_seconds: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -311,17 +300,9 @@ pub(crate) fn camera_stream_url(id: &str) -> String {
     format!("/api/cameras/stream.mjpeg?id={}", encode_query(id))
 }
 
-/// Timeline detail endpoint for one persisted Spiral episode.
-pub(crate) fn episode_timeline_url(episode: &str) -> String {
-    format!("/api/episodes/{}/timeline", encode_query(episode))
-}
-
-/// Random-access sample endpoint for one persisted Spiral episode.
-pub(crate) fn timeline_sample_url(episode: &str, seconds: f64) -> String {
-    format!(
-        "/api/episodes/{}/timeline/sample?at={seconds:.6}",
-        encode_query(episode)
-    )
+/// Complete visual-inspection snapshot for one persisted Spiral episode.
+pub(crate) fn episode_inspection_url(episode: &str) -> String {
+    format!("/api/episodes/{}/inspection", encode_query(episode))
 }
 
 /// Browser-native MP4 endpoint for one segment of a local camera stream.
@@ -365,12 +346,8 @@ mod tests {
         assert_eq!(encode_query("cam 1&x=2"), "cam%201%26x%3D2");
         assert_eq!(encode_query("plain-id_1.0~"), "plain-id_1.0~");
         assert_eq!(
-            episode_timeline_url("episode 1"),
-            "/api/episodes/episode%201/timeline"
-        );
-        assert_eq!(
-            timeline_sample_url("episode 1", 1.25),
-            "/api/episodes/episode%201/timeline/sample?at=1.250000"
+            episode_inspection_url("episode 1"),
+            "/api/episodes/episode%201/inspection"
         );
         assert_eq!(
             episode_video_url("episode 1", "arm/camera", 2),

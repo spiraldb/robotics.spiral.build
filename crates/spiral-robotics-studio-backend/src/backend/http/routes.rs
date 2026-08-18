@@ -31,20 +31,21 @@ use spiral_robotics::serial_ports::{available_ports, port_description, port_kind
 use spiral_robotics_contracts::api::{
     ApiError, BackendReadiness, BackendReadinessState, CalibrationReapplyResponse, CameraStatus,
     ConnectionStatus, ConnectionTestResponse, CreateRobotRequest, DataSettings,
-    EpisodeCatalogResponse, EpisodeSummary, GoalRequest, IdentifyPortRequest, IdentifyPortResponse,
-    JudgeEpisodeRequest, ModeSelection, PortSettings, RobotSummary, RolloutSnapshot,
-    SerialPortSummary, SetRecordingPausedRequest, SetReplayPausedRequest, SpiralQueryRequest,
-    SpiralQueryResponse, SpiralSettings as ContractSpiralSettings, StartRecordingRequest,
-    StartReplayRequest, StartRolloutRequest, StartSpiralReplayRequest, StartTrainingRequest,
-    StopRecordingRequest, StudioSnapshot, TrainingPolicy as ContractTrainingPolicy, TrainingRun,
-    TrainingSnapshot, UpdateDataSettingsRequest, UpdateRobotRequest, VideoSettings,
-    default_teleoperation_pair,
+    EpisodeCatalogResponse, EpisodeInspectionArm, EpisodeInspectionSnapshot,
+    EpisodeOptionalFrameMatrix, EpisodeSummary, EpisodeVideoAssetMetadata, GoalRequest,
+    IdentifyPortRequest, IdentifyPortResponse, JudgeEpisodeRequest, ModeSelection, PortSettings,
+    RobotSummary, RolloutSnapshot, SerialPortSummary, SetRecordingPausedRequest,
+    SetReplayPausedRequest, SpiralQueryRequest, SpiralQueryResponse,
+    SpiralSettings as ContractSpiralSettings, StartRecordingRequest, StartReplayRequest,
+    StartRolloutRequest, StartSpiralReplayRequest, StartTrainingRequest, StopRecordingRequest,
+    StudioSnapshot, TrainingPolicy as ContractTrainingPolicy, TrainingRun, TrainingSnapshot,
+    UpdateDataSettingsRequest, UpdateRobotRequest, VideoSettings, default_teleoperation_pair,
 };
 use spiral_robotics_core::calibration::{Calibration, CalibrationInput, MotorSpec};
 
 use crate::backend::recording::episodes::{
-    ArmCondition, EpisodeError, EpisodeStore, EpisodeWriter, TimelineMetadata, TimelineSample,
-    TimelineTraces, build_arms,
+    ArmCondition, EpisodeError, EpisodeInspection, EpisodeStore, EpisodeWriter, TimelineMetadata,
+    TimelineSample, TimelineTraces, build_arms,
 };
 use crate::backend::robotics::cameras::{CameraManager, Frame};
 use crate::backend::robotics::hardware::{HardwareHandle, RobotSpec};
@@ -75,10 +76,10 @@ use spiral_robotics_studio_application::device_discovery::{
     SerialPortInventory, SerialPortQueryPort, SerialPortView,
 };
 use spiral_robotics_studio_application::episode_queries::{
-    self, EpisodeArmView, EpisodeQueryPort, EpisodeTimelineView, EpisodeTraceQuery, EpisodeView,
-    RecordingGapView, TimelineArmSampleView, TimelineMetadataView, TimelineSampleView,
-    TimelineTraceLaneView, TimelineTracePointView, TimelineTraceSeriesView, TimelineTracesView,
-    VideoAssetView,
+    self, EpisodeArmView, EpisodeInspectionArmView, EpisodeInspectionView, EpisodeQueryPort,
+    EpisodeTimelineView, EpisodeTraceQuery, EpisodeView, OptionalFrameMatrixView, RecordingGapView,
+    TimelineArmSampleView, TimelineMetadataView, TimelineSampleView, TimelineTraceLaneView,
+    TimelineTracePointView, TimelineTraceSeriesView, TimelineTracesView, VideoAssetView,
 };
 use spiral_robotics_studio_application::episode_seek::{
     self, ActiveRecording, HistoricalSample, HistoricalSeekState, PhysicalSeekPlan,

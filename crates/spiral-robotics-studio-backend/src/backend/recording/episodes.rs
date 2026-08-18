@@ -117,6 +117,13 @@ pub(crate) struct CompletedEpisode {
     pub completion: EpisodeCompletion,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct EpisodeInspection {
+    pub episode: CompletedEpisode,
+    pub summary: EpisodeSummary,
+    pub videos: Vec<VideoAssetMetadata>,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ReappliedEpisodePositions {
     pub updated_episode_ids: Vec<String>,
@@ -314,6 +321,21 @@ impl EpisodeStore {
                 })
             })
             .map_err(EpisodeError::Invalid)
+    }
+
+    pub(crate) fn inspection(&self, id: &str) -> Result<EpisodeInspection, EpisodeError> {
+        let episode = self.completed(id)?;
+        let summary = summary(
+            &episode.start,
+            &episode.completion,
+            episode.samples.len() as u64,
+        );
+        let videos = self.video_metadata_for_existing(id)?;
+        Ok(EpisodeInspection {
+            episode,
+            summary,
+            videos,
+        })
     }
 
     pub(crate) fn next_id(&self) -> Result<String, EpisodeError> {
@@ -604,6 +626,13 @@ impl EpisodeStore {
 
     pub(crate) fn video_metadata(&self, id: &str) -> Result<Vec<VideoAssetMetadata>, EpisodeError> {
         self.get(id)?;
+        self.video_metadata_for_existing(id)
+    }
+
+    fn video_metadata_for_existing(
+        &self,
+        id: &str,
+    ) -> Result<Vec<VideoAssetMetadata>, EpisodeError> {
         let relation = sql::relation(self.repository.namespace(), Table::VideoAssets);
         let id = sql::string_literal(id);
         self.repository.run_blocking(move |connection| {

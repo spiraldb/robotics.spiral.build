@@ -80,6 +80,7 @@ fn feature_routers_preserve_every_public_path_exactly_once() {
         "/episodes/export",
         "/episodes/import",
         "/episodes/{id}",
+        "/episodes/{id}/inspection",
         "/episodes/{id}/judge",
         "/episodes/{id}/trace",
         "/episodes/{id}/timeline",

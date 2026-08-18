@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 
 use crate::frontend::api::commands;
 use crate::frontend::api::historical::{
-    HistoricalPreview, historical_replay_slot, request_historical_preview,
+    EpisodeInspectionCache, HistoricalPreview, historical_replay_slot, request_historical_preview,
 };
 use crate::frontend::app::activity::{Activity, RecordedSource, TimelineSubject, TimelineTarget};
 use crate::frontend::app::state::Studio;
@@ -97,6 +97,7 @@ pub(crate) struct TimelineActionContext {
     pub seek_context: Option<(String, String, Option<String>)>,
     pub historical_state: Signal<Option<RecordedSource<HistoricalPreview>>>,
     pub historical_revision: Signal<u64>,
+    pub historical_cache: Signal<EpisodeInspectionCache>,
     pub automatic_preview_target: Signal<Option<(String, u64)>>,
     pub interactive_preview_target: Signal<Option<(String, u64)>>,
 }
@@ -113,6 +114,7 @@ pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: T
         seek_context,
         mut historical_state,
         mut historical_revision,
+        mut historical_cache,
         mut automatic_preview_target,
         mut interactive_preview_target,
     } = context;
@@ -131,6 +133,7 @@ pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: T
                     commands::set_recording_paused(studio, &episode, paused);
                     follow_live.set(!paused);
                     if !paused {
+                        historical_cache.write().invalidate(&episode);
                         historical_state.set(None);
                     }
                 }
@@ -138,12 +141,14 @@ pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: T
             TimelineCaptureAction::Stop | TimelineCaptureAction::Discard => {
                 if let Some(episode) = episode {
                     let keep = action == TimelineCaptureAction::Stop;
+                    let finished_episode = episode.clone();
                     commands::stop_recording(
                         studio,
                         &episode,
                         keep,
                         EventHandler::new(
                             move |_: spiral_robotics_contracts::api::EpisodeSummary| {
+                                historical_cache.write().invalidate(&finished_episode);
                                 let next_revision = historical_revision.peek().wrapping_add(1);
                                 historical_revision.set(next_revision);
                                 historical_state.set(None);
@@ -199,9 +204,11 @@ pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: T
                     request_historical_preview(
                         studio,
                         episode,
+                        None,
                         request.seconds,
                         historical_state,
                         historical_revision,
+                        historical_cache,
                     );
                 }
             }
@@ -240,12 +247,15 @@ pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: T
             if review_episode.as_deref() == Some(episode.as_str()) =>
         {
             historical_state.set(None);
+            historical_cache.write().invalidate(&episode);
             request_historical_preview(
                 studio,
                 episode,
+                None,
                 playhead(),
                 historical_state,
                 historical_revision,
+                historical_cache,
             );
         }
         _ => studio.report("The Timeline subject changed before the action was applied."),

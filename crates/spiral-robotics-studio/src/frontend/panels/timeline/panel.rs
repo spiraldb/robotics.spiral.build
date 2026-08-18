@@ -6,6 +6,8 @@
 //! when the caller passes an allowed robot-sync [`TimelineGate`] and the
 //! operator has explicitly enabled “Sync robot”.
 
+use std::sync::Arc;
+
 use charming::Chart;
 use charming::component::{Axis, Grid};
 use charming::datatype::{CompositeValue, DataFrame, DataPoint};
@@ -142,19 +144,6 @@ impl RecordedTimelineTraces {
             }
         })
     }
-}
-
-/// Fetch bounded historical traces for a completed or paused episode.
-pub(crate) async fn load_recorded_timeline_traces(
-    episode: &str,
-    buckets: usize,
-) -> Result<RecordedTimelineTraces, String> {
-    let path = format!(
-        "{}/traces?buckets={}",
-        crate::frontend::api::http::episode_timeline_url(episode),
-        buckets.clamp(1, 512)
-    );
-    crate::frontend::api::http::get(&path).await
 }
 
 /// Convert the studio's existing take signal store into the timeline's fixed
@@ -360,7 +349,7 @@ fn transport_intent(playback: TimelinePlayback, sync_robot: bool) -> TimelineTra
 #[component]
 pub(crate) fn StudioTimeline(
     state: StudioTimelineState,
-    signal_lanes: [TimelineSignalLane; 6],
+    signal_lanes: Arc<[TimelineSignalLane; 6]>,
     signal_source: SignalSource,
     capabilities: TimelineCapabilities,
     on_action: EventHandler<TimelineAction>,

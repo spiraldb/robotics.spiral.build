@@ -1,5 +1,7 @@
 //! Reactive assembly of the persisted frontend panel workspace.
 
+use std::sync::Arc;
+
 use dioxus::prelude::*;
 use spiral_robotics_contracts::api::{ModeSelection, ReplayPhase, ReplayPurpose};
 use spiral_robotics_panels::{DockZone, Panel, PanelId, PanelLayout, PanelWorkspace};
@@ -40,9 +42,9 @@ use crate::frontend::screens::rollout::workspace::{
     selected_checkpoint_camera_roles,
 };
 
-use historical::{HistoricalPreview, historical_replay_slot, request_historical_preview};
-#[cfg(test)]
-use historical::{attach_historical_trace_failure, attach_historical_traces};
+use historical::{
+    EpisodeInspectionCache, HistoricalPreview, historical_replay_slot, request_historical_preview,
+};
 
 #[derive(Clone, PartialEq)]
 pub(crate) struct ScreenWorkspaceDefinition {
@@ -85,6 +87,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
     let mut robot_sync_target = timeline.robot_sync_target;
     let mut historical_state = use_signal(|| None::<RecordedSource<HistoricalPreview>>);
     let mut historical_revision = use_signal(|| 0_u64);
+    let historical_cache = use_signal(EpisodeInspectionCache::default);
     let mut sampled_replay_slot = use_signal(|| None::<(String, u64)>);
     let mut automatic_preview_target = use_signal(|| None::<(String, u64)>);
     let mut interactive_preview_target = use_signal(|| None::<(String, u64)>);
@@ -120,9 +123,11 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                 request_historical_preview(
                     studio,
                     episode.clone(),
+                    None,
                     next,
                     historical_state,
                     historical_revision,
+                    historical_cache,
                 );
             }
             if next >= duration {
@@ -158,9 +163,11 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
         request_historical_preview(
             studio,
             replay.episode,
+            None,
             replay.elapsed_seconds,
             historical_state,
             historical_revision,
+            historical_cache,
         );
     });
 
@@ -213,8 +220,12 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
     // A paused take remains inspectable in Live. Completed recordings return
     // to the live source and stay available from Data instead.
     use_effect(move || {
-        let (episode, seconds) = match studio.recording() {
-            Some(recording) if recording.paused => (recording.episode, recording.elapsed_seconds),
+        let (episode, frames, seconds) = match studio.recording() {
+            Some(recording) if recording.paused => (
+                recording.episode,
+                recording.frames,
+                recording.elapsed_seconds,
+            ),
             Some(_) => {
                 if automatic_preview_target.peek().is_some() {
                     automatic_preview_target.set(None);
@@ -238,9 +249,11 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
         request_historical_preview(
             studio,
             episode,
+            Some(frames),
             seconds,
             historical_state,
             historical_revision,
+            historical_cache,
         );
     });
 
@@ -258,7 +271,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
     use_effect(use_reactive(
         (&projected_recorded_identity,),
         move |(identity,)| {
-            let Some((episode, _source_frames, seconds)) = identity else {
+            let Some((episode, source_frames, seconds)) = identity else {
                 return;
             };
             // The stable episode ID survives checkpoints and finalization.
@@ -271,17 +284,19 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             request_historical_preview(
                 studio,
                 episode,
+                Some(source_frames),
                 seconds,
                 historical_state,
                 historical_revision,
+                historical_cache,
             );
         },
     ));
     let subject = projection.timeline.clone();
-    let live_signal_lanes = {
+    let live_signal_lanes = Arc::new({
         let store = studio.recording_signals.read();
         signal_lanes_from_store(&store)
-    };
+    });
     let assigned_cameras = assigned_cameras(projection.activity);
     let review_episode = subject.recorded_episode().map(str::to_owned);
     let historical_source = historical_state
@@ -294,38 +309,22 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
         .cloned();
     let history_active = review_episode.is_some();
     let signal_lanes = match historical.as_ref() {
-        Some(preview) => preview
-            .signal_lanes
-            .clone()
-            .unwrap_or_else(|| RecordedTimelineTraces::default().signal_lanes()),
-        None if history_active => RecordedTimelineTraces::default().signal_lanes(),
+        Some(preview) => Arc::clone(&preview.signal_lanes),
+        None if history_active => Arc::new(RecordedTimelineTraces::default().signal_lanes()),
         None => live_signal_lanes,
     };
-    // The lanes above cannot tell absence from delay, so the reason travels
-    // beside them. Empty lanes only mean "this episode had no samples" once the
-    // trace request has actually come back.
     let signal_source = match review_episode.as_ref() {
         None => SignalSource::Live,
         Some(episode) => {
-            let failure = historical
+            let failure = historical_source
                 .as_ref()
-                .and_then(|preview| preview.signal_lanes_error.clone())
-                .or_else(|| {
-                    historical_source
-                        .as_ref()
-                        .and_then(|source| source.state.reason().map(str::to_owned))
-                });
+                .and_then(|source| source.state.reason().map(str::to_owned));
             match failure {
                 Some(reason) => SignalSource::RecordedUnavailable {
                     episode: episode.clone(),
                     reason,
                 },
-                None if historical
-                    .as_ref()
-                    .is_some_and(|preview| preview.signal_lanes.is_some()) =>
-                {
-                    SignalSource::RecordedReady
-                }
+                None if historical.is_some() => SignalSource::RecordedReady,
                 None => SignalSource::RecordedLoading,
             }
         }
@@ -589,6 +588,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                     seek_context: seek_context.clone(),
                     historical_state,
                     historical_revision,
+                    historical_cache,
                     automatic_preview_target,
                     interactive_preview_target,
                 },
@@ -948,7 +948,7 @@ mod tests {
     fn preview(at: f64, videos: Vec<VideoAssetMetadata>) -> HistoricalPreview {
         HistoricalPreview {
             episode: "take-1".to_owned(),
-            timeline: EpisodeTimelineResponse {
+            timeline: Arc::new(EpisodeTimelineResponse {
                 episode: EpisodeSummary {
                     dataset_id: "default".to_owned(),
                     id: "take-1".to_owned(),
@@ -965,13 +965,12 @@ mod tests {
                 },
                 samples: TimelineMetadata::default(),
                 videos,
-            },
+            }),
             sample: TimelineSample {
                 seconds: at,
                 ..TimelineSample::default()
             },
-            signal_lanes: None,
-            signal_lanes_error: None,
+            signal_lanes: Arc::new(RecordedTimelineTraces::default().signal_lanes()),
         }
     }
 
@@ -1188,137 +1187,8 @@ mod tests {
     }
 
     #[test]
-    fn stale_trace_results_cannot_cross_episode_revisions() {
-        let mut source = Some(RecordedSource {
-            episode: "take-1".to_owned(),
-            seconds: 0.0,
-            state: LoadState::Ready(preview(0.0, Vec::new())),
-        });
-        let traces = RecordedTimelineTraces::default();
-
-        assert!(!attach_historical_traces(
-            &mut source,
-            "take-1",
-            599,
-            &traces,
-        ));
-        assert!(
-            source
-                .as_ref()
-                .and_then(RecordedSource::renderable)
-                .is_some_and(|preview| preview.signal_lanes.is_none())
-        );
-
-        assert!(attach_historical_traces(
-            &mut source,
-            "take-1",
-            600,
-            &traces,
-        ));
-        assert!(
-            source
-                .as_ref()
-                .and_then(RecordedSource::renderable)
-                .is_some_and(|preview| preview.signal_lanes.is_some())
-        );
-
-        let mut in_flight_sample = Some(RecordedSource {
-            episode: "take-1".to_owned(),
-            seconds: 2.0,
-            state: LoadState::Loading {
-                previous: Some(preview(1.0, Vec::new())),
-            },
-        });
-        assert!(attach_historical_traces(
-            &mut in_flight_sample,
-            "take-1",
-            600,
-            &traces,
-        ));
-        assert!(
-            in_flight_sample
-                .as_ref()
-                .and_then(RecordedSource::renderable)
-                .is_some_and(|preview| preview.signal_lanes.is_some())
-        );
-    }
-
-    #[test]
-    fn a_dead_trace_request_is_recorded_as_unavailable_not_as_an_empty_episode() {
-        let mut source = Some(RecordedSource {
-            episode: "take-1".to_owned(),
-            seconds: 0.0,
-            state: LoadState::Ready(preview(0.0, Vec::new())),
-        });
-
-        // A failure from a different persisted revision belongs to a take that is
-        // no longer on the clock.
-        assert!(!attach_historical_trace_failure(
-            &mut source,
-            "take-1",
-            599,
-            "The signal traces did not answer within 15s.",
-        ));
-
-        assert!(attach_historical_trace_failure(
-            &mut source,
-            "take-1",
-            600,
-            "The signal traces did not answer within 15s.",
-        ));
-        let failed = source
-            .as_ref()
-            .and_then(RecordedSource::renderable)
-            .expect("preview");
-        assert!(failed.signal_lanes.is_none());
-        assert_eq!(
-            failed.signal_lanes_error.as_deref(),
-            Some("The signal traces did not answer within 15s.")
-        );
-    }
-
-    #[test]
-    fn traces_arriving_after_a_timeout_clear_the_failure() {
-        let mut source = Some(RecordedSource {
-            episode: "take-1".to_owned(),
-            seconds: 0.0,
-            state: LoadState::Ready(preview(0.0, Vec::new())),
-        });
-        attach_historical_trace_failure(&mut source, "take-1", 600, "timed out");
-
-        assert!(attach_historical_traces(
-            &mut source,
-            "take-1",
-            600,
-            &RecordedTimelineTraces::default(),
-        ));
-        let recovered = source
-            .as_ref()
-            .and_then(RecordedSource::renderable)
-            .expect("preview");
-        assert!(recovered.signal_lanes.is_some());
-        assert_eq!(recovered.signal_lanes_error, None);
-
-        // A late timeout from the same generation must not un-say a success the
-        // operator can already see.
-        assert!(!attach_historical_trace_failure(
-            &mut source,
-            "take-1",
-            600,
-            "timed out",
-        ));
-        assert_eq!(
-            source
-                .as_ref()
-                .and_then(RecordedSource::renderable)
-                .and_then(|preview| preview.signal_lanes_error.as_deref()),
-            None
-        );
-    }
-
-    #[test]
     fn a_missing_recorded_scene_source_never_falls_back_to_live() {
-        let episode = preview(0.0, Vec::new()).timeline.episode;
+        let episode = preview(0.0, Vec::new()).timeline.episode.clone();
         let subject = TimelineSubject::Episode {
             activity: Activity::Data,
             episode,

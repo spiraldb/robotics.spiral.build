@@ -24,6 +24,20 @@ follower without making visual scrubbing dangerous.
   row.
 - **TIMELINE-008** Play after pause must continue from the current playhead.
 - **TIMELINE-009** A separate Rewind action is not required.
+- **TIMELINE-010** The first visual inspection of an episode in a browser
+  session must load one immutable inspection snapshot containing the episode
+  clock, joint state tracks, signal inputs, and video alignment metadata.
+- **TIMELINE-011** The inspection snapshot must store frame data in shared
+  columnar tracks so arm and joint identity are not repeated for every sample.
+- **TIMELINE-012** Scene pose, signal charts, preview playback, and visual
+  scrubbing must resolve from the loaded snapshot without making per-frame
+  database requests.
+- **TIMELINE-013** Studio must retain a bounded browser cache of inspection
+  snapshots, distinguish a changed persisted frame count, and invalidate an
+  episode on explicit reload or recording lifecycle changes.
+- **TIMELINE-014** Video payloads must remain separate range-addressable media;
+  the inspection snapshot carries only the metadata needed to align them with
+  the episode clock.
 
 ## Physical replay
 

@@ -1461,6 +1461,58 @@ impl EpisodeSummary {
     }
 }
 
+/// One immutable, browser-cacheable projection of a recorded episode.
+///
+/// The frame clock and arm tracks are columnar: arm and joint identities occur
+/// once, while every visual seek indexes the flat frame-major matrices in
+/// memory. Video bytes remain separate range-addressable resources.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EpisodeInspectionSnapshot {
+    pub episode: EpisodeSummary,
+    pub sample_times_seconds: Vec<f64>,
+    pub follow_error_degrees: Vec<Option<f64>>,
+    pub arms: Vec<EpisodeInspectionArm>,
+    pub videos: Vec<EpisodeVideoAssetMetadata>,
+}
+
+/// All recorded scalar channels for one arm, sharing one frame and joint
+/// ordering. A matrix value for frame `f`, joint `j` is stored at
+/// `f * joints.len() + j`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EpisodeInspectionArm {
+    pub arm: String,
+    pub joints: Vec<String>,
+    pub normalized: Vec<Option<f64>>,
+    pub raw: Vec<i64>,
+    pub velocity: EpisodeOptionalFrameMatrix,
+    pub effort: EpisodeOptionalFrameMatrix,
+    pub action: EpisodeOptionalFrameMatrix,
+}
+
+/// A channel that may be absent for an entire arm at an individual frame.
+/// `present` has one entry per frame; `values` remains frame-major and uses
+/// nulls for unavailable joints without repeating arm or joint names.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct EpisodeOptionalFrameMatrix {
+    pub present: Vec<bool>,
+    pub values: Vec<Option<f64>>,
+}
+
+/// Filesystem-free metadata needed to align a browser-native video with the
+/// episode clock. The MP4 payload deliberately does not travel in the snapshot.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EpisodeVideoAssetMetadata {
+    pub stream_id: String,
+    pub camera_id: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub frames: u64,
+    pub duration_seconds: f64,
+    pub segment_index: u32,
+    pub timeline_offset_seconds: Option<f64>,
+}
+
 /// Browser-owned episode catalog loaded on startup or explicit refresh.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeCatalogResponse {
