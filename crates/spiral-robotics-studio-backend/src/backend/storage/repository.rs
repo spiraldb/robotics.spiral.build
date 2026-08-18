@@ -4,16 +4,17 @@
 //! share this connection pool. Nothing below this module falls back to a
 //! filesystem or a second database.
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use adbc_core::error::Status as AdbcStatus;
 use adbc_core::options::{
-    AdbcVersion, IngestMode, ObjectDepth, OptionConnection, OptionDatabase, OptionStatement,
-    OptionValue,
+    IngestMode, ObjectDepth, OptionConnection, OptionDatabase, OptionStatement, OptionValue,
 };
 use adbc_core::{Connection as _, Database as _, Driver as _, Optionable as _, Statement as _};
-use adbc_driver_manager::{ManagedConnection, ManagedDatabase, ManagedDriver, ManagedStatement};
+use adbc_driver_spiraldb::{
+    Connection as SpiralConnection, Database as SpiralDatabase, Driver as SpiralDriver,
+    Statement as SpiralStatement,
+};
 use arrow_array::{RecordBatch, RecordBatchReader};
 use arrow_schema::Schema;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -32,7 +33,6 @@ const TRANSPORT_FAILURE_MARKERS: [&str; 5] = [
 
 #[derive(Clone)]
 struct ConnectionConfig {
-    driver_path: PathBuf,
     project_id: String,
     endpoint: String,
     spfs_endpoint: String,
@@ -46,12 +46,12 @@ struct ConnectionConfig {
 /// bounded repository pool; async jobs additionally run away from Tokio's
 /// async worker threads.
 pub(crate) struct RepositoryConnection {
-    inner: ManagedConnection,
+    inner: SpiralConnection,
     reusable: bool,
 }
 
 impl RepositoryConnection {
-    fn into_reusable_inner(self) -> Option<ManagedConnection> {
+    fn into_reusable_inner(self) -> Option<SpiralConnection> {
         self.reusable.then_some(self.inner)
     }
 
@@ -112,7 +112,7 @@ impl RepositoryConnection {
 /// A statement whose synchronous ADBC implementation remains private to this
 /// adapter. Callers can compose repository work without importing ADBC.
 pub(crate) struct RepositoryStatement {
-    inner: ManagedStatement,
+    inner: SpiralStatement,
 }
 
 impl RepositoryStatement {
@@ -150,20 +150,17 @@ impl RepositoryStatement {
 
 #[derive(Default)]
 struct ConnectionPool {
-    driver: Option<ManagedDriver>,
-    database: Option<ManagedDatabase>,
-    available: Vec<ManagedConnection>,
+    database: Option<SpiralDatabase>,
+    available: Vec<SpiralConnection>,
 }
 
 impl ConnectionPool {
-    fn checkout(&mut self, config: &ConnectionConfig) -> Result<ManagedConnection, String> {
+    fn checkout(&mut self, config: &ConnectionConfig) -> Result<SpiralConnection, String> {
         if let Some(connection) = self.available.pop() {
             return Ok(connection);
         }
         if self.database.is_none() {
-            let (driver, database) = open_database(config)?;
-            self.driver = Some(driver);
-            self.database = Some(database);
+            self.database = Some(open_database(config)?);
         }
         self.database
             .as_ref()
@@ -175,7 +172,7 @@ impl ConnectionPool {
             .map_err(|error| format!("connecting Spiral ADBC database: {error}"))
     }
 
-    fn checkin(&mut self, connection: ManagedConnection) {
+    fn checkin(&mut self, connection: SpiralConnection) {
         debug_assert!(
             self.available.len() < HOSTED_ADBC_CONNECTIONS,
             "the bounded checkout gate prevents an oversized idle pool"
@@ -186,12 +183,10 @@ impl ConnectionPool {
     fn reset(&mut self) {
         self.available.clear();
         self.database = None;
-        self.driver = None;
     }
 }
 
 pub(crate) struct SpiralRepository {
-    driver_path: PathBuf,
     endpoint: Arc<RwLock<String>>,
     spfs_endpoint: Arc<RwLock<String>>,
     credentials: Arc<RwLock<Option<SpiralCredentials>>>,
@@ -204,16 +199,12 @@ pub(crate) struct SpiralRepository {
 
 impl SpiralRepository {
     pub(crate) fn new(
-        driver_path: PathBuf,
         endpoint: String,
         spfs_endpoint: String,
         project_id: Option<String>,
         credentials: Option<SpiralCredentials>,
         namespace: String,
     ) -> Result<Self, String> {
-        if !driver_path.is_absolute() || !driver_path.is_file() {
-            return Err("Spiral ADBC driver must be an existing absolute file path".to_owned());
-        }
         let project_id = project_id
             .map(|value| validate_project_id(&value))
             .transpose()?;
@@ -221,7 +212,6 @@ impl SpiralRepository {
             return Err("Spiral namespace is not a safe SQL identifier".to_owned());
         }
         Ok(Self {
-            driver_path,
             endpoint: Arc::new(RwLock::new(endpoint)),
             spfs_endpoint: Arc::new(RwLock::new(spfs_endpoint)),
             credentials: Arc::new(RwLock::new(credentials)),
@@ -321,20 +311,14 @@ impl SpiralRepository {
             .map_err(|_| "Spiral ADBC connection pool is shutting down".to_owned())?;
         let hosted = self.hosted.clone();
         let operation_gate = self.operation_gate.clone();
-        let driver_path = self.driver_path.clone();
         let project_id = self.project_id.clone();
         let endpoint = self.endpoint.clone();
         let spfs_endpoint = self.spfs_endpoint.clone();
         let credentials = self.credentials.clone();
         tokio::task::spawn_blocking(move || {
             let _operation = read(&operation_gate);
-            let connection = connection_config(
-                driver_path,
-                &project_id,
-                &endpoint,
-                &spfs_endpoint,
-                &credentials,
-            )?;
+            let connection =
+                connection_config(&project_id, &endpoint, &spfs_endpoint, &credentials)?;
             let display_endpoint = connection.endpoint.clone();
             let connection = lock(&hosted)
                 .checkout(&connection)
@@ -365,7 +349,6 @@ impl SpiralRepository {
         let _permit = acquire_blocking(self.hosted_slots.clone())?;
         let _operation = read(&self.operation_gate);
         let connection = connection_config(
-            self.driver_path.clone(),
             &self.project_id,
             &self.endpoint,
             &self.spfs_endpoint,
@@ -404,7 +387,6 @@ impl SpiralRepository {
         let _permit = acquire_blocking(self.hosted_slots.clone())?;
         let _operation = write(&self.operation_gate);
         let connection = connection_config(
-            self.driver_path.clone(),
             &self.project_id,
             &self.endpoint,
             &self.spfs_endpoint,
@@ -432,7 +414,6 @@ impl SpiralRepository {
         let _permit = acquire_blocking(self.hosted_slots.clone())?;
         let _operation = write(&self.operation_gate);
         let connection = connection_config(
-            self.driver_path.clone(),
             &self.project_id,
             &self.endpoint,
             &self.spfs_endpoint,
@@ -500,7 +481,6 @@ fn validate_project_id(project_id: &str) -> Result<String, String> {
 }
 
 fn connection_config(
-    driver_path: PathBuf,
     project_id: &RwLock<Option<String>>,
     endpoint: &RwLock<String>,
     spfs_endpoint: &RwLock<String>,
@@ -510,7 +490,6 @@ fn connection_config(
         "Spiral project is not configured. Choose a project in Settings → SpiralDB.".to_owned()
     })?;
     Ok(ConnectionConfig {
-        driver_path,
         project_id,
         endpoint: read(endpoint).clone(),
         spfs_endpoint: read(spfs_endpoint).clone(),
@@ -518,18 +497,8 @@ fn connection_config(
     })
 }
 
-fn open_database(config: &ConnectionConfig) -> Result<(ManagedDriver, ManagedDatabase), String> {
-    let mut driver = ManagedDriver::load_dynamic_from_filename(
-        &config.driver_path,
-        Some(b"AdbcDriverSpiraldbInit"),
-        AdbcVersion::V110,
-    )
-    .map_err(|error| {
-        format!(
-            "loading Spiral ADBC driver {}: {error}",
-            config.driver_path.display()
-        )
-    })?;
+fn open_database(config: &ConnectionConfig) -> Result<SpiralDatabase, String> {
+    let mut driver = SpiralDriver;
     let database_uri = format!("spiraldb://?project={}", config.project_id);
     let mut options = vec![
         (OptionDatabase::Uri, database_uri.clone().into()),
@@ -555,7 +524,7 @@ fn open_database(config: &ConnectionConfig) -> Result<(ManagedDriver, ManagedDat
     let database = driver
         .new_database_with_opts(options)
         .map_err(|error| format!("opening Spiral ADBC database {database_uri}: {error}"))?;
-    Ok((driver, database))
+    Ok(database)
 }
 
 fn acquire_blocking(semaphore: Arc<Semaphore>) -> Result<OwnedSemaphorePermit, String> {
@@ -585,9 +554,7 @@ mod tests {
 
     #[test]
     fn repository_can_start_unconfigured_then_select_one_project() {
-        let driver = tempfile::NamedTempFile::new().unwrap();
         let repository = SpiralRepository::new(
-            driver.path().to_owned(),
             "https://api.spiraldb.dev".to_owned(),
             "https://spfs.spiraldb.dev".to_owned(),
             None,
@@ -610,9 +577,7 @@ mod tests {
 
     #[test]
     fn invalid_project_selection_does_not_configure_the_repository() {
-        let driver = tempfile::NamedTempFile::new().unwrap();
         let repository = SpiralRepository::new(
-            driver.path().to_owned(),
             "https://api.spiraldb.dev".to_owned(),
             "https://spfs.spiraldb.dev".to_owned(),
             None,

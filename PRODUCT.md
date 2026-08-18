@@ -227,10 +227,10 @@ meet the observation safety window is rejected before a new action is sent.
   contract permits a separately hosted browser, but authentication, TLS, and
   explicit allowed origins are required before exposing the backend beyond a
   trusted network.
-- **The Spiral ADBC driver is trusted native backend code.** Development can
-  select it with `--spiral-adbc-driver` or `SPIRALDB_ADBC_DRIVER`. A packaged
-  release should bundle an approved driver; the browser never chooses a library
-  path.
+- **The Spiral ADBC driver is trusted native backend code.** Studio links the
+  pinned Rust driver crate into its backend; the browser cannot choose or load
+  native code. Python training workers continue to use the driver's shared
+  library through their language-neutral ADBC manager.
 
 **Terminology:** *robot instance* (one arm), *leader* / *follower*, *joint*,
 *calibration*, *travel*, *torque*, *Hold* / *Release* / *Teleop*, *Studio*

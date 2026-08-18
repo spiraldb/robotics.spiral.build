@@ -65,11 +65,6 @@ struct Args {
     #[arg(long, default_value = "libx264", value_name = "CODEC")]
     video_codec: String,
 
-    /// Trusted SpiralDB ADBC shared library. The environment variable
-    /// SPIRALDB_ADBC_DRIVER is used when this option is omitted.
-    #[arg(long, value_name = "PATH")]
-    spiral_adbc_driver: Option<PathBuf>,
-
     /// Optional initial Spiral project. Settings and the backend state file are
     /// used when this and SPIRAL_PROJECT_ID are omitted.
     #[arg(long, value_name = "PROJECT")]
@@ -226,21 +221,14 @@ async fn serve(
         .into());
     }
     let namespace = args.spiral_namespace.trim().to_owned();
-    let spiral_adbc_driver = args
-        .spiral_adbc_driver
-        .clone()
-        .or_else(|| std::env::var_os("SPIRALDB_ADBC_DRIVER").map(PathBuf::from));
     let repository = Arc::new(
-        SpiralRepository::new(spiral_adbc_driver.clone().ok_or_else(|| {
-            std::io::Error::other(
-                "Spiral ADBC driver is required; use --spiral-adbc-driver or SPIRALDB_ADBC_DRIVER",
-            )
-        })?,
-        spiral_endpoint,
-        spiral_spfs_endpoint,
-        spiral_project,
-        backend_state.credentials(),
-        namespace)
+        SpiralRepository::new(
+            spiral_endpoint,
+            spiral_spfs_endpoint,
+            spiral_project,
+            backend_state.credentials(),
+            namespace,
+        )
         .map_err(std::io::Error::other)?,
     );
     let workspace = Arc::new(RobotWorkspace::new(repository.clone()));

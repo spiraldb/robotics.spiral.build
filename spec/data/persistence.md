@@ -129,13 +129,16 @@ flowchart TD
 - **PERSIST-036** `.spiral-project` and `.spiral-episodes` must have distinct
   format identities and must not be accepted by the other's import path.
 - **PERSIST-037** The synchronous ADBC API must remain private to the shared
-  Spiral repository adapter. For each active project, that adapter must own one
-  loaded driver and one database/engine runtime, expose only repository-owned
-  connection and statement operations, run asynchronous calls on bounded
-  blocking workers, and apply the same fixed connection limit to ordinary,
-  long-lived, exclusive, invalidating, and synchronous-worker checkouts. No
-  domain or delivery module may construct an ADBC database or bypass that
-  capacity gate.
+  Spiral repository adapter. The Studio backend must link a commit-pinned
+  `adbc-driver-spiraldb` Rust crate and construct its native driver directly; it
+  must not accept a driver-library path, use an ADBC driver manager, or load the
+  Spiral driver dynamically. For each active project, the adapter must own one
+  native database/engine runtime, expose only repository-owned connection and
+  statement operations, run asynchronous calls on bounded blocking workers,
+  and apply the same fixed connection limit to ordinary, long-lived, exclusive,
+  invalidating, and synchronous-worker checkouts. No domain or delivery module
+  may construct an ADBC database or bypass that capacity gate. Non-Rust workers
+  may continue to use the language-neutral ADBC shared library.
 - **PERSIST-038** After the HTTP listener binds, Studio must prewarm the active
   project's authenticated catalog through the same shared ADBC pool used by
   ordinary repository work. Only after that succeeds may it hydrate
@@ -185,9 +188,10 @@ flowchart TD
   episodes survive and imported rows are retargeted, and prove a repeated
   import is refused rather than overwriting an episode.
 - **PERSIST-TEST-006** Architecture tests must prove that raw ADBC types occur
-  only in the shared repository adapter and that every repository checkout
-  mode consumes its one capacity gate. A concurrency test must prove a
-  synchronous worker waits while the same gate is occupied asynchronously.
+  only in the shared repository adapter, that Studio uses the native SpiralDB
+  driver crate rather than the driver manager, and that every repository
+  checkout mode consumes its one capacity gate. A concurrency test must prove
+  a synchronous worker waits while the same gate is occupied asynchronously.
 
 ## Implementation ownership
 

@@ -987,7 +987,6 @@ fn unix_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
-    use std::path::PathBuf;
     use std::process::Command;
     use std::sync::{Arc, Mutex};
 
@@ -1232,19 +1231,17 @@ mod tests {
     /// Run with a real SpiralDB stack:
     ///
     /// ```text
-    /// SPIRALDB_ADBC_DRIVER=/absolute/path/to/libadbc_driver_spiraldb.dylib \
     /// SPIRAL_PROJECT_ID=project-id \
     /// cargo test -p spiral-robotics-studio-backend \
     ///   backend::storage::bundle::tests::spiral_export_import_round_trip_overwrites_existing_data \
     ///   -- --ignored --exact
     /// ```
     #[test]
-    #[ignore = "requires a real SpiralDB server, SpFS, ADBC driver, and disposable project access"]
+    #[ignore = "requires a real SpiralDB server, SpFS, and disposable project access"]
     fn spiral_export_import_round_trip_overwrites_existing_data() {
         let _serial = SPIRAL_E2E
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let driver = required_path("SPIRALDB_ADBC_DRIVER");
         let project = required_project();
         let namespace = format!(
             "spiral_robotics_transfer_e2e_{}_{}",
@@ -1256,7 +1253,6 @@ mod tests {
         );
         let repository = Arc::new(
             SpiralRepository::new(
-                driver,
                 configured_spiral_endpoint(),
                 configured_spiral_spfs_endpoint(),
                 Some(project),
@@ -1340,12 +1336,11 @@ mod tests {
 
     /// Run with the same real-Spiral environment as the project transfer E2E.
     #[test]
-    #[ignore = "requires a real SpiralDB server, SpFS, ADBC driver, and disposable project access"]
+    #[ignore = "requires a real SpiralDB server, SpFS, and disposable project access"]
     fn spiral_episode_export_import_round_trip_merges_without_overwrite() {
         let _serial = SPIRAL_E2E
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let driver = required_path("SPIRALDB_ADBC_DRIVER");
         let project = required_project();
         let namespace = format!(
             "spiral_robotics_episode_transfer_e2e_{}_{}",
@@ -1357,7 +1352,6 @@ mod tests {
         );
         let repository = Arc::new(
             SpiralRepository::new(
-                driver,
                 configured_spiral_endpoint(),
                 configured_spiral_spfs_endpoint(),
                 Some(project),
@@ -1442,12 +1436,11 @@ mod tests {
 
     /// Run with the same real-Spiral environment as the project transfer E2E.
     #[test]
-    #[ignore = "requires a real SpiralDB server, SpFS, ADBC driver, disposable project access, and FFmpeg"]
+    #[ignore = "requires a real SpiralDB server, SpFS, disposable project access, and FFmpeg"]
     fn spiral_project_import_rebuilds_managed_video_datasets() {
         let _serial = SPIRAL_E2E
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let driver = required_path("SPIRALDB_ADBC_DRIVER");
         let project = required_project();
         let namespace = format!(
             "spiral_robotics_video_transfer_e2e_{}_{}",
@@ -1459,7 +1452,6 @@ mod tests {
         );
         let repository = Arc::new(
             SpiralRepository::new(
-                driver,
                 configured_spiral_endpoint(),
                 configured_spiral_spfs_endpoint(),
                 Some(project),
@@ -1559,10 +1551,6 @@ mod tests {
             .expect("the rebuilt managed dataset must serve an indexed video frame");
     }
 
-    fn required_env(name: &str) -> String {
-        std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set for the Spiral E2E test"))
-    }
-
     fn required_project() -> String {
         std::env::var("SPIRAL_PROJECT_ID")
             .ok()
@@ -1589,10 +1577,6 @@ mod tests {
             .ok()
             .and_then(|store| store.spiral_spfs_endpoint())
             .unwrap_or_else(environment_spiral_spfs_endpoint)
-    }
-
-    fn required_path(name: &str) -> PathBuf {
-        PathBuf::from(required_env(name))
     }
 
     fn relation_payloads(bundle: &[u8]) -> BTreeMap<String, Vec<u8>> {

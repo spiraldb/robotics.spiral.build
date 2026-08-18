@@ -366,7 +366,8 @@ fn synchronous_adbc_is_confined_to_one_bounded_adapter() {
         assert!(
             !source.contains("adbc_core")
                 && !source.contains("adbc_driver_manager")
-                && !source.contains("ManagedConnection"),
+                && !source.contains("adbc_driver_spiraldb")
+                && !source.contains("SpiralConnection"),
             "{} bypasses the repository-owned ADBC adapter",
             path.display()
         );
@@ -375,13 +376,22 @@ fn synchronous_adbc_is_confined_to_one_bounded_adapter() {
     let repository =
         fs::read_to_string(repository_path).expect("Spiral repository source must be readable");
     assert!(
-        repository.contains("struct ConnectionPool")
-            && repository.contains("driver: Option<ManagedDriver>")
-            && repository.contains("database: Option<ManagedDatabase>")
-            && repository.contains("available: Vec<ManagedConnection>")
+        repository.contains("use adbc_driver_spiraldb")
+            && !repository.contains("adbc_driver_manager")
+            && !repository.contains("load_dynamic")
+            && repository.contains("struct ConnectionPool")
+            && repository.contains("database: Option<SpiralDatabase>")
+            && repository.contains("available: Vec<SpiralConnection>")
+            && repository.contains("let mut driver = SpiralDriver")
             && repository.contains("if self.database.is_none()")
             && repository.contains("Semaphore::new(HOSTED_ADBC_CONNECTIONS)"),
-        "the adapter must share one driver/database and bound its connection pool"
+        "the adapter must own one native database/engine and bound its connection pool"
+    );
+    let server = fs::read_to_string(source_root.join("http/server.rs"))
+        .expect("backend server source must be readable");
+    assert!(
+        !server.contains("spiral-adbc-driver") && !server.contains("SPIRALDB_ADBC_DRIVER"),
+        "Studio must not accept a runtime path for its linked SpiralDB driver"
     );
     for operation in [
         "pub(crate) async fn run",

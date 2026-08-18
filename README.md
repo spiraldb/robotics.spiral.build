@@ -50,7 +50,6 @@ deployments placed behind an authenticated TLS proxy.
 To connect Studio to a local SpiralDB stack:
 
 ```console
-SPIRALDB_ADBC_DRIVER=/absolute/path/to/libadbc_driver_spiraldb.dylib \
 SPIRAL__DEV=1 \
 dx serve
 ```
