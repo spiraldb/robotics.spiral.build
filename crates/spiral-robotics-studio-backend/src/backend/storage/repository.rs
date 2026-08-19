@@ -15,7 +15,7 @@ use adbc_driver_spiraldb::{
     Connection as SpiralConnection, Database as SpiralDatabase, Driver as SpiralDriver,
     Statement as SpiralStatement,
 };
-use arrow_array::{RecordBatch, RecordBatchReader};
+use arrow_array::RecordBatchReader;
 use arrow_schema::Schema;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -131,8 +131,13 @@ impl RepositoryStatement {
             .map_err(|error| error.to_string())
     }
 
-    pub(crate) fn bind(&mut self, batch: RecordBatch) -> Result<(), String> {
-        self.inner.bind(batch).map_err(|error| error.to_string())
+    pub(crate) fn bind_stream(
+        &mut self,
+        reader: Box<dyn RecordBatchReader + Send>,
+    ) -> Result<(), String> {
+        self.inner
+            .bind_stream(reader)
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn execute(

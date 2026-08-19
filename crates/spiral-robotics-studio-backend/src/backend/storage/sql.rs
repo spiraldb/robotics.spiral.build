@@ -122,48 +122,24 @@ pub(crate) fn create_dataset_namespace(dataset: &str) -> String {
     )
 }
 
-pub(crate) fn video_sources_relation(dataset: &str, episode_id: &str, managed: bool) -> String {
-    if managed {
-        format!(
-            "{}_{}_video_sources",
-            dataset,
-            spiral::identifier_component(episode_id)
-        )
-    } else {
-        format!("{dataset}.video_sources")
-    }
+pub(crate) fn video_sources_relation(dataset: &str) -> String {
+    format!("{dataset}_video_sources")
 }
 
-pub(crate) fn video_dataset_relation(dataset: &str, episode_id: &str) -> String {
-    format!(
-        "{dataset}.video_{}",
-        spiral::identifier_component(episode_id)
-    )
+pub(crate) fn video_dataset_relation(dataset: &str) -> String {
+    format!("{dataset}.video")
 }
 
-pub(crate) fn video_dataset_output(dataset: &str, episode_id: &str) -> String {
-    format!("{}.assets", video_dataset_relation(dataset, episode_id))
+pub(crate) fn video_dataset_output(dataset: &str) -> String {
+    format!("{}.assets", video_dataset_relation(dataset))
 }
 
-pub(crate) fn create_video_sources(
-    sources: &str,
-    assets: &str,
-    episode_id: Option<&str>,
-) -> String {
-    let source_filter = episode_id
-        .map(|episode_id| {
-            format!(
-                " WHERE assets.{} = {}",
-                column::EPISODE_ID,
-                string_literal(episode_id)
-            )
-        })
-        .unwrap_or_default();
+pub(crate) fn create_video_sources(sources: &str, assets: &str) -> String {
     format!(
         "CREATE OR REPLACE VIEW {sources} AS SELECT assets.{episode_id}, assets.{stream_id}, \
          assets.{segment_index}, assets.{timeline_offset}, \
          spql.blob.inline(assets.{payload}, assets.{byte_size}, 'video/mp4') AS {source} \
-         FROM {assets} AS assets{source_filter}",
+         FROM {assets} AS assets",
         episode_id = column::EPISODE_ID,
         stream_id = column::STREAM_ID,
         segment_index = column::SEGMENT_INDEX,
@@ -235,14 +211,6 @@ mod tests {
             ),
             (episode_samples("robot", "episode-'one"), "episode-'one"),
             (training_checkpoint("robot", "run-'two", 42), "run-'two"),
-            (
-                create_video_sources(
-                    "robot_episode_video_sources",
-                    "robot.video_assets",
-                    Some("episode-'two"),
-                ),
-                "episode-'two",
-            ),
         ];
         for (sql, value) in cases {
             assert_single_literal(&sql, value);
@@ -255,6 +223,17 @@ mod tests {
         let video = video_asset("robot", "episode-'four", "stream-'four", Some(0));
         assert_single_literal(&video, "episode-'four");
         assert_single_literal(&video, "stream-'four");
+    }
+
+    #[test]
+    fn video_resources_are_shared_by_the_namespace() {
+        assert_eq!(video_sources_relation("robot"), "robot_video_sources");
+        assert_eq!(video_dataset_relation("robot"), "robot.video");
+        assert_eq!(video_dataset_output("robot"), "robot.video.assets");
+        assert_eq!(
+            create_video_sources("robot_video_sources", "robot.video_assets"),
+            "CREATE OR REPLACE VIEW robot_video_sources AS SELECT assets.episode_id, assets.stream_id, assets.segment_index, assets.timeline_offset_ns, spql.blob.inline(assets.payload, assets.byte_size, 'video/mp4') AS source FROM robot.video_assets AS assets"
+        );
     }
 
     #[test]

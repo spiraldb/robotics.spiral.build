@@ -13,9 +13,10 @@ use spiral_robotics_contracts::api::{EpisodeImportSummary, ProjectImportSummary}
 use spiral_robotics_contracts::spiral::{self, Table, column};
 
 use crate::backend::storage::manager::{
-    commit_catalog_transaction, ensure_dataset_namespace, episode_video_dataset_exists,
-    execute_delete_sql, execute_update_sql, ingest_batch, rebuild_episode_video_dataset, run_query,
-    table_exists,
+    commit_catalog_transaction, drop_video_dataset, ensure_dataset_namespace, execute_delete_sql,
+    execute_update_sql, ingest_batches, rebuild_video_dataset,
+    retarget_stored_video_media_relations, run_query, stored_video_episode_ids, table_exists,
+    video_dataset_exists,
 };
 use crate::backend::storage::repository::RepositoryConnection;
 use crate::backend::storage::sql;
@@ -249,7 +250,6 @@ pub(crate) fn import(
     let mut decoded = decode_entries(parse(bundle)?, PROJECT_SPEC)?;
     sort_relations(&mut decoded, &Table::ALL);
     let imported_video_episodes = video_episode_ids(&decoded)?;
-    let existing_video_episodes = stored_video_episode_ids(connection, namespace)?;
 
     connection
         .set_autocommit(false)
@@ -279,15 +279,20 @@ pub(crate) fn import(
                 execute_delete_sql(connection, &format!("DELETE FROM {relation}"))
                     .map_err(|error| format!("clearing project relation {relation}: {error}"))?;
             }
-            for batch in batches {
-                let batch = if table == Table::VideoAssets {
-                    retarget_video_media_relations(batch, namespace)?
-                } else {
-                    batch
-                };
-                summary.rows = summary.rows.saturating_add(batch.num_rows() as u64);
-                ingest_batch(connection, &relation, batch)?;
-            }
+            let batches = batches
+                .into_iter()
+                .map(|batch| {
+                    if table == Table::VideoAssets {
+                        retarget_video_media_relations(batch, namespace)
+                    } else {
+                        Ok(batch)
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            summary.rows = summary
+                .rows
+                .saturating_add(batches.iter().map(RecordBatch::num_rows).sum::<usize>() as u64);
+            ingest_batches(connection, &relation, batches)?;
         }
         Ok(summary)
     })();
@@ -303,14 +308,11 @@ pub(crate) fn import(
     // published. Keep the repository's exclusive checkout while reconciling
     // the derived MP4 resources immediately after the durable rows commit.
     if can_reconcile {
-        if let Err(error) = reconcile_project_video_datasets(
-            connection,
-            namespace,
-            &existing_video_episodes,
-            &imported_video_episodes,
-        ) {
+        if let Err(error) =
+            reconcile_project_video_dataset(connection, namespace, &imported_video_episodes)
+        {
             summary.warnings.push(format!(
-                "project rows committed, but derived video datasets need repair: {error}"
+                "project rows committed, but the derived video dataset needs repair: {error}"
             ));
         }
     } else {
@@ -333,8 +335,12 @@ pub(crate) fn import_episodes(
     sort_relations(&mut decoded, &EPISODE_TABLES);
     let episode_ids = validate_episode_relations(&decoded)?;
     let video_episode_ids = video_episode_ids(&decoded)?;
+    let existing_video_episodes = stored_video_episode_ids(connection, namespace)?;
     reject_existing_episodes(connection, namespace, &episode_ids)?;
     ensure_dataset_namespace(connection, namespace)?;
+    if !existing_video_episodes.is_empty() && !video_dataset_exists(connection, namespace)? {
+        retarget_stored_video_media_relations(connection, namespace)?;
+    }
 
     connection
         .set_autocommit(false)
@@ -357,17 +363,20 @@ pub(crate) fn import_episodes(
                 continue;
             }
             let relation = sql::relation(namespace, table);
-            for batch in batches {
-                let batch = match table {
+            let batches = batches
+                .into_iter()
+                .map(|batch| match table {
                     Table::Datasets | Table::Episodes => {
-                        replace_utf8_column(batch, column::DATASET_ID, dataset_id)?
+                        replace_utf8_column(batch, column::DATASET_ID, dataset_id)
                     }
-                    Table::VideoAssets => retarget_video_media_relations(batch, namespace)?,
-                    _ => batch,
-                };
-                summary.rows = summary.rows.saturating_add(batch.num_rows() as u64);
-                ingest_batch(connection, &relation, batch)?;
-            }
+                    Table::VideoAssets => retarget_video_media_relations(batch, namespace),
+                    _ => Ok(batch),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            summary.rows = summary
+                .rows
+                .saturating_add(batches.iter().map(RecordBatch::num_rows).sum::<usize>() as u64);
+            ingest_batches(connection, &relation, batches)?;
         }
         Ok(summary)
     })();
@@ -378,17 +387,12 @@ pub(crate) fn import_episodes(
         summary.warnings.push(warning);
     }
     if can_reconcile {
-        for episode_id in &video_episode_ids {
-            let result = episode_video_dataset_exists(connection, namespace, episode_id).and_then(
-                |dataset_exists| {
-                    rebuild_episode_video_dataset(connection, namespace, episode_id, dataset_exists)
-                },
-            );
-            if let Err(error) = result {
-                summary.warnings.push(format!(
-                    "episode {episode_id} rows committed, but its derived video dataset needs repair: {error}"
-                ));
-            }
+        if !video_episode_ids.is_empty()
+            && let Err(error) = reconcile_appended_video_dataset(connection, namespace)
+        {
+            summary.warnings.push(format!(
+                "episode rows committed, but the derived video dataset needs repair: {error}"
+            ));
         }
     } else if !video_episode_ids.is_empty() {
         summary.warnings.push(
@@ -569,73 +573,27 @@ fn video_episode_ids(decoded: &[(Table, Vec<RecordBatch>)]) -> Result<BTreeSet<S
     Ok(episode_ids)
 }
 
-fn stored_video_episode_ids(
+fn reconcile_project_video_dataset(
     connection: &mut RepositoryConnection,
     namespace: &str,
-) -> Result<BTreeSet<String>, String> {
-    const MAX_VIDEO_EPISODES: usize = 100_000;
-
-    let assets = sql::relation(namespace, Table::VideoAssets);
-    if !table_exists(connection, &assets)? {
-        return Ok(BTreeSet::new());
-    }
-    let result = run_query(
-        connection,
-        &format!(
-            "SELECT DISTINCT {episode_id} FROM {assets}",
-            episode_id = column::EPISODE_ID
-        ),
-        MAX_VIDEO_EPISODES,
-    )?;
-    if result.truncated {
-        return Err(format!(
-            "project has more than {MAX_VIDEO_EPISODES} video episodes; refusing an incomplete derived-resource replacement"
-        ));
-    }
-    result
-        .rows
-        .into_iter()
-        .map(|row| {
-            let episode_id = row
-                .get(column::EPISODE_ID)
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "stored video asset has no valid episode ID".to_owned())?
-                .to_owned();
-            validate_episode_id(&episode_id)?;
-            Ok(episode_id)
-        })
-        .collect()
-}
-
-fn reconcile_project_video_datasets(
-    connection: &mut RepositoryConnection,
-    namespace: &str,
-    previous: &BTreeSet<String>,
     imported: &BTreeSet<String>,
 ) -> Result<(), String> {
-    for episode_id in previous.difference(imported) {
-        if episode_video_dataset_exists(connection, namespace, episode_id)? {
-            drop_episode_video_dataset(connection, namespace, episode_id)?;
-        }
-    }
-    for episode_id in imported {
-        let dataset_exists = episode_video_dataset_exists(connection, namespace, episode_id)?;
-        rebuild_episode_video_dataset(connection, namespace, episode_id, dataset_exists)?;
+    let dataset_exists = video_dataset_exists(connection, namespace)?;
+    if imported.is_empty() {
+        drop_video_dataset(connection, namespace, dataset_exists)?;
+    } else {
+        rebuild_video_dataset(connection, namespace, dataset_exists)?;
     }
     Ok(())
 }
 
-fn drop_episode_video_dataset(
+fn reconcile_appended_video_dataset(
     connection: &mut RepositoryConnection,
     namespace: &str,
-    episode_id: &str,
 ) -> Result<(), String> {
-    let dataset = sql::video_dataset_relation(namespace, episode_id);
-    execute_update_sql(connection, &sql::drop_video_dataset(&dataset))
-        .map_err(|error| format!("dropping stale Spiral MP4 dataset for {episode_id}: {error}"))?;
-    let sources = sql::video_sources_relation(namespace, episode_id, true);
-    execute_update_sql(connection, &sql::drop_video_sources(&sources))
-        .map_err(|error| format!("dropping stale Spiral video source for {episode_id}: {error}"))
+    let dataset_exists = video_dataset_exists(connection, namespace)?;
+    rebuild_video_dataset(connection, namespace, dataset_exists)?;
+    Ok(())
 }
 
 fn utf8_values(batch: &RecordBatch, name: &str) -> Result<Vec<String>, String> {
@@ -693,11 +651,7 @@ fn retarget_video_media_relations(
     batch: RecordBatch,
     namespace: &str,
 ) -> Result<RecordBatch, String> {
-    let episode_ids = utf8_values(&batch, column::EPISODE_ID)?;
-    let media_relations = episode_ids
-        .iter()
-        .map(|episode_id| sql::video_dataset_output(namespace, episode_id))
-        .collect::<Vec<_>>();
+    let media_relation = sql::video_dataset_output(namespace);
     let index = batch
         .schema()
         .index_of(column::MEDIA_RELATION)
@@ -710,17 +664,20 @@ fn retarget_video_media_relations(
     let mut columns = batch.columns().to_vec();
     let source = &columns[index];
     columns[index] = if source.as_any().is::<StringArray>() {
-        Arc::new(StringArray::from_iter_values(
-            media_relations.iter().map(String::as_str),
-        )) as ArrayRef
+        Arc::new(StringArray::from(vec![
+            media_relation.as_str();
+            batch.num_rows()
+        ])) as ArrayRef
     } else if source.as_any().is::<LargeStringArray>() {
-        Arc::new(LargeStringArray::from_iter_values(
-            media_relations.iter().map(String::as_str),
-        )) as ArrayRef
+        Arc::new(LargeStringArray::from(vec![
+            media_relation.as_str();
+            batch.num_rows()
+        ])) as ArrayRef
     } else if source.as_any().is::<StringViewArray>() {
-        Arc::new(StringViewArray::from_iter_values(
-            media_relations.iter().map(String::as_str),
-        )) as ArrayRef
+        Arc::new(StringViewArray::from(vec![
+            media_relation.as_str();
+            batch.num_rows()
+        ])) as ArrayRef
     } else {
         return Err(format!(
             "episode bundle column {} is not UTF-8 text",
@@ -986,9 +943,11 @@ fn unix_millis() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::io::Write as _;
     use std::process::Command;
     use std::sync::{Arc, Mutex};
+    use std::time::Instant;
 
     use arrow_array::{
         ArrayRef, BinaryArray, Float64Array, Int64Array, LargeBinaryArray, StringArray,
@@ -997,7 +956,7 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema};
 
     use super::*;
-    use crate::backend::recording::episodes::{EpisodeCompletion, EpisodeStart};
+    use crate::backend::recording::episodes::{EpisodeCompletion, EpisodeStart, EpisodeStore};
     use crate::backend::recording::spiral::{dataset_batch, episode_completion_batch};
     use crate::backend::storage::manager::{
         StorageManager, ensure_dataset_namespace, execute_update_sql, ingest_batch, run_query,
@@ -1194,10 +1153,7 @@ mod tests {
 
         assert_eq!(
             utf8_values(&retargeted, column::MEDIA_RELATION).unwrap(),
-            vec![
-                sql::video_dataset_output("destination", "episode_a"),
-                sql::video_dataset_output("destination", "episode-b"),
-            ]
+            vec![sql::video_dataset_output("destination"); 2]
         );
         assert_eq!(
             video_episode_ids(&[(Table::VideoAssets, vec![retargeted])]).unwrap(),
@@ -1437,7 +1393,7 @@ mod tests {
     /// Run with the same real-Spiral environment as the project transfer E2E.
     #[test]
     #[ignore = "requires a real SpiralDB server, SpFS, disposable project access, and FFmpeg"]
-    fn spiral_project_import_rebuilds_managed_video_datasets() {
+    fn spiral_project_import_rebuilds_the_shared_managed_video_dataset() {
         let _serial = SPIRAL_E2E
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1516,16 +1472,26 @@ mod tests {
             })
             .expect("clearing the relational fixture before import must succeed");
 
-        storage
+        let first_import = storage
             .import_project_bundle(&exported)
-            .expect("importing a video project must rebuild its managed datasets");
-        storage
+            .expect("importing a video project must rebuild its managed dataset");
+        assert!(
+            first_import.warnings.is_empty(),
+            "first import warnings: {:?}",
+            first_import.warnings
+        );
+        let second_import = storage
             .import_project_bundle(&exported)
             .expect("re-importing a video project must replace its managed dataset outputs");
+        assert!(
+            second_import.warnings.is_empty(),
+            "second import warnings: {:?}",
+            second_import.warnings
+        );
 
         repository
             .run_blocking(|connection| {
-                let output = sql::video_dataset_output(repository.namespace(), episode_id);
+                let output = sql::video_dataset_output(repository.namespace());
                 let rows = run_query(connection, &sql::count_rows(&output), 1)?;
                 assert_eq!(
                     rows.rows[0].get("rows").and_then(serde_json::Value::as_u64),
@@ -1549,6 +1515,389 @@ mod tests {
                 Ok(())
             })
             .expect("the rebuilt managed dataset must serve an indexed video frame");
+    }
+
+    /// Profile the production project-import algorithm against a real archive
+    /// in an isolated namespace of the configured Spiral project.
+    ///
+    /// ```text
+    /// SPIRAL_PROJECT_BUNDLE=/absolute/path/to/project.spiral-project \
+    /// cargo test -p spiral-robotics-studio-backend \
+    ///   backend::storage::bundle::tests::spiral_profile_project_import \
+    ///   -- --ignored --exact --nocapture
+    /// ```
+    #[test]
+    #[ignore = "profiles a real project import and creates temporary Spiral resources"]
+    fn spiral_profile_project_import() {
+        let _serial = SPIRAL_E2E
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let bundle_path = std::env::var("SPIRAL_PROJECT_BUNDLE")
+            .expect("SPIRAL_PROJECT_BUNDLE must name the project archive to profile");
+        let process_start = Instant::now();
+        eprintln!(
+            "PROFILE\tmeta\tpid={}\tpath={bundle_path}",
+            std::process::id()
+        );
+        let file_start = Instant::now();
+        let bytes = fs::read(&bundle_path).expect("the profiling archive must be readable");
+        profile_event("studio.file_read", file_start, 0, bytes.len());
+
+        let project = required_project();
+        let namespace = format!(
+            "spiral_robotics_import_profile_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock must be after the Unix epoch")
+                .as_nanos()
+        );
+        let repository_start = Instant::now();
+        let repository = Arc::new(
+            SpiralRepository::new(
+                configured_spiral_endpoint(),
+                configured_spiral_spfs_endpoint(),
+                Some(project),
+                stored_credentials(),
+                namespace,
+            )
+            .expect("the Spiral profiling repository must be valid"),
+        );
+        profile_event("studio.repository_config", repository_start, 0, 0);
+        let cleanup = TestNamespace::new(repository.clone());
+
+        let namespace_start = Instant::now();
+        repository
+            .run_exclusive_blocking(|connection| {
+                ensure_dataset_namespace(connection, repository.namespace())
+            })
+            .expect("the profiling namespace must be created");
+        profile_event("spiral.setup_namespace", namespace_start, 0, 0);
+
+        let exclusive_start = Instant::now();
+        let summary = repository
+            .run_exclusive_blocking(|connection| {
+                profile_project_import_into(connection, repository.namespace(), &bytes)
+            })
+            .expect("the profiled project import must succeed");
+        profile_event(
+            "studio.exclusive_import_total",
+            exclusive_start,
+            summary.rows as usize,
+            bytes.len(),
+        );
+
+        let storage = StorageManager::new(repository.clone());
+        let preferences_start = Instant::now();
+        storage
+            .load_studio_preferences()
+            .expect("profiled preferences reload must succeed");
+        profile_event("studio.reload_preferences", preferences_start, 0, 0);
+        let training_start = Instant::now();
+        storage
+            .load_training_snapshot::<spiral_robotics_contracts::api::TrainingSnapshot>()
+            .expect("profiled training reload must succeed");
+        profile_event("studio.reload_training", training_start, 0, 0);
+        let rollout_start = Instant::now();
+        storage
+            .load_rollout_snapshot::<spiral_robotics_contracts::api::RolloutSnapshot>()
+            .expect("profiled rollout reload must succeed");
+        profile_event("studio.reload_rollout", rollout_start, 0, 0);
+        let catalog_start = Instant::now();
+        let episodes = EpisodeStore::new(repository.clone()).list();
+        profile_event(
+            "studio.refresh_episode_catalog",
+            catalog_start,
+            episodes.len(),
+            0,
+        );
+
+        profile_event(
+            "studio.route_equivalent_total",
+            process_start,
+            summary.rows as usize,
+            bytes.len(),
+        );
+        eprintln!(
+            "PROFILE\tmeta\trelations={}\trows={}\twarnings={}",
+            summary.relations,
+            summary.rows,
+            summary.warnings.len()
+        );
+        let cleanup_start = Instant::now();
+        drop(cleanup);
+        profile_event("spiral.cleanup", cleanup_start, 0, 0);
+    }
+
+    fn profile_project_import_into(
+        connection: &mut RepositoryConnection,
+        namespace: &str,
+        bundle: &[u8],
+    ) -> Result<ProjectImportSummary, String> {
+        let parse_start = Instant::now();
+        let entries = parse(bundle)?;
+        profile_event("studio.bundle_parse", parse_start, 0, bundle.len());
+
+        let mut decoded = Vec::new();
+        for (table, payload) in entries {
+            let payload_bytes = payload.len();
+            let decode_start = Instant::now();
+            let mut relation = decode_entries(vec![(table, payload)], PROJECT_SPEC)?;
+            let rows = relation
+                .iter()
+                .flat_map(|(_, batches)| batches)
+                .map(RecordBatch::num_rows)
+                .sum();
+            profile_event(
+                &format!("studio.arrow_decode.{}", table.name()),
+                decode_start,
+                rows,
+                payload_bytes,
+            );
+            decoded.append(&mut relation);
+        }
+        sort_relations(&mut decoded, &Table::ALL);
+        if let Some(limit) = profile_usize("SPIRAL_PROFILE_VIDEO_LIMIT") {
+            limit_relation_rows(&mut decoded, Table::VideoAssets, limit);
+        }
+
+        let video_ids_start = Instant::now();
+        let imported_video_episodes = video_episode_ids(&decoded)?;
+        profile_event(
+            "studio.collect_video_episode_ids",
+            video_ids_start,
+            imported_video_episodes.len(),
+            0,
+        );
+        let transaction_start = Instant::now();
+        connection
+            .set_autocommit(false)
+            .map_err(|error| format!("starting profiled project import transaction: {error}"))?;
+        profile_event("spiral.transaction_begin", transaction_start, 0, 0);
+
+        let outcome = (|| {
+            for table in Table::ALL.into_iter().rev() {
+                if decoded.iter().any(|(incoming, _)| *incoming == table) {
+                    continue;
+                }
+                let relation = sql::relation(namespace, table);
+                let exists_start = Instant::now();
+                let exists = table_exists(connection, &relation)?;
+                profile_event(
+                    &format!("spiral.table_exists.{}", table.name()),
+                    exists_start,
+                    0,
+                    0,
+                );
+                if exists {
+                    let drop_start = Instant::now();
+                    execute_update_sql(connection, &format!("DROP TABLE {relation}"))?;
+                    profile_event(
+                        &format!("spiral.drop_relation.{}", table.name()),
+                        drop_start,
+                        0,
+                        0,
+                    );
+                }
+            }
+
+            let video_chunk_rows = profile_usize("SPIRAL_PROFILE_VIDEO_CHUNK_ROWS");
+            let mut summary = ProjectImportSummary::default();
+            for (table, batches) in decoded {
+                let relation = sql::relation(namespace, table);
+                summary.relations += 1;
+                let exists_start = Instant::now();
+                let exists = table_exists(connection, &relation)?;
+                profile_event(
+                    &format!("spiral.table_exists.{}", table.name()),
+                    exists_start,
+                    0,
+                    0,
+                );
+                if exists {
+                    let clear_start = Instant::now();
+                    execute_delete_sql(connection, &format!("DELETE FROM {relation}"))?;
+                    profile_event(
+                        &format!("spiral.clear_relation.{}", table.name()),
+                        clear_start,
+                        0,
+                        0,
+                    );
+                }
+                let relation_ingest_start = Instant::now();
+                let mut relation_rows = 0usize;
+                let mut relation_bytes = 0usize;
+                let mut stream_batches = Vec::new();
+                for batch in batches {
+                    let transform_start = Instant::now();
+                    let batch = if table == Table::VideoAssets {
+                        retarget_video_media_relations(batch, namespace)?
+                    } else {
+                        batch
+                    };
+                    profile_event(
+                        &format!("studio.transform.{}", table.name()),
+                        transform_start,
+                        batch.num_rows(),
+                        batch.get_array_memory_size(),
+                    );
+                    if batch.num_rows() == 0 {
+                        stream_batches.push(batch);
+                        continue;
+                    }
+                    let chunk_rows = if table == Table::VideoAssets {
+                        video_chunk_rows.unwrap_or(batch.num_rows().max(1))
+                    } else {
+                        batch.num_rows().max(1)
+                    };
+                    for offset in (0..batch.num_rows()).step_by(chunk_rows) {
+                        let len = chunk_rows.min(batch.num_rows() - offset);
+                        let chunk = batch.slice(offset, len);
+                        let chunk_bytes = chunk.get_array_memory_size();
+                        stream_batches.push(chunk);
+                        relation_rows = relation_rows.saturating_add(len);
+                        relation_bytes = relation_bytes.saturating_add(chunk_bytes);
+                        summary.rows = summary.rows.saturating_add(len as u64);
+                    }
+                }
+                let stream_ingest_start = Instant::now();
+                ingest_batches(connection, &relation, stream_batches)?;
+                profile_event(
+                    &format!("spiral.ingest.{}.stream", table.name()),
+                    stream_ingest_start,
+                    relation_rows,
+                    relation_bytes,
+                );
+                profile_event(
+                    &format!("spiral.ingest_total.{}", table.name()),
+                    relation_ingest_start,
+                    relation_rows,
+                    0,
+                );
+            }
+            Ok(summary)
+        })();
+
+        let mut summary = match outcome {
+            Ok(summary) => {
+                let commit_start = Instant::now();
+                commit_catalog_transaction(connection)
+                    .map_err(|error| format!("committing profiled project import: {error}"))?;
+                profile_event(
+                    "spiral.transaction_commit",
+                    commit_start,
+                    summary.rows as usize,
+                    0,
+                );
+                summary
+            }
+            Err(error) => {
+                let rollback_start = Instant::now();
+                let rollback = connection.rollback();
+                profile_event("spiral.transaction_rollback", rollback_start, 0, 0);
+                return Err(match rollback {
+                    Ok(()) => error,
+                    Err(rollback) => format!("{error}; rolling back also failed: {rollback}"),
+                });
+            }
+        };
+        let autocommit_start = Instant::now();
+        if let Err(error) = connection.set_autocommit(true) {
+            connection.discard();
+            summary.warnings.push(format!(
+                "profiled project import committed, but its Spiral connection was discarded: {error}"
+            ));
+        }
+        profile_event(
+            "spiral.transaction_restore_autocommit",
+            autocommit_start,
+            0,
+            0,
+        );
+
+        if !profile_bool("SPIRAL_PROFILE_SKIP_VIDEO_RECONCILE") {
+            let reconcile_total_start = Instant::now();
+            let dataset_exists = if imported_video_episodes.is_empty() {
+                video_dataset_exists(connection, namespace)?
+            } else {
+                profile_rebuild_video_dataset(connection, namespace)?
+            };
+            if imported_video_episodes.is_empty() {
+                drop_video_dataset(connection, namespace, dataset_exists)?;
+            }
+            profile_event(
+                "spiral.reconcile_video_total",
+                reconcile_total_start,
+                imported_video_episodes.len(),
+                0,
+            );
+        }
+        Ok(summary)
+    }
+
+    fn profile_rebuild_video_dataset(
+        connection: &mut RepositoryConnection,
+        namespace: &str,
+    ) -> Result<bool, String> {
+        let exists_start = Instant::now();
+        let dataset_exists = video_dataset_exists(connection, namespace)?;
+        profile_event("spiral.reconcile_video_exists", exists_start, 1, 0);
+
+        let sources = sql::video_sources_relation(namespace);
+        let assets = sql::relation(namespace, Table::VideoAssets);
+        let dataset = sql::video_dataset_relation(namespace);
+        let view_start = Instant::now();
+        execute_update_sql(connection, &sql::create_video_sources(&sources, &assets))
+            .map_err(|error| format!("creating Spiral video source view: {error}"))?;
+        profile_event("spiral.reconcile_video_view", view_start, 1, 0);
+        if !dataset_exists {
+            let create_start = Instant::now();
+            execute_update_sql(connection, &sql::create_video_dataset(&dataset, &sources))
+                .map_err(|error| format!("creating Spiral MP4 dataset: {error}"))?;
+            profile_event("spiral.reconcile_video_create", create_start, 1, 0);
+        }
+        let refresh_start = Instant::now();
+        execute_update_sql(connection, &sql::refresh_dataset(&dataset))
+            .map_err(|error| format!("refreshing Spiral MP4 dataset: {error}"))?;
+        profile_event("spiral.reconcile_video_refresh", refresh_start, 1, 0);
+        Ok(dataset_exists)
+    }
+
+    fn profile_event(stage: &str, start: Instant, rows: usize, bytes: usize) {
+        eprintln!(
+            "PROFILE\t{stage}\tseconds={:.6}\trows={rows}\tbytes={bytes}",
+            start.elapsed().as_secs_f64()
+        );
+    }
+
+    fn profile_usize(name: &str) -> Option<usize> {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+    }
+
+    fn profile_bool(name: &str) -> bool {
+        std::env::var(name)
+            .ok()
+            .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+    }
+
+    fn limit_relation_rows(decoded: &mut [(Table, Vec<RecordBatch>)], target: Table, limit: usize) {
+        let Some((_, batches)) = decoded.iter_mut().find(|(table, _)| *table == target) else {
+            return;
+        };
+        let mut remaining = limit;
+        let mut limited = Vec::new();
+        for batch in batches.drain(..) {
+            if remaining == 0 {
+                break;
+            }
+            let rows = remaining.min(batch.num_rows());
+            limited.push(batch.slice(0, rows));
+            remaining -= rows;
+        }
+        *batches = limited;
     }
 
     fn required_project() -> String {
@@ -1755,11 +2104,8 @@ mod tests {
         connection: &mut RepositoryConnection,
         namespace: &str,
     ) -> Result<(), String> {
-        for episode_id in stored_video_episode_ids(connection, namespace)? {
-            if episode_video_dataset_exists(connection, namespace, &episode_id)? {
-                drop_episode_video_dataset(connection, namespace, &episode_id)?;
-            }
-        }
+        let dataset_exists = video_dataset_exists(connection, namespace)?;
+        drop_video_dataset(connection, namespace, dataset_exists)?;
         for table in Table::ALL.into_iter().rev() {
             let relation = sql::relation(namespace, table);
             if table_exists(connection, &relation)? {

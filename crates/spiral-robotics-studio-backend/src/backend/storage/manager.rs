@@ -1,15 +1,16 @@
 //! SpiralDB persistence, query preview, and remote replay for Studio data.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use arrow_array::{
     Array as _, ArrayRef, BinaryArray, BinaryViewArray, Int64Array, LargeBinaryArray,
-    LargeStringArray, RecordBatch, StringArray, StringViewArray, UInt32Array, UInt64Array,
+    LargeStringArray, RecordBatch, RecordBatchIterator, StringArray, StringViewArray, UInt32Array,
+    UInt64Array,
 };
 use arrow_json::writer::{JsonArray, WriterBuilder};
-use arrow_schema::{DataType, Field, Schema};
+use arrow_schema::{ArrowError, DataType, Field, Schema};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -544,10 +545,29 @@ pub(crate) fn replace_episode_blocking(
     videos: &[VideoAsset],
 ) -> Result<(), String> {
     ensure_dataset_namespace(connection, namespace)?;
+    let had_video = episode_has_video_assets(connection, namespace, &episode.start.id)?;
+    let video_rows_changed = had_video || !videos.is_empty();
+    let dataset_exists = if video_rows_changed {
+        video_dataset_exists(connection, namespace)?
+    } else {
+        false
+    };
+    let previous_video_episodes = if video_rows_changed {
+        stored_video_episode_ids(connection, namespace)?
+    } else {
+        BTreeSet::new()
+    };
+    let has_video_rows = !videos.is_empty()
+        || previous_video_episodes
+            .iter()
+            .any(|episode_id| episode_id != &episode.start.id);
+    if !dataset_exists && !previous_video_episodes.is_empty() && has_video_rows {
+        retarget_stored_video_media_relations(connection, namespace)?;
+    }
     // Replacement is idempotent. Clear any earlier complete row and partial
     // children before writing, so a retry after a process or network failure
     // can finish without duplicating already-landed rows.
-    clear_episode_rows(connection, namespace, &episode.start.id)?;
+    clear_episode_rows_only(connection, namespace, &episode.start.id)?;
     let datasets = sql::relation(namespace, Table::Datasets);
     if !table_has_dataset(connection, &datasets, &episode.start.dataset_id)? {
         ingest_batch(
@@ -610,21 +630,20 @@ pub(crate) fn replace_episode_blocking(
         )?;
     }
     if !videos.is_empty() {
-        let video_dataset_exists =
-            episode_video_dataset_exists(connection, namespace, &episode.start.id)?;
-        let media_relation = sql::video_dataset_output(namespace, &episode.start.id);
+        let media_relation = sql::video_dataset_output(namespace);
         let batch = video_assets_batch(&episode.start.id, videos, &media_relation)?;
         ingest_batch(
             connection,
             &sql::relation(namespace, Table::VideoAssets),
             batch,
         )?;
-        rebuild_episode_video_dataset(
-            connection,
-            namespace,
-            &episode.start.id,
-            video_dataset_exists,
-        )?;
+    }
+    if video_rows_changed {
+        if has_video_rows {
+            rebuild_video_dataset(connection, namespace, dataset_exists)?;
+        } else {
+            drop_video_dataset(connection, namespace, dataset_exists)?;
+        }
     }
     // Inserted last: readers never see an episode whose streams or media only
     // partially arrived.
@@ -637,43 +656,38 @@ pub(crate) fn replace_episode_blocking(
     Ok(())
 }
 
-/// Rebuild the managed MP4 index derived from the durable `video_assets` rows.
+/// Rebuild the namespace's one managed MP4 index from all durable `video_assets` rows.
 ///
 /// The output is deliberately refreshed even when the Dataset already exists.
 /// Project import replaces those source rows in place, so merely observing an
 /// existing output does not prove that its video index matches the imported
 /// payloads.
-pub(crate) fn rebuild_episode_video_dataset(
+pub(crate) fn rebuild_video_dataset(
     connection: &mut RepositoryConnection,
     namespace: &str,
-    episode_id: &str,
     dataset_exists: bool,
 ) -> Result<(), String> {
-    // The view turns durable binary MP4 payloads into Spiral Blob values; the
-    // managed dataset then persists the MP4/video index used by
-    // `spql.video.*` frame selection and decode.
-    let sources = sql::video_sources_relation(namespace, episode_id, true);
+    // One unfiltered view and Dataset cover the whole Studio namespace. The
+    // output preserves episode and stream IDs, so consumers select individual
+    // media without multiplying catalog resources by episode count.
+    let sources = sql::video_sources_relation(namespace);
     let assets = sql::relation(namespace, Table::VideoAssets);
-    let dataset = sql::video_dataset_relation(namespace, episode_id);
-    execute_update_sql(
-        connection,
-        &sql::create_video_sources(&sources, &assets, Some(episode_id)),
-    )
-    .map_err(|error| format!("creating Spiral video source view for {episode_id}: {error}"))?;
+    let dataset = sql::video_dataset_relation(namespace);
+    execute_update_sql(connection, &sql::create_video_sources(&sources, &assets))
+        .map_err(|error| format!("creating Spiral video source view: {error}"))?;
     if !dataset_exists {
         execute_update_sql(connection, &sql::create_video_dataset(&dataset, &sources))
-            .map_err(|error| format!("creating Spiral MP4 dataset for {episode_id}: {error}"))?;
+            .map_err(|error| format!("creating Spiral MP4 dataset: {error}"))?;
     }
     execute_update_sql(connection, &sql::refresh_dataset(&dataset))
-        .map_err(|error| format!("refreshing Spiral MP4 dataset for {episode_id}: {error}"))
+        .map_err(|error| format!("refreshing Spiral MP4 dataset: {error}"))
 }
 
-pub(crate) fn episode_video_dataset_exists(
+pub(crate) fn video_dataset_exists(
     connection: &mut RepositoryConnection,
     namespace: &str,
-    episode_id: &str,
 ) -> Result<bool, String> {
-    let dataset = sql::video_dataset_relation(namespace, episode_id);
+    let dataset = sql::video_dataset_relation(namespace);
     match run_query(connection, &format!("DESCRIBE {dataset}"), 1) {
         Ok(_) => Ok(true),
         Err(error)
@@ -683,10 +697,27 @@ pub(crate) fn episode_video_dataset_exists(
         {
             Ok(false)
         }
-        Err(error) => Err(format!(
-            "checking Spiral MP4 dataset for {episode_id}: {error}"
-        )),
+        Err(error) => Err(format!("checking Spiral MP4 dataset: {error}")),
     }
+}
+
+pub(crate) fn drop_video_dataset(
+    connection: &mut RepositoryConnection,
+    namespace: &str,
+    dataset_exists: bool,
+) -> Result<(), String> {
+    if dataset_exists {
+        execute_update_sql(
+            connection,
+            &sql::drop_video_dataset(&sql::video_dataset_relation(namespace)),
+        )
+        .map_err(|error| format!("dropping Spiral MP4 dataset: {error}"))?;
+    }
+    execute_update_sql(
+        connection,
+        &sql::drop_video_sources(&sql::video_sources_relation(namespace)),
+    )
+    .map_err(|error| format!("dropping Spiral video source view: {error}"))
 }
 
 /// Spiral's managed catalog is a resource tree: `spiral_robotics.episodes` can only
@@ -724,6 +755,33 @@ pub(crate) fn clear_episode_rows(
     namespace: &str,
     episode_id: &str,
 ) -> Result<(), String> {
+    let previous_video_episodes = stored_video_episode_ids(connection, namespace)?;
+    let had_video = previous_video_episodes.contains(episode_id);
+    let dataset_exists = if had_video {
+        video_dataset_exists(connection, namespace)?
+    } else {
+        false
+    };
+    if had_video && !dataset_exists && previous_video_episodes.len() > 1 {
+        retarget_stored_video_media_relations(connection, namespace)?;
+    }
+    clear_episode_rows_only(connection, namespace, episode_id)?;
+    if !had_video {
+        return Ok(());
+    }
+    if previous_video_episodes.len() == 1 {
+        drop_video_dataset(connection, namespace, dataset_exists)?;
+    } else {
+        rebuild_video_dataset(connection, namespace, dataset_exists)?;
+    }
+    Ok(())
+}
+
+fn clear_episode_rows_only(
+    connection: &mut RepositoryConnection,
+    namespace: &str,
+    episode_id: &str,
+) -> Result<(), String> {
     for table in Table::EPISODE_RELATIONS {
         let target = sql::relation(namespace, table);
         if !table_exists(connection, &target)? {
@@ -733,6 +791,79 @@ pub(crate) fn clear_episode_rows(
             .map_err(|error| format!("clearing prior Spiral rows in {target}: {error}"))?;
     }
     Ok(())
+}
+
+pub(crate) fn stored_video_episode_ids(
+    connection: &mut RepositoryConnection,
+    namespace: &str,
+) -> Result<BTreeSet<String>, String> {
+    const MAX_VIDEO_EPISODES: usize = 100_000;
+
+    let assets = sql::relation(namespace, Table::VideoAssets);
+    if !table_exists(connection, &assets)? {
+        return Ok(BTreeSet::new());
+    }
+    let result = run_query(
+        connection,
+        &format!(
+            "SELECT DISTINCT {episode_id} FROM {assets}",
+            episode_id = db::EPISODE_ID
+        ),
+        MAX_VIDEO_EPISODES,
+    )?;
+    if result.truncated {
+        return Err(format!(
+            "project has more than {MAX_VIDEO_EPISODES} video episodes; refusing incomplete video-resource reconciliation"
+        ));
+    }
+    result
+        .rows
+        .into_iter()
+        .map(|row| {
+            row.get(db::EPISODE_ID)
+                .and_then(JsonValue::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| "stored video asset has no valid episode ID".to_owned())
+        })
+        .collect()
+}
+
+fn episode_has_video_assets(
+    connection: &mut RepositoryConnection,
+    namespace: &str,
+    episode_id: &str,
+) -> Result<bool, String> {
+    let assets = sql::relation(namespace, Table::VideoAssets);
+    if !table_exists(connection, &assets)? {
+        return Ok(false);
+    }
+    let result = run_query(
+        connection,
+        &format!(
+            "SELECT {episode_column} FROM {assets} WHERE {episode_column} = {episode_id} LIMIT 1",
+            episode_column = db::EPISODE_ID,
+            episode_id = sql::string_literal(episode_id),
+        ),
+        1,
+    )?;
+    Ok(!result.rows.is_empty())
+}
+
+pub(crate) fn retarget_stored_video_media_relations(
+    connection: &mut RepositoryConnection,
+    namespace: &str,
+) -> Result<(), String> {
+    let assets = sql::relation(namespace, Table::VideoAssets);
+    let output = sql::video_dataset_output(namespace);
+    execute_update_sql(
+        connection,
+        &format!(
+            "UPDATE {assets} SET {media_relation} = {output}",
+            media_relation = db::MEDIA_RELATION,
+            output = sql::string_literal(&output),
+        ),
+    )
+    .map_err(|error| format!("retargeting stored video media relations: {error}"))
 }
 
 fn table_has_dataset(
@@ -752,6 +883,17 @@ pub(crate) fn ingest_batch(
     target: &str,
     batch: RecordBatch,
 ) -> Result<(), String> {
+    ingest_batches(connection, target, vec![batch])
+}
+
+pub(crate) fn ingest_batches(
+    connection: &mut RepositoryConnection,
+    target: &str,
+    batches: Vec<RecordBatch>,
+) -> Result<(), String> {
+    let Some(schema) = batches.first().map(RecordBatch::schema) else {
+        return Ok(());
+    };
     let mut statement = connection
         .new_statement()
         .map_err(|error| format!("opening ADBC ingest for {target}: {error}"))?;
@@ -759,7 +901,10 @@ pub(crate) fn ingest_batch(
         .configure_ingest(target)
         .map_err(|error| format!("configuring ADBC ingest for {target}: {error}"))?;
     statement
-        .bind(batch)
+        .bind_stream(Box::new(RecordBatchIterator::new(
+            batches.into_iter().map(Ok::<_, ArrowError>),
+            schema,
+        )))
         .map_err(|error| format!("binding Spiral table {target}: {error}"))?;
     statement
         .execute_update()

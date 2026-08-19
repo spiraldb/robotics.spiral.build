@@ -71,8 +71,11 @@ flowchart TD
   joint values.
 - **PERSIST-019** The video-source relation must include episode, camera role,
   segment index, timeline bounds, media, dimensions, and frame rate.
-- **PERSIST-020** SpiralDB must expose video sources through its MP4 dataset
-  capability.
+- **PERSIST-020** SpiralDB must expose video sources through exactly one managed
+  MP4 dataset per active Studio namespace. One shared source view must read the
+  namespace's complete `video_assets` relation, and the managed output must
+  preserve episode, stream, and segment keys so consumers filter media rows
+  without creating per-episode views or datasets.
 - **PERSIST-021** A query for one episode and camera-frame index must return the
   matching joint vector and an image tensor shaped as height, width, and three
   color channels.
@@ -96,9 +99,10 @@ flowchart TD
   replaced, Studio-owned relations absent from the file must be removed, and
   import must not stage through the local filesystem. Before the exclusive
   operation returns, imported video assets must be retargeted to the active
-  namespace and their managed MP4 datasets must be created or refreshed from
-  the committed durable rows; managed video datasets absent from the imported
-  project must be removed.
+  namespace and its single managed MP4 dataset must be created or refreshed
+  once from all committed durable rows. The shared dataset and source view must
+  be removed when the imported project has no video assets. Studio must never
+  create or refresh per-episode video views or datasets.
   Derived-resource reconciliation happens after the relational commit because
   newly ingested relations are not bindable before publication. A repair
   failure must therefore return a successful committed-row summary with an
@@ -111,7 +115,9 @@ flowchart TD
 - **PERSIST-030** Project transfer may use one bounded in-memory
   request/response buffer, currently limited to 256 MiB; that buffer is not
   durable storage. HTTP import must move the received buffer into storage work
-  without cloning the entire archive.
+  without cloning the entire archive. Import must bind all Arrow record batches
+  for one relation as one ADBC stream rather than executing one ingest per IPC
+  batch.
 - **PERSIST-031** One private backend-local JSON file may persist only the
   bootstrap state needed before Spiral can be opened: the API endpoint, SpFS
   endpoint, selected project ID, and optional client ID and client secret. It
