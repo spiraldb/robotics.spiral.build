@@ -1050,23 +1050,28 @@ ambient browser selection—decides whether execution may begin.
 - **Destination state:** Settings selects the Spiral API endpoint, SpFS
   endpoint, and project; first launch opens this section when no project is
   selected. The backend remembers only those bootstrap pointers in its private
-  JSON file. A project switch requires an idle system and replaces the shared
-  repository connection pool atomically. Changing either service endpoint is
-  saved as the complete next destination and requires a process restart because
-  the ADBC driver has no per-database endpoint options; Studio does not write
-  project preferences to the still-active old destination. Namespace remains
-  process configuration, and Settings offers no second storage choice or
-  redundant enable switch. Domain operations and saved training runs do not
-  carry alternate destination objects.
+  JSON file. A project switch requires an idle system with no visible connected
+  robot and replaces the shared repository connection pool atomically. If the
+  old catalog is unavailable, released hardware connections hidden by that
+  failure are detached as part of the cutover. Endpoint and credential changes
+  are scoped to the new database and apply live after the old pool drains;
+  Studio does not write project preferences to the still-active old
+  destination. Namespace remains process configuration, and Settings offers no
+  second storage choice or redundant enable switch. Domain operations and saved
+  training runs do not carry alternate destination objects.
 
 ### Settings
 
-Settings is one Codex-style modal: category navigation at left, ordinary forms
-at right, header and footer fixed. Robots is the default section, followed by
-SpiralDB and Video. SpiralDB owns complete-project backup and destructive
-restore as a distinct `.spiral-project` transfer; restore requires explicit
-confirmation and replaces all Studio-managed relations. Test results and
-configuration blockers are rendered beside the responsible section.
+Settings is one full-height utility panel inside the Studio shell: category
+navigation at left, ordinary forms at right, header and footer fixed. It
+replaces the current activity workspace while leaving the activity rail and
+status bar available, and its navigation collapses to a horizontal row at
+narrow widths. Robots is the default section, followed by SpiralDB, Training,
+and Video. SpiralDB owns complete-project backup and destructive restore as a
+distinct `.spiral-project` transfer; restore alone uses the shared blocking
+dialog, requires explicit confirmation, and replaces all Studio-managed
+relations. Save failures, test results, and configuration blockers remain
+visible beside the responsible section and its retry and exit actions.
 
 ### Inputs / Fields
 

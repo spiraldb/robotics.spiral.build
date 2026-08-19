@@ -1,4 +1,4 @@
-//! Shell-overlay transitions. Primary screen navigation belongs to the router.
+//! Shell utility-view transitions. Primary activity navigation belongs to the router.
 
 use dioxus::prelude::*;
 
@@ -53,7 +53,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn settings_state_is_independent_from_routing() {
+    fn settings_view_state_is_independent_from_routing() {
         let initial = ShellState::default();
         let open = reduce_shell(&initial, ShellAction::OpenSettings);
         let closed = reduce_shell(&open, ShellAction::CloseSettings);

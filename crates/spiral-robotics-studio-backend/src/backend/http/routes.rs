@@ -48,7 +48,7 @@ use crate::backend::recording::episodes::{
     TimelineSample, TimelineTraces, build_arms,
 };
 use crate::backend::robotics::cameras::{CameraManager, Frame};
-use crate::backend::robotics::hardware::{HardwareHandle, RobotSpec};
+use crate::backend::robotics::hardware::{HardwareHandle, HardwareState, RobotSpec};
 use crate::backend::robotics::video::{
     CameraCaptureSpec, VideoAsset, VideoAssetMetadata, VideoCapture, VideoEncoderSettings,
 };

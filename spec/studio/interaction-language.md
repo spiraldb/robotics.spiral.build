@@ -113,6 +113,9 @@ browser confirmation dialogs.
   the owning panel so the user can retry or leave without a trapped overlay.
 - **STUDIO-050** Each activity-rail action must center its icon-and-label stack
   vertically and horizontally within the full navigation target.
+- **STUDIO-057** A Settings save or connection-test failure must remain visible
+  in the owning Settings panel beside its retry and exit actions; a transient
+  status-bar message may supplement it but must not be its only presentation.
 
 ## Implementation ownership
 

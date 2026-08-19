@@ -13,6 +13,7 @@ use crate::frontend::components::icons::{
 #[component]
 pub(crate) fn ActivityRail(
     activity: Activity,
+    settings_active: bool,
     on_activity: EventHandler<Activity>,
     on_settings: EventHandler<()>,
 ) -> Element {
@@ -21,8 +22,8 @@ pub(crate) fn ActivityRail(
             Action {
                 purpose: ActionPurpose::Navigate,
                 variant: ActionVariant::Row,
-                class: if activity == Activity::Live { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
-                aria_pressed: activity == Activity::Live,
+                class: if !settings_active && activity == Activity::Live { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
+                aria_pressed: !settings_active && activity == Activity::Live,
                 onclick: move |_| on_activity.call(Activity::Live),
                 RobotPanelIcon {}
                 span { "Live" }
@@ -30,8 +31,8 @@ pub(crate) fn ActivityRail(
             Action {
                 purpose: ActionPurpose::Navigate,
                 variant: ActionVariant::Row,
-                class: if activity == Activity::Data { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
-                aria_pressed: activity == Activity::Data,
+                class: if !settings_active && activity == Activity::Data { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
+                aria_pressed: !settings_active && activity == Activity::Data,
                 onclick: move |_| on_activity.call(Activity::Data),
                 DataIcon {}
                 span { "Data" }
@@ -39,8 +40,8 @@ pub(crate) fn ActivityRail(
             Action {
                 purpose: ActionPurpose::Navigate,
                 variant: ActionVariant::Row,
-                class: if activity == Activity::Training { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
-                aria_pressed: activity == Activity::Training,
+                class: if !settings_active && activity == Activity::Training { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
+                aria_pressed: !settings_active && activity == Activity::Training,
                 onclick: move |_| on_activity.call(Activity::Training),
                 TrainingIcon {}
                 span { "Training" }
@@ -48,8 +49,8 @@ pub(crate) fn ActivityRail(
             Action {
                 purpose: ActionPurpose::Navigate,
                 variant: ActionVariant::Row,
-                class: if activity == Activity::Rollout { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
-                aria_pressed: activity == Activity::Rollout,
+                class: if !settings_active && activity == Activity::Rollout { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
+                aria_pressed: !settings_active && activity == Activity::Rollout,
                 onclick: move |_| on_activity.call(Activity::Rollout),
                 RolloutIcon {}
                 span { "Rollout" }
@@ -58,7 +59,8 @@ pub(crate) fn ActivityRail(
                 id: "settings-rail-trigger",
                 purpose: ActionPurpose::Navigate,
                 variant: ActionVariant::Row,
-                class: "activity-rail-item activity-rail-settings",
+                class: if settings_active { "activity-rail-item activity-rail-item-active activity-rail-settings" } else { "activity-rail-item activity-rail-settings" },
+                aria_pressed: settings_active,
                 aria_label: "Settings",
                 title: "Settings",
                 onclick: move |_| on_settings.call(()),

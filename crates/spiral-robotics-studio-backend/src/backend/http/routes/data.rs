@@ -571,6 +571,51 @@ async fn get_data_settings(State(state): State<AppState>) -> Json<DataSettings> 
     )))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum DestinationChangeAdmission {
+    Ready,
+    DisconnectOrphaned(Vec<String>),
+    Busy,
+}
+
+fn destination_change_admission(
+    hardware: &HardwareState,
+    current_robot_ids: Option<&BTreeSet<String>>,
+    training_is_active: bool,
+    rollout_is_active: bool,
+) -> DestinationChangeAdmission {
+    if hardware.telemetry.recording.is_some()
+        || !matches!(hardware.mode.selection, ModeSelection::Idle)
+        || training_is_active
+        || rollout_is_active
+    {
+        return DestinationChangeAdmission::Busy;
+    }
+
+    let connected = hardware
+        .connections
+        .iter()
+        .filter(|(_, connection)| connection.connected)
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    if connected.is_empty() {
+        return DestinationChangeAdmission::Ready;
+    }
+
+    match current_robot_ids {
+        Some(ids) if connected.iter().any(|id| ids.contains(id)) => {
+            DestinationChangeAdmission::Busy
+        }
+        Some(ids) => DestinationChangeAdmission::DisconnectOrphaned(
+            connected
+                .into_iter()
+                .filter(|id| !ids.contains(id))
+                .collect(),
+        ),
+        None => DestinationChangeAdmission::DisconnectOrphaned(connected),
+    }
+}
+
 async fn update_data_settings(
     State(state): State<AppState>,
     Json(request): Json<UpdateDataSettingsRequest>,
@@ -618,27 +663,43 @@ async fn update_data_settings(
             token,
         };
         let hardware = state.hardware.state();
-        let project_is_busy = hardware.telemetry.recording.is_some()
-            || !matches!(hardware.mode.selection, ModeSelection::Idle)
-            || hardware
-                .connections
-                .values()
-                .any(|connection| connection.connected)
-            || training_is_active
-            || matches!(
-                rollout_application::snapshot(&super::training_rollout::RolloutHttpAdapter(
-                    state.rollout.clone(),
-                ))
-                .phase,
-                ApplicationRolloutPhase::Loading
-                    | ApplicationRolloutPhase::WarmingUp
-                    | ApplicationRolloutPhase::Running
-                    | ApplicationRolloutPhase::Stopping
-            );
-        if project_is_busy {
-            return Err(Failure::conflict(
-                "Disconnect robots and stop recording, replay, rollout, and training before changing the Spiral destination",
-            ));
+        let rollout_is_active = matches!(
+            rollout_application::snapshot(&super::training_rollout::RolloutHttpAdapter(
+                state.rollout.clone(),
+            ))
+            .phase,
+            ApplicationRolloutPhase::Loading
+                | ApplicationRolloutPhase::WarmingUp
+                | ApplicationRolloutPhase::Running
+                | ApplicationRolloutPhase::Stopping
+        );
+        let current_robot_ids = state.workspace.try_list().ok().map(|records| {
+            records
+                .into_iter()
+                .map(|record| record.id)
+                .collect::<BTreeSet<_>>()
+        });
+        match destination_change_admission(
+            &hardware,
+            current_robot_ids.as_ref(),
+            training_is_active,
+            rollout_is_active,
+        ) {
+            DestinationChangeAdmission::Ready => {}
+            DestinationChangeAdmission::Busy => {
+                return Err(Failure::conflict(
+                    "Stop recording, replay, rollout, and training, then disconnect visible robots before changing the Spiral destination",
+                ));
+            }
+            DestinationChangeAdmission::DisconnectOrphaned(robot_ids) => {
+                for robot_id in robot_ids {
+                    state.hardware.disconnect(&robot_id).await.map_err(|error| {
+                        Failure::conflict(format!(
+                            "Could not safely disconnect hidden robot {robot_id:?} before changing the Spiral destination: {error}"
+                        ))
+                    })?;
+                }
+            }
         }
         Some(reservation)
     } else {
@@ -727,4 +788,52 @@ async fn spiral_video(
         header::HeaderValue::from_static("private, no-store"),
     );
     Ok(response)
+}
+
+#[cfg(test)]
+mod destination_change_tests {
+    use super::*;
+
+    fn idle_hardware_with_connected_robot(id: &str) -> HardwareState {
+        let mut hardware = HardwareState::default();
+        hardware.connections.insert(
+            id.to_owned(),
+            ConnectionStatus {
+                connected: true,
+                error: None,
+            },
+        );
+        hardware
+    }
+
+    #[test]
+    fn unavailable_catalog_can_detach_idle_hidden_robots_during_cutover() {
+        let hardware = idle_hardware_with_connected_robot("leader");
+
+        assert_eq!(
+            destination_change_admission(&hardware, None, false, false),
+            DestinationChangeAdmission::DisconnectOrphaned(vec!["leader".to_owned()]),
+        );
+    }
+
+    #[test]
+    fn visible_connected_robot_still_blocks_destination_cutover() {
+        let hardware = idle_hardware_with_connected_robot("leader");
+        let current_robot_ids = BTreeSet::from(["leader".to_owned()]);
+
+        assert_eq!(
+            destination_change_admission(&hardware, Some(&current_robot_ids), false, false,),
+            DestinationChangeAdmission::Busy,
+        );
+    }
+
+    #[test]
+    fn active_work_never_uses_the_hidden_robot_recovery_path() {
+        let hardware = idle_hardware_with_connected_robot("leader");
+
+        assert_eq!(
+            destination_change_admission(&hardware, None, true, false),
+            DestinationChangeAdmission::Busy,
+        );
+    }
 }

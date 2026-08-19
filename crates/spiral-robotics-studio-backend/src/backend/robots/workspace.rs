@@ -362,7 +362,7 @@ impl RobotWorkspace {
             .map_err(WorkspaceError::Invalid)
     }
 
-    fn try_list(&self) -> Result<Vec<RobotRecord>, WorkspaceError> {
+    pub(crate) fn try_list(&self) -> Result<Vec<RobotRecord>, WorkspaceError> {
         let relation = sql::relation(self.repository.namespace(), Table::Robots);
         self.repository
             .run_blocking(move |connection| {

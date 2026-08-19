@@ -152,7 +152,7 @@ fn StudioShell() -> Element {
     rsx! {
         document::Stylesheet { href: TAILWIND }
         document::Script { src: ECHARTS_RUNTIME }
-        document::Title { "Spiral Robotics Studio · {activity.label()}" }
+        document::Title { if settings_open { "Spiral Robotics Studio · Settings" } else { "Spiral Robotics Studio · {activity.label()}" } }
         document::Link { rel: "icon", href: FAVICON }
         document::Meta { name: "color-scheme", content: "light" }
 
@@ -164,39 +164,40 @@ fn StudioShell() -> Element {
                     shell.dispatch(ShellAction::CloseSettings);
                 }
             },
-            if settings_open {
-                SettingsPanel {
-                    initial: loaded_settings.clone(),
-                    load_error: settings_error.clone(),
-                    on_close: move |_| {
-                        if !settings_busy() {
-                            shell.dispatch(ShellAction::CloseSettings);
-                        }
-                    },
-                    on_saved: move |_| {
-                        settings.restart();
-                        spawn(async move {
-                            let _ = studio.refresh_episode_catalog().await;
-                        });
-                    },
-                    on_busy_change: move |busy| settings_busy.set(busy),
-                }
-            }
             div {
                 class: "studio-shell-background",
-                inert: settings_open.then_some("true"),
-                "aria-hidden": settings_open,
                 main { class: "studio-v2-body",
                     ActivityRail {
                         activity,
+                        settings_active: settings_open,
                         on_activity: move |next| {
                             timeline.stop_preview();
                             studio.notifications.write().close();
+                            shell.dispatch(ShellAction::CloseSettings);
                             navigator.push(StudioRoute::for_activity(next));
                         },
                         on_settings: move |_| shell.dispatch(ShellAction::OpenSettings),
                     }
-                    Outlet::<StudioRoute> {}
+                    if settings_open {
+                        SettingsPanel {
+                            initial: loaded_settings.clone(),
+                            load_error: settings_error.clone(),
+                            on_close: move |_| {
+                                if !settings_busy() {
+                                    shell.dispatch(ShellAction::CloseSettings);
+                                }
+                            },
+                            on_saved: move |_| {
+                                settings.restart();
+                                spawn(async move {
+                                    let _ = studio.refresh_episode_catalog().await;
+                                });
+                            },
+                            on_busy_change: move |busy| settings_busy.set(busy),
+                        }
+                    } else {
+                        Outlet::<StudioRoute> {}
+                    }
                 }
                 StatusBar {
                     mode: activity,

@@ -7,7 +7,7 @@ use spiral_robotics_contracts::api::{
 };
 use spiral_robotics_ui::{
     Action, ActionLink, ActionPurpose, ActionVariant, BlockingConfirmation, CloseIcon, FileAction,
-    Toggle, focus_after_render, trap_focus_within,
+    Toggle, focus_after_render,
 };
 
 use crate::frontend::api::http as api;
@@ -46,6 +46,7 @@ pub(crate) fn SettingsPanel(
     let mut testing = use_signal(|| false);
     let transferring_project = use_signal(|| false);
     let mut test_result = use_signal(|| None::<ConnectionTestResponse>);
+    let mut save_error = use_signal(|| None::<String>);
     let mut pending_project_file = use_signal(|| None::<dioxus::html::FileData>);
     let mut project_transfer_error = use_signal(|| None::<String>);
     let mut initial_focus_set = use_signal(|| false);
@@ -53,7 +54,7 @@ pub(crate) fn SettingsPanel(
 
     use_effect(move || {
         if !initial_focus_set() {
-            focus_after_render("settings-close-action".to_owned());
+            focus_after_render("data-settings-panel".to_owned());
             initial_focus_set.set(true);
         }
     });
@@ -71,6 +72,7 @@ pub(crate) fn SettingsPanel(
         if saving() || transferring_project() || !settings_loaded {
             return;
         }
+        save_error.set(None);
         saving.set(true);
         on_busy_change.call(true);
         let request = UpdateDataSettingsRequest {
@@ -116,7 +118,7 @@ pub(crate) fn SettingsPanel(
                         );
                     }
                 }
-                Err(error) => studio.report_from(MessageSource::Settings, error),
+                Err(error) => save_error.set(Some(error)),
             }
             saving.set(false);
             on_busy_change.call(false);
@@ -131,23 +133,13 @@ pub(crate) fn SettingsPanel(
     });
 
     rsx! {
-        div { class: "ui-dialog-backdrop settings-backdrop", onclick: move |_| if !saving() && !transferring_project() { on_close.call(()) } }
         section {
-            id: "data-settings-dialog",
-            class: "ui-dialog-surface data-settings-dialog",
-            role: "dialog",
-            "aria-modal": "true",
+            id: "data-settings-panel",
+            class: "data-settings-panel",
+            role: "region",
             "aria-labelledby": "data-settings-title",
             "aria-hidden": pending_project_file().is_some(),
             tabindex: "-1",
-            onclick: move |event| event.stop_propagation(),
-            onkeydown: move |event| {
-                if event.key() == Key::Tab
-                    && trap_focus_within("data-settings-dialog", event.modifiers().shift())
-                {
-                    event.prevent_default();
-                }
-            },
             header { class: "settings-header",
                 div {
                     h2 { id: "data-settings-title", "Settings" }
@@ -165,10 +157,10 @@ pub(crate) fn SettingsPanel(
             }
             div { class: "settings-layout",
                 nav { class: "settings-nav", "aria-label": "Settings sections",
-                    SettingsSectionAction { label: "Robots", active: section() == SettingsSection::Robots, onclick: move |_| { section.set(SettingsSection::Robots); test_result.set(None); } }
-                    SettingsSectionAction { label: "SpiralDB", active: section() == SettingsSection::Spiral, onclick: move |_| { section.set(SettingsSection::Spiral); test_result.set(None); } }
-                    SettingsSectionAction { label: "Training", active: section() == SettingsSection::Training, onclick: move |_| { section.set(SettingsSection::Training); test_result.set(None); } }
-                    SettingsSectionAction { label: "Video", active: section() == SettingsSection::Video, onclick: move |_| { section.set(SettingsSection::Video); test_result.set(None); } }
+                    SettingsSectionAction { label: "Robots", active: section() == SettingsSection::Robots, onclick: move |_| { section.set(SettingsSection::Robots); test_result.set(None); save_error.set(None); } }
+                    SettingsSectionAction { label: "SpiralDB", active: section() == SettingsSection::Spiral, onclick: move |_| { section.set(SettingsSection::Spiral); test_result.set(None); save_error.set(None); } }
+                    SettingsSectionAction { label: "Training", active: section() == SettingsSection::Training, onclick: move |_| { section.set(SettingsSection::Training); test_result.set(None); save_error.set(None); } }
+                    SettingsSectionAction { label: "Video", active: section() == SettingsSection::Video, onclick: move |_| { section.set(SettingsSection::Video); test_result.set(None); save_error.set(None); } }
                 }
                 div { class: "settings-content",
                     if section() == SettingsSection::Robots {
@@ -303,6 +295,23 @@ pub(crate) fn SettingsPanel(
                                 "{response.message}"
                             }
                         }
+                    }
+                }
+            }
+            if let Some(error) = save_error() {
+                div {
+                    class: "settings-save-error",
+                    role: "alert",
+                    "aria-live": "assertive",
+                    div {
+                        strong { "Settings weren’t saved." }
+                        span { "{error}" }
+                    }
+                    Action {
+                        purpose: ActionPurpose::Close,
+                        aria_label: "Dismiss settings error",
+                        onclick: move |_| save_error.set(None),
+                        "Dismiss"
                     }
                 }
             }

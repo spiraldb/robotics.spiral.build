@@ -31,11 +31,15 @@ The product does not reconcile a second local source of truth.
   must let the operator configure both the Spiral control-plane API endpoint
   and the SpFS endpoint, then select and test the active project. Project
   switches must drain repository work, discard stale pooled connections, and
-  be refused while robots or project activity are active. Endpoint, project,
-  client ID, and client-secret changes must create a new database with scoped
-  ADBC options and apply live after the old pool drains; they must not mutate
-  process-global environment variables or require a Studio restart. The
-  namespace remains process bootstrap configuration, and
+  be refused while recording, replay, rollout, training, active motor control,
+  or a catalog-visible robot connection is active. When the old catalog is
+  unavailable, idle released hardware connections that cannot be represented
+  in Settings must be disconnected during the cutover rather than trapping the
+  operator on the unavailable destination. Endpoint, project, client ID, and
+  client-secret changes must create a new database with scoped ADBC options and
+  apply live after the old pool drains; they must not mutate process-global
+  environment variables or require a Studio restart. The namespace remains
+  process bootstrap configuration, and
   individual domain operations must not accept or reconstruct alternate
   destinations.
 - **PERSIST-014** Stored SpiralDB credentials must remain in the backend and

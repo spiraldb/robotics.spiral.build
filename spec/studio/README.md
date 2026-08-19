@@ -13,7 +13,9 @@ panels to be arranged spatially.
 3. The user arranges the panels needed for the task.
 4. The status bar and notification center report global state without moving
    the workspace.
-5. The user opens Settings from the bottom of the activity rail.
+5. The user opens Settings from the bottom of the activity rail. Settings
+   replaces the activity workspace inside the shell rather than covering it in
+   a modal, so the activity rail and status bar remain available.
 6. In Settings → SpiralDB, the user may back up or restore the complete active
    project as one portable file.
 
@@ -97,6 +99,10 @@ panels to be arranged spatially.
   backend/UI crates adapt those ports to HTTP, hardware, persistence, and
   presentation. Cross-process work must use versioned neutral contracts rather
   than importing another process's implementation.
+- **STUDIO-056** Settings must be an in-shell utility panel rather than a modal.
+  It must retain its section navigation, fixed action footer, the activity rail,
+  and the status bar at desktop and narrow widths. A scope-wide destructive
+  confirmation opened from Settings may still use the shared blocking dialog.
 
 ## Feature relationships
 

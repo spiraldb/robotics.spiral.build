@@ -20,7 +20,7 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
-adbc-driver-spiraldb = { git = "https://github.com/spiraldb/spiraldb.git", rev = "e417cba7a2f0d3e036550097a14ac39f3e0c583f", default-features = false }
+adbc-driver-spiraldb = { path = "../spiraldb/engine/adbc-driver-spiraldb", default-features = false }
 spiral-robotics = { path = "." }
 spiral-robotics-contracts = { path = "crates/spiral-robotics-contracts" }
 spiral-robotics-core = { path = "crates/spiral-robotics-core" }

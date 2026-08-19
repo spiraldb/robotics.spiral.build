@@ -33,7 +33,7 @@
           };
           llvmPackages = pkgs.llvmPackages_latest;
           # Pin the complete Rust toolchain so development stays aligned.
-          rustToolchain = pkgs.rust-bin.nightly."2026-05-17".default.override {
+          rustToolchain = pkgs.rust-bin.nightly."2026-06-29".default.override {
             extensions = [
               "rust-src"
               "rust-analyzer"
@@ -58,7 +58,7 @@
             pkgs.wasm-bindgen-cli_0_2_126
             pkgs.binaryen # wasm-opt, used for release builds
           ];
-          linuxNativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [
+          nativeBuildInputs = [
             llvmPackages.libclang
           ];
           linuxBuildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [
@@ -74,10 +74,10 @@
                 pkgs.uv
                 llvmPackages.llvm
               ]
-              ++ linuxNativeBuildInputs
+              ++ nativeBuildInputs
               ++ linuxBuildInputs;
             ASAN_SYMBOLIZER_PATH = "${llvmPackages.llvm}/bin/llvm-symbolizer";
-            LIBCLANG_PATH = pkgs.lib.optionalString pkgs.stdenv.isLinux "${llvmPackages.libclang.lib}/lib";
+            LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
           };
         in
         {
