@@ -233,11 +233,10 @@ def test_training_anchors_follow_camera_frames_instead_of_joint_rows() -> None:
     assert [anchor.sample.sample_index for anchor in anchors] == [0, 2, 4]
 
 
-def test_missing_managed_video_relation_falls_back_to_raw_spiral_payload(
+def test_missing_managed_video_relation_is_an_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dataset = object.__new__(SpiralActDataset)
-    dataset.namespace = "spiral_robotics"
     dataset.camera_streams = ("observation.images.wrist",)
     dataset.image_width = 2
     dataset.image_height = 1
@@ -270,27 +269,18 @@ def test_missing_managed_video_relation_falls_back_to_raw_spiral_payload(
 
     def query(sql: str) -> pa.Table:
         queries.append(sql)
-        if "SELECT payload FROM spiral_robotics.video_assets" in sql:
-            return pa.table({"payload": [b"mp4"]})
         raise RuntimeRequestError(
             "Spiral training query failed: unknown table `spiral_robotics.video_episode.assets`",
             422,
         )
 
     monkeypatch.setattr(dataset, "_query", query)
-    monkeypatch.setattr(
-        "spiral_training_runtime.spiral._decode_mp4_frames",
-        lambda payload, frames, width, height, resize: {
-            0: np.full((height, width, 3), 17, dtype=np.uint8)
-        },
-    )
 
-    images = dataset._fetch_images([Anchor(sample, 0, 0)])
+    with pytest.raises(RuntimeRequestError, match="unknown table"):
+        dataset._fetch_images([Anchor(sample, 0, 0)])
 
-    assert images.shape == (1, 1, 1, 2, 3)
-    assert images.tolist() == [[[[[17, 17, 17], [17, 17, 17]]]]]
-    assert any("video_episode.assets" in query for query in queries)
-    assert any("SELECT payload FROM spiral_robotics.video_assets" in query for query in queries)
+    assert len(queries) == 1
+    assert "video_episode.assets" in queries[0]
 
 
 def test_spiral_image_query_casts_request_index_to_arrow_integer(

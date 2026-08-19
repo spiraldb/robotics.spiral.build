@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 import os
 import re
-import subprocess
 import time
 from dataclasses import dataclass
 from itertools import pairwise
@@ -498,16 +497,7 @@ class SpiralActDataset:
                 "spql.video.frames(a.media, "
                 f"spql.video.frame_indices(ARRAY[{indices}])) AS f"
             )
-        try:
-            table = self._query(
-                " UNION ALL ".join(selects) + " ORDER BY group_index, request_index"
-            )
-        except RuntimeRequestError as error:
-            if not _is_unusable_video_index_error(str(error)):
-                raise
-            for segment, destinations in grouped:
-                self._fetch_raw_images(output, segment, destinations, error)
-            return output
+        table = self._query(" UNION ALL ".join(selects) + " ORDER BY group_index, request_index")
         rows = table.to_pylist()
         expected_rows = sum(len(destinations) for _, destinations in grouped)
         if len(rows) != expected_rows:
@@ -529,51 +519,6 @@ class SpiralActDataset:
             image = _image_tensor(row["image"], self.image_height, self.image_width)
             output[batch_index, camera_index] = image
         return output
-
-    def _fetch_raw_images(
-        self,
-        output: np.ndarray,
-        segment: VideoSegment,
-        destinations: list[tuple[int, int, int]],
-        indexed_error: Exception,
-    ) -> None:
-        payload = self._raw_video_payload(segment)
-        frame_indices = sorted({destination[2] for destination in destinations})
-        try:
-            decoded = _decode_mp4_frames(
-                payload,
-                frame_indices,
-                self.image_width,
-                self.image_height,
-                self.resize_images,
-            )
-        except Exception as error:
-            raise RuntimeRequestError(
-                f"{indexed_error}; raw MP4 fallback failed: {error}", 422
-            ) from error
-        for batch_index, camera_index, frame_index in destinations:
-            image = decoded.get(frame_index)
-            if image is None:
-                raise RuntimeRequestError(
-                    f"FFmpeg did not decode requested frame {frame_index}", 422
-                )
-            output[batch_index, camera_index] = image
-
-    def _raw_video_payload(self, segment: VideoSegment) -> bytes:
-        table = self._query(
-            f"SELECT payload FROM {self.namespace}.video_assets WHERE "
-            f"episode_id = {_literal(segment.episode_id)} AND "
-            f"stream_id = {_literal(segment.stream_id)} AND "
-            f"segment_index = {segment.segment_index}"
-        )
-        if table.num_rows != 1:
-            raise RuntimeRequestError(
-                "Spiral must return exactly one raw video asset for a segment", 422
-            )
-        payload = table["payload"][0].as_py()
-        if not isinstance(payload, bytes) or not payload:
-            raise RuntimeRequestError("Spiral returned an invalid raw video payload", 422)
-        return payload
 
 
 def _read_only_query(value: Any) -> str:
@@ -607,14 +552,6 @@ def _optional_string(value: Any) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
-def _is_unusable_video_index_error(error: str) -> bool:
-    return (
-        "unknown table" in error
-        or ("video frame index" in error and "is outside a track with" in error)
-        or "frequency cannot be zero" in error
-    )
-
-
 def _image_tensor(value: Any, height: int, width: int) -> np.ndarray:
     expected_shape = [height, width, 3]
     if isinstance(value, dict):
@@ -633,70 +570,6 @@ def _image_tensor(value: Any, height: int, width: int) -> np.ndarray:
             422,
         )
     return image.reshape(height, width, 3)
-
-
-def _decode_mp4_frames(
-    payload: bytes,
-    frame_indices: list[int],
-    width: int,
-    height: int,
-    resize: bool,
-) -> dict[int, np.ndarray]:
-    if not frame_indices:
-        return {}
-    select = "+".join(f"eq(n\\,{index})" for index in frame_indices)
-    filters = [f"select={select}", "format=rgb24"]
-    if resize:
-        filters.append(f"scale={width}:{height}:flags=bilinear")
-    try:
-        result = subprocess.run(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-i",
-                "pipe:0",
-                "-an",
-                "-sn",
-                "-map",
-                "0:v:0",
-                "-vf",
-                ",".join(filters),
-                "-vsync",
-                "0",
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "rgb24",
-                "pipe:1",
-            ],
-            input=payload,
-            capture_output=True,
-            check=False,
-            timeout=120,
-        )
-    except FileNotFoundError as error:
-        raise RuntimeError("FFmpeg is required for raw MP4 fallback") from error
-    except subprocess.TimeoutExpired as error:
-        raise RuntimeError("FFmpeg timed out decoding Spiral video") from error
-    if result.returncode != 0:
-        detail = result.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"FFmpeg exited with status {result.returncode}: {detail}")
-    frame_bytes = width * height * 3
-    expected = frame_bytes * len(frame_indices)
-    if len(result.stdout) != expected:
-        raise RuntimeError(
-            f"FFmpeg returned {len(result.stdout)} RGB bytes for {len(frame_indices)} "
-            f"frame(s), expected {expected}"
-        )
-    return {
-        frame_index: np.frombuffer(
-            result.stdout[position * frame_bytes : (position + 1) * frame_bytes],
-            dtype=np.uint8,
-        ).reshape(height, width, 3)
-        for position, frame_index in enumerate(frame_indices)
-    }
 
 
 def _positive_int(value: Any, label: str) -> int:

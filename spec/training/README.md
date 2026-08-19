@@ -51,9 +51,9 @@ durable checkpoints through a worker that reads and writes SpiralDB directly.
 - **TRAIN-015** Camera frame selection must use camera frame indices and stream
   rates, not joint sample frequency.
 - **TRAIN-016** SpiralDB must perform supported frame selection, decode, and
-  Arrow tensor conversion. A worker may fall back to decoding the authoritative
-  MP4 payload read directly from SpiralDB when an imported or legacy managed
-  video relation is unavailable; the fallback must remain worker-owned.
+  Arrow tensor conversion. Every persisted video asset must have its managed
+  video relation and index; a missing or unusable index is a storage-integrity
+  error that must fail the job instead of invoking a second decode path.
 - **TRAIN-017** When ACT requires image resizing or normalization, the transform
   must match LeRobot behavior.
 - **TRAIN-018** The worker should overlap or pipeline data preparation with

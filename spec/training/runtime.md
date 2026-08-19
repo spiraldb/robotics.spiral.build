@@ -69,12 +69,12 @@ flowchart LR
   must not mutate process-global endpoint or credential environment variables.
 - **RUNTIME-015** The worker must use the `spiraldb` Python package and prefer
   SPQL video frame selection, decode, optional resize, and Arrow image tensor
-  conversion. When legacy or imported video metadata references a managed MP4
-  relation that is unavailable, the worker must query the authoritative MP4
-  payload directly from SpiralDB and decode only the requested frames with its
-  local FFmpeg runtime; Studio must not proxy or stage the payload. The worker
-  must consume SPQL tensors through their canonical Arrow `data` and `shape`
-  storage fields rather than treating the extension struct as a flat array.
+  conversion. The managed MP4 relation and index are required persisted
+  derivatives of every video asset. Missing, stale, or unusable video indexes
+  must fail the job as storage-integrity errors; the worker must not retrieve
+  raw MP4 payloads for a separate decode path. The worker must consume SPQL
+  tensors through their canonical Arrow `data` and `shape` storage fields
+  rather than treating the extension struct as a flat array.
 - **RUNTIME-016** The protocol must support more than one runtime
   implementation and must not require gRPC, Arrow Flight, Docker, or Compose.
 - **RUNTIME-031** GPU bootstrap must validate that SpiralDB's packaged video
@@ -121,8 +121,8 @@ flowchart LR
   and model timing. Studio-side Arrow encode and upload timings are absent for
   worker-owned training jobs because there is no training data upload.
 - **RUNTIME-027** One worker batch must request all required indexed video
-  frames in one SPQL statement, even when the samples span several videos.
-  Missing or unusable managed video relations must retain the raw-MP4 fallback.
+  frames in one SPQL statement, even when the samples span several videos, and
+  must propagate any managed-video relation or index failure.
 - **RUNTIME-028** Lambda bootstrap must prefer a colocated
   `libadbc_driver_spiraldb.so` over the driver inside the locked Python package,
   so a credential-capable deployment driver is not replaced during `uv sync`.
