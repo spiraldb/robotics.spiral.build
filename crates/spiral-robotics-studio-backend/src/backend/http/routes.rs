@@ -101,9 +101,9 @@ use spiral_robotics_studio_application::robot_control::{
     self, RobotControlCommand, RobotControlPort,
 };
 use spiral_robotics_studio_application::robots::{
-    self, AutoConnectStatus, CameraAssignment, CreateRobotCommand, ExportedRobotDocument, NewRobot,
-    RobotConnectionPort, RobotConnectionSpec, RobotRepository, RobotUpdate, SavedRobot,
-    SerialPortConfiguration, UpdateRobotCommand,
+    self, AutoConnectOutcome, AutoConnectStatus, CameraAssignment, CreateRobotCommand,
+    ExportedRobotDocument, NewRobot, RobotConnectionPort, RobotConnectionSpec, RobotRepository,
+    RobotUpdate, SavedRobot, SerialPortConfiguration, UpdateRobotCommand,
 };
 use spiral_robotics_studio_application::rollout::{
     self as rollout_application, RolloutMetrics as ApplicationRolloutMetrics,

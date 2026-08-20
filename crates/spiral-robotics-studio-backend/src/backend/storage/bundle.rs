@@ -13,10 +13,9 @@ use spiral_robotics_contracts::api::{EpisodeImportSummary, ProjectImportSummary}
 use spiral_robotics_contracts::spiral::{self, Table, column};
 
 use crate::backend::storage::manager::{
-    commit_catalog_transaction, drop_video_dataset, ensure_dataset_namespace, execute_delete_sql,
-    execute_update_sql, ingest_batches, rebuild_video_dataset,
-    retarget_stored_video_media_relations, run_query, stored_video_episode_ids, table_exists,
-    video_dataset_exists,
+    commit_catalog_transaction, drop_video_dataset, ensure_dataset_namespace, execute_update_sql,
+    ingest_batches, rebuild_video_dataset, replace_batches, retarget_stored_video_media_relations,
+    run_query, stored_video_episode_ids, table_exists, video_dataset_exists,
 };
 use crate::backend::storage::repository::RepositoryConnection;
 use crate::backend::storage::sql;
@@ -256,10 +255,9 @@ pub(crate) fn import(
         .map_err(|error| format!("starting project import transaction: {error}"))?;
     let outcome = (|| {
         // Retire only relations absent from the incoming project. Relations in
-        // the bundle keep their catalog identity: their rows are cleared and
-        // rebuilt below. Retiring and recreating one name in a single project
-        // transaction is an unresolved resource conflict in SpiralDB, while
-        // hosted Arbor does not support CREATE OR REPLACE TABLE.
+        // the bundle are atomically replaced below through hosted Arbor. All
+        // namespace swaps remain staged in this one project transaction, so a
+        // reader observes either the old project or the complete replacement.
         for table in Table::ALL.into_iter().rev() {
             if decoded.iter().any(|(incoming, _)| *incoming == table) {
                 continue;
@@ -275,10 +273,6 @@ pub(crate) fn import(
         for (table, batches) in decoded {
             let relation = sql::relation(namespace, table);
             summary.relations += 1;
-            if table_exists(connection, &relation)? {
-                execute_delete_sql(connection, &format!("DELETE FROM {relation}"))
-                    .map_err(|error| format!("clearing project relation {relation}: {error}"))?;
-            }
             let batches = batches
                 .into_iter()
                 .map(|batch| {
@@ -292,7 +286,7 @@ pub(crate) fn import(
             summary.rows = summary
                 .rows
                 .saturating_add(batches.iter().map(RecordBatch::num_rows).sum::<usize>() as u64);
-            ingest_batches(connection, &relation, batches)?;
+            replace_batches(connection, &relation, batches)?;
         }
         Ok(summary)
     })();
@@ -1629,6 +1623,257 @@ mod tests {
         profile_event("spiral.cleanup", cleanup_start, 0, 0);
     }
 
+    /// Measure hosted Arbor's fixed create, append, and replacement costs
+    /// separately from project parsing, video reconciliation, and Studio state
+    /// reloads.
+    ///
+    /// ```text
+    /// SPIRAL_PROJECT_BUNDLE=/absolute/path/to/project.spiral-project \
+    /// cargo test -p spiral-robotics-studio-backend \
+    ///   backend::storage::bundle::tests::spiral_profile_write_fixed_cost \
+    ///   -- --ignored --exact --nocapture
+    /// ```
+    #[test]
+    #[ignore = "profiles real hosted Arbor replacements in temporary Spiral resources"]
+    fn spiral_profile_write_fixed_cost() {
+        let _serial = SPIRAL_E2E
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let bundle_path = std::env::var("SPIRAL_PROJECT_BUNDLE")
+            .expect("SPIRAL_PROJECT_BUNDLE must name the project archive to profile");
+        let bytes = fs::read(&bundle_path).expect("the profiling archive must be readable");
+        let mut decoded = decode_entries(
+            parse(&bytes).expect("the profiling archive must parse"),
+            PROJECT_SPEC,
+        )
+        .expect("the profiling archive must decode");
+        sort_relations(&mut decoded, &Table::ALL);
+
+        let project = required_project();
+        let namespace = format!(
+            "spiral_robotics_replace_profile_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock must be after the Unix epoch")
+                .as_nanos()
+        );
+        let repository = Arc::new(
+            SpiralRepository::new(
+                configured_spiral_endpoint(),
+                configured_spiral_spfs_endpoint(),
+                Some(project),
+                stored_credentials(),
+                namespace,
+            )
+            .expect("the Spiral profiling repository must be valid"),
+        );
+        let cleanup = TestNamespace::new(repository.clone());
+
+        repository
+            .run_exclusive_blocking(|connection| {
+                ensure_dataset_namespace(connection, repository.namespace())?;
+                for (label, table, row_limit) in [
+                    ("dataset_1", Table::Datasets, 1),
+                    ("joint_0", Table::JointSamples, 0),
+                    ("joint_1", Table::JointSamples, 1),
+                    ("joint_512", Table::JointSamples, 512),
+                    ("joint_1000", Table::JointSamples, 1_000),
+                    ("joint_full", Table::JointSamples, usize::MAX),
+                    ("video_1", Table::VideoAssets, 1),
+                    ("video_full", Table::VideoAssets, usize::MAX),
+                ] {
+                    if std::env::var("SPIRAL_PROFILE_CASE")
+                        .is_ok_and(|requested| requested != label)
+                    {
+                        continue;
+                    }
+                    let source = decoded
+                        .iter()
+                        .find_map(|(candidate, batches)| (*candidate == table).then_some(batches))
+                        .ok_or_else(|| format!("profiling archive omits {}", table.name()))?;
+                    let batches = profile_prefix_batches(source, row_limit);
+                    let rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+                    let encoded_bytes = profile_encoded_bytes(&batches)?;
+                    let target = format!("{}.{label}", repository.namespace());
+                    let ingest_target = format!("{}.{label}_ingest", repository.namespace());
+                    let autocommit_target =
+                        format!("{}.{label}_autocommit", repository.namespace());
+
+                    profile_autocommit_ingest_operation(
+                        connection,
+                        label,
+                        "ingest_missing_autocommit",
+                        &autocommit_target,
+                        &batches,
+                        rows,
+                        encoded_bytes,
+                    )?;
+                    profile_autocommit_ingest_operation(
+                        connection,
+                        label,
+                        "append_existing_autocommit",
+                        &autocommit_target,
+                        &batches,
+                        rows,
+                        encoded_bytes,
+                    )?;
+                    profile_write_operation(
+                        connection,
+                        label,
+                        "ingest_missing",
+                        &ingest_target,
+                        &batches,
+                        rows,
+                        encoded_bytes,
+                        false,
+                    )?;
+                    profile_write_operation(
+                        connection,
+                        label,
+                        "replace_missing",
+                        &target,
+                        &batches,
+                        rows,
+                        encoded_bytes,
+                        true,
+                    )?;
+                    profile_write_operation(
+                        connection,
+                        label,
+                        "existing_cold",
+                        &target,
+                        &batches,
+                        rows,
+                        encoded_bytes,
+                        true,
+                    )?;
+
+                    for bind_index in 1..=10 {
+                        let bind_start = Instant::now();
+                        let exists = connection.table_schema(&target)?.is_some();
+                        eprintln!(
+                            "PROFILE_SCOPED\tcase={label}\tphase=bind_existing_{bind_index}\tseconds={:.6}\trows={rows}\tbytes={encoded_bytes}\texists={exists}",
+                            bind_start.elapsed().as_secs_f64()
+                        );
+                    }
+                    let missing_target = format!("{}.missing", repository.namespace());
+                    for bind_index in 1..=5 {
+                        let bind_start = Instant::now();
+                        let exists = connection.table_schema(&missing_target)?.is_some();
+                        eprintln!(
+                            "PROFILE_SCOPED\tcase={label}\tphase=bind_missing_{bind_index}\tseconds={:.6}\trows=0\tbytes=0\texists={exists}",
+                            bind_start.elapsed().as_secs_f64()
+                        );
+                    }
+                    profile_write_operation(
+                        connection,
+                        label,
+                        "existing_after_bind",
+                        &target,
+                        &batches,
+                        rows,
+                        encoded_bytes,
+                        true,
+                    )?;
+                }
+                Ok(())
+            })
+            .expect("scoped Spiral replacement profiling must succeed");
+
+        let cleanup_start = Instant::now();
+        drop(cleanup);
+        profile_event("spiral.cleanup", cleanup_start, 0, 0);
+    }
+
+    fn profile_autocommit_ingest_operation(
+        connection: &mut RepositoryConnection,
+        label: &str,
+        phase: &str,
+        target: &str,
+        batches: &[RecordBatch],
+        rows: usize,
+        bytes: usize,
+    ) -> Result<(), String> {
+        let write_start = Instant::now();
+        ingest_batches(connection, target, batches.to_vec())?;
+        let write_seconds = write_start.elapsed().as_secs_f64();
+        eprintln!(
+            "PROFILE_SCOPED\tcase={label}\tphase={phase}\tseconds={write_seconds:.6}\trows={rows}\tbytes={bytes}"
+        );
+        Ok(())
+    }
+
+    fn profile_write_operation(
+        connection: &mut RepositoryConnection,
+        label: &str,
+        phase: &str,
+        target: &str,
+        batches: &[RecordBatch],
+        rows: usize,
+        bytes: usize,
+        replace: bool,
+    ) -> Result<(), String> {
+        let begin_start = Instant::now();
+        connection.set_autocommit(false)?;
+        let begin_seconds = begin_start.elapsed().as_secs_f64();
+
+        let write_start = Instant::now();
+        if replace {
+            replace_batches(connection, target, batches.to_vec())?;
+        } else {
+            ingest_batches(connection, target, batches.to_vec())?;
+        }
+        let write_seconds = write_start.elapsed().as_secs_f64();
+
+        let commit_start = Instant::now();
+        commit_catalog_transaction(connection)?;
+        let commit_seconds = commit_start.elapsed().as_secs_f64();
+        connection.set_autocommit(true)?;
+
+        eprintln!(
+            "PROFILE_SCOPED\tcase={label}\tphase={phase}\tseconds={write_seconds:.6}\tbegin_seconds={begin_seconds:.6}\tcommit_seconds={commit_seconds:.6}\trows={rows}\tbytes={bytes}"
+        );
+        Ok(())
+    }
+
+    fn profile_prefix_batches(batches: &[RecordBatch], limit: usize) -> Vec<RecordBatch> {
+        if limit == 0 {
+            return batches
+                .first()
+                .map(|batch| vec![batch.slice(0, 0)])
+                .unwrap_or_default();
+        }
+        let mut remaining = limit;
+        let mut prefix = Vec::new();
+        for batch in batches {
+            if remaining == 0 {
+                break;
+            }
+            let rows = remaining.min(batch.num_rows());
+            prefix.push(batch.slice(0, rows));
+            remaining -= rows;
+        }
+        prefix
+    }
+
+    fn profile_encoded_bytes(batches: &[RecordBatch]) -> Result<usize, String> {
+        let schema = batches
+            .first()
+            .map(RecordBatch::schema)
+            .ok_or_else(|| "scoped profiling requires at least one batch".to_owned())?;
+        let mut payload = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut payload, schema.as_ref())
+                .map_err(|error| error.to_string())?;
+            for batch in batches {
+                writer.write(batch).map_err(|error| error.to_string())?;
+            }
+            writer.finish().map_err(|error| error.to_string())?;
+        }
+        Ok(payload.len())
+    }
+
     fn profile_project_import_into(
         connection: &mut RepositoryConnection,
         namespace: &str,
@@ -1706,24 +1951,6 @@ mod tests {
             for (table, batches) in decoded {
                 let relation = sql::relation(namespace, table);
                 summary.relations += 1;
-                let exists_start = Instant::now();
-                let exists = table_exists(connection, &relation)?;
-                profile_event(
-                    &format!("spiral.table_exists.{}", table.name()),
-                    exists_start,
-                    0,
-                    0,
-                );
-                if exists {
-                    let clear_start = Instant::now();
-                    execute_delete_sql(connection, &format!("DELETE FROM {relation}"))?;
-                    profile_event(
-                        &format!("spiral.clear_relation.{}", table.name()),
-                        clear_start,
-                        0,
-                        0,
-                    );
-                }
                 let relation_ingest_start = Instant::now();
                 let mut relation_rows = 0usize;
                 let mut relation_bytes = 0usize;
@@ -1761,15 +1988,15 @@ mod tests {
                     }
                 }
                 let stream_ingest_start = Instant::now();
-                ingest_batches(connection, &relation, stream_batches)?;
+                replace_batches(connection, &relation, stream_batches)?;
                 profile_event(
-                    &format!("spiral.ingest.{}.stream", table.name()),
+                    &format!("spiral.replace.{}.stream", table.name()),
                     stream_ingest_start,
                     relation_rows,
                     relation_bytes,
                 );
                 profile_event(
-                    &format!("spiral.ingest_total.{}", table.name()),
+                    &format!("spiral.replace_total.{}", table.name()),
                     relation_ingest_start,
                     relation_rows,
                     0,

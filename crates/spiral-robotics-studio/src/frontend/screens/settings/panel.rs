@@ -338,7 +338,7 @@ pub(crate) fn SettingsPanel(
                     "Import {} into the active SpiralDB project.",
                     file.name(),
                 ),
-                consequence: "Every Studio-managed relation in this project will be replaced, including robots, episodes, media, settings, training history, checkpoints, and rollouts.".to_owned(),
+                consequence: "Every Studio-managed relation in this project will be replaced, including robots, episodes, media, settings, training history, checkpoints, and rollouts. Connected robots will disconnect first; imported robots will then connect automatically.".to_owned(),
                 confirm_label: if transferring_project() { "Restoring…" } else { "Import and replace project" },
                 cancel_label: "Keep current project",
                 purpose: ActionPurpose::Replace,

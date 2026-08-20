@@ -9134,10 +9134,8 @@ dependencies = [
  "derive_builder",
  "foyer",
  "futures",
- "hex",
  "http 1.5.0",
  "itertools 0.15.0",
- "kismet-cache",
  "libc",
  "moka",
  "object_store",
@@ -9152,12 +9150,12 @@ dependencies = [
  "reqwest-retry",
  "reqwest-tracing",
  "serde",
- "sha2 0.11.0",
  "sketches-ddsketch",
  "spiral-api",
  "spiral-config",
  "spiral-error",
  "spiral-http-client",
+ "spiral-kismet-cache",
  "spiral-o11y",
  "spiral-session",
  "spiral-token",
@@ -9361,6 +9359,7 @@ dependencies = [
  "spiral-api",
  "spiral-config",
  "spiral-error",
+ "spiral-io",
  "spiral-o11y",
  "spiral-session",
  "spiral-spql",
@@ -9625,6 +9624,7 @@ dependencies = [
  "arrow-schema",
  "async-trait",
  "dashmap",
+ "foyer",
  "futures",
  "futures-timer",
  "glob",
@@ -9638,9 +9638,11 @@ dependencies = [
  "sha1 0.11.0",
  "sha2 0.11.0",
  "sketches-ddsketch",
+ "spiral-config",
  "spiral-engine",
  "spiral-error",
  "spiral-http-client",
+ "spiral-kismet-cache",
  "spiral-session",
  "tar",
  "tokio",
@@ -9681,6 +9683,16 @@ dependencies = [
  "tracing-futures",
  "vortex",
  "vortex-array",
+]
+
+[[package]]
+name = "spiral-kismet-cache"
+version = "0.0.0+dev"
+dependencies = [
+ "hex",
+ "kismet-cache",
+ "sha2 0.11.0",
+ "vortex-buffer",
 ]
 
 [[package]]
@@ -10426,7 +10438,6 @@ dependencies = [
  "kanal",
  "legacy-spiral-engine",
  "md-5 0.11.0",
- "moka",
  "parking_lot",
  "serde",
  "serde_json",

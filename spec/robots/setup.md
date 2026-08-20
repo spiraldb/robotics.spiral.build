@@ -4,9 +4,10 @@
 
 1. The user opens Settings.
 2. The user creates or imports one robot instance.
-3. The user selects the SO-ARM101 role and serial port.
+3. The user selects the SO-ARM101 role and serial port; Studio connects the arm
+   as soon as it has a usable saved configuration.
 4. The user assigns cameras while viewing a preview.
-5. The user connects the arm and records its calibration travel.
+5. The user records the arm's calibration travel.
 6. Studio validates and saves the complete configuration.
 
 ## Requirements
@@ -33,6 +34,10 @@
   an explicit, validated operation.
 - **SETUP-012** A successful camera assignment must update the active Live
   camera panels without a browser refresh or backend restart.
+- **SETUP-013** Creating a robot with a port, importing a robot configuration,
+  or assigning the first port to a newly created robot must automatically try
+  to connect it. A missing or unavailable bus must leave the durable robot in
+  place and expose its disconnected or error state for recovery.
 
 ## Related features
 

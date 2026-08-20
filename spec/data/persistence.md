@@ -95,9 +95,12 @@ flowchart TD
 - **PERSIST-027** Import must validate the file format, schema version, relation
   names, and exact ordered columns before replacing project data.
 - **PERSIST-028** Import must replace the active project in one exclusive
-  transaction and roll back on failure. Rows in included relations must be
-  replaced, Studio-owned relations absent from the file must be removed, and
-  import must not stage through the local filesystem. Before the exclusive
+  transaction and roll back on failure. Each included relation must be installed
+  from its single Arrow stream with ADBC `Replace`; Studio must not clear an
+  included relation with `DELETE` and then append its replacement rows.
+  Incremental episode import and live recording remain create-append operations.
+  Studio-owned relations absent from the file must be removed, and import must
+  not stage through the local filesystem. Before the exclusive
   operation returns, imported video assets must be retargeted to the active
   namespace and its single managed MP4 dataset must be created or refreshed
   once from all committed durable rows. The shared dataset and source view must
@@ -110,8 +113,13 @@ flowchart TD
   If restoring autocommit after a successful commit fails, Studio must likewise
   return the committed summary with a warning and discard the uncertain
   connection rather than returning it to the pool.
-- **PERSIST-029** Import must be refused while robots are connected or recording,
-  replay, rollout, training, or another catalog mutation is active.
+- **PERSIST-029** Whole-project import must disconnect every connected robot
+  before replacing project data and must stop without importing if a robot
+  cannot be safely disconnected. After a successful replacement it must
+  automatically try to connect every usable imported robot independently.
+  Episode import must still be refused while any robot is connected. Both
+  import paths must be refused while recording, replay, rollout, training, or
+  another catalog mutation is active.
 - **PERSIST-030** Project transfer may use one bounded in-memory
   request/response buffer, currently limited to 256 MiB; that buffer is not
   durable storage. HTTP import must move the received buffer into storage work

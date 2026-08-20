@@ -891,24 +891,56 @@ pub(crate) fn ingest_batches(
     target: &str,
     batches: Vec<RecordBatch>,
 ) -> Result<(), String> {
+    write_batches(connection, target, batches, false)
+}
+
+/// Atomically replace one complete Arbor relation from a single Arrow stream.
+///
+/// Whole-project restore owns the complete incoming relation and therefore uses
+/// hosted Arbor's replacement path. Incremental recording and episode import
+/// deliberately continue through [`ingest_batches`].
+pub(crate) fn replace_batches(
+    connection: &mut RepositoryConnection,
+    target: &str,
+    batches: Vec<RecordBatch>,
+) -> Result<(), String> {
+    write_batches(connection, target, batches, true)
+}
+
+fn write_batches(
+    connection: &mut RepositoryConnection,
+    target: &str,
+    batches: Vec<RecordBatch>,
+    replace: bool,
+) -> Result<(), String> {
     let Some(schema) = batches.first().map(RecordBatch::schema) else {
         return Ok(());
     };
     let mut statement = connection
         .new_statement()
         .map_err(|error| format!("opening ADBC ingest for {target}: {error}"))?;
-    statement
-        .configure_ingest(target)
-        .map_err(|error| format!("configuring ADBC ingest for {target}: {error}"))?;
+    if replace {
+        statement
+            .configure_replace(target)
+            .map_err(|error| format!("configuring ADBC replacement for {target}: {error}"))?;
+    } else {
+        statement
+            .configure_ingest(target)
+            .map_err(|error| format!("configuring ADBC ingest for {target}: {error}"))?;
+    }
     statement
         .bind_stream(Box::new(RecordBatchIterator::new(
             batches.into_iter().map(Ok::<_, ArrowError>),
             schema,
         )))
         .map_err(|error| format!("binding Spiral table {target}: {error}"))?;
-    statement
-        .execute_update()
-        .map_err(|error| format!("ingesting Spiral table {target}: {error}"))?;
+    statement.execute_update().map_err(|error| {
+        if replace {
+            format!("replacing Spiral table {target}: {error}")
+        } else {
+            format!("ingesting Spiral table {target}: {error}")
+        }
+    })?;
     Ok(())
 }
 

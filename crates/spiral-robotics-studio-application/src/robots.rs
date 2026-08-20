@@ -296,6 +296,33 @@ pub struct AutoConnectOutcome {
     pub status: AutoConnectStatus,
 }
 
+/// Try one saved robot without turning an unavailable or incomplete arm into
+/// a failure for the persistence action that introduced it.
+pub async fn auto_connect_robot<R, C>(
+    repository: &R,
+    control: &C,
+    robot: String,
+) -> AutoConnectOutcome
+where
+    R: RobotRepository + ?Sized,
+    C: RobotConnectionPort + ?Sized,
+{
+    let specification = match repository.connection_spec(&robot) {
+        Ok(specification) => specification,
+        Err(error) => {
+            return AutoConnectOutcome {
+                robot,
+                status: AutoConnectStatus::Skipped(error.to_string()),
+            };
+        }
+    };
+    let status = match control.connect(specification).await {
+        Ok(()) => AutoConnectStatus::Connected,
+        Err(error) => AutoConnectStatus::Failed(error.to_string()),
+    };
+    AutoConnectOutcome { robot, status }
+}
+
 /// Try every saved robot independently; one invalid or absent arm must not
 /// prevent other usable arms or the Studio itself from starting.
 pub async fn auto_connect<R, C>(repository: &R, control: &C) -> Vec<AutoConnectOutcome>
@@ -305,21 +332,7 @@ where
 {
     let mut outcomes = Vec::new();
     for robot in repository.saved_robot_ids() {
-        let specification = match repository.connection_spec(&robot) {
-            Ok(specification) => specification,
-            Err(error) => {
-                outcomes.push(AutoConnectOutcome {
-                    robot,
-                    status: AutoConnectStatus::Skipped(error.to_string()),
-                });
-                continue;
-            }
-        };
-        let status = match control.connect(specification).await {
-            Ok(()) => AutoConnectStatus::Connected,
-            Err(error) => AutoConnectStatus::Failed(error.to_string()),
-        };
-        outcomes.push(AutoConnectOutcome { robot, status });
+        outcomes.push(auto_connect_robot(repository, control, robot).await);
     }
     outcomes
 }
@@ -621,6 +634,18 @@ mod tests {
                 "connect:ready"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn auto_connect_one_reports_an_incomplete_robot_without_opening_hardware() {
+        let (mut repository, control, events) = setup();
+        repository.invalid = Some("arm".to_owned());
+
+        let outcome = auto_connect_robot(&repository, &control, "arm".to_owned()).await;
+
+        assert!(matches!(outcome.status, AutoConnectStatus::Skipped(_)));
+        assert_eq!(outcome.robot, "arm");
+        assert_eq!(*events.lock().unwrap(), ["spec:arm"]);
     }
 
     #[tokio::test]

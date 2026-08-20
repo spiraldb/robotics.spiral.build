@@ -745,6 +745,9 @@ async fn create_robot(
             baud_rate: request.baud_rate,
         },
     )?;
+    log_auto_connect_outcome(
+        robots::auto_connect_robot(&adapter, &adapter, robot.id.clone()).await,
+    );
     Ok((
         StatusCode::CREATED,
         Json(present_saved_robot(&state, robot)?),
@@ -763,6 +766,9 @@ async fn import_robot_configuration(
     }
     let adapter = RobotHttpAdapter::import(&state, body);
     let robot = robots::import_configuration(&adapter)?;
+    log_auto_connect_outcome(
+        robots::auto_connect_robot(&adapter, &adapter, robot.id.clone()).await,
+    );
     Ok((
         StatusCode::CREATED,
         Json(present_saved_robot(&state, robot)?),
@@ -808,6 +814,7 @@ async fn update_robot(
     Json(request): Json<UpdateRobotRequest>,
 ) -> Result<Json<RobotSummary>, Failure> {
     let adapter = RobotHttpAdapter::new(&state);
+    let should_auto_connect = request.port.is_some();
     let robot = robots::update(
         &adapter,
         &adapter,
@@ -829,6 +836,11 @@ async fn update_robot(
             }),
         },
     )?;
+    if should_auto_connect {
+        log_auto_connect_outcome(
+            robots::auto_connect_robot(&adapter, &adapter, robot.id.clone()).await,
+        );
+    }
     Ok(Json(present_saved_robot(&state, robot)?))
 }
 
@@ -892,16 +904,20 @@ async fn connect_robot(
 pub(crate) async fn auto_connect_saved_robots(state: AppState) {
     let adapter = RobotHttpAdapter::new(&state);
     for outcome in robots::auto_connect(&adapter, &adapter).await {
-        match outcome.status {
-            AutoConnectStatus::Connected => {
-                tracing::info!(robot = %outcome.robot, "auto-connected saved robot")
-            }
-            AutoConnectStatus::Skipped(error) => {
-                tracing::info!(robot = %outcome.robot, "saved robot is not ready for auto-connect: {error}")
-            }
-            AutoConnectStatus::Failed(error) => {
-                tracing::warn!(robot = %outcome.robot, "auto-connect failed: {error}")
-            }
+        log_auto_connect_outcome(outcome);
+    }
+}
+
+fn log_auto_connect_outcome(outcome: AutoConnectOutcome) {
+    match outcome.status {
+        AutoConnectStatus::Connected => {
+            tracing::info!(robot = %outcome.robot, "auto-connected saved robot")
+        }
+        AutoConnectStatus::Skipped(error) => {
+            tracing::info!(robot = %outcome.robot, "saved robot is not ready for auto-connect: {error}")
+        }
+        AutoConnectStatus::Failed(error) => {
+            tracing::warn!(robot = %outcome.robot, "auto-connect failed: {error}")
         }
     }
 }

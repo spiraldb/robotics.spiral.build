@@ -123,11 +123,19 @@ impl RepositoryStatement {
     }
 
     pub(crate) fn configure_ingest(&mut self, target: &str) -> Result<(), String> {
+        self.configure_ingest_mode(target, IngestMode::CreateAppend)
+    }
+
+    pub(crate) fn configure_replace(&mut self, target: &str) -> Result<(), String> {
+        self.configure_ingest_mode(target, IngestMode::Replace)
+    }
+
+    fn configure_ingest_mode(&mut self, target: &str, mode: IngestMode) -> Result<(), String> {
         self.inner
             .set_option(OptionStatement::TargetTable, target.into())
             .map_err(|error| error.to_string())?;
         self.inner
-            .set_option(OptionStatement::IngestMode, IngestMode::CreateAppend.into())
+            .set_option(OptionStatement::IngestMode, mode.into())
             .map_err(|error| error.to_string())
     }
 

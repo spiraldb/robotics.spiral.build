@@ -90,17 +90,19 @@ async fn import_project(
         lease: state.catalog_lease.clone(),
         token,
     };
-    require_import_idle(&state, "a project")?;
     if body.is_empty() {
         return Err(Failure::bad_request(
             "choose a .spiral-project file to import",
         ));
     }
+    require_project_import_idle(&state)?;
+    disconnect_all_robots(&state).await?;
     let storage = state.storage.clone();
     let summary = tokio::task::spawn_blocking(move || storage.import_project_bundle(&body))
         .await
         .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
         .map_err(Failure::import)?;
+    super::auto_connect_saved_robots(state.clone()).await;
     state.preferences.replace(
         state
             .storage
@@ -191,12 +193,31 @@ async fn import_episodes(
 
 fn require_import_idle(state: &AppState, subject: &str) -> Result<(), Failure> {
     let hardware = state.hardware.state();
-    let busy = hardware.telemetry.recording.is_some()
+    let connected = hardware
+        .connections
+        .values()
+        .any(|connection| connection.connected);
+    if import_activity_is_busy(state, &hardware) || connected {
+        return Err(Failure::conflict(format!(
+            "Disconnect robots and stop recording, replay, rollout, and training before importing {subject}"
+        )));
+    }
+    Ok(())
+}
+
+fn require_project_import_idle(state: &AppState) -> Result<(), Failure> {
+    let hardware = state.hardware.state();
+    if import_activity_is_busy(state, &hardware) {
+        return Err(Failure::conflict(
+            "Stop recording, replay, rollout, and training before importing a project",
+        ));
+    }
+    Ok(())
+}
+
+fn import_activity_is_busy(state: &AppState, hardware: &HardwareState) -> bool {
+    hardware.telemetry.recording.is_some()
         || !matches!(hardware.mode.selection, ModeSelection::Idle)
-        || hardware
-            .connections
-            .values()
-            .any(|connection| connection.connected)
         || state
             .training
             .snapshot()
@@ -212,11 +233,23 @@ fn require_import_idle(state: &AppState, subject: &str) -> Result<(), Failure> {
                 | ApplicationRolloutPhase::WarmingUp
                 | ApplicationRolloutPhase::Running
                 | ApplicationRolloutPhase::Stopping
-        );
-    if busy {
-        return Err(Failure::conflict(format!(
-            "Disconnect robots and stop recording, replay, rollout, and training before importing {subject}"
-        )));
+        )
+}
+
+async fn disconnect_all_robots(state: &AppState) -> Result<(), Failure> {
+    let robot_ids = state
+        .hardware
+        .state()
+        .connections
+        .into_iter()
+        .filter_map(|(robot, connection)| connection.connected.then_some(robot))
+        .collect::<Vec<_>>();
+    for robot in robot_ids {
+        state.hardware.disconnect(&robot).await.map_err(|error| {
+            Failure::conflict(format!(
+                "Could not safely disconnect robot {robot:?} before importing the project: {error}"
+            ))
+        })?;
     }
     Ok(())
 }
