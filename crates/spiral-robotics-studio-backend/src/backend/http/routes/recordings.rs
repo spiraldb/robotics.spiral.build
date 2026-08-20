@@ -1441,12 +1441,11 @@ async fn episode_video(
     // Looking up the episode first prevents an orphaned media row from becoming
     // an independent serving namespace.
     episode_queries::authorize_asset(&EpisodeHttpAdapter::catalog(&state), id.clone())?;
-    let payload = state
+    let length = state
         .storage
-        .video_asset(&id, &stream, query.segment)
+        .video_asset_size(&id, &stream, query.segment)
         .await
         .map_err(|error| Failure(StatusCode::NOT_FOUND, error))?;
-    let length = payload.len() as u64;
     let requested_range = match headers.get(header::RANGE) {
         None => None,
         Some(value) => match value
@@ -1470,7 +1469,23 @@ async fn episode_video(
     let body = if content_length == 0 {
         Bytes::new()
     } else {
-        Bytes::copy_from_slice(&payload[range.start as usize..=range.end as usize])
+        let payload = state
+            .storage
+            .video_asset_range(&id, &stream, query.segment, range.start, content_length)
+            .await
+            .map_err(|error| Failure(StatusCode::NOT_FOUND, error))?;
+        if payload.len() as u64 != content_length {
+            return Err(Failure(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "Spiral returned {} video bytes for requested range {}-{} (expected {content_length})",
+                    payload.len(),
+                    range.start,
+                    range.end,
+                ),
+            ));
+        }
+        Bytes::from(payload)
     };
     let mut response = Response::builder()
         .status(if requested_range.is_some() {

@@ -167,6 +167,15 @@ flowchart TD
   the shared machine-readable boundary descriptor. External workers must
   receive the selected version through their request boundary and must not
   maintain a copied schema-version literal.
+- **PERSIST-040** `video_assets.payload` must be the `spql.io.Blob` Arrow
+  extension, not an Arrow Binary column. Native Spiral table writes must own
+  Blob outlining and provider placement, and the shared MP4 source view must
+  forward that Blob without wrapping a materialized Binary value. Portable
+  project and episode exports must deliberately materialize Blob bytes into
+  their bounded Arrow IPC payloads; import must normalize both those payloads
+  and legacy Binary payloads back to the canonical Blob type before ingest.
+  Catalog startup and destination changes must migrate a legacy Binary
+  `video_assets` relation before the destination is considered ready.
 
 ## Schema changes
 
@@ -201,6 +210,9 @@ flowchart TD
   must also begin with only durable MP4 rows, prove import rebuilds the managed
   MP4 output and can read an indexed frame, then re-import the same project and
   prove the output is atomically replaced rather than rejected or duplicated.
+  Its MP4 fixture must exceed Spiral's inline-Blob threshold and prove the
+  imported payload has a provider URI and that `spql.io.read_bytes` returns an
+  exact requested byte slice.
 - **PERSIST-TEST-005** A real-SpiralDB episode-transfer test must export one
   dataset, import it into an existing target dataset, prove the target's prior
   episodes survive and imported rows are retargeted, and prove a repeated

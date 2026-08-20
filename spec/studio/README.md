@@ -2,13 +2,15 @@
 
 ## Outcome
 
-Studio gives an ML engineer one stable browser workspace for the complete robot
-learning loop. It keeps feature ownership clear while allowing visualization
-panels to be arranged spatially.
+Studio gives an ML engineer one stable browser workspace centered on the
+project's robot data: Data is the home, Live produces episodes, and Training
+and Rollout consume them. It keeps feature ownership clear while allowing
+visualization panels to be arranged spatially.
 
 ## User flow
 
-1. The user selects Live, Data, Training, or Rollout from the activity rail.
+1. The user opens Studio in Data, or selects Data, Live, Training, or Rollout
+   from the activity rail.
 2. The selected feature route restores its own workspace.
 3. The user arranges the panels needed for the task.
 4. The status bar and notification center report global state without moving
@@ -28,6 +30,9 @@ panels to be arranged spatially.
 - **STUDIO-004** A route change must not create empty tiles or move panels into
   another feature.
 - **STUDIO-005** Settings must be at the bottom of the activity rail.
+- **STUDIO-057** Data must be the first activity in the rail and the default
+  route on open, reflecting the data-core story. Live, Training, and Rollout
+  follow.
 - **STUDIO-006** Studio must not add a top menu or search bar without a confirmed
   use.
 - **STUDIO-007** A thin status bar must show connection, mode, rate, active work,
@@ -135,3 +140,10 @@ panels to be arranged spatially.
   [`spiral-robotics-viewport`](../../crates/spiral-robotics-viewport/)
 
 Approved screenshots for this feature belong in [`assets/`](assets/README.md).
+
+## Current gaps
+
+- **STUDIO-057** is not implemented: the code's activity rail leads with Live
+  and `Activity::default()` is Live
+  ([`frontend/app/activity.rs`](../../crates/spiral-robotics-studio/src/frontend/app/activity.rs)).
+  Reordering to Data-first is part of the data-core rearrangement.

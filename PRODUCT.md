@@ -8,43 +8,76 @@ web
 
 ## Users
 
-The primary user is an **ML engineer building robot policies**. Their real job
-is collecting data, training models, and evaluating behavior; Spiral Robotics
-is the hardware and data layer they need to stop fighting. They judge it on
-how quickly and reliably they can get from “arms on the bench” to synchronized,
-queryable episodes, and on whether the system stays predictable once physical
-motion begins.
+The primary user is an **ML engineer working with robot data**. Their real job
+is turning piles of trajectories into policies: understanding what data they
+have, deciding what is usable, shaping it into training sets, and evaluating
+the behavior that comes out. Spiral Robotics is the data layer they need to
+stop fighting.
 
-They work with a pair of SO-ARM101 arms — one leader and one follower — wired
-to the Spiral Robotics backend, with one or more cameras observing the workspace. The
-browser may be on the same machine or elsewhere on the network.
+That engineer arrives in one of two postures, and both are first-class:
 
-Secondary, and not yet a design target: other SO-101 owners who will arrive
-when the project is opened. See **Distribution** below.
+- **With existing data.** They already have episodes — LeRobot datasets on
+  Hugging Face, buckets of MCAP files in object storage, exports from other
+  rigs — and no place to actually look at, query, or reshape them. They judge
+  the Studio on how quickly a pile of files becomes a browsable, queryable,
+  curatable dataset.
+- **With arms on the bench.** They work with a pair of SO-ARM101 arms — one
+  leader and one follower — wired to the Spiral Robotics backend, with one or
+  more cameras observing the workspace. They judge the Studio on how quickly
+  and reliably "arms on the bench" becomes synchronized, queryable episodes,
+  and on whether the system stays predictable once physical motion begins.
+
+The browser may be on the same machine as the backend or elsewhere on the
+network.
+
+Secondary, and not yet a design target: other SO-101 owners and external
+dataset owners who will arrive when the project is opened. See
+**Distribution** below.
 
 ## Product Purpose
 
-Spiral Robotics sets up, calibrates, and drives SO-ARM101 arms, records synchronized
-robot and camera data in SpiralDB, queries episodes, trains policies, and
-safely replays actions on a follower. Operators use it from the browser or the
-terminal and connect Studio to a selectable policy compute runtime.
+Spiral Robotics Studio is **the place where robot data lives**: one SpiralDB
+project where episodes are viewed against a synchronized clock, queried with
+real SQL, and shaped into training sets — regardless of whether the Studio
+recorded them or ingested them from somewhere else.
 
-The durable scope is the **full robot-learning loop**: connect → calibrate →
-teleoperate → record → inspect/query → export → train → run a policy.
-The loop now crosses the Studio backend boundary: vision-conditioned ACT
-training stores a native artifact, and Rollout loads, supervises, measures,
-and applies it through the follower's bounded control path.
+The durable shape of the product is a **data core with producers and
+consumers**:
 
-Success is an ML engineer collecting a usable dataset, understanding any
-episode against one synchronized clock, training from Spiral, and replaying it
-on real hardware without writing glue code or operating a second training stack.
+- **Producers** put episodes into the project. Recording with connected arms
+  is the built-in producer. Ingestion from external sources — LeRobot
+  datasets, object stores full of MCAP files, portable episode bundles — is a
+  peer producer and, for many users, the primary one.
+- **The data core** is where the user spends their time: the episode catalog,
+  the Timeline as one synchronized clock over every stream, SQL query, and
+  curation — selecting, transforming, and deriving the datasets worth
+  training on.
+- **Consumers** take datasets and episodes out of the core: training a
+  policy, rolling a checkpoint out on real hardware, replaying an episode,
+  and exporting portable bundles.
+
+The full hardware loop — connect, calibrate, teleoperate, record, train,
+run a policy — remains shipped and supported, but it is one path through the
+system rather than the system's spine. Vision-conditioned ACT training stores
+a native artifact, and Rollout loads, supervises, measures, and applies it
+through the follower's bounded control path.
+
+Success is an ML engineer pointing the Studio at data — theirs or the
+world's — understanding any episode against one synchronized clock, curating
+a training set with queries instead of scripts, and training and replaying
+from it without writing glue code or operating a second data stack.
 
 ## Positioning
 
+- **The data core is the center of gravity.** Hardware collection is one
+  producer among several; query, curation, training, rollout, and export are
+  consumers. The Studio competes as the *database-backed* robot-data
+  workbench: viewers show files, the Studio owns a queryable project.
 - **One trusted Rust backend, one portable browser frontend.** The backend owns
-  hardware, safety, recording, media encoding, data services, and replay. The
-  browser is an interchangeable operating surface that talks only to that
-  backend; it never holds service credentials or drives hardware directly.
+  hardware, safety, recording, ingestion, media encoding, data services, and
+  replay. The browser is an interchangeable operating surface that talks only
+  to that backend; it never holds service credentials or drives hardware
+  directly.
 - **Rust owns the system boundary.** The motor bus, camera capture,
   calibration, kinematics, server, run supervision, data contracts, and web
   interface are Rust. Studio's dedicated ADBC connection reads Arrow state,
@@ -59,7 +92,14 @@ on real hardware without writing glue code or operating a second training stack.
 - **Episode data keeps its natural streams and one clock.** Joint state,
   commanded action, camera media, and recording gaps are separate synchronized
   streams rather than one wide table of duplicated or resampled values. The
-  Timeline is the common inspection and control surface for that clock.
+  Timeline is the common inspection and control surface for that clock. This
+  stream model is also the ingestion target: external channels land as
+  streams on one clock, not as a resampled wide table.
+- **Robot-specific behavior is a capability, not an assumption.** An episode
+  is viewable and queryable on its own. Replay, physical seek, and
+  training compatibility are conditional capabilities an episode has when its
+  streams match a configured robot's contract. Ingested episodes without a
+  matching robot remain full citizens of the catalog.
 - **SpiralDB is the only persistent data path.** Robots, settings, episodes,
   relational Arrow samples, MP4 assets, training runs, checkpoints, and rollout
   state are written and read through one shared ADBC repository. There is no
@@ -100,7 +140,8 @@ Spiral Robotics backend
 - **The backend is the one consequential system.** It normally runs near the
   arms and owns all hardware connections, the control loop, safety decisions,
   camera capture, video encoding, SpiralDB credentials and persistence, and
-  replay execution.
+  replay execution. As ingestion arrives, it also owns external-source
+  credentials and ingestion jobs.
 - **The wire API is a product boundary.** The Dioxus browser is the current
   client, not a privileged bypass. Hardware and safety behavior must remain
   correct for any client that uses the API.
@@ -202,6 +243,27 @@ and replay motion gates policy commands by an unguessable active session. The
 selected remote runtime chooses its PyTorch device; an inference that cannot
 meet the observation safety window is rejected before a new action is sent.
 
+**Committed direction — confirmed, not yet built**
+
+These are the accepted next moves of the data-core pivot. None of them ship
+today, and nothing below may be presented as existing behavior:
+
+- **Ingestion as a peer producer.** Backend-owned ingestion jobs bring
+  external episodes into the active project: LeRobot datasets (Hugging Face
+  or compatible layouts) first because they map nearly 1:1 onto the episode
+  schema, then MCAP files from object stores or local upload with an explicit
+  channel-to-stream mapping step. The long-term goal is that any well-formed
+  MCAP file ingests without manual schema work. See
+  `spec/data/ingestion.md`.
+- **Data as the home activity.** The activity rail leads with Data and the
+  Studio opens there; Live remains the collection surface.
+- **Curation as a consumer.** Materializing a query or a curated selection as
+  a new derived dataset, so filtering and shaping training sets happens in the
+  Studio instead of external scripts.
+- **Generalized episodes.** Episode schema loosened so robot-specific
+  semantics (arms, follow error, replay) are optional capabilities rather
+  than required fields.
+
 **Constraints**
 
 - **Hardware:** SO-ARM101 only for now, with leader and follower roles. Live
@@ -237,20 +299,22 @@ meet the observation safety window is rejected before a new action is sent.
 (the browser interface),
 *workbench* (Live, Data, or Rollout operating panel), *panel* (one registered content
 surface), *tile* (a tab group in the layout tree), *dataset* (a collection of
-episodes), *episode* / *take* (one recording; *episode* is canonical in data and
-wire naming), *Timeline* / *playhead* (the shared episode clock and its current
-time), and *Follow Δ* (the gap between measured and commanded joint position).
+episodes), *episode* / *take* (one kept multi-stream trajectory, recorded or
+ingested; *episode* is canonical in data and wire naming), *producer* (a path
+that creates episodes: recording or ingestion), *consumer* (a use of the data
+core: query, curation, training, rollout, replay, export), *ingestion*
+(backend-owned import of external data into the project), *Timeline* /
+*playhead* (the shared episode clock and its current time), and *Follow Δ*
+(the gap between measured and commanded joint position).
 
 ## Brand Commitments
 
 - The name is **Spiral Robotics**; the web interface is **Spiral Robotics
   Studio**.
-- The interface follows the compact, information-dense Notion/Rerun direction
-  recorded in `notes.md`, while its panel mechanics use familiar VS Code
-  tab-and-tile behavior. Live, Data, Training, and Rollout are the primary activities;
-  panels are spatial composition, not a proliferation of navigation modes.
-- **`notes.md` is the single source of truth for conflicting changes and must
-  not be edited unless explicitly requested.**
+- The interface follows a compact, information-dense Notion/Rerun direction,
+  while its panel mechanics use familiar VS Code tab-and-tile behavior. Live,
+  Data, Training, and Rollout are the primary activities; panels are spatial
+  composition, not a proliferation of navigation modes.
 - **Distribution:** public open source eventually, but not on the current
   timeline. Keep code and configuration honest for strangers without inventing
   an outward-facing marketing surface, users, or proof.
@@ -272,22 +336,32 @@ Real, in-repo:
 
 Deliberately absent, and not to be fabricated: there are **no users,
 testimonials, case studies, benchmarks, published performance numbers, pricing,
-or deployment/endorsement claims**. The project has not been released.
+or deployment/endorsement claims**. The project has not been released. There
+is **no ingestion implementation yet**; ingestion is a committed direction,
+not a shipped capability.
 
 ## Product Principles
 
-1. **The browser observes and requests; the backend owns consequences.**
-   Hardware, safety, recording, credentials, data persistence, and replay remain
-   backend responsibilities regardless of which client is connected.
-2. **The wire API is the product boundary.** The current Dioxus UI is one
+1. **Data is the center of gravity.** Producers put episodes in; consumers
+   take datasets out. Hardware collection is one producer, never the front
+   door the rest of the product hides behind.
+2. **The browser observes and requests; the backend owns consequences.**
+   Hardware, safety, recording, ingestion, credentials, data persistence, and
+   replay remain backend responsibilities regardless of which client is
+   connected.
+3. **The wire API is the product boundary.** The current Dioxus UI is one
    client, so correctness cannot depend on browser-local state or component
    behavior.
-3. **One clock composes the episode.** State, action, camera media, gaps,
+4. **One clock composes the episode.** State, action, camera media, gaps,
    signals, query selection, and replay meet at the Timeline without erasing
    their natural stream rates.
-4. **One SpiralDB project holds the complete durable system; explicit files are
-   transfer formats.** Robot JSON, selected-dataset episode bundles, and
-   whole-project bundles stay portable, while no filesystem spool or retry
-   queue becomes a second source of truth.
-5. **Safety is enforced where it cannot be bypassed.** Every client receives
+5. **One SpiralDB project holds the complete durable system; explicit files are
+   transfer formats.** Robot JSON, selected-dataset episode bundles,
+   whole-project bundles, and external source files stay portable, while no
+   filesystem spool or retry queue becomes a second source of truth.
+6. **Robot semantics are capabilities, not assumptions.** An episode earns
+   replay, physical seek, and training compatibility by matching a configured
+   robot's contract; without a match it remains fully viewable, queryable, and
+   curatable.
+7. **Safety is enforced where it cannot be bypassed.** Every client receives
    the same bounded, calibrated, server-owned motion behavior.

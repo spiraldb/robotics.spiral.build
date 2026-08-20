@@ -5,18 +5,34 @@ its user flow, visible behavior, data rules, safety rules, and implementation
 ownership together.
 
 Spiral Robotics is a Rust-native robotics system and browser Studio for an ML
-engineer working through the complete robot-learning loop with SO-ARM101 leader
-and follower arms.
+engineer working with robot data. The data core — one SpiralDB project of
+datasets and episodes — is the center of the product. Producers put episodes
+in: recording with SO-ARM101 leader and follower arms, and ingestion from
+external sources. Consumers take data out: query, curation, training,
+rollout, replay, and export.
 
 ## Product flow
 
 ```mermaid
 flowchart LR
-    Studio["Studio workspace"] --> Robots["Set up and control robots"]
-    Robots --> Recording["Record episodes"]
-    Recording --> Data["Inspect and query data"]
-    Data --> Training["Train a policy"]
-    Training --> Rollout["Run the policy"]
+    subgraph Producers
+        Recording["Record with connected arms"]
+        Ingestion["Ingest external data"]
+    end
+    subgraph Core["Data core"]
+        Data["View, query, and curate datasets"]
+    end
+    subgraph Consumers
+        Training["Train a policy"]
+        Rollout["Run the policy"]
+        Export["Replay and export"]
+    end
+    Robots["Set up and control robots"] --> Recording
+    Recording --> Data
+    Ingestion --> Data
+    Data --> Training
+    Training --> Rollout
+    Data --> Export
 ```
 
 ## Features
@@ -30,6 +46,9 @@ flowchart LR
   discard, episode completion, and direct SpiralDB persistence.
 - [Data](data/README.md) — datasets, episode catalog, Timeline, replay, SQL,
   import/export, and SpiralDB persistence.
+- [Ingestion](data/ingestion.md) — bringing external episodes (LeRobot
+  datasets, MCAP files) into the project as a peer producer. Confirmed
+  direction; not implemented yet.
 - [Training](training/README.md) — dataset selection, ACT training, metrics,
   run history, and checkpoints.
 - [Policy runtime](training/runtime.md) — the replaceable remote compute

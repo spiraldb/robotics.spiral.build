@@ -17,7 +17,14 @@
 - **Teleop** means leader motion commands the compatible follower.
 - **dataset** is an ordered collection of episodes used for inspection or
   training.
-- **episode** is one kept recording.
+- **episode** is one kept multi-stream trajectory, recorded by Studio or
+  ingested from an external source.
+- **producer** is a path that creates episodes in the project: recording with
+  connected arms, or ingestion.
+- **consumer** is a use of stored data: query, curation, training, rollout,
+  replay, or export.
+- **ingestion** is the backend-owned import of externally produced data, such
+  as LeRobot datasets or MCAP files, into the project.
 - **stream** is one natural sequence in an episode, such as joint samples or one
   camera.
 - **Timeline** is the shared episode clock and its user control.

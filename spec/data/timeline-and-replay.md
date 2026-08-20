@@ -38,6 +38,11 @@ follower without making visual scrubbing dangerous.
 - **TIMELINE-014** Video payloads must remain separate range-addressable media;
   the inspection snapshot carries only the metadata needed to align them with
   the episode clock.
+- **TIMELINE-015** The recorded-video HTTP endpoint must translate one valid
+  browser `Range` request into `spql.io.read_bytes(blob, offset, size)` and
+  forward exactly those bytes with the corresponding HTTP range headers. It
+  must not materialize the complete MP4 before slicing it or introduce an
+  application payload cache to compensate for Binary storage.
 
 ## Physical replay
 

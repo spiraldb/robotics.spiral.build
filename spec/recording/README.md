@@ -3,7 +3,9 @@
 ## Outcome
 
 Recording captures leader-to-follower teleoperation, joint state, commands, and
-assigned cameras as one complete episode in the selected dataset.
+assigned cameras as one complete episode in the selected dataset. It is the
+built-in producer for the data core; external data enters through
+[ingestion](../data/ingestion.md).
 
 ## User flow
 

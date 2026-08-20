@@ -6,11 +6,12 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use arrow_array::{
     Array as _, ArrayRef, BinaryArray, BinaryViewArray, Int64Array, LargeBinaryArray,
-    LargeStringArray, RecordBatch, RecordBatchIterator, StringArray, StringViewArray, UInt32Array,
-    UInt64Array,
+    LargeStringArray, RecordBatch, RecordBatchIterator, StringArray, StringViewArray, StructArray,
+    UInt32Array, UInt64Array,
 };
 use arrow_json::writer::{JsonArray, WriterBuilder};
-use arrow_schema::{ArrowError, DataType, Field, Schema};
+use arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
+use arrow_schema::{ArrowError, DataType, Field, Fields, Schema};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -40,6 +41,8 @@ const MAX_INTERNAL_QUERY_RESPONSE_BYTES: usize = 128 * 1024 * 1024;
 const QUERY_JSON_CHUNK_ROWS: usize = 64;
 const MAX_REPLAY_ROWS: usize = 250_000;
 const JOINT_BATCH_ROWS: usize = 512;
+const BLOB_EXTENSION_NAME: &str = "spql.io.Blob";
+
 pub(crate) struct StorageManager {
     repository: Arc<SpiralRepository>,
 }
@@ -92,7 +95,11 @@ impl StorageManager {
     }
 
     pub(crate) async fn prewarm(&self) -> Result<(), String> {
-        self.repository.prewarm().await
+        self.repository.prewarm().await?;
+        let namespace = self.repository.namespace().to_owned();
+        self.repository
+            .run(move |connection| ensure_video_assets_blob_relation(connection, &namespace))
+            .await
     }
 
     pub(crate) fn configure_connection(
@@ -198,6 +205,7 @@ impl StorageManager {
             .map_err(|error| format!("encoding Studio preferences: {error}"))?;
         self.repository.run_blocking(move |connection| {
             ensure_dataset_namespace(connection, &namespace)?;
+            ensure_video_assets_blob_relation(connection, &namespace)?;
             if table_exists(connection, &relation)? {
                 execute_delete_sql(
                     connection,
@@ -429,18 +437,56 @@ impl StorageManager {
         decode_trajectory(result.rows)
     }
 
-    /// Fetch one original MP4 payload for browser preview. Spiral's managed
-    /// video dataset remains the compute/index surface; the byte asset is the
-    /// correct browser delivery format and avoids decoding/re-encoding frames.
+    /// Read the authoritative MP4 size without materializing its bytes.
+    pub(crate) async fn video_asset_size(
+        &self,
+        episode: &str,
+        stream: &str,
+        segment: Option<u32>,
+    ) -> Result<u64, String> {
+        let sql = sql::video_asset_size(self.repository.namespace(), episode, stream, segment);
+        self.repository
+            .run(move |connection| run_u64_query(connection, &sql, db::BYTE_SIZE))
+            .await
+    }
+
+    /// Fetch exactly one browser-requested range from Spiral's managed Blob.
+    ///
+    /// The managed MP4 output retains the source Blob, including its provider
+    /// URI and object offset. `spql.io.read_bytes` can therefore push the range
+    /// into object storage instead of materializing the complete MP4 in Studio.
+    pub(crate) async fn video_asset_range(
+        &self,
+        episode: &str,
+        stream: &str,
+        segment: Option<u32>,
+        offset: u64,
+        size: u64,
+    ) -> Result<Vec<u8>, String> {
+        let sql = sql::video_asset_range(
+            self.repository.namespace(),
+            episode,
+            stream,
+            segment,
+            offset,
+            size,
+        );
+        self.repository
+            .run(move |connection| run_binary_query(connection, &sql))
+            .await
+    }
+
     pub(crate) async fn video_asset(
         &self,
         episode: &str,
         stream: &str,
         segment: Option<u32>,
     ) -> Result<Vec<u8>, String> {
-        let sql = sql::video_asset(self.repository.namespace(), episode, stream, segment);
-        self.repository
-            .run(move |connection| run_binary_query(connection, &sql))
+        let size = self.video_asset_size(episode, stream, segment).await?;
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        self.video_asset_range(episode, stream, segment, 0, size)
             .await
     }
 }
@@ -545,6 +591,9 @@ pub(crate) fn replace_episode_blocking(
     videos: &[VideoAsset],
 ) -> Result<(), String> {
     ensure_dataset_namespace(connection, namespace)?;
+    if !videos.is_empty() {
+        ensure_video_assets_blob_relation(connection, namespace)?;
+    }
     let had_video = episode_has_video_assets(connection, namespace, &episode.start.id)?;
     let video_rows_changed = had_video || !videos.is_empty();
     let dataset_exists = if video_rows_changed {
@@ -1064,7 +1113,7 @@ fn video_assets_batch(
         Arc::new(StringArray::from_iter_values(
             videos.iter().map(|video| video.camera_id.as_str()),
         )),
-        Arc::new(BinaryArray::from_iter_values(payloads.iter().copied())),
+        inline_video_blob_array(&payloads)?,
         Arc::new(UInt64Array::from_iter_values(
             payloads.iter().map(|payload| payload.len() as u64),
         )),
@@ -1095,7 +1144,7 @@ fn video_assets_schema() -> Arc<Schema> {
         Field::new(db::SEGMENT_INDEX, DataType::UInt32, false),
         Field::new(db::TIMELINE_OFFSET_NS, DataType::UInt64, true),
         Field::new(db::CAMERA_ID, DataType::Utf8, false),
-        Field::new(db::PAYLOAD, DataType::Binary, false),
+        video_blob_field(db::PAYLOAD),
         Field::new(db::BYTE_SIZE, DataType::UInt64, false),
         Field::new(db::WIDTH, DataType::UInt32, false),
         Field::new(db::HEIGHT, DataType::UInt32, false),
@@ -1103,6 +1152,141 @@ fn video_assets_schema() -> Arc<Schema> {
         Field::new(db::FRAMES, DataType::UInt64, false),
         Field::new(db::MEDIA_RELATION, DataType::Utf8, false),
     ]))
+}
+
+fn video_blob_storage_fields() -> Fields {
+    vec![
+        Field::new("bytes", DataType::BinaryView, true),
+        Field::new("uri", DataType::Utf8View, true),
+        Field::new("offset", DataType::UInt64, true),
+        Field::new("size", DataType::UInt64, true),
+        Field::new("mime_type", DataType::Utf8View, true),
+        Field::new("etag", DataType::Utf8View, true),
+        Field::new("version_id", DataType::Utf8View, true),
+        Field::new("generation", DataType::Utf8View, true),
+        Field::new("md5", DataType::Utf8View, true),
+        Field::new("sha1", DataType::Utf8View, true),
+        Field::new("sha256", DataType::Utf8View, true),
+        Field::new("manifest_digest", DataType::Utf8View, true),
+    ]
+    .into()
+}
+
+fn video_blob_field(name: &str) -> Field {
+    Field::new(name, DataType::Struct(video_blob_storage_fields()), true).with_metadata(
+        [(
+            EXTENSION_TYPE_NAME_KEY.to_owned(),
+            BLOB_EXTENSION_NAME.to_owned(),
+        )]
+        .into(),
+    )
+}
+
+fn inline_video_blob_array(payloads: &[&[u8]]) -> Result<ArrayRef, String> {
+    let len = payloads.len();
+    let fields = video_blob_storage_fields();
+    let null_text = || Arc::new(StringViewArray::from(vec![None::<&str>; len])) as ArrayRef;
+    let null_u64 = || Arc::new(UInt64Array::from(vec![None::<u64>; len])) as ArrayRef;
+    let values = vec![
+        Arc::new(BinaryViewArray::from_iter_values(payloads.iter().copied())) as ArrayRef,
+        null_text(),
+        null_u64(),
+        Arc::new(UInt64Array::from_iter_values(
+            payloads.iter().map(|payload| payload.len() as u64),
+        )) as ArrayRef,
+        Arc::new(StringViewArray::from(vec![Some("video/mp4"); len])) as ArrayRef,
+        null_text(),
+        null_text(),
+        null_text(),
+        null_text(),
+        null_text(),
+        null_text(),
+        null_text(),
+    ];
+    StructArray::try_new(fields, values, None)
+        .map(|array| Arc::new(array) as ArrayRef)
+        .map_err(|error| format!("building Spiral video Blob array: {error}"))
+}
+
+pub(crate) fn normalize_video_asset_batch(batch: RecordBatch) -> Result<RecordBatch, String> {
+    let payload_index = batch
+        .schema()
+        .index_of(db::PAYLOAD)
+        .map_err(|error| format!("video asset batch is missing {}: {error}", db::PAYLOAD))?;
+    let batch_schema = batch.schema();
+    let payload_field = batch_schema.field(payload_index);
+    if payload_field
+        .metadata()
+        .get(EXTENSION_TYPE_NAME_KEY)
+        .is_some_and(|name| name == BLOB_EXTENSION_NAME)
+    {
+        return Ok(batch);
+    }
+    let payload = batch.column(payload_index);
+    let values = if let Some(payload) = payload.as_any().downcast_ref::<BinaryArray>() {
+        payload.iter().collect::<Vec<_>>()
+    } else if let Some(payload) = payload.as_any().downcast_ref::<LargeBinaryArray>() {
+        payload.iter().collect::<Vec<_>>()
+    } else if let Some(payload) = payload.as_any().downcast_ref::<BinaryViewArray>() {
+        payload.iter().collect::<Vec<_>>()
+    } else {
+        return Err(format!(
+            "video asset {} must be a Spiral Blob or Arrow binary, got {}",
+            db::PAYLOAD,
+            payload.data_type(),
+        ));
+    };
+    if values.iter().any(Option::is_none) {
+        return Err("video asset payload cannot be null".to_owned());
+    }
+    let payloads = values.into_iter().flatten().collect::<Vec<_>>();
+    let mut fields = batch
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    fields[payload_index] = video_blob_field(db::PAYLOAD);
+    let schema = Arc::new(Schema::new_with_metadata(
+        fields,
+        batch.schema().metadata().clone(),
+    ));
+    let mut columns = batch.columns().to_vec();
+    columns[payload_index] = inline_video_blob_array(&payloads)?;
+    RecordBatch::try_new(schema, columns)
+        .map_err(|error| format!("normalizing video asset Blob batch: {error}"))
+}
+
+pub(crate) fn ensure_video_assets_blob_relation(
+    connection: &mut RepositoryConnection,
+    namespace: &str,
+) -> Result<(), String> {
+    let assets = sql::relation(namespace, Table::VideoAssets);
+    let Some(schema) = connection.table_schema(&assets)? else {
+        return Ok(());
+    };
+    let payload = schema
+        .field_with_name(db::PAYLOAD)
+        .map_err(|error| format!("stored video assets are missing {}: {error}", db::PAYLOAD))?;
+    if payload
+        .metadata()
+        .get(EXTENSION_TYPE_NAME_KEY)
+        .is_some_and(|name| name == BLOB_EXTENSION_NAME)
+    {
+        return Ok(());
+    }
+    if !matches!(
+        payload.data_type(),
+        DataType::Binary | DataType::LargeBinary | DataType::BinaryView
+    ) {
+        return Err(format!(
+            "stored video asset {} must be a Spiral Blob or Arrow binary, got {}",
+            db::PAYLOAD,
+            payload.data_type(),
+        ));
+    }
+    execute_update_sql(connection, &sql::migrate_video_assets_to_blob(&assets))
+        .map_err(|error| format!("migrating video assets from Binary to Blob: {error}"))
 }
 
 pub(crate) fn run_query(
@@ -1199,7 +1383,10 @@ fn push_query_row(
     Ok(true)
 }
 
-fn run_binary_query(connection: &mut RepositoryConnection, sql: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn run_binary_query(
+    connection: &mut RepositoryConnection,
+    sql: &str,
+) -> Result<Vec<u8>, String> {
     let mut statement = connection
         .new_statement()
         .map_err(|error| format!("opening Spiral ADBC video query: {error}"))?;
@@ -1233,6 +1420,37 @@ fn run_binary_query(connection: &mut RepositoryConnection, sql: &str) -> Result<
             "Spiral video payload has unexpected type {}",
             payload.data_type()
         ));
+    }
+    Err("No video matched that episode and stream".to_owned())
+}
+
+fn run_u64_query(
+    connection: &mut RepositoryConnection,
+    sql: &str,
+    column: &str,
+) -> Result<u64, String> {
+    let mut statement = connection
+        .new_statement()
+        .map_err(|error| format!("opening Spiral scalar query: {error}"))?;
+    statement
+        .set_sql_query(sql)
+        .map_err(|error| format!("binding Spiral scalar query: {error}"))?;
+    let reader = statement
+        .execute()
+        .map_err(|error| format!("executing Spiral scalar query: {error}"))?;
+    for batch in reader {
+        let batch = batch.map_err(|error| format!("reading Spiral scalar result: {error}"))?;
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        let values = batch
+            .column_by_name(column)
+            .and_then(|array| array.as_any().downcast_ref::<UInt64Array>())
+            .ok_or_else(|| format!("Spiral scalar query returned no UInt64 {column} column"))?;
+        if values.is_null(0) {
+            return Err(format!("Spiral scalar query returned null {column}"));
+        }
+        return Ok(values.value(0));
     }
     Err("No video matched that episode and stream".to_owned())
 }

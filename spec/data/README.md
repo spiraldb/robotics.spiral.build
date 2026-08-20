@@ -2,12 +2,18 @@
 
 ## Outcome
 
-Data lets the user organize, inspect, query, replay, import, export, and delete
-the durable results of recording and training.
+Data is the center of the product: the place where the project's episodes
+live and where the user spends their time viewing, querying, curating,
+replaying, importing, exporting, and deleting them. Producers fill it —
+[recording](../recording/README.md) and [ingestion](ingestion.md) — and
+consumers draw from it: query, curation, [training](../training/README.md),
+[rollout](../rollout/README.md), replay, and export.
 
 ## Feature map
 
 - Episode catalog and dataset operations are defined here.
+- [Ingestion](ingestion.md) — external producers (confirmed direction, not
+  implemented)
 - [Timeline and replay](timeline-and-replay.md)
 - [SQL query](query.md)
 - [SpiralDB persistence and schema](persistence.md)
@@ -62,9 +68,18 @@ the durable results of recording and training.
   retarget the imported episode rows to it, and refuse any episode-ID collision
   instead of overwriting an existing episode.
 
+## Curation direction
+
+Confirmed direction, not yet specified in requirements: the user must
+eventually be able to materialize a query result or a curated selection as a
+new derived dataset, so training sets are shaped inside the Studio instead of
+external scripts. Requirements will be added when this feature is designed.
+
 ## Feature relationships
 
-- [Recording](../recording/README.md) creates episodes.
+- [Recording](../recording/README.md) creates episodes with connected arms.
+- [Ingestion](ingestion.md) creates episodes from external sources
+  (confirmed direction, not implemented).
 - [Training](../training/README.md) consumes a dataset and creates runs and
   checkpoints.
 - [Rollout](../rollout/README.md) consumes a checkpoint and records rollout

@@ -76,7 +76,7 @@ pub(crate) fn episode_samples(dataset: &str, episode_id: &str) -> String {
     )
 }
 
-pub(crate) fn video_asset(
+pub(crate) fn video_asset_size(
     dataset: &str,
     episode_id: &str,
     stream_id: &str,
@@ -87,9 +87,37 @@ pub(crate) fn video_asset(
         .map(|segment| format!(" AND {} = {segment}", column::SEGMENT_INDEX))
         .unwrap_or_default();
     format!(
-        "SELECT {payload} FROM {assets} WHERE {episode_id_column} = {episode_id} \
+        "SELECT {byte_size} FROM {assets} WHERE {episode_id_column} = {episode_id} \
          AND {stream_id_column} = {stream_id}{segment_filter} \
          ORDER BY {segment_index} LIMIT 1",
+        byte_size = column::BYTE_SIZE,
+        episode_id_column = column::EPISODE_ID,
+        episode_id = string_literal(episode_id),
+        stream_id_column = column::STREAM_ID,
+        stream_id = string_literal(stream_id),
+        segment_index = column::SEGMENT_INDEX,
+    )
+}
+
+pub(crate) fn video_asset_range(
+    dataset: &str,
+    episode_id: &str,
+    stream_id: &str,
+    segment: Option<u32>,
+    offset: u64,
+    size: u64,
+) -> String {
+    let assets = video_dataset_output(dataset);
+    let segment_filter = segment
+        .map(|segment| format!(" AND {} = {segment}", column::SEGMENT_INDEX))
+        .unwrap_or_default();
+    format!(
+        "SELECT spql.io.read_bytes({source}, CAST({offset} AS UINT64), \
+         CAST({size} AS UINT64)) AS {payload} \
+         FROM {assets} WHERE {episode_id_column} = {episode_id} \
+         AND {stream_id_column} = {stream_id}{segment_filter} \
+         ORDER BY {segment_index} LIMIT 1",
+        source = column::SOURCE,
         payload = column::PAYLOAD,
         episode_id_column = column::EPISODE_ID,
         episode_id = string_literal(episode_id),
@@ -138,15 +166,35 @@ pub(crate) fn create_video_sources(sources: &str, assets: &str) -> String {
     format!(
         "CREATE OR REPLACE VIEW {sources} AS SELECT assets.{episode_id}, assets.{stream_id}, \
          assets.{segment_index}, assets.{timeline_offset}, \
-         spql.blob.inline(assets.{payload}, assets.{byte_size}, 'video/mp4') AS {source} \
+         assets.{payload} AS {source} \
          FROM {assets} AS assets",
         episode_id = column::EPISODE_ID,
         stream_id = column::STREAM_ID,
         segment_index = column::SEGMENT_INDEX,
         timeline_offset = column::TIMELINE_OFFSET_NS,
         payload = column::PAYLOAD,
-        byte_size = column::BYTE_SIZE,
         source = column::SOURCE,
+    )
+}
+
+pub(crate) fn migrate_video_assets_to_blob(assets: &str) -> String {
+    format!(
+        "CREATE OR REPLACE TABLE {assets} ENGINE 'arbor' AS SELECT \
+         {episode_id}, {stream_id}, {segment_index}, {timeline_offset}, {camera_id}, \
+         spql.blob.inline({payload}, {byte_size}, 'video/mp4') AS {payload}, \
+         {byte_size}, {width}, {height}, {fps}, {frames}, {media_relation} FROM {assets}",
+        episode_id = column::EPISODE_ID,
+        stream_id = column::STREAM_ID,
+        segment_index = column::SEGMENT_INDEX,
+        timeline_offset = column::TIMELINE_OFFSET_NS,
+        camera_id = column::CAMERA_ID,
+        payload = column::PAYLOAD,
+        byte_size = column::BYTE_SIZE,
+        width = column::WIDTH,
+        height = column::HEIGHT,
+        fps = column::FPS,
+        frames = column::FRAMES,
+        media_relation = column::MEDIA_RELATION,
     )
 }
 
@@ -220,7 +268,7 @@ mod tests {
         assert_single_literal(&trajectory, "episode-'three");
         assert_single_literal(&trajectory, "stream-'three");
 
-        let video = video_asset("robot", "episode-'four", "stream-'four", Some(0));
+        let video = video_asset_size("robot", "episode-'four", "stream-'four", Some(0));
         assert_single_literal(&video, "episode-'four");
         assert_single_literal(&video, "stream-'four");
     }
@@ -232,7 +280,11 @@ mod tests {
         assert_eq!(video_dataset_output("robot"), "robot.video.assets");
         assert_eq!(
             create_video_sources("robot_video_sources", "robot.video_assets"),
-            "CREATE OR REPLACE VIEW robot_video_sources AS SELECT assets.episode_id, assets.stream_id, assets.segment_index, assets.timeline_offset_ns, spql.blob.inline(assets.payload, assets.byte_size, 'video/mp4') AS source FROM robot.video_assets AS assets"
+            "CREATE OR REPLACE VIEW robot_video_sources AS SELECT assets.episode_id, assets.stream_id, assets.segment_index, assets.timeline_offset_ns, assets.payload AS source FROM robot.video_assets AS assets"
+        );
+        assert_eq!(
+            video_asset_range("robot", "episode", "camera.main", Some(2), 512, 1024),
+            "SELECT spql.io.read_bytes(source, CAST(512 AS UINT64), CAST(1024 AS UINT64)) AS payload FROM robot.video.assets WHERE episode_id = 'episode' AND stream_id = 'camera.main' AND segment_index = 2 ORDER BY segment_index LIMIT 1"
         );
     }
 

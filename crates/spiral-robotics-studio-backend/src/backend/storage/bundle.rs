@@ -12,10 +12,14 @@ use serde::{Deserialize, Serialize};
 use spiral_robotics_contracts::api::{EpisodeImportSummary, ProjectImportSummary};
 use spiral_robotics_contracts::spiral::{self, Table, column};
 
+#[cfg(test)]
+use crate::backend::storage::manager::run_binary_query;
 use crate::backend::storage::manager::{
-    commit_catalog_transaction, drop_video_dataset, ensure_dataset_namespace, execute_update_sql,
-    ingest_batches, rebuild_video_dataset, replace_batches, retarget_stored_video_media_relations,
-    run_query, stored_video_episode_ids, table_exists, video_dataset_exists,
+    commit_catalog_transaction, drop_video_dataset, ensure_dataset_namespace,
+    ensure_video_assets_blob_relation, execute_update_sql, ingest_batches,
+    normalize_video_asset_batch, rebuild_video_dataset, replace_batches,
+    retarget_stored_video_media_relations, run_query, stored_video_episode_ids, table_exists,
+    video_dataset_exists,
 };
 use crate::backend::storage::repository::RepositoryConnection;
 use crate::backend::storage::sql;
@@ -90,7 +94,12 @@ pub(crate) fn export(
         if !table_exists(connection, &relation)? {
             continue;
         }
-        queries.push((table, format!("SELECT * FROM {relation}")));
+        let query = if table == Table::VideoAssets {
+            portable_video_assets_query(&relation, None)
+        } else {
+            format!("SELECT * FROM {relation}")
+        };
+        queries.push((table, query));
     }
     export_queries(connection, queries, PROJECT_SPEC).map(|export| export.bytes)
 }
@@ -123,9 +132,13 @@ pub(crate) fn export_episodes(
                 "SELECT * FROM {relation} WHERE {} = {dataset}",
                 column::DATASET_ID
             ),
-            Table::EpisodeStreams | Table::JointSamples | Table::VideoAssets => format!(
+            Table::EpisodeStreams | Table::JointSamples => format!(
                 "SELECT * FROM {relation} WHERE {} IN ({episode_ids})",
                 column::EPISODE_ID
+            ),
+            Table::VideoAssets => portable_video_assets_query(
+                &relation,
+                Some(&format!("{} IN ({episode_ids})", column::EPISODE_ID)),
             ),
             _ => unreachable!("episode bundle table set is closed"),
         };
@@ -203,6 +216,29 @@ fn export_queries(
     build_bundle(entries, spec).map(|bytes| ExportedBundle { bytes, row_counts })
 }
 
+fn portable_video_assets_query(relation: &str, predicate: Option<&str>) -> String {
+    let filter = predicate
+        .map(|predicate| format!(" WHERE {predicate}"))
+        .unwrap_or_default();
+    format!(
+        "SELECT {episode_id}, {stream_id}, {segment_index}, {timeline_offset}, {camera_id}, \
+         spql.io.read_bytes({payload}) AS {payload}, {byte_size}, {width}, {height}, {fps}, \
+         {frames}, {media_relation} FROM {relation}{filter}",
+        episode_id = column::EPISODE_ID,
+        stream_id = column::STREAM_ID,
+        segment_index = column::SEGMENT_INDEX,
+        timeline_offset = column::TIMELINE_OFFSET_NS,
+        camera_id = column::CAMERA_ID,
+        payload = column::PAYLOAD,
+        byte_size = column::BYTE_SIZE,
+        width = column::WIDTH,
+        height = column::HEIGHT,
+        fps = column::FPS,
+        frames = column::FRAMES,
+        media_relation = column::MEDIA_RELATION,
+    )
+}
+
 fn encoded_entries_size(entries: &[(String, Vec<u8>)]) -> usize {
     entries
         .iter()
@@ -277,7 +313,7 @@ pub(crate) fn import(
                 .into_iter()
                 .map(|batch| {
                     if table == Table::VideoAssets {
-                        retarget_video_media_relations(batch, namespace)
+                        prepare_video_asset_import(batch, namespace)
                     } else {
                         Ok(batch)
                     }
@@ -332,6 +368,9 @@ pub(crate) fn import_episodes(
     let existing_video_episodes = stored_video_episode_ids(connection, namespace)?;
     reject_existing_episodes(connection, namespace, &episode_ids)?;
     ensure_dataset_namespace(connection, namespace)?;
+    if !video_episode_ids.is_empty() {
+        ensure_video_assets_blob_relation(connection, namespace)?;
+    }
     if !existing_video_episodes.is_empty() && !video_dataset_exists(connection, namespace)? {
         retarget_stored_video_media_relations(connection, namespace)?;
     }
@@ -363,7 +402,7 @@ pub(crate) fn import_episodes(
                     Table::Datasets | Table::Episodes => {
                         replace_utf8_column(batch, column::DATASET_ID, dataset_id)
                     }
-                    Table::VideoAssets => retarget_video_media_relations(batch, namespace),
+                    Table::VideoAssets => prepare_video_asset_import(batch, namespace),
                     _ => Ok(batch),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -680,6 +719,10 @@ fn retarget_video_media_relations(
     };
     RecordBatch::try_new(batch.schema(), columns)
         .map_err(|error| format!("retargeting episode bundle media relations: {error}"))
+}
+
+fn prepare_video_asset_import(batch: RecordBatch, namespace: &str) -> Result<RecordBatch, String> {
+    retarget_video_media_relations(normalize_video_asset_batch(batch)?, namespace)
 }
 
 fn reject_existing_episodes(
@@ -1434,7 +1477,15 @@ mod tests {
             discarded: false,
             condition: Vec::new(),
         };
-        let mp4 = test_mp4();
+        let mut mp4 = test_mp4();
+        // A valid top-level `free` box makes the fixture large enough to cross
+        // Spiral's managed-Blob outlining threshold without making FFmpeg
+        // encode hundreds of thousands of incompressible video bytes.
+        let free_box_size = 300_000_u32;
+        mp4.extend_from_slice(&free_box_size.to_be_bytes());
+        mp4.extend_from_slice(b"free");
+        mp4.resize(mp4.len() + free_box_size as usize - 8, 0);
+        assert!(mp4.len() > 256 * 1024);
 
         repository
             .run_exclusive_blocking(|connection| {
@@ -1454,9 +1505,10 @@ mod tests {
                     connection,
                     &sql::relation(repository.namespace(), Table::VideoAssets),
                     video_asset_batch(episode_id, &mp4),
-                )
+                )?;
+                ensure_video_assets_blob_relation(connection, repository.namespace())
             })
-            .expect("seeding durable video rows must succeed without derived resources");
+            .expect("legacy Binary video rows must migrate to Blob without derived resources");
         let exported = storage
             .export_project_bundle()
             .expect("exporting the video project must succeed");
@@ -1485,6 +1537,50 @@ mod tests {
 
         repository
             .run_blocking(|connection| {
+                let assets = sql::relation(repository.namespace(), Table::VideoAssets);
+                let schema = connection
+                    .table_schema(&assets)?
+                    .ok_or_else(|| "imported video asset relation is missing".to_owned())?;
+                assert_eq!(
+                    schema
+                        .field_with_name(column::PAYLOAD)
+                        .ok()
+                        .and_then(|field| {
+                            field
+                                .metadata()
+                                .get(arrow_schema::extension::EXTENSION_TYPE_NAME_KEY)
+                        })
+                        .map(String::as_str),
+                    Some("spql.io.Blob"),
+                );
+                let descriptor = run_query(
+                    connection,
+                    &format!(
+                        "SELECT spql.blob.uri({payload}) AS uri FROM {assets}",
+                        payload = column::PAYLOAD,
+                    ),
+                    1,
+                )?;
+                assert!(
+                    descriptor.rows[0]
+                        .get("uri")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|uri| !uri.is_empty()),
+                    "large MP4 must be outlined into a provider-backed Blob",
+                );
+                let range = run_binary_query(
+                    connection,
+                    &sql::video_asset_range(
+                        repository.namespace(),
+                        episode_id,
+                        "camera.main",
+                        Some(0),
+                        512,
+                        1024,
+                    ),
+                )?;
+                assert_eq!(range, mp4[512..1536]);
+
                 let output = sql::video_dataset_output(repository.namespace());
                 let rows = run_query(connection, &sql::count_rows(&output), 1)?;
                 assert_eq!(
@@ -1958,7 +2054,7 @@ mod tests {
                 for batch in batches {
                     let transform_start = Instant::now();
                     let batch = if table == Table::VideoAssets {
-                        retarget_video_media_relations(batch, namespace)?
+                        prepare_video_asset_import(batch, namespace)?
                     } else {
                         batch
                     };
