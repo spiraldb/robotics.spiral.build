@@ -15,6 +15,7 @@ pub enum CatalogLeaseOwner {
     EpisodeImport,
     ProjectImport,
     ProjectSwitch,
+    WorkflowStart,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -193,5 +194,35 @@ mod tests {
         assert!(lease.is_held(), "claim retains exclusion through commit");
         assert!(lease.release(claimed.token));
         assert!(!lease.release(claimed.token));
+    }
+
+    #[test]
+    fn workflow_start_and_catalog_import_handshakes_are_linearized() {
+        let lease = CatalogMutationLease::default();
+        let import = lease
+            .try_acquire(CatalogLeaseOwner::ProjectImport)
+            .expect("import claims the empty handshake slot");
+        assert!(
+            lease
+                .try_acquire(CatalogLeaseOwner::WorkflowStart)
+                .is_none(),
+            "an admitted import prevents a Workflow start"
+        );
+        assert!(lease.release(import));
+
+        let workflow = lease
+            .try_acquire(CatalogLeaseOwner::WorkflowStart)
+            .expect("Workflow claims the empty handshake slot");
+        assert!(
+            lease
+                .try_acquire(CatalogLeaseOwner::EpisodeImport)
+                .is_none(),
+            "import cannot pass its idle check before Workflow publishes active state"
+        );
+        assert!(lease.release(workflow));
+        let import = lease
+            .try_acquire(CatalogLeaseOwner::EpisodeImport)
+            .expect("import may perform its active-state check after Workflow releases handshake");
+        assert!(lease.release(import));
     }
 }

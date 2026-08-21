@@ -20,12 +20,13 @@ use image::{DynamicImage, ImageFormat};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map as JsonMap, Value as JsonValue};
+use sha2::{Digest as _, Sha256};
 use spiral_robotics_contracts::api::{
     ConnectionTestResponse, DataSettings, QueryColumn, SpiralQueryResponse, SpiralSettings,
 };
 use spiral_robotics_contracts::spiral::{self, Table, column as db};
 use spiral_robotics_contracts::workflow::{
-    WorkflowDocument, WorkflowRelation, WorkflowRelationsResponse,
+    WorkflowDocument, WorkflowRelation, WorkflowRelationsResponse, derived_model_output_relation,
 };
 use spiral_robotics_core::workflow::validate_qualified_relation;
 
@@ -87,6 +88,10 @@ impl StorageManager {
 
     pub(crate) fn project_id(&self) -> String {
         self.repository.project_id()
+    }
+
+    pub(crate) fn workflow_model_repository(&self) -> Arc<SpiralRepository> {
+        self.repository.clone()
     }
 
     pub(crate) fn spiral_endpoint(&self) -> String {
@@ -185,6 +190,58 @@ impl StorageManager {
 
     pub(crate) fn save_workflow_document(&self, value: &WorkflowDocument) -> Result<(), String> {
         self.save_json_document(Table::WorkflowRuns, "default", value)
+    }
+
+    pub(crate) fn save_workflow_document_and_drop_models(
+        &self,
+        value: &WorkflowDocument,
+        removed_model_ids: &[String],
+    ) -> Result<(), String> {
+        if removed_model_ids.is_empty() {
+            return self.save_workflow_document(value);
+        }
+        let removed_relations = removed_model_ids
+            .iter()
+            .map(|node_id| derived_model_output_relation(&value.workflow.id, node_id))
+            .collect::<Vec<_>>();
+        let namespace = self.repository.namespace().to_owned();
+        let relation = sql::relation(&namespace, Table::WorkflowRuns);
+        let key = "default".to_owned();
+        let json = serde_json::to_string(value)
+            .map_err(|error| format!("encoding {} snapshot: {error}", Table::WorkflowRuns))?;
+        let removed_relations = removed_relations.to_vec();
+        self.repository.run_exclusive_blocking(move |connection| {
+            connection.set_autocommit(false)?;
+            let mutation = (|| {
+                ensure_dataset_namespace(connection, &namespace)?;
+                save_json_document_on_connection(
+                    connection,
+                    Table::WorkflowRuns,
+                    &relation,
+                    key,
+                    json,
+                )?;
+                for removed in removed_relations {
+                    execute_update_sql(connection, &format!("DROP TABLE IF EXISTS {removed}"))?;
+                }
+                connection.commit()
+            })();
+            if mutation.is_err() {
+                let _ = connection.rollback();
+            }
+            let restore = connection.set_autocommit(true);
+            match (mutation, restore) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(error), Ok(())) => Err(error),
+                (Ok(()), Err(_)) => {
+                    connection.discard();
+                    Ok(())
+                }
+                (Err(error), Err(restore)) => Err(format!(
+                    "{error}; restoring ADBC autocommit also failed: {restore}"
+                )),
+            }
+        })
     }
 
     pub(crate) fn load_studio_preferences(&self) -> Result<StoredStudioPreferences, String> {
@@ -331,32 +388,11 @@ impl StorageManager {
         let namespace = self.repository.namespace().to_owned();
         let relation = sql::relation(&namespace, table);
         let key = key.to_owned();
-        let key_sql = sql::string_literal(&key);
         let json = serde_json::to_string(value)
             .map_err(|error| format!("encoding {table} snapshot: {error}"))?;
         self.repository.run_blocking(move |connection| {
             ensure_dataset_namespace(connection, &namespace)?;
-            if table_exists(connection, &relation)? {
-                execute_delete_sql(
-                    connection,
-                    &format!("DELETE FROM {relation} WHERE {} = {key_sql}", db::RUN_ID),
-                )?;
-            }
-            let schema = Arc::new(Schema::new(vec![
-                Field::new(db::RUN_ID, DataType::Utf8, false),
-                Field::new(db::SNAPSHOT_JSON, DataType::Utf8, false),
-                Field::new(db::UPDATED_MS, DataType::Int64, false),
-            ]));
-            let batch = RecordBatch::try_new(
-                schema,
-                vec![
-                    Arc::new(StringArray::from(vec![key])) as ArrayRef,
-                    Arc::new(StringArray::from(vec![json])) as ArrayRef,
-                    Arc::new(Int64Array::from(vec![unix_millis()])) as ArrayRef,
-                ],
-            )
-            .map_err(|error| format!("building {table} snapshot batch: {error}"))?;
-            ingest_batch(connection, &relation, batch)
+            save_json_document_on_connection(connection, table, &relation, key, json)
         })
     }
 
@@ -599,6 +635,40 @@ impl StorageManager {
     }
 }
 
+fn save_json_document_on_connection(
+    connection: &mut RepositoryConnection,
+    table: Table,
+    relation: &str,
+    key: String,
+    json: String,
+) -> Result<(), String> {
+    if table_exists(connection, relation)? {
+        execute_delete_sql(
+            connection,
+            &format!(
+                "DELETE FROM {relation} WHERE {} = {}",
+                db::RUN_ID,
+                sql::string_literal(&key)
+            ),
+        )?;
+    }
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(db::RUN_ID, DataType::Utf8, false),
+        Field::new(db::SNAPSHOT_JSON, DataType::Utf8, false),
+        Field::new(db::UPDATED_MS, DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec![key])) as ArrayRef,
+            Arc::new(StringArray::from(vec![json])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![unix_millis()])) as ArrayRef,
+        ],
+    )
+    .map_err(|error| format!("building {table} snapshot batch: {error}"))?;
+    ingest_batch(connection, relation, batch)
+}
+
 /// Decode remote replay data without dropping malformed joints or inventing a
 /// clock. Physical replay is all-or-nothing: every row must declare the same
 /// finite sample rate and one exact, unique, finite pose.
@@ -799,7 +869,7 @@ pub(crate) fn replace_episode_blocking(
         if has_video_rows {
             rebuild_video_dataset(connection, namespace, dataset_exists)?;
         } else {
-            drop_video_dataset(connection, namespace, dataset_exists)?;
+            drop_video_dataset(connection, namespace)?;
         }
     }
     // Inserted last: readers never see an episode whose streams or media only
@@ -861,15 +931,12 @@ pub(crate) fn video_dataset_exists(
 pub(crate) fn drop_video_dataset(
     connection: &mut RepositoryConnection,
     namespace: &str,
-    dataset_exists: bool,
 ) -> Result<(), String> {
-    if dataset_exists {
-        execute_update_sql(
-            connection,
-            &sql::drop_video_dataset(&sql::video_dataset_relation(namespace)),
-        )
-        .map_err(|error| format!("dropping Spiral MP4 dataset: {error}"))?;
-    }
+    let dataset = sql::video_dataset_relation(namespace);
+    validate_qualified_relation(&dataset)
+        .map_err(|error| format!("refusing to drop an invalid Spiral MP4 Dataset: {error}"))?;
+    execute_update_sql(connection, &sql::drop_video_dataset(&dataset))
+        .map_err(|error| format!("dropping Spiral MP4 dataset with CASCADE: {error}"))?;
     execute_update_sql(
         connection,
         &sql::drop_video_sources(&sql::video_sources_relation(namespace)),
@@ -927,7 +994,7 @@ pub(crate) fn clear_episode_rows(
         return Ok(());
     }
     if previous_video_episodes.len() == 1 {
-        drop_video_dataset(connection, namespace, dataset_exists)?;
+        drop_video_dataset(connection, namespace)?;
     } else {
         rebuild_video_dataset(connection, namespace, dataset_exists)?;
     }
@@ -1173,7 +1240,7 @@ pub(crate) fn execute_delete_sql(
     }
 }
 
-fn video_assets_batch(
+pub(crate) fn video_assets_batch(
     episode_id: &str,
     videos: &[VideoAsset],
     media_relation: &str,
@@ -1295,6 +1362,15 @@ fn inline_video_blob_array(payloads: &[&[u8]]) -> Result<ArrayRef, String> {
     let fields = video_blob_storage_fields();
     let null_text = || Arc::new(StringViewArray::from(vec![None::<&str>; len])) as ArrayRef;
     let null_u64 = || Arc::new(UInt64Array::from(vec![None::<u64>; len])) as ArrayRef;
+    let sha256 = Arc::new(StringViewArray::from_iter_values(payloads.iter().map(
+        |payload| {
+            let digest = Sha256::digest(payload);
+            digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        },
+    ))) as ArrayRef;
     let values = vec![
         Arc::new(BinaryViewArray::from_iter_values(payloads.iter().copied())) as ArrayRef,
         null_text(),
@@ -1308,7 +1384,7 @@ fn inline_video_blob_array(payloads: &[&[u8]]) -> Result<ArrayRef, String> {
         null_text(),
         null_text(),
         null_text(),
-        null_text(),
+        sha256,
         null_text(),
     ];
     StructArray::try_new(fields, values, None)
@@ -1928,6 +2004,32 @@ mod tests {
                 .collect::<Vec<_>>(),
             Table::VideoAssets.columns(),
         );
+    }
+
+    #[test]
+    fn inline_video_blobs_store_content_sha256_in_the_named_field() {
+        let payload = b"spiral";
+        let array = inline_video_blob_array(&[payload.as_slice()]).unwrap();
+        let blob = array.as_any().downcast_ref::<StructArray>().unwrap();
+        let sha256 = blob
+            .column_by_name("sha256")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringViewArray>()
+            .unwrap();
+        let expected = Sha256::digest(payload)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(sha256.value(0), expected);
+
+        let generation = blob
+            .column_by_name("generation")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringViewArray>()
+            .unwrap();
+        assert!(generation.is_null(0));
     }
 
     #[test]

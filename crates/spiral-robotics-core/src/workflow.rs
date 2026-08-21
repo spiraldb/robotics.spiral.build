@@ -13,6 +13,7 @@ use std::fmt;
 use crate::query::is_identifier;
 
 const PLACEHOLDER_PREFIX: &str = "{{node:";
+pub const SIGLIP_SCORE_COLUMN_PREFIX: &str = "score_";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkflowSyntaxError(String);
@@ -40,6 +41,30 @@ pub fn is_workflow_node_id(value: &str) -> bool {
         .next()
         .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+/// Turn a user-facing SigLIP concept into the safe, deterministic stem used by
+/// the server-owned output schema. Collisions are resolved by the contract
+/// layer, which has visibility into the full ordered concept list.
+pub fn siglip_score_column_stem(concept: &str) -> String {
+    let mut stem = String::new();
+    let mut separator_pending = false;
+    for character in concept.trim().chars() {
+        if character.is_ascii_alphanumeric() {
+            if separator_pending && !stem.is_empty() {
+                stem.push('_');
+            }
+            stem.push(character.to_ascii_lowercase());
+            separator_pending = false;
+        } else if !stem.is_empty() {
+            separator_pending = true;
+        }
+    }
+    if stem.is_empty() {
+        "concept".to_owned()
+    } else {
+        stem
+    }
 }
 
 /// Admit an unquoted dotted Spiral relation such as `dataset.camera_frames`.
@@ -187,5 +212,13 @@ mod tests {
             "pick_place.frames; DROP TABLE x".to_owned(),
         )]);
         assert!(substitute_node_placeholders("SELECT * FROM {{node:frames}}", &injected).is_err());
+    }
+
+    #[test]
+    fn siglip_score_stems_are_identifier_safe_and_stable() {
+        assert_eq!(siglip_score_column_stem(" Red cube "), "red_cube");
+        assert_eq!(siglip_score_column_stem("red-cube!"), "red_cube");
+        assert_eq!(siglip_score_column_stem("  🤖  "), "concept");
+        assert_eq!(siglip_score_column_stem("Café / CUP"), "caf_cup");
     }
 }

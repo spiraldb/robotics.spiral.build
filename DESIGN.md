@@ -255,6 +255,11 @@ put reads as a bench tool.
   workbench to 27% and replaces the Timeline slot with one low Inference lane.
 - Workflow uses a 30% Assistant/Node tab lane beside a right column with a
   dominant lineage canvas above Results. It has its own layout scope.
+- Workflow's Model inspector is the truthful execution surface: one advertised
+  SigLIP capability, upstream media choice, one visual concept per line,
+  resolved score-column map, bounded row progress, warnings/quarantine, actual
+  device and timings, fingerprint, and computed/reused state. Assistant remains
+  visibly unavailable.
 - One playhead synchronizes every representation of an episode.
 - Compact 12px type, 24px controls, 32px panel tabs, small radii, and hairlines.
 - Monospace tabular figures for elapsed time, rates, durations, counts, and IDs.
@@ -655,7 +660,7 @@ physical motion is sent only for the committed seek.
 | Live robot and camera selection | Live Activity Controller | Live Workbench, Scene, Live camera registry |
 | Live recording and review subject | Live Activity Controller, reconciled with backend truth | Live Workbench, Timeline, recorded preview surfaces |
 | Data tool, selected episode, and query | Data Activity Controller | Data Workbench and the complete Data projection |
-| Workflow saved graph, local draft, run snapshot, and terminal result | Workflow Activity Controller, reconciled with backend truth | Assistant/Node panels, Workflow canvas, Results panel, Status Bar |
+| Workflow saved graph, local draft, model capability/configuration, run snapshot, derived-relation metadata, and terminal result | Workflow Activity Controller, reconciled with backend truth | Assistant/Node panels, Workflow canvas, Results panel, Status Bar |
 | Rollout checkpoint, execution inputs, fixed follower, and readiness | Rollout Activity Controller, reconciled with backend truth | Rollout Workbench, live Scene, follower Camera, Inference lane |
 | Timeline subject, playhead, preview playback, and Follow Live | Timeline Controller within the active activity | Scene, Cameras, Signals, Timeline |
 | Panel geometry and active tab | `PanelWorkspace` | Panel chrome and persisted layout only |
@@ -675,9 +680,11 @@ preserved Scene + active QueryResult sibling tab + explicit episode context or
 explicit no-episode context`.
 
 **Apply and run a Workflow:** `Node inspector edits → revision-checked Apply →
-Workflow backend → run/cancel snapshot events → reconciled Canvas + bounded
-media-aware Results`, while browser-owned node geometry and panel focus remain
-stable.
+Workflow backend → optional pinned SigLIP materialization → read-only Query →
+run/cancel snapshot events → reconciled Canvas + bounded media-aware Results`,
+while browser-owned node geometry and panel focus remain stable. The controlled
+Add/Remove model actions rewrite the Table→Query lineage and placeholder as one
+topology change; they never expose arbitrary graph editing.
 
 **Seek or rewind:** `Timeline → Seek(subject, time, phase) → Activity Controller
 → one synchronized historical projection`. A committed, explicitly armed
@@ -893,17 +900,28 @@ This is the signature component system.
 - **Canvas:** Pale viewport surface with a subtle dot grid, thin graphite
   lineage edges, no MiniMap, and a typed Fit action. `--df-*` values map to the
   existing `--tone-*` roles rather than forming a second palette.
-- **Stage-2 truth:** Assistant explicitly identifies its unavailable transport
-  and owns no run action. The runnable editor is Table→Query→Result over
-  authoritative Spiral catalog relations; Model cards remain visibly unavailable
-  until Stage 3. Table and Query edits use explicit Apply with revision conflict
-  recovery, while the canvas exclusively owns Run/Cancel and prints every disabled
-  reason on-page.
-- **Runtime state:** Cards render authoritative Pending, Validating, Running,
-  Complete, Failed, Stale, Cancelling, and Cancelled states without fabricated
-  percentages. Reruns and failed/cancelled attempts retain prior rows as visibly
-  stale. Results reuse Data's bounded media-aware table instead of defining a
-  second semantic-cell renderer.
+- **Stage-3 truth:** Assistant explicitly identifies its unavailable transport
+  and owns no run action. Manual Table→Query→Result and
+  Table→Model→Query→Result graphs run over authoritative Spiral relations. The
+  only advertised Model is pinned SigLIP; its inspector accepts a discovered
+  direct image field or durable video-manifest `media_relation`, plus one visual
+  concept per line, and shows the server-derived score-column mapping. Table,
+  Model, and Query edits use explicit Apply with revision-conflict recovery,
+  while the canvas exclusively owns Run/Cancel and prints every disabled reason
+  on-page.
+- **Controlled topology:** Add model inserts SigLIP between the first Table and
+  Query; Remove model reconnects that pair and repairs the Query placeholder.
+  Topology changes trigger left-to-right auto-layout after cards are measurable;
+  reopening a hidden narrow-screen canvas layouts changed topology or only fits
+  unchanged geometry. The canvas exposes no arbitrary connection or delete tool.
+- **Runtime state:** Cards render authoritative Pending, Validating, Loading,
+  Running, Complete, Complete-with-warnings, Failed, Stale, Cancelling, and
+  Cancelled states. Running uses bounded `completed / total rows`, never
+  fabricated percentages or ETA. The inspector exposes actual device,
+  decode/inference timing, quarantine count/examples, warnings, fingerprint,
+  and computed/reused state. Reruns and failed/cancelled attempts retain prior
+  query rows as visibly stale. Results reuse Data's bounded media-aware table
+  instead of defining a second semantic-cell renderer.
 - **Focus and reload:** Pointer selection or Enter/Space from a focused node opens
   the Node inspector; initial rendering leaves Assistant active. SSE/reconnect
   updates preserve node geometry and never steal panel focus. A dirty draft whose
@@ -1175,9 +1193,11 @@ another component only to rename it or copy shared mechanics.
   cannot move content between them.
 - **Do** make Workflow relation-first: multiple Spiral Table roots may converge
   through Model and Query nodes, and each Model owns a visible derived relation.
-- **Do** keep unavailable Workflow capabilities visually and verbally inert;
-  Assistant and Stage-2 Model nodes must not imply an agent turn, download, or
-  model execution. Empty Results must distinguish no run from real empty rows.
+- **Do** keep unavailable Workflow capabilities visually and verbally inert:
+  Assistant must not imply an agent turn or Stage-4 transport. Keep the single
+  executable SigLIP capability, actual Loading/device/fallback state, bounded
+  progress, quarantine/warnings, and computed/reused materialization evidence
+  explicit. Empty Results must distinguish no run from real empty rows.
 - **Do** route workbench, Timeline, panel-focus, and backend events through one
   activity controller that derives the complete visible projection.
 - **Do** represent Live, Recorded Loading, Recorded Ready, Recorded Unavailable,
@@ -1217,6 +1237,12 @@ another component only to rename it or copy shared mechanics.
 - **Don't** put Hugging Face, MCAP, URLs, repository selectors, or import
   controls on the Workflow canvas. Import into Spiral first, then read the
   resulting Table relations.
+- **Don't** present Hugging Face model-artifact resolution as dataset ingestion,
+  advertise unimplemented model variants, imply artifact/network availability,
+  or turn bounded row counts into a fabricated percentage or ETA.
+- **Don't** add free-form Workflow edge drawing or generic node deletion to the
+  Stage-3 canvas. Preserve the controlled Add model / Remove model lineage
+  transformation and its server-derived relation and score-column ownership.
 - **Don't** let a Data action mutate Live camera tabs, or derive recorded camera
   tabs from current hardware assignment.
 - **Don't** duplicate a camera stream merely because its panel moved or another

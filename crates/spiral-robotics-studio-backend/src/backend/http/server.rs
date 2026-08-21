@@ -323,6 +323,7 @@ async fn serve(
     };
     tracing::info!("releasing motors and cameras");
     let cleanup = async {
+        workflow.shutdown().await;
         training.shutdown().await;
         rollout.shutdown().await;
         if let Err(error) = hardware.shutdown().await {

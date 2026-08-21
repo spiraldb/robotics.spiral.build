@@ -118,6 +118,10 @@ async fn import_project(
         .rollout
         .reload_from_storage()
         .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    state
+        .workflow
+        .reload_from_storage()
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
     Ok(Json(summary))
 }
 
@@ -199,7 +203,7 @@ fn require_import_idle(state: &AppState, subject: &str) -> Result<(), Failure> {
         .any(|connection| connection.connected);
     if import_activity_is_busy(state, &hardware) || connected {
         return Err(Failure::conflict(format!(
-            "Disconnect robots and stop recording, replay, rollout, and training before importing {subject}"
+            "Disconnect robots and stop recording, replay, rollout, training, and Workflow before importing {subject}"
         )));
     }
     Ok(())
@@ -209,7 +213,7 @@ fn require_project_import_idle(state: &AppState) -> Result<(), Failure> {
     let hardware = state.hardware.state();
     if import_activity_is_busy(state, &hardware) {
         return Err(Failure::conflict(
-            "Stop recording, replay, rollout, and training before importing a project",
+            "Stop recording, replay, rollout, training, and Workflow before importing a project",
         ));
     }
     Ok(())
@@ -234,6 +238,7 @@ fn import_activity_is_busy(state: &AppState, hardware: &HardwareState) -> bool {
                 | ApplicationRolloutPhase::Running
                 | ApplicationRolloutPhase::Stopping
         )
+        || state.workflow.is_active()
 }
 
 async fn disconnect_all_robots(state: &AppState) -> Result<(), Failure> {
@@ -304,6 +309,14 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
                 .map(Some)?,
         };
         let credentials_changed = current_credentials != credentials;
+        if (endpoint_changed || project_changed || credentials_changed)
+            && self.state.workflow.state().snapshot.phase.active()
+        {
+            return Err(ApplicationError::Conflict(
+                "Cancel the active Workflow run before changing the Spiral destination or credentials."
+                    .to_owned(),
+            ));
+        }
         let staged = self
             .state
             .preferences
@@ -347,6 +360,10 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
                 .map_err(ApplicationError::External)?;
             self.state
                 .rollout
+                .reload_from_storage()
+                .map_err(ApplicationError::External)?;
+            self.state
+                .workflow
                 .reload_from_storage()
                 .map_err(ApplicationError::External)?;
         }
@@ -600,11 +617,13 @@ fn destination_change_admission(
     current_robot_ids: Option<&BTreeSet<String>>,
     training_is_active: bool,
     rollout_is_active: bool,
+    workflow_is_active: bool,
 ) -> DestinationChangeAdmission {
     if hardware.telemetry.recording.is_some()
         || !matches!(hardware.mode.selection, ModeSelection::Idle)
         || training_is_active
         || rollout_is_active
+        || workflow_is_active
     {
         return DestinationChangeAdmission::Busy;
     }
@@ -653,6 +672,9 @@ async fn update_data_settings(
     let endpoint_changed = state.storage.spiral_endpoint() != requested_endpoint
         || state.storage.spiral_spfs_endpoint() != requested_spfs_endpoint;
     let project_changed = state.storage.project_id() != request.project_id.trim();
+    let credentials_change_requested = request.clear_client_secret
+        || !request.client_secret.trim().is_empty()
+        || state.backend_state.client_id() != request.client_id;
     let training_endpoint_changed =
         state.preferences.get().training.endpoint != requested_training_endpoint;
     let training_is_active = state
@@ -666,7 +688,7 @@ async fn update_data_settings(
             "Stop the active training job before changing its remote worker endpoint",
         ));
     }
-    let _reservation = if project_changed || endpoint_changed {
+    let _reservation = if project_changed || endpoint_changed || credentials_change_requested {
         let token = state
             .catalog_lease
             .try_acquire(CatalogLeaseOwner::ProjectSwitch)
@@ -701,11 +723,12 @@ async fn update_data_settings(
             current_robot_ids.as_ref(),
             training_is_active,
             rollout_is_active,
+            state.workflow.state().snapshot.phase.active(),
         ) {
             DestinationChangeAdmission::Ready => {}
             DestinationChangeAdmission::Busy => {
                 return Err(Failure::conflict(
-                    "Stop recording, replay, rollout, and training, then disconnect visible robots before changing the Spiral destination",
+                    "Stop recording, replay, rollout, training, and Workflow, then disconnect visible robots before changing the Spiral destination",
                 ));
             }
             DestinationChangeAdmission::DisconnectOrphaned(robot_ids) => {
@@ -828,7 +851,7 @@ mod destination_change_tests {
         let hardware = idle_hardware_with_connected_robot("leader");
 
         assert_eq!(
-            destination_change_admission(&hardware, None, false, false),
+            destination_change_admission(&hardware, None, false, false, false),
             DestinationChangeAdmission::DisconnectOrphaned(vec!["leader".to_owned()]),
         );
     }
@@ -839,7 +862,7 @@ mod destination_change_tests {
         let current_robot_ids = BTreeSet::from(["leader".to_owned()]);
 
         assert_eq!(
-            destination_change_admission(&hardware, Some(&current_robot_ids), false, false,),
+            destination_change_admission(&hardware, Some(&current_robot_ids), false, false, false,),
             DestinationChangeAdmission::Busy,
         );
     }
@@ -849,7 +872,11 @@ mod destination_change_tests {
         let hardware = idle_hardware_with_connected_robot("leader");
 
         assert_eq!(
-            destination_change_admission(&hardware, None, true, false),
+            destination_change_admission(&hardware, None, true, false, false),
+            DestinationChangeAdmission::Busy,
+        );
+        assert_eq!(
+            destination_change_admission(&hardware, None, false, false, true),
             DestinationChangeAdmission::Busy,
         );
     }

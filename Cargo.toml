@@ -23,6 +23,9 @@ publish = false
 [workspace.dependencies]
 adbc-driver-spiraldb = { path = "../spiraldb/engine/adbc-driver-spiraldb", default-features = false }
 base64 = "0.22"
+candle-core = "=0.11.0"
+candle-nn = "=0.11.0"
+candle-transformers = "=0.11.0"
 spiral-robotics = { path = "." }
 spiral-robotics-contracts = { path = "crates/spiral-robotics-contracts" }
 spiral-robotics-core = { path = "crates/spiral-robotics-core" }
@@ -40,12 +43,14 @@ dioxus = { version = "0.7.10", default-features = false }
 dioxus-flow = { git = "https://github.com/XiangpengHao/dioxus-flow", rev = "a85262445c1707a397511d63a049e3c6d59ab927" }
 glam = { version = "0.33", default-features = false, features = ["std"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+hf-hub = { version = "=0.4.3", default-features = false, features = ["ureq", "native-tls"] }
 nokhwa = { version = "0.10.11", default-features = false, features = ["decoding", "input-native", "serialize"] }
 roxmltree = "0.21"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serialport = { version = "4.9", default-features = false }
 tempfile = "3.27"
+tokenizers = "=0.22.2"
 
 [package]
 name = "spiral-robotics"

@@ -2,7 +2,8 @@
 
 use dioxus::prelude::*;
 use dioxus_flow::{
-    Background, BackgroundVariant, Flow, Handle, HandleKind, NodeViewCtx, use_flow_handle,
+    Background, BackgroundVariant, Flow, Handle, HandleKind, LayoutDirection, LayoutOptions,
+    NodeViewCtx, use_flow_handle,
 };
 use spiral_robotics_contracts::workflow::{WorkflowNodeConfig, WorkflowNodeKind, WorkflowRunPhase};
 use spiral_robotics_panels::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
@@ -92,7 +93,7 @@ fn WorkflowAssistant() -> Element {
                 header { class: "workflow-assistant-intro",
                     h2 { "Assistant is not connected" }
                     p {
-                        "Use the Node inspector to choose Spiral relations and edit read-only SQL. Agent turns arrive in a later stage."
+                        "Use the Node inspector to choose Spiral relations, configure SigLIP scoring, and edit read-only SQL. Agent turns arrive in a later stage."
                     }
                 }
                 section { class: "workflow-assistant-plan",
@@ -109,7 +110,7 @@ fn WorkflowAssistant() -> Element {
                             span { "2" }
                             div {
                                 strong { "Apply read-only SQL" }
-                                p { "Exact node placeholders are resolved to server-owned qualified names." }
+                                p { "Optionally score image fields with SigLIP, then query server-owned relation outputs." }
                             }
                         }
                         li {
@@ -123,7 +124,7 @@ fn WorkflowAssistant() -> Element {
                 }
             }
             footer { class: "workflow-assistant-footer",
-                span { "Assistant input is unavailable in Stage 2." }
+                span { "Assistant input is unavailable; manual Workflow nodes run now." }
             }
         }
     }
@@ -134,7 +135,10 @@ fn WorkflowNodeInspector() -> Element {
     let controller = workflow_controller();
     let selected = controller.selected_node_data();
     let relations = controller.relations();
-    let active = controller.snapshot().phase.active();
+    let capabilities = controller.capabilities();
+    let snapshot_active = controller.snapshot().phase.active();
+    let command_pending = controller.command().is_some();
+    let active = snapshot_active || command_pending;
     rsx! {
         section { class: "workflow-inspector", "aria-label": "Selected workflow node",
             if let Some((node_id, title, data)) = selected {
@@ -150,6 +154,12 @@ fn WorkflowNodeInspector() -> Element {
                     div { class: "workflow-inspector-error", role: "alert",
                         strong { "{data.phase_label()}" }
                         p { "{error}" }
+                    }
+                }
+                if !data.warnings.is_empty() {
+                    div { class: "workflow-inspector-warning", role: "status",
+                        strong { "Completed with warnings" }
+                        for warning in &data.warnings { p { "{warning}" } }
                     }
                 }
                 dl { class: "workflow-inspector-facts",
@@ -175,6 +185,35 @@ fn WorkflowNodeInspector() -> Element {
                             dd { class: "workflow-inspector-fields",
                                 for field in &data.fields { code { "{field}" } }
                             }
+                        }
+                    }
+                    if let Some(progress) = &data.progress {
+                        div {
+                            dt { "Progress" }
+                            dd { class: "font-mono tabular-nums", "{progress.completed} / {progress.total} {progress.unit}" }
+                        }
+                    }
+                    if data.quarantine.count > 0 {
+                        div {
+                            dt { "Quarantine" }
+                            dd { "{data.quarantine.count} rows" }
+                        }
+                    }
+                    if let Some(model) = &data.model {
+                        div {
+                            dt { "Device" }
+                            dd { "{model.device}" }
+                        }
+                        div {
+                            dt { "Materialization" }
+                            dd {
+                                if model.reused { "Reused · " } else { "Computed · " }
+                                span { class: "font-mono tabular-nums", "{model.decode_ms} ms decode · {model.inference_ms} ms inference" }
+                            }
+                        }
+                        div {
+                            dt { "Fingerprint" }
+                            dd { code { title: "{model.fingerprint}", "{model.fingerprint.chars().take(12).collect::<String>()}" } }
                         }
                     }
                 }
@@ -228,14 +267,90 @@ fn WorkflowNodeInspector() -> Element {
                             }
                         }
                         p { class: "workflow-inspector-help",
-                            "Reference each connected Table with an exact placeholder such as "
+                            "Reference each connected Table or Model output with an exact placeholder such as "
                             code { "{{node:table}}" }
                             "."
                         }
                     }
                 } else if data.kind == WorkflowNodeKind::Model {
-                    p { class: "workflow-inspector-boundary workflow-inspector-unavailable",
-                        "Model execution is reserved for Stage 3. Remove Model nodes to run this workflow now."
+                    section { class: "workflow-inspector-editor workflow-inspector-model-editor",
+                        label {
+                            span { class: "label", "Model" }
+                            select {
+                                class: "field",
+                                disabled: true,
+                                value: data.model_id.clone().unwrap_or_default(),
+                                for model in &capabilities.models {
+                                    option { value: "{model.id}", "{model.label}" }
+                                }
+                            }
+                        }
+                        label {
+                            span { class: "label", "Upstream image field" }
+                            select {
+                                class: "field",
+                                disabled: active,
+                                value: data.media_column.clone().unwrap_or_default(),
+                                onchange: {
+                                    let node_id = node_id.clone();
+                                    move |event| controller.set_model_media_column(&node_id, event.value())
+                                },
+                                option { value: "", "Choose a decoded image field…" }
+                                for field in controller.model_media_fields(&node_id) {
+                                    option {
+                                        value: "{field}",
+                                        selected: data.media_column.as_deref() == Some(field.as_str()),
+                                        "{field}"
+                                    }
+                                }
+                            }
+                        }
+                        label {
+                            span { class: "label", "Visual concepts" }
+                            textarea {
+                                class: "query-input workflow-model-concepts",
+                                spellcheck: "false",
+                                disabled: active,
+                                placeholder: "red cube\ngripper",
+                                value: data.concepts.join("\n"),
+                                oninput: {
+                                    let node_id = node_id.clone();
+                                    move |event| controller.set_model_concepts(&node_id, event.value())
+                                },
+                            }
+                        }
+                        p { class: "workflow-inspector-help",
+                            "Choose a decoded image field, or media_relation on a durable video-segment manifest. Enter one concept per line; the server derives safe score columns and keeps artifacts pinned."
+                        }
+                        if !data.concept_columns.is_empty() {
+                            dl { class: "workflow-model-column-map",
+                                for mapping in &data.concept_columns {
+                                    div {
+                                        dt { "{mapping.concept}" }
+                                        dd { code { "{mapping.score_column}" } }
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "workflow-inspector-actions",
+                            Action {
+                                purpose: ActionPurpose::Remove,
+                                variant: ActionVariant::Outline,
+                                disabled: active,
+                                title: if snapshot_active { "Cancel the active run before removing this Model node" } else if command_pending { "Wait for the current Workflow command before removing this Model node" } else { "Remove this Model and reconnect its Table directly to Query" },
+                                onclick: {
+                                    let node_id = node_id.clone();
+                                    move |_| controller.remove_siglip_model(&node_id)
+                                },
+                                "Remove model"
+                            }
+                        }
+                    }
+                    if !data.quarantine.examples.is_empty() {
+                        section { class: "workflow-inspector-boundary workflow-quarantine-examples",
+                            strong { "Quarantine examples" }
+                            for example in &data.quarantine.examples { code { "{example}" } }
+                        }
                     }
                 }
                 {node_validation_issues(&node_id)}
@@ -279,12 +394,17 @@ fn WorkflowCanvas() -> Element {
     let edges = controller.edges();
     let flow = use_flow_handle::<WorkflowNodeData>();
     let mut canvas_was_active = use_signal(|| false);
+    let initial_topology = controller.topology_signature();
+    let observed_initial_topology = initial_topology.clone();
+    let mut observed_topology = use_signal(move || observed_initial_topology);
+    let mut canvas_topology = use_signal(move || initial_topology);
     let spec = controller.spec();
     let snapshot = controller.snapshot();
     let run_reason = controller.run_disabled_reason();
     let apply_reason = controller.apply_disabled_reason();
     let command = controller.command();
     let active = snapshot.phase.active();
+    let topology_blocked = active || command.is_some();
     let state_load_failed = controller.load_error().is_some();
     let state_label = if controller.dirty() {
         "Modified"
@@ -308,6 +428,20 @@ fn WorkflowCanvas() -> Element {
     });
 
     use_effect(move || {
+        let topology = controller.topology_signature();
+        if topology == *observed_topology.peek() {
+            return;
+        }
+        observed_topology.set(topology);
+        spawn(async move {
+            // Give a new card one rendered frame so dioxus-flow includes its
+            // measured bounds in layered layout and the accompanying fit.
+            gloo_timers::future::TimeoutFuture::new(48).await;
+            flow.auto_layout(&LayoutOptions::default().direction(LayoutDirection::LeftToRight));
+        });
+    });
+
+    use_effect(move || {
         let canvas_active = controller
             .active_panel()
             .as_ref()
@@ -317,12 +451,20 @@ fn WorkflowCanvas() -> Element {
             canvas_was_active.set(canvas_active);
         }
         if canvas_active && !was_active {
+            let topology = controller.topology_signature();
+            let needs_layout = topology != *canvas_topology.peek();
+            canvas_topology.set(topology);
             spawn(async move {
-                // PanelWorkspace updates mobile visibility from the same
-                // activation. Wait one frame so dioxus-flow measures the now
-                // visible canvas rather than its former hidden bounds.
-                gloo_timers::future::TimeoutFuture::new(32).await;
-                flow.fit_view(300);
+                // Wait one frame so dioxus-flow measures the newly active
+                // canvas rather than its former hidden bounds.
+                gloo_timers::future::TimeoutFuture::new(48).await;
+                if needs_layout {
+                    flow.auto_layout(
+                        &LayoutOptions::default().direction(LayoutDirection::LeftToRight),
+                    );
+                } else {
+                    flow.fit_view(300);
+                }
             });
         }
     });
@@ -333,6 +475,16 @@ fn WorkflowCanvas() -> Element {
                 div {
                     strong { class: if controller.dirty() { "workflow-toolbar-modified" } else { "workflow-toolbar-saved" }, "{state_label}" }
                     span { "{spec.nodes.len()} nodes · {spec.edges.len()} connections · r{spec.revision}" }
+                }
+                if !controller.has_model() {
+                    Action {
+                        purpose: ActionPurpose::Create,
+                        variant: ActionVariant::Outline,
+                        disabled: topology_blocked,
+                        title: if snapshot.phase.active() { "Cancel the active run before adding a Model node" } else if command.is_some() { "Wait for the current Workflow command before adding a Model node" } else { "Insert SigLIP between the first Table and Query" },
+                        onclick: move |_| controller.add_siglip_model(),
+                        "Add model"
+                    }
                 }
                 Action {
                     purpose: ActionPurpose::Fit,
@@ -423,7 +575,7 @@ fn WorkflowNodeCard(ctx: NodeViewCtx<WorkflowNodeData>) -> Element {
     let fields = if data.fields.is_empty() {
         match data.kind {
             WorkflowNodeKind::Table => "Choose a relation".to_owned(),
-            WorkflowNodeKind::Model => "Stage 3 capability".to_owned(),
+            WorkflowNodeKind::Model => "Choose concepts".to_owned(),
             WorkflowNodeKind::Query => "Read-only SQL".to_owned(),
             WorkflowNodeKind::Result => "Terminal payload".to_owned(),
         }
@@ -465,7 +617,11 @@ fn WorkflowNodeCard(ctx: NodeViewCtx<WorkflowNodeData>) -> Element {
             }
             footer { class: "workflow-node-footer",
                 span { class: "workflow-node-status-dot {data.phase_class()}", "aria-hidden": "true" }
-                span { "{data.phase_label()} · {data.detail}" }
+                if let Some(progress) = &data.progress {
+                    span { "{data.phase_label()} · {progress.completed}/{progress.total} {progress.unit}" }
+                } else {
+                    span { "{data.phase_label()} · {data.detail}" }
+                }
             }
             if data.kind != WorkflowNodeKind::Result {
                 Handle { kind: HandleKind::Source, position: node.source_side }
@@ -612,6 +768,9 @@ mod tests {
         let source = source.split("#[cfg(test)]").next().unwrap();
         assert!(source.contains("Assistant is not connected"));
         assert_eq!(source.matches("Run workflow").count(), 1);
+        assert_eq!(source.matches("Remove model").count(), 1);
+        assert!(source.contains("ActionPurpose::Remove"));
+        assert!(source.contains("LayoutDirection::LeftToRight"));
         assert!(source.contains("Choose a qualified relation"));
         assert!(!source.contains("Hugging Face"));
         assert!(!source.contains("MCAP"));

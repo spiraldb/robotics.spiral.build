@@ -118,9 +118,16 @@ spatially.
 - **STUDIO-061** Workflow must own an independent four-panel layout scope:
   Assistant and Node tabbed in a 30% left lane, Workflow above Results in the
   right lane.
-- **STUDIO-062** Until execution and agent transports exist, Workflow must
-  identify its graph as a static draft, keep Assistant and Results in explicit
-  scaffold states, and expose no control that implies a run or durable write.
+- **STUDIO-062** Workflow's manual graph execution must keep Assistant in an
+  explicit unavailable state with no run authority. The canvas owns Apply,
+  Run/Cancel, and the controlled Add model action; Model removal must reconnect
+  its Table directly to Query and repair that Query's placeholder. A topology
+  change must auto-layout left-to-right once the cards are measurable, including
+  after its tab makes the canvas visible, without exposing
+  arbitrary edge drawing or generic node deletion. The Model inspector must
+  show the one advertised SigLIP capability, eligible upstream media fields,
+  concept-to-score-column mapping, bounded progress, warnings/quarantine,
+  actual device and measured timings, and computed/reused fingerprint state.
 
 ## Feature relationships
 

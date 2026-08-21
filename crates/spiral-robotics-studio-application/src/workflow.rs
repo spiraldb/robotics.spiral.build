@@ -6,9 +6,6 @@
 
 use crate::error::ApplicationError;
 
-pub const MODEL_STAGE_THREE_RECOVERY: &str =
-    "Remove Model nodes to run SQL now; Model execution arrives in Stage 3.";
-
 pub fn admit_save(
     expected_revision: u64,
     current_revision: u64,
@@ -34,7 +31,6 @@ pub fn admit_run(
     current_revision: u64,
     run_active: bool,
     valid: bool,
-    contains_model: bool,
 ) -> Result<(), ApplicationError> {
     if run_active {
         return Err(ApplicationError::Conflict(
@@ -49,11 +45,6 @@ pub fn admit_run(
     if !valid {
         return Err(ApplicationError::InvalidInput(
             "Apply a valid Table → Query → Result graph before running.".to_owned(),
-        ));
-    }
-    if contains_model {
-        return Err(ApplicationError::InvalidInput(
-            MODEL_STAGE_THREE_RECOVERY.to_owned(),
         ));
     }
     Ok(())
@@ -87,20 +78,15 @@ mod tests {
     }
 
     #[test]
-    fn run_rejects_concurrency_stale_invalid_and_model_graphs() {
-        assert_eq!(admit_run(2, 2, false, true, false), Ok(()));
+    fn run_rejects_concurrency_stale_and_invalid_graphs() {
+        assert_eq!(admit_run(2, 2, false, true), Ok(()));
         for result in [
-            admit_run(2, 2, true, true, false),
-            admit_run(1, 2, false, true, false),
-            admit_run(2, 2, false, false, false),
-            admit_run(2, 2, false, true, true),
+            admit_run(2, 2, true, true),
+            admit_run(1, 2, false, true),
+            admit_run(2, 2, false, false),
         ] {
             assert!(result.is_err());
         }
-        assert_eq!(
-            admit_run(2, 2, false, true, true).unwrap_err().message(),
-            MODEL_STAGE_THREE_RECOVERY
-        );
     }
 
     #[test]

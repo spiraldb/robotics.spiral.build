@@ -211,7 +211,7 @@ pub(crate) fn refresh_dataset(dataset: &str) -> String {
 }
 
 pub(crate) fn drop_video_dataset(dataset: &str) -> String {
-    format!("DROP DATASET IF EXISTS {dataset}")
+    format!("DROP DATASET IF EXISTS {dataset} CASCADE")
 }
 
 pub(crate) fn drop_video_sources(sources: &str) -> String {
@@ -278,6 +278,10 @@ mod tests {
         assert_eq!(video_sources_relation("robot"), "robot_video_sources");
         assert_eq!(video_dataset_relation("robot"), "robot.video");
         assert_eq!(video_dataset_output("robot"), "robot.video.assets");
+        assert_eq!(
+            drop_video_dataset("robot.video"),
+            "DROP DATASET IF EXISTS robot.video CASCADE"
+        );
         assert_eq!(
             create_video_sources("robot_video_sources", "robot.video_assets"),
             "CREATE OR REPLACE VIEW robot_video_sources AS SELECT assets.episode_id, assets.stream_id, assets.segment_index, assets.timeline_offset_ns, assets.payload AS source FROM robot.video_assets AS assets"

@@ -8,6 +8,7 @@ use spiral_robotics_contracts::workflow::{
     RunWorkflowRequest, SaveWorkflowRequest, WorkflowCapabilities, WorkflowRelationsResponse,
     WorkflowRunSnapshot, WorkflowStateResponse,
 };
+use spiral_robotics_studio_application::catalog_lease::CatalogLeaseOwner;
 
 use super::{AppState, Failure};
 
@@ -55,7 +56,18 @@ async fn run(
     State(state): State<AppState>,
     Json(request): Json<RunWorkflowRequest>,
 ) -> Result<Json<WorkflowRunSnapshot>, Failure> {
-    state.workflow.start(request).map(Json).map_err(Into::into)
+    let token = state
+        .catalog_lease
+        .try_acquire(CatalogLeaseOwner::WorkflowStart)
+        .ok_or_else(|| {
+            Failure::conflict(
+                "Wait for the current recording or catalog change before running Workflow",
+            )
+        })?;
+    let result = state.workflow.start(request).map(Json).map_err(Into::into);
+    let released = state.catalog_lease.release(token);
+    debug_assert!(released, "Workflow start releases its admission lease once");
+    result
 }
 
 async fn cancel(State(state): State<AppState>) -> Result<Json<WorkflowRunSnapshot>, Failure> {

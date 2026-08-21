@@ -613,7 +613,7 @@ fn reconcile_project_video_dataset(
 ) -> Result<(), String> {
     let dataset_exists = video_dataset_exists(connection, namespace)?;
     if imported.is_empty() {
-        drop_video_dataset(connection, namespace, dataset_exists)?;
+        drop_video_dataset(connection, namespace)?;
     } else {
         rebuild_video_dataset(connection, namespace, dataset_exists)?;
     }
@@ -2140,13 +2140,10 @@ mod tests {
 
         if !profile_bool("SPIRAL_PROFILE_SKIP_VIDEO_RECONCILE") {
             let reconcile_total_start = Instant::now();
-            let dataset_exists = if imported_video_episodes.is_empty() {
-                video_dataset_exists(connection, namespace)?
-            } else {
-                profile_rebuild_video_dataset(connection, namespace)?
-            };
             if imported_video_episodes.is_empty() {
-                drop_video_dataset(connection, namespace, dataset_exists)?;
+                drop_video_dataset(connection, namespace)?;
+            } else {
+                let _ = profile_rebuild_video_dataset(connection, namespace)?;
             }
             profile_event(
                 "spiral.reconcile_video_total",
@@ -2427,8 +2424,7 @@ mod tests {
         connection: &mut RepositoryConnection,
         namespace: &str,
     ) -> Result<(), String> {
-        let dataset_exists = video_dataset_exists(connection, namespace)?;
-        drop_video_dataset(connection, namespace, dataset_exists)?;
+        drop_video_dataset(connection, namespace)?;
         for table in Table::ALL.into_iter().rev() {
             let relation = sql::relation(namespace, table);
             if table_exists(connection, &relation)? {

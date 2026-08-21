@@ -83,12 +83,16 @@ from it without writing glue code or operating a second data stack.
   directly.
 - **Rust owns the system boundary.** The motor bus, camera capture,
   calibration, kinematics, server, run supervision, data contracts, and web
-  interface are Rust. Studio's dedicated ADBC connection reads Arrow state,
-  action, and Spiral-decoded image tensors, then streams Arrow IPC batches over
-  HTTP to a selected remote ACT/CVAE compute runtime. The same runtime owns
-  PyTorch policy sessions for rollout inference. Rust owns lifecycle,
-  cancellation, validation, remote telemetry, and SafeTensors checkpoint
-  persistence without linking the Studio server to LibTorch.
+  interface are Rust. Workflow runs its one advertised enrichment model as
+  pinned SigLIP safetensors through candle inside the backend, over direct
+  Spiral image values or engine-decoded video manifests, and writes derived
+  score relations back to Spiral. Training's dedicated ADBC connection reads
+  Arrow state, action, and Spiral-decoded image tensors, then streams Arrow IPC
+  batches over HTTP to a selected remote ACT/CVAE compute runtime. That runtime
+  owns PyTorch policy sessions for rollout inference. Rust owns lifecycle,
+  cancellation, validation, remote telemetry, derived-relation persistence,
+  and SafeTensors checkpoint persistence without linking the Studio server to
+  LibTorch.
 - **One arm is one robot instance in SpiralDB.** Serial port, cameras, motors,
   and calibration live in one versioned configuration row. JSON is an explicit
   per-robot transfer format, not live storage.
@@ -131,6 +135,7 @@ Spiral Robotics backend
       ├── robot connections and safety
       ├── recording and MP4 encoding
       ├── SpiralDB persistence and read-only queries
+      ├── pinned Workflow SigLIP enrichment and derived relations
       ├── policy-training supervision and checkpoint persistence
       ├── episode validation and bounded follower control
       └── Arrow IPC / HTTP ──► selected compute runtime
@@ -145,7 +150,9 @@ Spiral Robotics backend
   arms and owns all hardware connections, the control loop, safety decisions,
   camera capture, video encoding, SpiralDB credentials and persistence, and
   replay execution. As ingestion arrives, it also owns external-source
-  credentials and ingestion jobs.
+  credentials and ingestion jobs. It already owns Workflow's pinned model
+  artifact resolution, local candle execution, cancellation, and derived
+  relation lifecycle; the browser only configures and observes that work.
 - **The wire API is a product boundary.** The Dioxus browser is the current
   client, not a privileged bypass. Hardware and safety behavior must remain
   correct for any client that uses the API.
@@ -185,11 +192,20 @@ never becomes the motor-control runtime.
   - **Data** owns the SpiralDB episode catalog, replay/delete actions,
     selected-dataset episode import/export, and guarded read-only Spiral SQL.
   - **Workflow** owns relation discovery and a persisted, revision-safe
-    Table → Query → Result editor over existing qualified Spiral relations. The
-    backend runs bounded read-only SQL, publishes run/cancel state through the
-    shared event stream, restores saved graphs and results after reload, and
-    rejects Model nodes until Stage 3. Workflow has no ingestion controls,
-    model execution, or agent chat today.
+    Table → optional Model → Query → Result editor over existing qualified
+    Spiral relations. The backend runs bounded read-only SQL and one executable
+    model capability: `siglip-base`, backed by
+    `google/siglip-base-patch16-224` at exact revision
+    `7fd15f0689c79d79e38b1c2e2e2370a7bf2761ed`. It accepts direct
+    `spql.image.Image` fields or durable video-segment manifests, performs
+    in-engine video decode, maps visual concepts to server-derived score
+    columns, and persists deterministic derived relations with bounded
+    progress, quarantine, cancellation, and reuse metadata. Metal is preferred
+    where available and an actual CPU fallback is reported rather than hidden.
+    The Model inspector owns typed configuration, measured run state, controlled
+    insertion/removal, and topology-aware layout. Workflow has no ingestion
+    controls or agent chat; Hugging Face is used here only to resolve the pinned
+    model artifacts, while Assistant/LLM execution remains future work.
   - **Training** owns random anchor and camera/action sampling through the
     Spiral ADBC/Arrow path, remote HTTP runtime selection, vision ACT
     configuration, learning/resource telemetry, graceful cancellation, and
@@ -282,11 +298,13 @@ today, and nothing below may be presented as existing behavior:
   touch-target overrides.
 - **Hardware:** SO-ARM101 only for now, with leader and follower roles. Live
   calibration supports Feetech protocol-0 motors such as the STS3215.
-- **One selected compute endpoint.** Studio reads samples through a dedicated
-  read-only ADBC connection and sends Arrow IPC tensor batches to the configured
-  HTTP endpoint. The remote runtime holds model, optimizer, and active rollout
-  policy state; Studio remains responsible for queries, run history, checkpoint
-  ingest, and bounded hardware control.
+- **One selected policy compute endpoint.** Training reads samples through a
+  dedicated read-only ADBC connection and sends Arrow IPC tensor batches to the
+  configured HTTP endpoint. The remote runtime holds ACT model, optimizer, and
+  active rollout policy state; Studio remains responsible for queries, run
+  history, checkpoint ingest, and bounded hardware control. Workflow enrichment
+  is separate: its one pinned SigLIP capability runs locally in the trusted Rust
+  backend and does not become another configurable policy endpoint.
 - **Nix flake** provides the development environment and web toolchain (`dx`,
   Tailwind CLI, `wasm-bindgen`, and `wasm-opt`).
 - **Safety is enforced by the server.** Enabling torque first copies measured
@@ -347,13 +365,20 @@ Real, in-repo:
 - `crates/spiral-robotics-studio-backend/src/backend/recording/spiral.rs` — the relational episode schema.
 - `crates/spiral-robotics-studio-backend/src/backend/robotics/video.rs` — server-owned MP4 capture and
   timeline-aligned segment manifests.
+- `crates/spiral-robotics-studio-backend/src/backend/workflow/model.rs` — the
+  pinned SigLIP runner, direct-image and durable-manifest input contracts,
+  derived-relation persistence, bounded pipeline, quarantine, cancellation,
+  and deterministic reuse.
 - A detailed `README.md` maintained in the repository.
 
 Deliberately absent, and not to be fabricated: there are **no users,
-testimonials, case studies, benchmarks, published performance numbers, pricing,
-or deployment/endorsement claims**. The project has not been released. There
-is **no ingestion implementation yet**; ingestion is a committed direction,
-not a shipped capability.
+testimonials, case studies, published benchmarks, performance guarantees,
+pricing, or deployment/endorsement claims**. Development tests do retain
+measured SigLIP timing and golden-score evidence, but those observations are
+not product performance claims. The project has not been released. There is
+**no ingestion implementation yet**; ingestion is a committed direction, not
+a shipped capability. Workflow's Assistant/LLM transport is likewise not
+implemented.
 
 ## Product Principles
 
