@@ -8,7 +8,9 @@ use std::collections::BTreeSet;
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_contracts::api::{EpisodeImportSummary, EpisodeSummary, SpiralQueryResponse};
+use spiral_robotics_contracts::api::{
+    EpisodeImportSummary, EpisodeSummary, QueryColumn, SpiralQueryResponse,
+};
 use spiral_robotics_contracts::spiral::{QueryPreset, Table};
 use spiral_robotics_ui::{
     Action, ActionLink, ActionPurpose, ActionVariant, CloseIcon, FileAction, InlineConfirmation,
@@ -23,6 +25,9 @@ use crate::frontend::tasks::single_flight;
 
 pub(crate) const DEFAULT_QUERY_ROWS: usize = 100;
 const QUERY_ROW_OPTIONS: [usize; 5] = [25, 100, 250, 500, 1_000];
+const IMAGE_EXTENSION_NAME: &str = "spql.image.Image";
+const VARIABLE_TENSOR_EXTENSION_NAME: &str = "arrow.variable_shape_tensor";
+const ENCODED_MEDIA_EXTENSION_NAME: &str = "spql.media.EncodedMedia";
 
 /// A complete, renderable snapshot of the Query tool.
 #[derive(Clone, Debug, PartialEq)]
@@ -682,28 +687,30 @@ fn render_query_result(model: &QueryViewModel) -> Element {
                         }
                     }
                 },
-                QueryState::Ready(result) => rsx! {
-                    div { class: "min-h-0 flex-1 overflow-auto",
-                        table { class: "query-table",
-                            thead { tr {
-                                for column in &result.columns {
-                                    th { key: "{column.name}", scope: "col",
-                                        title: if column.nullable {
-                                            format!("{} · nullable", column.data_type)
-                                        } else {
-                                            column.data_type.clone()
-                                        },
-                                        "{column.name}"
+                QueryState::Ready(result) => {
+                    let has_video_previews = query_has_video_previews(result);
+                    rsx! {
+                        div { class: "min-h-0 flex-1 overflow-auto",
+                            table { class: "query-table",
+                                thead { tr {
+                                    if has_video_previews {
+                                        th { class: "query-media-heading", scope: "col", "Preview" }
                                     }
-                                }
-                            } }
-                            tbody {
-                                for (index, row) in result.rows.iter().enumerate() {
-                                    tr { key: "{index}",
-                                        for column in &result.columns {
-                                            {
-                                                let value = query_cell(row.get(&column.name));
-                                                rsx! { td { key: "{column.name}", title: "{value}", "{value}" } }
+                                    for column in &result.columns {
+                                        th { key: "{column.name}", scope: "col",
+                                            title: query_column_title(column),
+                                            "{column.name}"
+                                        }
+                                    }
+                                } }
+                                tbody {
+                                    for (index, row) in result.rows.iter().enumerate() {
+                                        tr { key: "{index}",
+                                            if has_video_previews {
+                                                {render_query_video_cell(row, index)}
+                                            }
+                                            for column in &result.columns {
+                                                {render_query_cell(column, row.get(&column.name), index)}
                                             }
                                         }
                                     }
@@ -740,7 +747,7 @@ fn preset_sql(namespace: &str, dataset_id: &str, preset: QueryPreset) -> String 
             "SELECT j.* FROM {relation} AS j JOIN {episodes} AS e ON e.episode_id = j.episode_id WHERE e.dataset_id = '{dataset_id}' ORDER BY j.episode_id DESC, j.stream_id, j.sample_index LIMIT 100"
         ),
         QueryPreset::VideoAssets => format!(
-            "SELECT v.episode_id, v.stream_id, v.camera_id, v.byte_size, v.width, v.height, v.fps, v.frames FROM {relation} AS v JOIN {episodes} AS e ON e.episode_id = v.episode_id WHERE e.dataset_id = '{dataset_id}' ORDER BY v.episode_id DESC, v.stream_id LIMIT 100"
+            "SELECT v.episode_id, v.stream_id, v.segment_index, v.camera_id, v.byte_size, v.width, v.height, v.fps, v.frames FROM {relation} AS v JOIN {episodes} AS e ON e.episode_id = v.episode_id WHERE e.dataset_id = '{dataset_id}' ORDER BY v.episode_id DESC, v.stream_id, v.segment_index LIMIT 100"
         ),
         QueryPreset::TrainingCheckpoints
         | QueryPreset::Robots
@@ -827,6 +834,114 @@ fn delete_episode(
     });
 }
 
+fn query_column_title(column: &QueryColumn) -> String {
+    let mut title = column.data_type.clone();
+    if let Some(semantic_type) = &column.semantic_type {
+        title.push_str(" · ");
+        title.push_str(semantic_type);
+    }
+    if column.nullable {
+        title.push_str(" · nullable");
+    }
+    title
+}
+
+fn render_query_cell(
+    column: &QueryColumn,
+    value: Option<&serde_json::Value>,
+    row_index: usize,
+) -> Element {
+    if query_image_src(column, value).is_some() {
+        let src = value
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        return rsx! {
+            td { key: "{column.name}", class: "query-media-cell",
+                img {
+                    class: "query-image-preview",
+                    src,
+                    alt: "Query image in {column.name}, row {row_index + 1}",
+                    loading: "lazy",
+                    decoding: "async",
+                    draggable: "false",
+                }
+            }
+        };
+    }
+    if column.semantic_type.as_deref() == Some(ENCODED_MEDIA_EXTENSION_NAME) {
+        return rsx! {
+            td { key: "{column.name}", class: "query-media-reference", title: "Spiral encoded media reference",
+                "Video reference"
+            }
+        };
+    }
+    let rendered = query_cell(value);
+    rsx! { td { key: "{column.name}", title: "{rendered}", "{rendered}" } }
+}
+
+fn query_image_src<'a>(
+    column: &QueryColumn,
+    value: Option<&'a serde_json::Value>,
+) -> Option<&'a str> {
+    matches!(
+        column.semantic_type.as_deref(),
+        Some(IMAGE_EXTENSION_NAME | VARIABLE_TENSOR_EXTENSION_NAME)
+    )
+    .then(|| value?.as_str())?
+    .filter(|value| value.starts_with("data:image/"))
+}
+
+fn query_has_video_previews(result: &SpiralQueryResponse) -> bool {
+    let has = |name: &str| result.columns.iter().any(|column| column.name == name);
+    has("episode_id")
+        && has("stream_id")
+        && has("segment_index")
+        && (has("camera_id")
+            || has("byte_size")
+            || result.columns.iter().any(|column| {
+                column.semantic_type.as_deref() == Some(ENCODED_MEDIA_EXTENSION_NAME)
+            }))
+}
+
+fn render_query_video_cell(
+    row: &serde_json::Map<String, serde_json::Value>,
+    row_index: usize,
+) -> Element {
+    let Some((url, label)) = query_video_preview(row) else {
+        return rsx! {
+            td { class: "query-media-cell query-media-unavailable", title: "This row does not identify one exact video segment", "—" }
+        };
+    };
+    rsx! {
+        td { class: "query-media-cell",
+            video {
+                class: "query-video-preview",
+                src: url,
+                preload: "none",
+                controls: true,
+                playsinline: true,
+                "aria-label": "Query video {label}, row {row_index + 1}",
+                "Your browser cannot preview this MP4 segment."
+            }
+        }
+    }
+}
+
+fn query_video_preview(
+    row: &serde_json::Map<String, serde_json::Value>,
+) -> Option<(String, String)> {
+    let episode = row.get("episode_id")?.as_str()?;
+    let stream = row.get("stream_id")?.as_str()?;
+    let segment = row.get("segment_index")?.as_u64()?.try_into().ok()?;
+    let label = row
+        .get("camera_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|label| !label.is_empty())
+        .unwrap_or(stream)
+        .to_owned();
+    Some((api::episode_video_url(episode, stream, segment), label))
+}
+
 pub(crate) fn short_id(id: &str) -> String {
     id.strip_prefix("episode_")
         .and_then(|number| number.parse::<u64>().ok())
@@ -851,6 +966,15 @@ fn query_cell(value: Option<&serde_json::Value>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn query_column(name: &str, semantic_type: Option<&str>) -> QueryColumn {
+        QueryColumn {
+            name: name.to_owned(),
+            data_type: "Utf8".to_owned(),
+            nullable: false,
+            semantic_type: semantic_type.map(str::to_owned),
+        }
+    }
 
     fn episode(id: &str, usable: bool, discarded: bool) -> EpisodeSummary {
         EpisodeSummary {
@@ -901,6 +1025,56 @@ mod tests {
         assert_eq!(
             preset_sql("training", "pick-'place", QueryPreset::Episodes),
             "SELECT * FROM training.episodes WHERE dataset_id = 'pick-''place' ORDER BY started_ms DESC LIMIT 100"
+        );
+        assert_eq!(
+            preset_sql("training", "pick-place", QueryPreset::VideoAssets),
+            "SELECT v.episode_id, v.stream_id, v.segment_index, v.camera_id, v.byte_size, v.width, v.height, v.fps, v.frames FROM training.video_assets AS v JOIN training.episodes AS e ON e.episode_id = v.episode_id WHERE e.dataset_id = 'pick-place' ORDER BY v.episode_id DESC, v.stream_id, v.segment_index LIMIT 100"
+        );
+    }
+
+    #[test]
+    fn image_previews_require_both_semantic_type_and_an_encoded_image() {
+        let value = serde_json::json!("data:image/jpeg;base64,preview");
+        let image = query_column("frame", Some(IMAGE_EXTENSION_NAME));
+        let plain = query_column("frame", None);
+        assert_eq!(
+            query_image_src(&image, Some(&value)),
+            Some("data:image/jpeg;base64,preview")
+        );
+        assert_eq!(query_image_src(&plain, Some(&value)), None);
+        assert_eq!(
+            query_image_src(&image, Some(&serde_json::json!("not-an-image"))),
+            None
+        );
+    }
+
+    #[test]
+    fn video_rows_map_to_the_exact_range_streaming_endpoint() {
+        let columns = vec![
+            query_column("episode_id", None),
+            query_column("stream_id", None),
+            query_column("segment_index", None),
+            query_column("camera_id", None),
+        ];
+        let row = serde_json::Map::from_iter([
+            ("episode_id".to_owned(), serde_json::json!("take 1")),
+            ("stream_id".to_owned(), serde_json::json!("follower/camera")),
+            ("segment_index".to_owned(), serde_json::json!(2)),
+            ("camera_id".to_owned(), serde_json::json!("wrist")),
+        ]);
+        let result = SpiralQueryResponse {
+            columns,
+            rows: vec![row.clone()],
+            truncated: false,
+            elapsed_ms: 1,
+        };
+        assert!(query_has_video_previews(&result));
+        assert_eq!(
+            query_video_preview(&row),
+            Some((
+                "/api/episodes/take%201/videos/follower%2Fcamera?segment=2".to_owned(),
+                "wrist".to_owned(),
+            ))
         );
     }
 

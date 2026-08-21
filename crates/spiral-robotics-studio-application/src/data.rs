@@ -62,6 +62,7 @@ pub struct QueryColumn {
     pub name: String,
     pub data_type: String,
     pub nullable: bool,
+    pub semantic_type: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

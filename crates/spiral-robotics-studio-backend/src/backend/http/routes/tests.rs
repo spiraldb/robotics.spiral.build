@@ -341,6 +341,7 @@ fn data_presenters_round_trip_transport_values_without_leaking_them_to_policy() 
             name: "payload".to_owned(),
             data_type: "json".to_owned(),
             nullable: true,
+            semantic_type: Some("spql.test.Payload".to_owned()),
         }],
         rows: vec![serde_json::Map::from_iter([(
             "payload".to_owned(),

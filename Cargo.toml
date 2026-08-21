@@ -23,6 +23,7 @@ publish = false
 
 [workspace.dependencies]
 adbc-driver-spiraldb = { path = "../spiraldb/engine/adbc-driver-spiraldb", default-features = false }
+base64 = "0.22"
 spiral-robotics = { path = "." }
 spiral-robotics-contracts = { path = "crates/spiral-robotics-contracts" }
 spiral-robotics-core = { path = "crates/spiral-robotics-core" }

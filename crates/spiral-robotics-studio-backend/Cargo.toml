@@ -33,6 +33,7 @@ arrow-ipc = "58.4.0"
 arrow-json = "58.4.0"
 adbc_core = "0.24.0"
 adbc-driver-spiraldb.workspace = true
+base64.workspace = true
 safetensors = "0.7"
 image.workspace = true
 spiral-robotics-inference.workspace = true

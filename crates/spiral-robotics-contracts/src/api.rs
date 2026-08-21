@@ -160,6 +160,10 @@ pub struct QueryColumn {
     pub name: String,
     pub data_type: String,
     pub nullable: bool,
+    /// Arrow extension name when the column carries a semantic value such as
+    /// a decoded image, tensor, media reference, or Blob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_type: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]

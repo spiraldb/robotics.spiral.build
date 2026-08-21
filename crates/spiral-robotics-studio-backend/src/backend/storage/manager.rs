@@ -1,17 +1,22 @@
 //! SpiralDB persistence, query preview, and remote replay for Studio data.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Cursor;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use arrow_array::{
-    Array as _, ArrayRef, BinaryArray, BinaryViewArray, Int64Array, LargeBinaryArray,
-    LargeStringArray, RecordBatch, RecordBatchIterator, StringArray, StringViewArray, StructArray,
-    UInt32Array, UInt64Array,
+    Array as _, ArrayRef, BinaryArray, BinaryViewArray, FixedSizeListArray, Int32Array, Int64Array,
+    LargeBinaryArray, LargeListArray, LargeStringArray, ListArray, RecordBatch,
+    RecordBatchIterator, StringArray, StringViewArray, StructArray, UInt8Array, UInt32Array,
+    UInt64Array,
 };
 use arrow_json::writer::{JsonArray, WriterBuilder};
 use arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
 use arrow_schema::{ArrowError, DataType, Field, Fields, Schema};
+use base64::Engine as _;
+use image::codecs::jpeg::JpegEncoder;
+use image::{DynamicImage, ImageFormat};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -39,9 +44,13 @@ const MAX_QUERY_ROWS: usize = 1_000;
 const MAX_QUERY_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_INTERNAL_QUERY_RESPONSE_BYTES: usize = 128 * 1024 * 1024;
 const QUERY_JSON_CHUNK_ROWS: usize = 64;
+const QUERY_IMAGE_PREVIEW_MAX_EDGE: u32 = 640;
+const QUERY_IMAGE_JPEG_QUALITY: u8 = 82;
 const MAX_REPLAY_ROWS: usize = 250_000;
 const JOINT_BATCH_ROWS: usize = 512;
 const BLOB_EXTENSION_NAME: &str = "spql.io.Blob";
+const IMAGE_EXTENSION_NAME: &str = "spql.image.Image";
+const VARIABLE_TENSOR_EXTENSION_NAME: &str = "arrow.variable_shape_tensor";
 
 pub(crate) struct StorageManager {
     repository: Arc<SpiralRepository>,
@@ -1320,16 +1329,30 @@ fn run_query_with_byte_limit(
     let mut reader = statement
         .execute()
         .map_err(|error| format!("executing Spiral query: {error}"))?;
-    let columns = reader
-        .schema()
+    let schema = reader.schema();
+    let columns = schema
         .fields()
         .iter()
         .map(|field| QueryColumn {
             name: field.name().clone(),
             data_type: field.data_type().to_string(),
             nullable: field.is_nullable(),
+            semantic_type: field.metadata().get(EXTENSION_TYPE_NAME_KEY).cloned(),
         })
         .collect();
+    let chunk_rows = if schema.fields().iter().any(|field| {
+        matches!(
+            field
+                .metadata()
+                .get(EXTENSION_TYPE_NAME_KEY)
+                .map(String::as_str),
+            Some(IMAGE_EXTENSION_NAME | VARIABLE_TENSOR_EXTENSION_NAME)
+        )
+    }) {
+        1
+    } else {
+        QUERY_JSON_CHUNK_ROWS
+    };
     let fetch = max_rows.saturating_add(1);
     let mut rows = Vec::with_capacity(max_rows.min(QUERY_JSON_CHUNK_ROWS));
     let mut encoded_bytes = 2_usize;
@@ -1339,11 +1362,12 @@ fn run_query_with_byte_limit(
         let batch = batch.map_err(|error| format!("reading Spiral result: {error}"))?;
         let mut offset = 0_usize;
         while offset < batch.num_rows() && inspected < fetch {
-            let count = QUERY_JSON_CHUNK_ROWS
+            let count = chunk_rows
                 .min(batch.num_rows() - offset)
                 .min(fetch - inspected);
             let chunk = batch.slice(offset, count);
-            for row in batch_to_json(&chunk)? {
+            let preview = query_preview_batch(&chunk)?;
+            for row in batch_to_json(&preview)? {
                 inspected += 1;
                 if rows.len() >= max_rows {
                     truncated = true;
@@ -1363,6 +1387,222 @@ fn run_query_with_byte_limit(
         truncated,
         elapsed_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
     })
+}
+
+/// Replace displayable image extension columns with bounded browser-ready
+/// data URLs before Arrow's JSON writer expands every pixel into a number.
+/// The response schema is captured from the original batch, so callers still
+/// receive the real Arrow physical and semantic types.
+fn query_preview_batch(batch: &RecordBatch) -> Result<RecordBatch, String> {
+    let mut fields = Vec::with_capacity(batch.num_columns());
+    let mut columns = Vec::with_capacity(batch.num_columns());
+    let mut changed = false;
+    for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
+        let semantic_type = field
+            .metadata()
+            .get(EXTENSION_TYPE_NAME_KEY)
+            .map(String::as_str);
+        let preview = match semantic_type {
+            Some(IMAGE_EXTENSION_NAME) => Some(image_preview_array(column.as_ref())?),
+            Some(VARIABLE_TENSOR_EXTENSION_NAME) => tensor_preview_array(column.as_ref())?,
+            _ => None,
+        };
+        if let Some(preview) = preview {
+            fields.push(Field::new(
+                field.name(),
+                DataType::Utf8,
+                field.is_nullable(),
+            ));
+            columns.push(preview);
+            changed = true;
+        } else {
+            fields.push(field.as_ref().clone());
+            columns.push(column.clone());
+        }
+    }
+    if !changed {
+        return Ok(batch.clone());
+    }
+    RecordBatch::try_new(
+        Arc::new(Schema::new_with_metadata(
+            fields,
+            batch.schema().metadata().clone(),
+        )),
+        columns,
+    )
+    .map_err(|error| format!("building Spiral image previews: {error}"))
+}
+
+fn image_preview_array(array: &dyn arrow_array::Array) -> Result<ArrayRef, String> {
+    let values = array
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .ok_or_else(|| "Spiral Image column did not use struct storage".to_owned())?;
+    let data = values
+        .column_by_name("data")
+        .ok_or_else(|| "Spiral Image column has no data field".to_owned())?;
+    let widths = values
+        .column_by_name("width")
+        .and_then(|column| column.as_any().downcast_ref::<UInt32Array>())
+        .ok_or_else(|| "Spiral Image column has no UInt32 width field".to_owned())?;
+    let heights = values
+        .column_by_name("height")
+        .and_then(|column| column.as_any().downcast_ref::<UInt32Array>())
+        .ok_or_else(|| "Spiral Image column has no UInt32 height field".to_owned())?;
+    let formats = values
+        .column_by_name("pixel_format")
+        .and_then(|column| column.as_any().downcast_ref::<UInt8Array>())
+        .ok_or_else(|| "Spiral Image column has no UInt8 pixel_format field".to_owned())?;
+    let mut previews = Vec::with_capacity(values.len());
+    for row in 0..values.len() {
+        if values.is_null(row) {
+            previews.push(None);
+            continue;
+        }
+        if widths.is_null(row) || heights.is_null(row) || formats.is_null(row) {
+            return Err("Spiral Image dimensions and pixel format cannot be null".to_owned());
+        }
+        let pixels = list_u8_value(data.as_ref(), row)
+            .ok_or_else(|| "Spiral Image data must be a List<UInt8>".to_owned())?;
+        previews.push(Some(encode_query_image(
+            &pixels,
+            widths.value(row),
+            heights.value(row),
+            formats.value(row),
+        )?));
+    }
+    Ok(Arc::new(StringArray::from(previews)))
+}
+
+/// Render only the canonical HWC UInt8 tensor shape used by
+/// `spql.image.to_tensor(image, 'hwc', 'none')`. Other tensors retain their
+/// ordinary JSON representation instead of being mislabeled as imagery.
+fn tensor_preview_array(array: &dyn arrow_array::Array) -> Result<Option<ArrayRef>, String> {
+    let Some(values) = array.as_any().downcast_ref::<StructArray>() else {
+        return Ok(None);
+    };
+    let Some(data) = values.column_by_name("data") else {
+        return Ok(None);
+    };
+    let Some(shapes) = values
+        .column_by_name("shape")
+        .and_then(|column| column.as_any().downcast_ref::<FixedSizeListArray>())
+    else {
+        return Ok(None);
+    };
+    if shapes.value_length() != 3 {
+        return Ok(None);
+    }
+    let mut previews = Vec::with_capacity(values.len());
+    for row in 0..values.len() {
+        if values.is_null(row) {
+            previews.push(None);
+            continue;
+        }
+        let shape_value = shapes.value(row);
+        let Some(shape) = shape_value.as_any().downcast_ref::<Int32Array>() else {
+            return Ok(None);
+        };
+        let [height, width, channels] = shape.values().as_ref() else {
+            return Ok(None);
+        };
+        if *height <= 0 || *width <= 0 || !matches!(*channels, 3 | 4) {
+            return Ok(None);
+        }
+        let Some(pixels) = list_u8_value(data.as_ref(), row) else {
+            return Ok(None);
+        };
+        previews.push(Some(encode_query_image(
+            &pixels,
+            u32::try_from(*width).map_err(|_| "Spiral image tensor width overflowed u32")?,
+            u32::try_from(*height).map_err(|_| "Spiral image tensor height overflowed u32")?,
+            if *channels == 3 { 1 } else { 2 },
+        )?));
+    }
+    Ok(Some(Arc::new(StringArray::from(previews))))
+}
+
+fn list_u8_value(array: &dyn arrow_array::Array, row: usize) -> Option<Vec<u8>> {
+    if array.is_null(row) {
+        return None;
+    }
+    let value = if let Some(values) = array.as_any().downcast_ref::<ListArray>() {
+        values.value(row)
+    } else {
+        let values = array.as_any().downcast_ref::<LargeListArray>()?;
+        values.value(row)
+    };
+    let values = value.as_any().downcast_ref::<UInt8Array>()?;
+    (values.null_count() == 0).then(|| values.values().to_vec())
+}
+
+fn encode_query_image(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    pixel_format: u8,
+) -> Result<String, String> {
+    if width == 0 || height == 0 {
+        return Err("Spiral Image dimensions must be positive".to_owned());
+    }
+    let channels = match pixel_format {
+        1 => 3_usize,
+        2 => 4_usize,
+        value => {
+            return Err(format!(
+                "Spiral Image uses unsupported pixel format {value}"
+            ));
+        }
+    };
+    let expected = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(channels))
+        .ok_or_else(|| "Spiral Image dimensions overflowed the host".to_owned())?;
+    if pixels.len() != expected {
+        return Err(format!(
+            "Spiral Image declares {width}×{height}×{channels} but contains {} values",
+            pixels.len()
+        ));
+    }
+    let image = match pixel_format {
+        1 => image::RgbImage::from_raw(width, height, pixels.to_vec()).map(DynamicImage::ImageRgb8),
+        2 => {
+            image::RgbaImage::from_raw(width, height, pixels.to_vec()).map(DynamicImage::ImageRgba8)
+        }
+        _ => unreachable!(),
+    }
+    .ok_or_else(|| "Spiral Image pixels did not match their dimensions".to_owned())?;
+    let preview = if width > QUERY_IMAGE_PREVIEW_MAX_EDGE || height > QUERY_IMAGE_PREVIEW_MAX_EDGE {
+        image.thumbnail(QUERY_IMAGE_PREVIEW_MAX_EDGE, QUERY_IMAGE_PREVIEW_MAX_EDGE)
+    } else {
+        image
+    };
+    let (mime_type, encoded) = if pixel_format == 1 {
+        let rgb = preview.to_rgb8();
+        let mut encoded = Vec::new();
+        JpegEncoder::new_with_quality(&mut encoded, QUERY_IMAGE_JPEG_QUALITY)
+            .encode(
+                rgb.as_raw(),
+                rgb.width(),
+                rgb.height(),
+                image::ExtendedColorType::Rgb8,
+            )
+            .map_err(|error| format!("encoding Spiral Image preview as JPEG: {error}"))?;
+        ("image/jpeg", encoded)
+    } else {
+        let mut encoded = Cursor::new(Vec::new());
+        preview
+            .write_to(&mut encoded, ImageFormat::Png)
+            .map_err(|error| format!("encoding Spiral Image preview as PNG: {error}"))?;
+        ("image/png", encoded.into_inner())
+    };
+    let payload = base64::engine::general_purpose::STANDARD.encode(encoded);
+    Ok(format!("data:{mime_type};base64,{payload}"))
 }
 
 fn push_query_row(
@@ -1567,6 +1807,9 @@ fn unix_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    use arrow_array::builder::{FixedSizeListBuilder, Int32Builder, ListBuilder, UInt8Builder};
 
     #[test]
     fn backend_owned_arrow_schemas_match_the_shared_contract() {
@@ -1597,6 +1840,89 @@ mod tests {
             sql::ensure_read_only("DELETE FROM robotics.episodes", ReadOnlyMode::Preview).is_err()
         );
         assert!(sql::ensure_read_only("SELECT 1; SELECT 2", ReadOnlyMode::Preview).is_err());
+    }
+
+    #[test]
+    fn decoded_spiral_images_become_bounded_browser_previews() {
+        let mut data = ListBuilder::new(UInt8Builder::new());
+        for value in [255, 0, 0, 0, 255, 0] {
+            data.values().append_value(value);
+        }
+        data.append(true);
+        let data = Arc::new(data.finish()) as ArrayRef;
+        let widths = Arc::new(UInt32Array::from(vec![2])) as ArrayRef;
+        let heights = Arc::new(UInt32Array::from(vec![1])) as ArrayRef;
+        let formats = Arc::new(UInt8Array::from(vec![1])) as ArrayRef;
+        let storage_fields = Fields::from(vec![
+            Arc::new(Field::new("data", data.data_type().clone(), false)),
+            Arc::new(Field::new("width", DataType::UInt32, false)),
+            Arc::new(Field::new("height", DataType::UInt32, false)),
+            Arc::new(Field::new("pixel_format", DataType::UInt8, false)),
+        ]);
+        let images = Arc::new(StructArray::new(
+            storage_fields,
+            vec![data, widths, heights, formats],
+            None,
+        )) as ArrayRef;
+        let image_field =
+            Field::new("image", images.data_type().clone(), false).with_metadata(HashMap::from([
+                (
+                    EXTENSION_TYPE_NAME_KEY.to_owned(),
+                    IMAGE_EXTENSION_NAME.to_owned(),
+                ),
+            ]));
+        let batch =
+            RecordBatch::try_new(Arc::new(Schema::new(vec![image_field])), vec![images]).unwrap();
+
+        let preview = query_preview_batch(&batch).unwrap();
+        let rows = batch_to_json(&preview).unwrap();
+        let value = rows[0].get("image").and_then(JsonValue::as_str).unwrap();
+        assert!(value.starts_with("data:image/jpeg;base64,"));
+        let encoded = value.split_once(',').unwrap().1;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        assert_eq!(image::load_from_memory(&bytes).unwrap().width(), 2);
+        assert!(value.len() < 2_048, "tiny preview unexpectedly expanded");
+    }
+
+    #[test]
+    fn hwc_u8_arrow_tensors_use_the_same_image_preview_path() {
+        let mut data = ListBuilder::new(UInt8Builder::new());
+        for value in [255, 0, 0, 0, 255, 0] {
+            data.values().append_value(value);
+        }
+        data.append(true);
+        let data = Arc::new(data.finish()) as ArrayRef;
+        let mut shapes = FixedSizeListBuilder::new(Int32Builder::new(), 3);
+        for value in [1, 2, 3] {
+            shapes.values().append_value(value);
+        }
+        shapes.append(true);
+        let shapes = Arc::new(shapes.finish()) as ArrayRef;
+        let storage_fields = Fields::from(vec![
+            Arc::new(Field::new("data", data.data_type().clone(), false)),
+            Arc::new(Field::new("shape", shapes.data_type().clone(), false)),
+        ]);
+        let tensors =
+            Arc::new(StructArray::new(storage_fields, vec![data, shapes], None)) as ArrayRef;
+        let tensor_field =
+            Field::new("image", tensors.data_type().clone(), false).with_metadata(HashMap::from([
+                (
+                    EXTENSION_TYPE_NAME_KEY.to_owned(),
+                    VARIABLE_TENSOR_EXTENSION_NAME.to_owned(),
+                ),
+            ]));
+        let batch =
+            RecordBatch::try_new(Arc::new(Schema::new(vec![tensor_field])), vec![tensors]).unwrap();
+
+        let rows = batch_to_json(&query_preview_batch(&batch).unwrap()).unwrap();
+        assert!(
+            rows[0]
+                .get("image")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|value| value.starts_with("data:image/jpeg;base64,"))
+        );
     }
 
     #[test]

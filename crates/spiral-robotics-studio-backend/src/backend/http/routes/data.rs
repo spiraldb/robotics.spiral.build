@@ -467,6 +467,7 @@ pub(super) fn application_query_result(result: SpiralQueryResponse) -> Applicati
                 name: column.name,
                 data_type: column.data_type,
                 nullable: column.nullable,
+                semantic_type: column.semantic_type,
             })
             .collect(),
         rows: result
@@ -538,6 +539,7 @@ pub(super) fn contract_query_result(result: ApplicationQueryResult) -> SpiralQue
                 name: column.name,
                 data_type: column.data_type,
                 nullable: column.nullable,
+                semantic_type: column.semantic_type,
             })
             .collect(),
         rows: result

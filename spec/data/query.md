@@ -29,6 +29,16 @@ inside the Data route.
   names.
 - **QUERY-008** Query errors must identify the failing relation or field without
   exposing credentials.
+- **QUERY-009** Query columns must preserve their Arrow extension name so the
+  viewer can distinguish semantic media values from structurally similar
+  structs, lists, and tensors.
+- **QUERY-010** A decoded `spql.image.Image`, or an HWC unsigned-byte Arrow
+  tensor shaped as height, width, and three or four channels, must render as a
+  bounded inline image preview. The backend must encode that preview before
+  JSON serialization rather than expanding pixels into numeric JSON values.
+- **QUERY-011** A result that identifies one video asset by episode, stream,
+  and segment must provide an inline browser video preview through the bounded
+  byte-range media endpoint. Query JSON must not carry an MP4 payload.
 
 ## Implementation ownership
 
@@ -40,4 +50,3 @@ inside the Data route.
   [`backend/storage`](../../crates/spiral-robotics-studio-backend/src/backend/storage/)
 - Query UI:
   [`frontend/screens/data`](../../crates/spiral-robotics-studio/src/frontend/screens/data/)
-

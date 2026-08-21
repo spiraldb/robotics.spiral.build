@@ -291,9 +291,10 @@ impl QueryPreset {
                 column::SAMPLE_INDEX
             ),
             Self::VideoAssets => format!(
-                "SELECT {}, {}, {}, {}, {}, {}, {}, {} FROM {relation} ORDER BY {} DESC, {} LIMIT 100",
+                "SELECT {}, {}, {}, {}, {}, {}, {}, {}, {} FROM {relation} ORDER BY {} DESC, {}, {} LIMIT 100",
                 column::EPISODE_ID,
                 column::STREAM_ID,
+                column::SEGMENT_INDEX,
                 column::CAMERA_ID,
                 column::BYTE_SIZE,
                 column::WIDTH,
@@ -302,6 +303,7 @@ impl QueryPreset {
                 column::FRAMES,
                 column::EPISODE_ID,
                 column::STREAM_ID,
+                column::SEGMENT_INDEX,
             ),
             Self::TrainingCheckpoints => format!(
                 "SELECT {}, {}, {}, {}, {}, {} FROM {relation} ORDER BY {} DESC LIMIT 100",
