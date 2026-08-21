@@ -22,13 +22,9 @@ nix develop .
 Start the studio with:
 
 ```console
-./scripts/studio-dev
+cd crates/spiral-robotics-studio
+dx serve --release
 ```
-
-The supervisor keeps the browser and native builds separate. Frontend edits
-use Dioxus's Wasm watcher, while backend and application edits compile and
-restart only the native server. Pass server options directly, for example
-`./scripts/studio-dev --no-cameras`.
 
 Start the Python policy compute runtime separately (on the same machine or a
 remote compute host). It owns PyTorch for both training and rollout inference:

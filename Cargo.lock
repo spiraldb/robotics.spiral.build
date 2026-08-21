@@ -9976,10 +9976,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "spiral-robotics-studio-dev"
-version = "0.1.0"
-
-[[package]]
 name = "spiral-robotics-studio-hardware"
 version = "0.1.0"
 dependencies = [

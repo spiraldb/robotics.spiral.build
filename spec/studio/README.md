@@ -108,13 +108,6 @@ visualization panels to be arranged spatially.
   It must retain its section navigation, fixed action footer, the activity rail,
   and the status bar at desktop and narrow widths. A scope-wide destructive
   confirmation opened from Settings may still use the shared blocking dialog.
-- **STUDIO-058** The supported Studio development command,
-  `./scripts/studio-dev`, must detect edits in browser, application, hardware,
-  and backend crates. A backend-only or application-only edit must rebuild and
-  restart only the native server; it must not run wasm-bindgen or wasm-opt.
-- **STUDIO-059** After each successful native development restart, the terminal
-  must report `Spiral Robotics Studio is running at` with the browser-facing
-  URL. A failed native rebuild must leave the previous server running.
 
 ## Feature relationships
 
@@ -145,8 +138,6 @@ visualization panels to be arranged spatially.
   [`spiral-robotics-studio-hardware`](../../crates/spiral-robotics-studio-hardware/)
 - HTTP, camera, persistence, and runtime adapters:
   [`spiral-robotics-studio-backend`](../../crates/spiral-robotics-studio-backend/)
-- Target-aware development supervisor:
-  [`spiral-robotics-studio-dev`](../../crates/spiral-robotics-studio-dev/)
 - URDF and rendering:
   [`spiral-robotics-viewport`](../../crates/spiral-robotics-viewport/)
 
