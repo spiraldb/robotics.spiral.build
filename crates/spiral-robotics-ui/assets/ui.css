@@ -22,7 +22,6 @@
   --ui-target-compact: 24px;
   --ui-target-standard: 28px;
   --ui-target-prominent: 32px;
-  --ui-target-touch: 44px;
 }
 
 .ui-icon {
@@ -327,14 +326,12 @@
     opacity 100ms ease-out;
 }
 
-@media (hover: hover) and (pointer: fine) {
-  .ui-hover-action-host:not(:hover):not(:focus-within) .ui-hover-action {
-    opacity: 0;
-  }
+.ui-hover-action-host:not(:hover):not(:focus-within) .ui-hover-action {
+  opacity: 0;
+}
 
-  .ui-hover-action:focus {
-    opacity: 1;
-  }
+.ui-hover-action:focus {
+  opacity: 1;
 }
 
 .ui-action:is(
@@ -496,32 +493,6 @@
 .ui-blocking-confirmation footer {
   padding: 8px 14px;
   border-top: 1px solid var(--ui-line);
-}
-
-@media (max-width: 480px), (pointer: coarse) {
-  .ui-action {
-    min-width: var(--ui-target-touch);
-    min-height: var(--ui-target-touch);
-  }
-
-  .ui-action--icon {
-    width: var(--ui-target-touch);
-    min-width: var(--ui-target-touch);
-  }
-
-  .ui-toggle {
-    min-height: var(--ui-target-touch);
-  }
-
-  .ui-blocking-confirmation {
-    top: auto;
-    bottom: 0;
-    left: 0;
-    width: 100%;
-    max-height: min(80dvh, 34rem);
-    transform: none;
-    border-radius: 6px 6px 0 0;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

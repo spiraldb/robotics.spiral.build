@@ -39,7 +39,7 @@ pub mod urdf;
 pub use glam;
 
 pub use camera::Camera;
-pub use gesture::{Drag, Gesture, Pinch};
+pub use gesture::{Drag, Gesture};
 pub use pick::Viewport;
 pub use robot::{
     ArmPlacement, CameraMount, RobotEntity, RobotScene, so101_joint_positions, tool_position,

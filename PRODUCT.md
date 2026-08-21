@@ -4,7 +4,10 @@
 
 ## Platform
 
-web
+Desktop web. Studio supports desktop browsers at 1024 CSS pixels and wider.
+Mouse and touchpad are the primary pointer inputs, with keyboard alternatives
+for workspace operations. Mobile layouts and touch-specific interactions are
+outside the product boundary.
 
 ## Users
 
@@ -273,6 +276,10 @@ today, and nothing below may be presented as existing behavior:
 
 **Constraints**
 
+- **Desktop-only interface:** Studio has a 1024 CSS-pixel minimum viewport and
+  always renders the desktop panel tree. It does not maintain mobile
+  breakpoints, alternate narrow-screen navigation, touch gestures, or
+  touch-target overrides.
 - **Hardware:** SO-ARM101 only for now, with leader and follower roles. Live
   calibration supports Feetech protocol-0 motors such as the STS3215.
 - **One selected compute endpoint.** Studio reads samples through a dedicated

@@ -60,7 +60,7 @@
    and one visualization region whose lower editor is always the Timeline. */
 @layer components {
   .studio-shell-v2 {
-    min-width: 20rem;
+    min-width: 64rem;
   }
 
   .studio-shell-background {
@@ -541,10 +541,6 @@
   .status-bar-message.message-success { color: var(--tone-good); }
   .status-bar-message.message-warning { color: var(--tone-caution); }
   .status-bar-message.message-error { color: var(--tone-danger); }
-
-  .status-bar-mobile-state {
-    display: none;
-  }
 
   .status-bar-notifications {
     @apply relative inline-flex min-h-5 min-w-6 shrink-0 items-center justify-center gap-1 border-l border-line px-1.5;
@@ -1976,134 +1972,6 @@
   }
 }
 
-@media (max-width: 980px) {
-  /* The rail keeps its full width here. Narrowing it to 3.25rem bought eight
-     pixels for the workspace and spent them on "Settings" and "Training",
-     which at 10px are 47px wide and were left with two pixels of air on each
-     side — the labels stopped reading as centred and started reading as cut. */
-
-  .studio-status-bar {
-    display: flex;
-    justify-content: flex-start;
-    overflow-x: auto;
-  }
-
-  .status-bar-message {
-    width: min(32rem, 50vw);
-    max-width: min(32rem, 50vw);
-    flex: 0 0 min(32rem, 50vw);
-  }
-
-  .status-bar-group,
-  .status-bar-group-right {
-    max-width: none;
-    flex: 0 0 auto;
-  }
-}
-
-@media (max-width: 480px) {
-  .studio-status-bar {
-    justify-content: space-between;
-    overflow: hidden;
-    padding-left: 0.5rem;
-    padding-right: 0;
-  }
-
-  .status-bar-group {
-    min-width: 0;
-    flex: 1 1 auto;
-  }
-
-  .status-bar-group-right {
-    min-width: 0;
-    flex: 0 1 auto;
-    margin-left: auto;
-  }
-
-  .status-bar-group > .status-bar-item:not(:first-child),
-  .status-bar-group-right > .status-bar-item,
-  .status-bar-message {
-    display: none;
-  }
-
-  .status-bar-mobile-state {
-    display: inline-flex;
-    min-width: 0;
-    min-height: 44px;
-    max-width: min(42vw, 12rem);
-    align-items: center;
-    overflow: hidden;
-    padding-inline: 0.5rem;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .training-form-grid,
-  .training-primary-grid,
-  .training-column-row,
-  .training-resource-grid,
-  .rollout-field-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .rollout-metric-strip {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .training-resource-lane {
-    border-right: 0;
-    border-bottom: 1px solid var(--tone-line);
-  }
-
-  .training-resource-lane:nth-last-child(-n + 2) {
-    border-bottom: 1px solid var(--tone-line);
-  }
-
-  .training-resource-lane:last-child {
-    grid-column: auto;
-    border-bottom: 0;
-  }
-
-  .training-loss-summary {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  }
-
-  .training-loss-summary > div:last-child {
-    display: none;
-  }
-
-  .training-event-strip {
-    grid-template-columns: minmax(5rem, 1fr);
-  }
-
-  .training-event-legend {
-    display: none;
-  }
-
-  .training-field input,
-  .training-field select,
-  .training-query-section textarea {
-    min-height: 44px;
-    font-size: 16px;
-  }
-
-  .training-start-action,
-  .training-stop-action,
-  .training-history-row,
-  .training-history-delete,
-  .training-query-section > summary,
-    .rollout-run-action,
-    .rollout-stop-action {
-      min-height: 44px;
-    }
-
-  .rollout-field input,
-  .rollout-field select {
-    min-height: 44px;
-    font-size: 16px;
-  }
-}
-
 .settings-header {
   display: flex;
   min-height: 3.25rem;
@@ -2644,37 +2512,6 @@ li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
   color: var(--tone-ink-faint);
 }
 
-@media (max-width: 760px) {
-  .query-input { min-height: 8rem; }
-  .settings-layout {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr);
-  }
-  .settings-nav {
-    display: flex;
-    align-items: center;
-    overflow-x: auto;
-    padding: 0.375rem;
-    border-right: 0;
-    border-bottom: 1px solid var(--tone-line);
-  }
-  .settings-nav .ui-action { width: auto; flex: 0 0 auto; }
-  .settings-content { padding: 0.875rem; }
-  .settings-field-row { grid-template-columns: 1fr; gap: 0; }
-  .settings-footer > span { display: none; }
-  .settings-footer { justify-content: flex-end; }
-}
-
-@media (max-width: 480px) {
-  .data-episode-row {
-    min-height: 3.5rem;
-  }
-
-  .data-episode-actions .ui-action {
-    min-height: 2.75rem;
-  }
-}
-
 @theme inline {
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
 
@@ -3013,9 +2850,8 @@ li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
   }
 
   /* A glance, not a panel. It follows the pointer, carries a name and at most
-     one reading, and never becomes the place a fact only lives — an operator
-     with a hand on the arm has no hand for a hover, and a touch bench has no
-     hover at all, so everything here is also in the inspector. */
+     one reading, and never becomes the place a fact only lives, so everything
+     here is also in the inspector. */
   .bench-note {
     @apply pointer-events-none absolute z-10 flex max-w-56 translate-x-3 translate-y-3 items-baseline gap-1.5 rounded border border-line bg-surface px-1.5 py-0.5 shadow-sm;
   }
@@ -3157,80 +2993,6 @@ li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
     @apply h-3 w-3 rounded-full border-2 border-surface bg-ink-soft shadow-sm;
   }
 
-}
-
-@media (max-width: 760px) {
-  .studio-shell {
-    height: 100dvh;
-    min-height: 0;
-    overflow: hidden;
-  }
-
-  .viewport-help {
-    display: none;
-  }
-
-  /* Hidden scrollbars keep the panel row compact; the edge fade makes its
-     additional destinations discoverable without adding another chrome row. */
-  .rp-mobile-switcher {
-    -webkit-mask-image: linear-gradient(to right, transparent 0, #000 12px, #000 calc(100% - 24px), transparent 100%);
-    mask-image: linear-gradient(to right, transparent 0, #000 12px, #000 calc(100% - 24px), transparent 100%);
-  }
-}
-
-@media (max-width: 480px) {
-  .control-segment,
-  .live-robot-row,
-  .joint-row,
-  .joint-label,
-  .data-episode-select,
-  .field,
-  .data-dataset-input,
-  .settings-nav .ui-action,
-  .device-chevron,
-  .device-main,
-  .device-camera-remove,
-  .query-result-tab,
-  .query-result-tab-close,
-  .query-schema-row,
-  .timeline-transport-action,
-  .take-action,
-  .viewport-action,
-  .viewport-legend-row,
-  .view-cube .ui-action,
-  .notification-center-action,
-  .notification-primary-action,
-  .status-bar-notifications {
-    min-height: 44px;
-  }
-
-  .status-bar-notifications {
-    min-width: 44px;
-  }
-
-  .workflow-fit-action {
-    min-height: 44px;
-  }
-
-  .device-chevron,
-  .device-camera-remove,
-  .query-result-tab-close {
-    width: 44px;
-    min-width: 44px;
-  }
-
-  .field,
-  .query-input,
-  .data-dataset-input {
-    font-size: 16px;
-  }
-
-  .studio-status-bar,
-  .status-bar-item {
-    min-height: 44px;
-  }
-
-  .data-delete-confirmation { padding-bottom: 0.25rem; }
 }
 
 /*
@@ -3384,8 +3146,7 @@ li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
 
   /* Same bargain the episode card strikes: the row's own labels keep the full
      width, and the way to undo the assignment appears when the pointer or the
-     keyboard reaches it. Touch has no hover, so it is always visible there.
-     Faded rather than `visibility: hidden` on purpose — a hidden element cannot
+     keyboard reaches it. Faded rather than `visibility: hidden` on purpose — a hidden element cannot
      take focus, and unlike an episode card this row has no other focusable
      child to reveal it, so hiding it outright put the control beyond the reach
      of a keyboard entirely. */

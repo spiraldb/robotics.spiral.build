@@ -26,7 +26,7 @@ use spiral_robotics_ui::{Action, ActionPurpose, ActionVariant};
 use spiral_robotics_viewport::glam::Vec3;
 use spiral_robotics_viewport::robot::BENCH_SPACING;
 use spiral_robotics_viewport::{
-    ArmPlacement, Camera, CameraMount, Condition, Drag, Gesture, Interaction, Pinch, RobotEntity,
+    ArmPlacement, Camera, CameraMount, Condition, Drag, Gesture, Interaction, RobotEntity,
     RobotScene, Viewport as Bench, robot,
 };
 #[cfg(feature = "web")]
@@ -127,8 +127,6 @@ pub(crate) fn Viewport(
     let bench = use_hook(|| Rc::new(RefCell::new(Option::<Bench>::None)));
     let mut camera = use_signal(Camera::default);
     let mut drag = use_signal(|| Option::<Drag>::None);
-    let mut touches = use_signal(BTreeMap::<i32, (f64, f64)>::new);
-    let mut pinch = use_signal(|| None::<Pinch>);
     let mut trouble = use_signal(|| Option::<String>::None);
     let mut hover = use_signal(|| Option::<Hover>::None);
     // On by default: the bench is a physical workspace and the 20cm rhythm is
@@ -233,7 +231,7 @@ pub(crate) fn Viewport(
         div { class: "relative h-full w-full overflow-hidden bg-viewport",
             canvas {
                 id: CANVAS_ID,
-                class: "h-full w-full touch-none select-none",
+                class: "h-full w-full select-none",
                 class: if drag().is_some() {
                     "cursor-grabbing"
                 } else if hover().is_some() {
@@ -243,17 +241,9 @@ pub(crate) fn Viewport(
                 },
                 role: "application",
                 tabindex: "0",
-                "aria-label": "Interactive 3D robot viewer. Click a motor or camera to select it and see its readings in the inspector. Drag to orbit, shift-drag or two-finger drag to pan, pinch or scroll to zoom, and press F to frame the selection.",
+                "aria-label": "Interactive 3D robot viewer. Click a motor or camera to select it and see its readings in the inspector. Drag to orbit, shift-drag to pan, scroll to zoom, and press F to frame the selection.",
                 onpointerdown: move |event| {
                     capture(&event);
-                    if let Some((pointer, position)) = touch(&event) {
-                        touches.write().insert(pointer, position);
-                        if let Some(current) = Pinch::from_touches(&touches.read()) {
-                            pinch.set(Some(current));
-                            drag.set(None);
-                            return;
-                        }
-                    }
                     // The middle and right buttons pan, matching every other 3D
                     // viewer; shift with the left button does the same for a
                     // one-button mouse.
@@ -271,22 +261,6 @@ pub(crate) fn Viewport(
                     let visible_robot = visible_robot.clone();
                     move |event| {
                         let position = point(&event);
-                        if let Some((pointer, _)) = touch(&event)
-                            && touches.read().contains_key(&pointer)
-                        {
-                            touches.write().insert(pointer, position);
-                            if let Some(current) = Pinch::from_touches(&touches.read()) {
-                                if let Some(previous) = pinch() {
-                                    current.advance_from(
-                                        previous,
-                                        &mut camera.write(),
-                                        height(&bench),
-                                    );
-                                }
-                                pinch.set(Some(current));
-                                return;
-                            }
-                        }
                         if let Some(mut active) = drag() {
                             active.advance(position, &mut camera.write(), height(&bench));
                             drag.set(Some(active));
@@ -314,12 +288,6 @@ pub(crate) fn Viewport(
                     let source = source.clone();
                     let visible_robot = visible_robot.clone();
                     move |event| {
-                        if let Some((pointer, _)) = touch(&event) {
-                            touches.write().remove(&pointer);
-                            pinch.set(None);
-                            drag.set(None);
-                            return;
-                        }
                         if drag().is_some_and(|active| !active.moved()) {
                             let position = point(&event);
                             let picked = hovered(
@@ -341,20 +309,11 @@ pub(crate) fn Viewport(
                         drag.set(None);
                     }
                 },
-                onpointercancel: move |event| {
-                    if let Some((pointer, _)) = touch(&event) {
-                        touches.write().remove(&pointer);
-                        pinch.set(None);
-                    }
+                onpointercancel: move |_| {
                     drag.set(None);
                 },
-                onpointerleave: move |event| {
-                    // Captured mouse pointers continue reporting outside the
-                    // canvas. Touch pointers are kept until up/cancel so a
-                    // two-finger gesture cannot lose one finger at an edge.
-                    if touch(&event).is_none() {
-                        drag.set(None);
-                    }
+                onpointerleave: move |_| {
+                    drag.set(None);
                     hover.set(None);
                 },
                 oncontextmenu: move |event| event.prevent_default(),
@@ -925,11 +884,6 @@ fn frame_selection(
 fn point(event: &Event<PointerData>) -> (f64, f64) {
     let position = event.client_coordinates();
     (position.x, position.y)
-}
-
-fn touch(event: &Event<PointerData>) -> Option<(i32, (f64, f64))> {
-    let raw = event.downcast::<web_sys::PointerEvent>()?;
-    (raw.pointer_type() == "touch").then(|| (raw.pointer_id(), point(event)))
 }
 
 /// Keep receiving moves after the pointer leaves the canvas, so a drag that

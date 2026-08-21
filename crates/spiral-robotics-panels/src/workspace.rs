@@ -50,7 +50,7 @@ impl Panel {
         self
     }
 
-    /// Give this panel an explicit close affordance in desktop and mobile tabs.
+    /// Give this panel an explicit close affordance in its tab.
     /// The application remains responsible for removing it from the registry.
     pub fn with_closable(mut self, closable: bool) -> Self {
         self.closable = closable;
@@ -90,7 +90,6 @@ struct RenderContext {
     placements: Vec<PanelPlacement>,
     layout: Signal<PanelLayout>,
     reset_layout: PanelLayout,
-    mobile_panel: Signal<Option<PanelId>>,
     dragging: Signal<Option<PanelId>>,
     drop_preview: Signal<Option<DropPreview>>,
     resizing: Signal<Option<ResizeDrag>>,
@@ -119,13 +118,11 @@ pub fn PanelWorkspace(
     on_resize: EventHandler<()>,
 ) -> Element {
     let placements = panels.iter().map(Panel::placement).collect::<Vec<_>>();
-    let first_mobile_panel = panels.first().map(|panel| panel.id.clone());
     let initial_placements = placements.clone();
     let initial_fallback = initial_layout.clone();
     let mut layout = use_signal(move || layout_for_registry(initial_fallback, &initial_placements));
     let initial_scope = layout_scope.clone();
     let mut current_layout_scope = use_signal(move || initial_scope);
-    let mut mobile_panel = use_signal(move || first_mobile_panel);
     let mut dragging = use_signal(|| None::<PanelId>);
     let mut drop_preview = use_signal(|| None::<DropPreview>);
     let mut resizing = use_signal(|| None::<ResizeDrag>);
@@ -136,7 +133,6 @@ pub fn PanelWorkspace(
     let scope_dependency = layout_scope.clone();
     let next_fallback = initial_layout.clone();
     let next_placements = placements.clone();
-    let next_mobile_panel = panels.first().map(|panel| panel.id.clone());
     use_effect(use_reactive((&scope_dependency,), move |(next_scope,)| {
         if current_layout_scope.peek().as_ref() == next_scope.as_ref() {
             return;
@@ -144,7 +140,6 @@ pub fn PanelWorkspace(
         let next = layout_for_registry(next_fallback.clone(), &next_placements);
         current_layout_scope.set(next_scope.clone());
         layout.set(next);
-        mobile_panel.set(next_mobile_panel.clone());
         dragging.set(None);
         drop_preview.set(None);
         resizing.set(None);
@@ -174,8 +169,6 @@ pub fn PanelWorkspace(
                 requested_layout_change.call(next);
                 requested_resize.call(());
             }
-            mobile_panel.set(Some(panel.clone()));
-            scroll_mobile_tab_into_view(&panel);
         },
     ));
 
@@ -185,7 +178,6 @@ pub fn PanelWorkspace(
         placements,
         layout,
         reset_layout: initial_layout,
-        mobile_panel,
         dragging,
         drop_preview,
         resizing,
@@ -199,10 +191,6 @@ pub fn PanelWorkspace(
     let cancel_context = context.clone();
     let resizing_active = resizing().is_some();
     let dragging_active = dragging().is_some();
-    let mobile_selection = mobile_panel()
-        .filter(|id| context.panels.iter().any(|panel| &panel.id == id))
-        .or_else(|| context.panels.first().map(|panel| panel.id.clone()));
-    let mobile_tabs = context.panels.clone();
 
     rsx! {
         UiStyles {}
@@ -248,50 +236,6 @@ pub fn PanelWorkspace(
                 dragging.set(None);
                 drop_preview.set(None);
             },
-            nav { class: "rp-mobile-switcher", "aria-label": "Workspace panels",
-                for panel in mobile_tabs {
-                    {
-                        let panel_id = panel.id.clone();
-                        let activate_id = panel.id.clone();
-                        let activate_context = context.clone();
-                        let close_id = panel.id.clone();
-                        let close_context = context.clone();
-                        let is_active = mobile_selection.as_ref() == Some(&panel.id);
-                        let item_class = if is_active {
-                            "rp-mobile-tab-item rp-mobile-tab-item-active"
-                        } else {
-                            "rp-mobile-tab-item"
-                        };
-                        rsx! {
-                            div { key: "mobile-{panel.id}", id: "{mobile_tab_dom_id(&panel.id)}", class: "{item_class}",
-                            Action {
-                                purpose: ActionPurpose::Select,
-                                variant: ActionVariant::Tab,
-                                class: if is_active { "rp-mobile-tab rp-mobile-tab-active" } else { "rp-mobile-tab" },
-                                aria_pressed: is_active,
-                                onclick: move |_| {
-                                    mobile_panel.set(Some(panel_id.clone()));
-                                    mutate_layout(activate_context.clone(), |layout| layout.activate(&activate_id));
-                                    activate_context.on_panel_activate.call(activate_id.clone());
-                                },
-                                "{panel.title}"
-                            }
-                            if panel.closable {
-                                Action {
-                                    purpose: ActionPurpose::Close,
-                                    variant: ActionVariant::Icon,
-                                    class: "rp-mobile-tab-close",
-                                    aria_label: "Close {panel.title}",
-                                    title: "Close {panel.title}",
-                                    onclick: move |_| close_context.on_panel_close.call(close_id.clone()),
-                                    CloseIcon {}
-                                }
-                            }
-                            }
-                        }
-                    }
-                }
-            }
             {render_node(display_layout.root, context)}
         }
     }
@@ -405,18 +349,9 @@ fn render_node(node: LayoutNode, context: RenderContext) -> Element {
 fn render_tile(tile: Tile, context: RenderContext) -> Element {
     let tile_id = tile.id.clone();
     let preview = (context.drop_preview)().filter(|preview| preview.tile == tile.id);
-    let mobile_selection = (context.mobile_panel)()
-        .filter(|id| context.panels.iter().any(|panel| &panel.id == id))
-        .or_else(|| context.panels.first().map(|panel| panel.id.clone()));
-    let mobile_active = mobile_selection
-        .as_ref()
-        .is_some_and(|panel| tile.panels.contains(panel));
     let mut tile_classes = vec!["rp-tile"];
     if preview.is_some() {
         tile_classes.push("rp-tile-drop-active");
-    }
-    if mobile_active {
-        tile_classes.push("rp-mobile-active");
     }
     if tile.id.as_str().starts_with("tile-") {
         tile_classes.push("rp-tile-enter");
@@ -733,27 +668,9 @@ fn panel_dom_id(panel: &PanelId) -> String {
     format!("rp-panel-{}", safe_id(panel.as_str()))
 }
 
-fn mobile_tab_dom_id(panel: &PanelId) -> String {
-    format!("rp-mobile-tab-{}", safe_id(panel.as_str()))
-}
-
 fn focus_tab(panel: &PanelId) {
     focus_element(&tab_dom_id(panel));
 }
-
-#[cfg(feature = "web")]
-fn scroll_mobile_tab_into_view(panel: &PanelId) {
-    let Some(element) = web_sys::window()
-        .and_then(|window| window.document())
-        .and_then(|document| document.get_element_by_id(&mobile_tab_dom_id(panel)))
-    else {
-        return;
-    };
-    element.scroll_into_view();
-}
-
-#[cfg(not(feature = "web"))]
-fn scroll_mobile_tab_into_view(_panel: &PanelId) {}
 
 #[cfg(feature = "web")]
 fn element_span(id: &str, axis: SplitAxis) -> Option<f64> {

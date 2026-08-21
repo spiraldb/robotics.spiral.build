@@ -745,8 +745,7 @@ fn CameraSection(robot: RobotSummary) -> Element {
             }
             // Unassigning a camera is rare and reversible in one click, so it
             // does not hold a permanent word on every row the way it used to —
-            // the same treatment an episode card already gives its delete. It
-            // stays visible on touch, where there is no hover to reveal it.
+            // the same treatment an episode card already gives its delete.
             ul { class: "mb-1 flex flex-col gap-0.5",
                 for binding in robot.cameras.clone() {
                     li { key: "{binding.name}", class: "device-camera-row ui-hover-action-host",

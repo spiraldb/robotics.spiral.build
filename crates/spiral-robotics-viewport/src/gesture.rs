@@ -5,8 +5,6 @@
 //! handler any more. That arithmetic is the same whatever draws the canvas,
 //! and it is the part that is worth getting right once.
 
-use std::collections::BTreeMap;
-
 use crate::camera::Camera;
 
 /// Radians of orbit per pixel dragged.
@@ -63,37 +61,6 @@ impl Drag {
         } else {
             camera.orbit(-dx as f32 * ORBIT_PER_PIXEL, dy as f32 * ORBIT_PER_PIXEL);
         }
-    }
-}
-
-/// Two fingers on the canvas.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Pinch {
-    center: (f64, f64),
-    distance: f32,
-}
-
-impl Pinch {
-    /// The pinch two or more live touches describe, if there are two.
-    pub fn from_touches(touches: &BTreeMap<i32, (f64, f64)>) -> Option<Self> {
-        let mut points = touches.values();
-        let (first, second) = (*points.next()?, *points.next()?);
-        Some(Self {
-            center: ((first.0 + second.0) * 0.5, (first.1 + second.1) * 0.5),
-            distance: (second.0 - first.0).hypot(second.1 - first.1) as f32,
-        })
-    }
-
-    /// Apply the change from `previous` to this pinch.
-    pub fn advance_from(&self, previous: Self, camera: &mut Camera, viewport_height: f32) {
-        if self.distance > 1.0 && previous.distance > 1.0 {
-            camera.zoom(previous.distance / self.distance);
-        }
-        let metres = camera.metres_per_pixel(viewport_height);
-        camera.pan(
-            -(self.center.0 - previous.center.0) as f32 * metres,
-            (self.center.1 - previous.center.1) as f32 * metres,
-        );
     }
 }
 
@@ -169,33 +136,5 @@ mod tests {
         let moved_near = (near.target - origin.0).length();
         let moved_far = (far.target - origin.1).length();
         assert!(moved_far > moved_near * 5.0, "{moved_far} vs {moved_near}");
-    }
-
-    #[test]
-    fn a_pinch_needs_two_fingers() {
-        let mut touches = BTreeMap::from([(1, (0.0, 0.0))]);
-        assert!(Pinch::from_touches(&touches).is_none());
-
-        touches.insert(2, (100.0, 0.0));
-        let pinch = Pinch::from_touches(&touches).expect("two fingers pinch");
-        assert_eq!(pinch.center, (50.0, 0.0));
-        assert_eq!(pinch.distance, 100.0);
-    }
-
-    #[test]
-    fn spreading_two_fingers_pulls_the_camera_in() {
-        let mut camera = Camera::default();
-        let before = camera.distance;
-        let opening = Pinch {
-            center: (0.0, 0.0),
-            distance: 200.0,
-        };
-        let closed = Pinch {
-            center: (0.0, 0.0),
-            distance: 100.0,
-        };
-
-        opening.advance_from(closed, &mut camera, 600.0);
-        assert!(camera.distance < before);
     }
 }

@@ -108,7 +108,7 @@ spatially.
   than importing another process's implementation.
 - **STUDIO-056** Settings must be an in-shell utility panel rather than a modal.
   It must retain its section navigation, fixed action footer, the activity rail,
-  and the status bar at desktop and narrow widths. A scope-wide destructive
+  and the status bar. A scope-wide destructive
   confirmation opened from Settings may still use the shared blocking dialog.
 - **STUDIO-060** Workflow must appear adjacent to Data and before Training in
   the activity rail. Its canvas consumes qualified Spiral relations only;
@@ -117,7 +117,7 @@ spatially.
   Workflow Table roots.
 - **STUDIO-061** Workflow must own an independent four-panel layout scope:
   Assistant and Node tabbed in a 30% left lane, Workflow above Results in the
-  right lane, and the standard single-panel switcher at mobile width.
+  right lane.
 - **STUDIO-062** Until execution and agent transports exist, Workflow must
   identify its graph as a static draft, keep Assistant and Results in explicit
   scaffold states, and expose no control that implies a run or durable write.

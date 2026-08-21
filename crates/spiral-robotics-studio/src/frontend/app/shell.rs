@@ -155,24 +155,6 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
         snapshot.readiness.state,
         snapshot.readiness.catalog_available,
     );
-    let (mobile_state, mobile_state_critical) = if mode == Activity::Training {
-        (
-            if training.readiness.ready {
-                "Training ready".to_owned()
-            } else {
-                "Training unavailable".to_owned()
-            },
-            false,
-        )
-    } else if mode == Activity::Workflow {
-        (workflow_status.phase.clone(), false)
-    } else if let Some(recording) = recording_label.as_ref() {
-        (recording.clone(), true)
-    } else if holding > 0 {
-        (format!("{holding} holding"), true)
-    } else {
-        (status_mode.clone(), false)
-    };
     let center = studio.notifications.read().clone();
     let now = (studio.clock_ms)();
     let unread = center.unread_count();
@@ -318,7 +300,6 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                     if let Some(phase) = training_phase { span { class: "status-bar-item", "{phase}" } }
                     if let Some(step) = training_step { span { class: "status-bar-item", "{step}" } }
                     span { class: "status-bar-item", "{training_problems_label}" }
-                    span { class: "status-bar-mobile-state", title: "{mobile_state}", "{mobile_state}" }
                     NotificationTrigger { unread, open: center_open }
                 }
             }
@@ -344,7 +325,6 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                 }
                 div { class: "status-bar-group status-bar-group-right",
                     span { class: "status-bar-item status-bar-accent", "{workflow_status.graph}" }
-                    span { class: "status-bar-mobile-state status-bar-accent", title: "{mobile_state}", "{mobile_state}" }
                     NotificationTrigger { unread, open: center_open }
                 }
             }
@@ -377,11 +357,6 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                     if telemetry.target_hz > 0.0 { span { class: "status-bar-item status-bar-rate", "{rate_label}" } }
                     if let Some(robot_problems_label) = robot_problems_label {
                         span { class: "status-bar-item status-bar-caution", "{robot_problems_label}" }
-                    }
-                    span {
-                        class: if mobile_state_critical { "status-bar-mobile-state status-bar-danger" } else { "status-bar-mobile-state status-bar-accent" },
-                        title: "{mobile_state}",
-                        "{mobile_state}"
                     }
                     NotificationTrigger { unread, open: center_open }
                 }

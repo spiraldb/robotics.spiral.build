@@ -138,6 +138,50 @@ fn status_bar_keeps_messages_and_live_rates_in_stable_lanes() {
 }
 
 #[test]
+fn studio_is_a_strict_desktop_pointer_application() {
+    let studio = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let crates = studio.parent().expect("Studio should live in crates/");
+    let studio_styles =
+        fs::read_to_string(studio.join("tailwind.css")).expect("Studio styles should be readable");
+    let ui_styles = fs::read_to_string(crates.join("spiral-robotics-ui/assets/ui.css"))
+        .expect("shared UI styles should be readable");
+    let panel_styles = fs::read_to_string(crates.join("spiral-robotics-panels/assets/panels.css"))
+        .expect("panel styles should be readable");
+    let panel_workspace =
+        fs::read_to_string(crates.join("spiral-robotics-panels/src/workspace.rs"))
+            .expect("panel workspace source should be readable");
+    let viewport_gestures =
+        fs::read_to_string(crates.join("spiral-robotics-viewport/src/gesture.rs"))
+            .expect("viewport gesture source should be readable");
+    let scene = fs::read_to_string(studio.join("src/frontend/panels/scene.rs"))
+        .expect("scene source should be readable");
+
+    assert!(
+        studio_styles.contains(".studio-shell-v2 {\n    min-width: 64rem;"),
+        "the supported Studio viewport must begin at 1024 CSS pixels",
+    );
+    for (source, pattern) in [
+        (&studio_styles, "@media (max-width:"),
+        (&ui_styles, "@media (max-width:"),
+        (&ui_styles, "pointer: coarse"),
+        (&ui_styles, "pointer: fine"),
+        (&ui_styles, "target-touch"),
+        (&panel_styles, "@media (max-width:"),
+        (&panel_styles, "touch-action"),
+        (&panel_workspace, "rp-mobile"),
+        (&panel_workspace, "mobile_panel"),
+        (&scene, "pointer_type() == \"touch\""),
+        (&scene, "Pinch"),
+        (&viewport_gestures, "Pinch"),
+    ] {
+        assert!(
+            !source.contains(pattern),
+            "desktop-only Studio code must not specialize {pattern:?}",
+        );
+    }
+}
+
+#[test]
 fn failed_project_import_releases_the_blocking_confirmation() {
     let studio = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let settings = fs::read_to_string(studio.join("src/frontend/screens/settings/panel.rs"))
@@ -184,6 +228,10 @@ fn workflow_language_stays_relation_first_and_truthful() {
         .expect("activity rail source should be readable");
     let workflow = fs::read_to_string(studio.join("src/frontend/screens/workflow/workspace.rs"))
         .expect("workflow source should be readable");
+    let workflow = workflow
+        .split("#[cfg(test)]")
+        .next()
+        .expect("production Workflow source should precede its tests");
 
     let data = shell
         .find("onclick: move |_| on_activity.call(Activity::Data)")
@@ -200,11 +248,11 @@ fn workflow_language_stays_relation_first_and_truthful() {
     );
 
     for expected in [
-        "Static draft",
-        "Agent turns are not connected in this scaffold.",
-        "Execution is not connected in this scaffold.",
-        "Workflow nodes always name Spiral relations.",
-        "workflow.siglip_scores",
+        "Assistant is not connected",
+        "Agent turns arrive in a later stage.",
+        "manual Workflow nodes run now",
+        "Workflow reads relations already materialized in the active project.",
+        "configure SigLIP scoring",
     ] {
         assert!(
             workflow.contains(expected),
@@ -215,6 +263,24 @@ fn workflow_language_stays_relation_first_and_truthful() {
         assert!(
             !workflow.contains(external_source_node),
             "external import producers do not belong on the Workflow canvas: {external_source_node}",
+        );
+    }
+}
+
+#[test]
+fn workflow_model_warning_and_detail_states_have_structured_styles() {
+    let studio = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let styles = fs::read_to_string(studio.join("tailwind.css"))
+        .expect("Workflow styles should be readable");
+    for class in [
+        ".workflow-node-status-dot.workflow-node-state-warning",
+        ".workflow-inspector-warning",
+        ".workflow-model-column-map",
+        ".workflow-quarantine-examples",
+    ] {
+        assert!(
+            styles.contains(class),
+            "Workflow Model state is missing structured style {class:?}",
         );
     }
 }

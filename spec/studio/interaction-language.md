@@ -79,14 +79,13 @@ browser confirmation dialogs.
 - **STUDIO-035** A mutually exclusive physical mode must use radio-group
   semantics and support arrow-key selection.
 - **STUDIO-036** Hover may reveal a quiet trailing action only when keyboard
-  focus also reveals it and touch always shows it.
-- **STUDIO-037** Desktop controls must preserve the compact target scale.
-  Touch controls must provide at least a 44×44px target.
+  focus also reveals it.
+- **STUDIO-037** Controls must preserve the compact desktop target scale.
 - **STUDIO-038** Panel reordering and docking must work with pointer drag and
   the documented keyboard alternatives.
-- **STUDIO-039** At mobile width, the status bar must keep connection, the most
-  consequential active state, and notifications visible without horizontal
-  page overflow.
+- **STUDIO-039** Studio is a strict desktop-only interface with a 1024
+  CSS-pixel minimum viewport. Product code must not add mobile or touch-specific
+  layouts, breakpoints, gestures, hit-target overrides, or alternate UI.
 - **STUDIO-040** Readiness language must never claim Ready when a blocker or
   missing dependency prevents the action.
 - **STUDIO-041** Pending actions must expose `aria-busy`, remain in place, and

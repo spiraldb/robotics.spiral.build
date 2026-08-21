@@ -85,7 +85,6 @@ spacing:
   xl: "16px"
   target: "24px"
   target-transport: "28px"
-  target-touch: "44px"
 components:
   action:
     backgroundColor: "transparent"
@@ -255,8 +254,7 @@ put reads as a bench tool.
   visible in its own row of the named camera column. Rollout narrows the
   workbench to 27% and replaces the Timeline slot with one low Inference lane.
 - Workflow uses a 30% Assistant/Node tab lane beside a right column with a
-  dominant lineage canvas above Results. It has its own layout scope and uses
-  the standard one-panel mobile switcher at narrow widths.
+  dominant lineage canvas above Results. It has its own layout scope.
 - One playhead synchronizes every representation of an episode.
 - Compact 12px type, 24px controls, 32px panel tabs, small radii, and hairlines.
 - Monospace tabular figures for elapsed time, rates, durations, counts, and IDs.
@@ -264,8 +262,8 @@ put reads as a bench tool.
   surrounding geometry.
 - Role blue marks active, selected, primary, and docking-preview states;
   semantic colour is reserved for real state.
-- Narrow screens replace the desktop tree with one horizontally selectable
-  panel at a time without discarding the saved desktop layout.
+- Studio is desktop-only at 1024 CSS pixels and wider. The persisted split tree
+  is always the rendered workspace; there is no alternate narrow-screen UI.
 
 ## Colors
 
@@ -311,7 +309,7 @@ small set of semantic, arm, axis, and signal accents.
 - **Paper** (`{colors.canvas}` / `{colors.surface}`): Shell, panel content,
   tabs at rest, cards, fields, settings, and notices.
 - **Recess** (`{colors.sunken}`): Inactive tab bars, grouped controls, compact
-  readout cells, and mobile switcher troughs.
+  readout cells, and grouped settings navigation.
 - **Pale Bench** (`{colors.viewport}`): WebGL and other visualization frames.
 - **Camera Mat** (`{colors.camera}`): Camera frames and camera-unavailable
   surfaces only.
@@ -465,15 +463,9 @@ execution inputs, and the primary Run policy action; on a tall workbench, that
 action area anchors to the bottom. Follower connection, calibration, and camera
 state read as one compact line; do not rebuild them as a readiness checklist.
 
-At 760px and below, the split tree is not squeezed into unusable slivers. A
-horizontally scrollable panel switcher presents one registered panel at a time;
-the desktop tree remains persisted and unchanged. At narrower widths, optional
-status facts may drop, but active recording, torque, blockers, and the control
-that stops motion remain reachable.
-
-At 480px and below, Rollout uses that same mobile panel switcher. Its execution
-fields stack into one column, the three essential inference metrics remain one
-compact strip, and interactive controls preserve 44px reachability.
+The Studio shell has a 1024 CSS-pixel minimum width. The panel tree, activity
+rail, settings navigation, status bar, and Rollout composition do not switch to
+an alternate mobile or touch layout below that boundary.
 
 ### Named Rules
 
@@ -485,9 +477,9 @@ or let one component mutate another tile’s tabs.
 signals, and replay share one playhead contract. Do not create a second timeline
 with different geometry or ownership.
 
-**The Nothing-Load-Bearing-Hidden Rule.** A breakpoint may reflow, switch,
-scroll, or reduce optional status. It may not hide an active recording, safety
-state, blocker, or stop/release control.
+**The Desktop-Only Rule.** Design and test the Studio at 1024 CSS pixels and
+wider with mouse, touchpad, and keyboard input. Do not add viewport breakpoints,
+mobile navigation, touch gestures, or touch-target overrides.
 
 **The Consequence-On-The-Page Rule.** Text describing energize, release, stop,
 discard, replay, or physical seek is rendered on the page, never only in a
@@ -534,9 +526,8 @@ StudioShell
 
 `StudioShell` owns the application frame. `ActivityRail` chooses the active
 activity and owns the bottom-anchored Settings entry. `PanelWorkspace` owns
-tabs, docking, splits, resizing, mobile panel switching, reconciliation, and
-session layout state. It does not know what an episode, camera, robot, query,
-or playhead means.
+tabs, docking, splits, resizing, reconciliation, and session layout state. It
+does not know what an episode, camera, robot, query, or playhead means.
 
 The workbench, primary visualization, camera panels, and evidence panel are
 peers in the panel registry even when the default layout places the workbench
@@ -733,7 +724,6 @@ reserved for an object that genuinely floats above the shell.
 
 - **Resting lift** (`0 1px 2px rgb(0 0 0 / 0.05)`): Small controls placed above
   a visualization, such as the view cube.
-- **Segment lift** (`0 1px 3px rgb(0 0 0 / 0.12)`): Active mobile panel tile.
 - **Dock preview lift** (`0 6px 18px rgb(0 0 0 / 0.08)`): The blue docking
   footprint while a tab is dragged.
 - **Dock compass lift** (`0 6px 18px rgb(0 0 0 / 0.12)`): The small floating
@@ -771,9 +761,8 @@ Every interactive action is an `Action`, `ActionLink`, `FileAction`,
 `ModeAction`, or `Toggle` from `spiral-robotics-ui`. Product code declares the
 verb first; visual presentation never changes the verb.
 
-- **Shape:** Compact rectangle, 4px radius, 24px desktop target, and 6px
-  horizontal padding. Prominent transport actions use 32px. Every touch target
-  is at least 44×44px.
+- **Shape:** Compact rectangle, 4px radius, 24px target, and 6px horizontal
+  padding. Prominent transport actions use 32px.
 - **Presentation:** Quiet, Outline, Solid, Link, Icon, Row, Tab, and Segment are
   presentation variants. A local surface may own geometry but not restate
   hover, focus, selected, disabled, pending, or destructive state.
@@ -818,7 +807,7 @@ verb first; visual presentation never changes the verb.
   use the shared blocking alert dialog. Native browser confirmation is not part
   of the language.
 - Hover may reveal a quiet trailing action only when the same action remains
-  keyboard-reachable and is always visible on touch.
+  keyboard-reachable.
 
 ### Chips
 
@@ -1003,9 +992,9 @@ Opening history never replaces or rewrites the new-run draft.
   uses measured facts, and SQL plus tensor mapping stays under one collapsed
   **Data query & tensors** disclosure. Data-path stages pair short noun labels
   with live values instead of architecture prose.
-- **Responsive:** At 760px and below, the shared panel switcher exposes control,
-  history, and opened runs one at a time. The selected run stacks loss, data
-  path, and throughput without hiding the tab history or consequential actions.
+- **Desktop composition:** The split tree keeps control, history, and opened run
+  panels simultaneously available; container queries may adapt evidence within
+  a user-resized panel without creating a viewport-specific application mode.
 
 **The Shared-Optimizer-Step Rule.** Any training view that plots, marks, or
 summarizes run progress keys that evidence to optimizer step so learning and
@@ -1043,9 +1032,8 @@ follower camera, and inference evidence remain the visual authority.
 - **Inference evidence:** The low lane exposes Latency, Model, and Misses as
   tabular metrics. Values remain em dashes and the lane says “No measurements
   yet” until backend measurements arrive; never draw synthetic timing traces.
-- **Responsive:** The desktop workbench begins at 27%. At 480px and below,
-  Rollout uses the shared mobile panel switcher, stacks fields, keeps the three
-  metrics in one compact strip, and preserves 44px interactive controls.
+- **Desktop composition:** The workbench begins at 27% beside Scene, follower
+  cameras, and the three-metric Inference lane.
 
 **The Fixed-Follower Rule.** Rollout never asks the operator to choose a motion
 target. It commands only the configured follower, and backend readiness—not
@@ -1111,9 +1099,8 @@ ambient browser selection—decides whether execution may begin.
 Settings is one full-height utility panel inside the Studio shell: category
 navigation at left, ordinary forms at right, header and footer fixed. It
 replaces the current activity workspace while leaving the activity rail and
-status bar available, and its navigation collapses to a horizontal row at
-narrow widths. Robots is the default section, followed by SpiralDB, Training,
-and Video. SpiralDB owns complete-project backup and destructive restore as a
+status bar available. Robots is the default section, followed by SpiralDB,
+Training, and Video. SpiralDB owns complete-project backup and destructive restore as a
 distinct `.spiral-project` transfer; restore alone uses the shared blocking
 dialog, requires explicit confirmation, and replaces all Studio-managed
 relations. Save failures, test results, and configuration blockers remain
@@ -1249,8 +1236,7 @@ another component only to rename it or copy shared mechanics.
   ID; carry the episode, stream, robot, or query identity in the action.
 - **Don't** animate split geometry while the pointer is dragging or keep panel
   entry animation under reduced motion.
-- **Don't** hide a consequential action, blocker, active recording, or torque
-  state at a breakpoint.
+- **Don't** introduce viewport breakpoints or alternate mobile/touch UI.
 - **Don't** use colour alone for status, traces, or docking intent.
 - **Don't** unfold live prose, encode episode quality in card size, or introduce
   diagnostic dashboards as the primary Data experience.
