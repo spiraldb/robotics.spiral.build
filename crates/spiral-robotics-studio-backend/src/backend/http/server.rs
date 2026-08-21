@@ -9,9 +9,6 @@ use std::sync::Arc;
 use crate::backend::http::routes::{self, AppState, BootstrapState};
 use crate::backend::recording::episodes::EpisodeStore;
 use crate::backend::robotics::cameras::CameraManager;
-use crate::backend::robotics::hardware::{
-    ControlSettings, DEFAULT_MAX_STEP_COUNTS, DEFAULT_TELEOP_MAX_STEP_COUNTS, HardwareHandle,
-};
 use crate::backend::robotics::video::VideoEncoderSettings;
 use crate::backend::robots::workspace::RobotWorkspace;
 use crate::backend::rollout::manager::RolloutManager;
@@ -25,6 +22,9 @@ use crate::backend::training::manager::TrainingManager;
 use crate::backend::training::remote::ConfiguredHttpTrainingBackend;
 use clap::Parser;
 use spiral_robotics::cameras;
+use spiral_robotics_studio_hardware::{
+    ControlSettings, DEFAULT_MAX_STEP_COUNTS, DEFAULT_TELEOP_MAX_STEP_COUNTS, HardwareHandle,
+};
 use tracing_subscriber::EnvFilter;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -283,7 +283,9 @@ async fn serve(
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let address = listener.local_addr()?;
 
-    println!("Spiral Robotics Studio is running at http://{address}");
+    let public_url =
+        std::env::var("SPIRAL_ROBOTICS_PUBLIC_URL").unwrap_or_else(|_| format!("http://{address}"));
+    println!("Spiral Robotics Studio is running at {public_url}");
 
     let bootstrap = tokio::spawn(bootstrap_services(state.clone(), !args.no_cameras));
     let video_monitor = tokio::spawn(routes::monitor_video_recording(state.clone()));

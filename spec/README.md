@@ -141,6 +141,8 @@ These rules apply to every feature:
 - HTTP handlers must translate requests, call use cases, and translate results.
 - Adapters may depend on application policy. Application policy must not import
   adapters.
+- Fixed-rate motor control must remain a separate compile-time boundary from
+  HTTP, persistence, camera, training, and model-runtime adapters.
 - Critical invariants must be enforced by core or application policy, not only
   by UI controls.
 - Pure feature tests must run without hardware, HTTP, SpiralDB, or a compute

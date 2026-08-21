@@ -554,24 +554,6 @@ pub(super) fn contract_query_result(result: ApplicationQueryResult) -> SpiralQue
     }
 }
 
-impl SpiralReplayPort for HardwareHandle {
-    async fn start_spiral_replay(
-        &self,
-        command: StartSpiralReplayCommand,
-        trajectory: SpiralReplayTrajectory,
-    ) -> Result<(), ApplicationError> {
-        HardwareHandle::start_replay(
-            self,
-            &command.robot,
-            &command.episode,
-            trajectory.frames,
-            trajectory.sample_hz,
-        )
-        .await
-        .map_err(ApplicationError::conflict)
-    }
-}
-
 fn data_settings_command(request: UpdateDataSettingsRequest) -> UpdateDataSettingsCommand {
     UpdateDataSettingsCommand {
         spiral_endpoint: request.spiral_endpoint,

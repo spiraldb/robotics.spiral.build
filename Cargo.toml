@@ -8,6 +8,8 @@ members = [
     "crates/spiral-robotics-studio",
     "crates/spiral-robotics-studio-application",
     "crates/spiral-robotics-studio-backend",
+    "crates/spiral-robotics-studio-dev",
+    "crates/spiral-robotics-studio-hardware",
     "training/contracts",
     "training/http-client",
     "crates/spiral-robotics-viewport",
@@ -28,6 +30,7 @@ spiral-robotics-inference = { path = "crates/spiral-robotics-inference", default
 spiral-robotics-panels = { path = "crates/spiral-robotics-panels" }
 spiral-robotics-ui = { path = "crates/spiral-robotics-ui" }
 spiral-robotics-studio-backend = { path = "crates/spiral-robotics-studio-backend" }
+spiral-robotics-studio-hardware = { path = "crates/spiral-robotics-studio-hardware" }
 spiral-robotics-studio-application = { path = "crates/spiral-robotics-studio-application" }
 spiral-robotics-training = { path = "training/contracts" }
 spiral-robotics-training-http = { path = "training/http-client" }

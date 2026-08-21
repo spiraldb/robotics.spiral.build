@@ -41,14 +41,13 @@ use spiral_robotics_contracts::api::{
     StudioSnapshot, TrainingPolicy as ContractTrainingPolicy, TrainingRun, TrainingSnapshot,
     UpdateDataSettingsRequest, UpdateRobotRequest, VideoSettings, default_teleoperation_pair,
 };
-use spiral_robotics_core::calibration::{Calibration, CalibrationInput, MotorSpec};
+use spiral_robotics_core::calibration::{Calibration, MotorSpec};
 
 use crate::backend::recording::episodes::{
     ArmCondition, EpisodeError, EpisodeInspection, EpisodeStore, EpisodeWriter, TimelineMetadata,
     TimelineSample, TimelineTraces, build_arms,
 };
 use crate::backend::robotics::cameras::{CameraManager, Frame};
-use crate::backend::robotics::hardware::{HardwareHandle, HardwareState, RobotSpec};
 use crate::backend::robotics::video::{
     CameraCaptureSpec, VideoAsset, VideoAssetMetadata, VideoCapture, VideoEncoderSettings,
 };
@@ -59,8 +58,8 @@ use crate::backend::storage::settings::BackendStateStore;
 use crate::backend::storage::settings::StudioPreferencesStore;
 use crate::backend::training::manager::TrainingManager;
 use spiral_robotics_studio_application::calibration::{
-    self, CalibrationControlPort, CalibrationHistoryActivity, CalibrationHistoryPort,
-    ReappliedPositions, RobotCalibrationRepository,
+    self, CalibrationHistoryActivity, CalibrationHistoryPort, ReappliedPositions,
+    RobotCalibrationRepository,
 };
 use spiral_robotics_studio_application::catalog_lease::{
     CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease,
@@ -69,7 +68,7 @@ use spiral_robotics_studio_application::data::{
     self as data_application, ConnectionCheck, DataCatalogPort, DataSettingsView,
     QueryColumn as ApplicationQueryColumn, QueryCommand, QueryResult as ApplicationQueryResult,
     QueryValue, ReplayTrajectory as SpiralReplayTrajectory, SpiralDestinationSettings,
-    SpiralReplayPort, StartSpiralReplayCommand, UpdateDataSettingsCommand, VideoAssetQuery,
+    StartSpiralReplayCommand, UpdateDataSettingsCommand, VideoAssetQuery,
 };
 use spiral_robotics_studio_application::device_discovery::{
     self as device_discovery, CameraDiscoveryPort, DiscoveredCamera, IdentifySerialPortCommand,
@@ -91,15 +90,13 @@ use spiral_robotics_studio_application::episodes::{
     EpisodeMutationResult, JudgeEpisodeCommand,
 };
 use spiral_robotics_studio_application::error::ApplicationError;
-use spiral_robotics_studio_application::mode_control::{self, ModeControlPort, OperatorMode};
+use spiral_robotics_studio_application::mode_control::{self, OperatorMode};
 use spiral_robotics_studio_application::recording::{
     self, RecordingContext, RecordingPort, RecordingResult, ReplayEpisode, ReplayPlan, ReplayPort,
     ReplayTrajectory, SetRecordingPausedCommand, SetReplayPausedCommand, StartRecordingCommand,
     StartReplayCommand, StopRecordingCommand, TeleoperationPair,
 };
-use spiral_robotics_studio_application::robot_control::{
-    self, RobotControlCommand, RobotControlPort,
-};
+use spiral_robotics_studio_application::robot_control::{self, RobotControlCommand};
 use spiral_robotics_studio_application::robots::{
     self, AutoConnectOutcome, AutoConnectStatus, CameraAssignment, CreateRobotCommand,
     ExportedRobotDocument, NewRobot, RobotConnectionPort, RobotConnectionSpec, RobotRepository,
@@ -119,6 +116,7 @@ use spiral_robotics_studio_application::training::{
     TrainingRunActivity, TrainingRunPhase as ApplicationTrainingRunPhase, TrainingRunStatus,
     TrainingSnapshot as ApplicationTrainingSnapshot, TrainingSource as ApplicationTrainingSource,
 };
+use spiral_robotics_studio_hardware::{HardwareHandle, HardwareState, RobotSpec};
 
 /// Boundary marker separating parts of an MJPEG response.
 const MJPEG_BOUNDARY: &str = "spiral-robotics-frame";

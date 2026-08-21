@@ -38,7 +38,9 @@ the intended source of truth.
   [`src`](../../src/)
 - SpiralDB robot repository:
   [`backend/robots`](../../crates/spiral-robotics-studio-backend/src/backend/robots/)
-- Hardware and camera adapters:
+- Fixed-rate motor control:
+  [`spiral-robotics-studio-hardware`](../../crates/spiral-robotics-studio-hardware/)
+- Camera and video adapters:
   [`backend/robotics`](../../crates/spiral-robotics-studio-backend/src/backend/robotics/)
 - Robot use cases:
   [`spiral-robotics-studio-application`](../../crates/spiral-robotics-studio-application/src/)

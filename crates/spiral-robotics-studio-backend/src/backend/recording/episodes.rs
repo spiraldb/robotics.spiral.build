@@ -15,6 +15,8 @@ use spiral_robotics_contracts::spiral::{Table, column as db};
 use spiral_robotics_core::arm::SO101_JOINTS;
 use spiral_robotics_core::calibration::{Calibration, normalize_centered_raw};
 pub(crate) use spiral_robotics_core::episode::MAX_EPISODE_FRAMES;
+use spiral_robotics_studio_hardware::RecordingWriter;
+pub(crate) use spiral_robotics_studio_hardware::{ArmConditionSummary, EpisodeCheckpoint, Sample};
 
 use crate::backend::recording::spiral::{
     SpiralEpisodeEncoder, episode_completion_batch, joint_samples_batch,
@@ -67,26 +69,6 @@ pub(crate) struct ArmCondition {
     pub temperature_celsius: Vec<Option<f64>>,
     pub voltage_volts: Vec<Option<f64>>,
     pub limits: Vec<MotorLimits>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub(crate) struct ArmConditionSummary {
-    pub arm: String,
-    pub peak_temperature_celsius: Vec<Option<f64>>,
-    pub min_voltage_volts: Vec<Option<f64>>,
-    pub peak_load: Vec<Option<f64>>,
-    pub peak_current_amps: Vec<Option<f64>>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct Sample {
-    pub seconds: f64,
-    pub normalized: Vec<Vec<Option<f64>>>,
-    pub raw: Vec<Vec<i64>>,
-    pub follow_error_degrees: Option<f64>,
-    pub velocity: Option<Vec<Vec<Option<f64>>>>,
-    pub effort: Option<Vec<Vec<Option<f64>>>>,
-    pub action: Vec<Option<Vec<Option<f64>>>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -762,8 +744,6 @@ pub(crate) trait EpisodeWriteSession: Send {
     ) -> Result<EpisodeSummary, EpisodeError>;
 }
 
-pub(crate) type EpisodeCheckpoint = tokio::sync::oneshot::Receiver<Result<(), String>>;
-
 pub(crate) struct EpisodeWriter {
     session: Box<dyn EpisodeWriteSession>,
 }
@@ -852,6 +832,59 @@ impl EpisodeWriter {
             discarded,
             condition,
         })
+    }
+}
+
+impl RecordingWriter for EpisodeWriter {
+    fn id(&self) -> &str {
+        EpisodeWriter::id(self)
+    }
+
+    fn dataset_id(&self) -> &str {
+        EpisodeWriter::dataset_id(self)
+    }
+
+    fn push(&self, sample: Sample) -> bool {
+        EpisodeWriter::push(self, sample)
+    }
+
+    fn checkpoint(
+        &self,
+        duration_seconds: f64,
+        recording_gaps: Vec<RecordingGap>,
+        max_follow_error_degrees: Option<f64>,
+        condition: Vec<ArmConditionSummary>,
+    ) -> Result<EpisodeCheckpoint, String> {
+        EpisodeWriter::checkpoint(
+            self,
+            duration_seconds,
+            recording_gaps,
+            max_follow_error_degrees,
+            condition,
+        )
+    }
+
+    fn failure(&self) -> Option<String> {
+        EpisodeWriter::failure(self)
+    }
+
+    fn finish(
+        self: Box<Self>,
+        duration_seconds: f64,
+        recording_gaps: Vec<RecordingGap>,
+        max_follow_error_degrees: Option<f64>,
+        discarded: bool,
+        condition: Vec<ArmConditionSummary>,
+    ) -> Result<EpisodeSummary, String> {
+        EpisodeWriter::finish(
+            *self,
+            duration_seconds,
+            recording_gaps,
+            max_follow_error_degrees,
+            discarded,
+            condition,
+        )
+        .map_err(|error| error.to_string())
     }
 }
 

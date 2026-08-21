@@ -1,0 +1,10 @@
+[package]
+name = "spiral-robotics-studio-dev"
+version.workspace = true
+edition.workspace = true
+description = "Target-aware development supervisor for Spiral Robotics Studio"
+publish = false
+
+[[bin]]
+name = "spiral-robotics-studio-dev"
+path = "src/main.rs"

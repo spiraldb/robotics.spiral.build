@@ -361,50 +361,6 @@ impl RobotConnectionPort for RobotHttpAdapter<'_> {
     }
 }
 
-impl RobotControlPort for HardwareHandle {
-    async fn hold(&self, robot: &str) -> Result<(), String> {
-        HardwareHandle::hold(self, robot).await
-    }
-
-    async fn release(&self, robot: &str) -> Result<(), String> {
-        HardwareHandle::release(self, robot).await
-    }
-
-    async fn set_joint_goals(
-        &self,
-        robot: &str,
-        normalized: std::collections::BTreeMap<
-            String,
-            spiral_robotics_core::calibration::NormalizedPosition,
-        >,
-    ) -> Result<(), String> {
-        HardwareHandle::set_goals(
-            self,
-            robot,
-            normalized
-                .into_iter()
-                .map(|(joint, value)| (joint, value.get()))
-                .collect(),
-        )
-        .await
-    }
-}
-
-impl ModeControlPort for HardwareHandle {
-    async fn set_operator_mode(&self, mode: OperatorMode) -> Result<(), ApplicationError> {
-        let selection = match mode {
-            OperatorMode::Idle => ModeSelection::Idle,
-            OperatorMode::Manual { robot } => ModeSelection::Manual { robot },
-            OperatorMode::Teleoperate { leader, follower } => {
-                ModeSelection::Teleoperate { leader, follower }
-            }
-        };
-        HardwareHandle::set_mode(self, selection)
-            .await
-            .map_err(ApplicationError::conflict)
-    }
-}
-
 impl RobotCalibrationRepository for RobotWorkspace {
     fn motor_specs(&self, robot: &str) -> Result<BTreeMap<String, MotorSpec>, ApplicationError> {
         self.get(robot)
@@ -421,36 +377,6 @@ impl RobotCalibrationRepository for RobotWorkspace {
         RobotWorkspace::save_calibration(self, robot, motors, calibration)
             .map(|_| ())
             .map_err(workspace_application_error)
-    }
-}
-
-impl CalibrationControlPort for HardwareHandle {
-    async fn start_calibration(&self, robot: &str) -> Result<(), ApplicationError> {
-        HardwareHandle::start_calibration(self, robot)
-            .await
-            .map_err(ApplicationError::conflict)
-    }
-
-    async fn calibration_input(&self, robot: &str) -> Result<CalibrationInput, ApplicationError> {
-        HardwareHandle::calibration_input(self, robot)
-            .await
-            .map_err(ApplicationError::conflict)
-    }
-
-    async fn cancel_calibration(&self, robot: &str) -> Result<(), ApplicationError> {
-        HardwareHandle::cancel_calibration(self, robot)
-            .await
-            .map_err(ApplicationError::conflict)
-    }
-
-    async fn apply_calibration(
-        &self,
-        robot: &str,
-        calibration: Calibration,
-    ) -> Result<(), ApplicationError> {
-        HardwareHandle::apply_calibration(self, robot, calibration)
-            .await
-            .map_err(ApplicationError::conflict)
     }
 }
 

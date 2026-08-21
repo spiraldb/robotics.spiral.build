@@ -21,7 +21,6 @@ use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
 
 use crate::backend::adapters::clock::SystemClock;
 use crate::backend::robotics::cameras::{CameraManager, Frame};
-use crate::backend::robotics::hardware::{HardwareHandle, HardwareState};
 use crate::backend::robots::workspace::RobotWorkspace;
 use crate::backend::storage::manager::StorageManager;
 use crate::backend::storage::settings::StudioPreferencesStore;
@@ -39,6 +38,7 @@ use spiral_robotics_studio_application::rollout::{
     CompletionReason, ControlDecision, ExecutionOutcome, RolloutCoordinator, RolloutEventPort,
     RolloutMetrics, RolloutPhase, RolloutRequest, RolloutSnapshot,
 };
+use spiral_robotics_studio_hardware::{HardwareHandle, HardwareState};
 
 const INPUT_STALE_AFTER: Duration = Duration::from_millis(350);
 const INITIAL_CAMERA_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1288,7 +1288,6 @@ mod tests {
         spawn_inference, stop_and_join_active, take_active_rollout, validate_manifest,
         wait_for_policy_admission,
     };
-    use crate::backend::robotics::hardware::HardwareState;
     use bytes::Bytes;
     use spiral_robotics_contracts::api::{ModeSelection, ModeStatus, StartRolloutRequest};
     use spiral_robotics_inference::{
@@ -1302,6 +1301,7 @@ mod tests {
         ACT_ARTIFACT_FORMAT, ACT_TENSOR_NAMESPACE, CameraBindingContract, PolicyDataContract,
         PolicyModelContract, TargetRobotContract, validate_rollout_contract,
     };
+    use spiral_robotics_studio_hardware::HardwareState;
     use std::sync::{Arc, Mutex, mpsc};
     use std::time::{Duration, Instant};
 

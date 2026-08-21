@@ -9962,6 +9962,7 @@ dependencies = [
  "spiral-robotics-core",
  "spiral-robotics-inference",
  "spiral-robotics-studio-application",
+ "spiral-robotics-studio-hardware",
  "spiral-robotics-training",
  "spiral-robotics-training-http",
  "tempfile",
@@ -9971,6 +9972,23 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "spiral-robotics-studio-dev"
+version = "0.1.0"
+
+[[package]]
+name = "spiral-robotics-studio-hardware"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "spiral-robotics 0.1.0",
+ "spiral-robotics-contracts",
+ "spiral-robotics-core",
+ "spiral-robotics-studio-application",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

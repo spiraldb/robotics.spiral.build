@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+# Build the tiny supervisor first, then launch it after Cargo exits. In
+# particular, this keeps Cargo's temporary dynamic-library search path out of
+# the nested native builds performed by the supervisor.
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+workspace_root=$(dirname -- "$script_dir")
+
+cd "$workspace_root"
+cargo build --release --package spiral-robotics-studio-dev
+exec "$workspace_root/target/release/spiral-robotics-studio-dev" "$@"

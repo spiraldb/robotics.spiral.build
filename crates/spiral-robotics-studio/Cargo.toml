@@ -6,7 +6,8 @@ description = "Web studio for setting up, calibrating, and operating SO-ARM101 a
 publish = false
 
 [features]
-default = []
+default = ["fullstack"]
+fullstack = ["dioxus/fullstack"]
 web = ["charming/wasm", "dioxus/web", "spiral-robotics-panels/web", "spiral-robotics-ui/web"]
 server = [
     "dioxus/cli-config",
@@ -25,7 +26,6 @@ spiral-robotics-viewport.workspace = true
 dioxus = { workspace = true, features = [
     "asset",
     "document",
-    "fullstack",
     "hooks",
     "html",
     "launch",

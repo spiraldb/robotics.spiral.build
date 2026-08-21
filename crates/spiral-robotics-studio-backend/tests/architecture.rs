@@ -65,6 +65,43 @@ fn application_policy_is_a_separate_compile_time_boundary() {
         );
     }
 }
+
+#[test]
+fn fixed_rate_hardware_is_a_separate_compile_time_boundary() {
+    let backend = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let hardware = backend
+        .parent()
+        .expect("workspace crates directory")
+        .join("spiral-robotics-studio-hardware");
+    assert!(hardware.join("src/lib.rs").is_file());
+    assert!(
+        !backend.join("src/backend/robotics/hardware.rs").exists(),
+        "fixed-rate motor control must not drift back into the delivery crate"
+    );
+
+    let manifest = fs::read_to_string(hardware.join("Cargo.toml")).expect("hardware manifest");
+    for forbidden in [
+        "spiral-robotics-studio-backend",
+        "axum",
+        "dioxus",
+        "adbc",
+        "arrow",
+        "spiral-robotics-inference",
+        "spiral-robotics-training",
+    ] {
+        assert!(
+            !declares_local_dependency(&manifest, forbidden),
+            "hardware crate depends on outward detail {forbidden:?}"
+        );
+    }
+
+    let backend_manifest =
+        fs::read_to_string(backend.join("Cargo.toml")).expect("backend manifest");
+    assert!(
+        declares_local_dependency(&backend_manifest, "spiral-robotics-studio-hardware"),
+        "the backend must compose the hardware crate through Cargo"
+    );
+}
 #[test]
 fn read_controllers_delegate_selection_and_admission_to_application_use_cases() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/backend/http");
