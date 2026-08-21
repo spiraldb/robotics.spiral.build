@@ -7,12 +7,13 @@
 
 use spiral_robotics_contracts::api::{EpisodeSummary, RecordingProgress};
 
-/// The Studio's four primary activities.
+/// The Studio's five primary activities.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum Activity {
     #[default]
     Live,
     Data,
+    Workflow,
     Training,
     Rollout,
 }
@@ -22,6 +23,7 @@ impl Activity {
         match self {
             Self::Live => "Live",
             Self::Data => "Data",
+            Self::Workflow => "Workflow",
             Self::Training => "Training",
             Self::Rollout => "Rollout",
         }
@@ -54,6 +56,9 @@ impl TimelineSubject {
         let reason = match activity {
             Activity::Live => "Record an episode to begin using the shared clock.",
             Activity::Data => "Select an episode to inspect its shared clock.",
+            Activity::Workflow => {
+                "Workflow lineage uses Spiral relations instead of the episode clock."
+            }
             Activity::Training => {
                 "Training metrics use optimization steps instead of the episode clock."
             }
@@ -209,6 +214,12 @@ impl ActivityProjection {
                 },
             },
             Activity::Training => Self {
+                activity,
+                primary: PrimaryVisualization::EmptyEpisodes,
+                cameras: CameraRegistrySource::None,
+                timeline: TimelineSubject::empty(activity),
+            },
+            Activity::Workflow => Self {
                 activity,
                 primary: PrimaryVisualization::EmptyEpisodes,
                 cameras: CameraRegistrySource::None,
@@ -393,6 +404,21 @@ mod tests {
             projection.timeline,
             TimelineSubject::Empty {
                 activity: Activity::Rollout,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn workflow_is_a_relation_workspace_without_episode_projection() {
+        let projection = ActivityProjection::derive(Activity::Workflow, None, None);
+        assert_eq!(projection.activity, Activity::Workflow);
+        assert_eq!(projection.primary, PrimaryVisualization::EmptyEpisodes);
+        assert_eq!(projection.cameras, CameraRegistrySource::None);
+        assert!(matches!(
+            projection.timeline,
+            TimelineSubject::Empty {
+                activity: Activity::Workflow,
                 ..
             }
         ));

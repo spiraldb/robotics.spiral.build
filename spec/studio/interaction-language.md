@@ -3,8 +3,8 @@
 ## Outcome
 
 Studio uses one interaction language across the shell, docked panels, Live,
-Data, Training, Rollout, and Settings. A user can predict an action's meaning,
-location, state, confirmation, and focus behavior from its verb.
+Data, Workflow, Training, Rollout, and Settings. A user can predict an action's
+meaning, location, state, confirmation, and focus behavior from its verb.
 
 ## Action grammar
 
@@ -21,6 +21,7 @@ location, state, confirmation, and focus behavior from its verb.
 | Replace | Overwrite an existing scope. |
 | Hold / Teleoperate / Release | Change physical motor control; Release turns torque off. |
 | Sync | Reconcile clocks or state. |
+| Fit | Frame the current spatial contents inside their viewport. |
 | Retry / Refresh | Repeat failed work or reload current state. |
 
 Start, Stop, Cancel, Import, Export, Navigate, Select, and Toggle keep their
@@ -116,6 +117,10 @@ browser confirmation dialogs.
 - **STUDIO-057** A Settings save or connection-test failure must remain visible
   in the owning Settings panel beside its retry and exit actions; a transient
   status-bar message may supplement it but must not be its only presentation.
+- **STUDIO-063** Workflow node selection must use the shared selected and focus
+  states, support pointer activation plus Enter or Space from keyboard focus,
+  and open the Node inspector only after explicit selection. Initial rendering
+  must leave Assistant active.
 
 ## Implementation ownership
 

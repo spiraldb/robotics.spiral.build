@@ -211,10 +211,11 @@ make it feel like a precise bench utility rather than a dashboard. Camera pixels
 alone keep a dark mat for honest letterboxing; application chrome never changes
 visual worlds when the operator changes tasks.
 
-The Studio has four primary activities: **Live** for operating hardware and
-recording, **Data** for episodes and query, **Training** for configuring and
-observing policy runs, and **Rollout** for staging a trained checkpoint against
-the configured follower. Everything else is a panel. A
+The Studio has five primary activities: **Live** for operating hardware and
+recording, **Data** for episodes and query, **Workflow** for deriving and
+querying Spiral relations, **Training** for configuring and observing policy
+runs, and **Rollout** for staging a trained checkpoint against the configured
+follower. Everything else is a panel. A
 reusable tab-and-tile system lets the operator attach a panel as a tab, split a
 tile, resize the result, or move it with the keyboard. This borrows VS Code’s
 learned spatial grammar without importing its visual weight: the layout is
@@ -245,7 +246,7 @@ put reads as a bench tool.
 
 - One light neutral world across activity rail, panels, WebGL, plots,
   Timeline, settings, and status bar; camera pixels alone use the dark mat.
-- Live, Data, Training, and Rollout are the primary activities; independent
+- Live, Data, Workflow, Training, and Rollout are the primary activities; independent
   content registers as panels instead of growing one-off shell regions.
 - A session-owned tab-and-tile workspace supports docking, tabbing, splitting,
   resizing, keyboard operation, and hot-plugged panel reconciliation.
@@ -253,6 +254,9 @@ put reads as a bench tool.
   two-thirds visualization, with Timeline in the lower 42% and each camera
   visible in its own row of the named camera column. Rollout narrows the
   workbench to 27% and replaces the Timeline slot with one low Inference lane.
+- Workflow uses a 30% Assistant/Node tab lane beside a right column with a
+  dominant lineage canvas above Results. It has its own layout scope and uses
+  the standard one-panel mobile switcher at narrow widths.
 - One playhead synchronizes every representation of an episode.
 - Compact 12px type, 24px controls, 32px panel tabs, small radii, and hairlines.
 - Monospace tabular figures for elapsed time, rates, durations, counts, and IDs.
@@ -388,17 +392,18 @@ tracked kickers, decorative display faces, or all-caps panel titles.
 
 The first viewport is a full-height application shell:
 
-- a 60px activity rail spanning the body, with Live/Data/Training/Rollout at the
-  top and Settings anchored at the bottom;
+- a 60px activity rail spanning the body, with
+  Live/Data/Workflow/Training/Rollout at the top and Settings anchored at the
+  bottom;
 - the remaining body area owned by one `PanelWorkspace`, without a separate top
   menu row;
 - a 20px bottom status bar for connection, environment, activity, recording,
   torque, rate, and issues;
 - transient notices floating above the shell rather than inserting a new row.
 
-Live, Data, Training, and Rollout are activity changes, not panel tabs. Each
-activity registers its own panel set and uses an independent session layout
-scope. Switching activity therefore changes both the operating
+Live, Data, Workflow, Training, and Rollout are activity changes, not panel
+tabs. Each activity registers its own panel set and uses an independent session
+layout scope. Switching activity therefore changes both the operating
 content and its visualization without moving Live camera tabs into Data, or
 vice versa.
 
@@ -852,9 +857,9 @@ This is the signature component system.
 ### Application Chrome
 
 - **Activity rail:** 60px wide on desktop and the only global navigation
-  surface. Live, Data, Training, and Rollout stay at the top; Settings stays at
-  the bottom. Active activities use blue ink, a paper surface, and a 2px left
-  edge. There is no separate top menu.
+  surface. Live, Data, Workflow, Training, and Rollout stay at the top, in that
+  order; Settings stays at the bottom. Active activities use blue ink, a paper
+  surface, and a 2px left edge. There is no separate top menu.
 - **Status bar:** 20px, 10px type, hairline-separated facts. It owns global
   connection, environment, current activity, recording, holding, rate, and
   issue truth.
@@ -874,6 +879,26 @@ This is the signature component system.
   state. Live does not repeat them as a camera list under joint controls.
 - **Setup:** Lives in Settings → Robots. Ports, camera assignment, calibration,
   import/export, and deletion do not compete with active motor control.
+
+### Workflow Canvas
+
+- **Relation-first boundary:** Workflow begins with qualified Spiral Table
+  relations. Hugging Face datasets, MCAP files, and other external sources are
+  import producers owned elsewhere; they never appear as Workflow nodes or
+  controls. One import may produce several Table roots.
+- **Node grammar:** Table, Model, Query, and Result are the only node kinds.
+  Model cards name their server-derived output relation. Query cards read
+  upstream relations, and Result is terminal.
+- **Card:** Paper surface, one-pixel hairline, 4px radius, 12px sentence-case
+  title, 10–11px detail, and a reserved footer for semantic state. Selection is
+  a role-blue inset ring and must remain legible without relying on colour.
+- **Canvas:** Pale viewport surface with a subtle dot grid, thin graphite
+  lineage edges, no MiniMap, and a typed Fit action. `--df-*` values map to the
+  existing `--tone-*` roles rather than forming a second palette.
+- **Stage-1 truth:** Assistant and Results explicitly identify their disconnected
+  scaffold state. The canvas says Static draft and exposes no Run or persistence
+  action. Pointer selection or Enter/Space from a focused node opens the Node
+  inspector; initial rendering leaves Assistant active.
 
 ### Timeline
 
@@ -1137,9 +1162,13 @@ another component only to rename it or copy shared mechanics.
 - **Do** render exceptional status only when it helps the operator act.
 - **Do** put disabled-action reasons and physical consequences on the page.
 - **Do** move robot and destination configuration into Settings.
-- **Do** keep Live, Data, Training, and Rollout layout state independent, and
+- **Do** keep Live, Data, Workflow, Training, and Rollout layout state independent, and
   keep episode selection and camera ownership activity-scoped so switching
   cannot move content between them.
+- **Do** make Workflow relation-first: multiple Spiral Table roots may converge
+  through Model and Query nodes, and each Model owns a visible derived relation.
+- **Do** keep disconnected Workflow capabilities visually and verbally inert;
+  empty Assistant and Results states must not imply execution or saved output.
 - **Do** route workbench, Timeline, panel-focus, and backend events through one
   activity controller that derives the complete visible projection.
 - **Do** represent Live, Recorded Loading, Recorded Ready, Recorded Unavailable,
@@ -1173,8 +1202,12 @@ another component only to rename it or copy shared mechanics.
 - **Don't** name product components or local CSS classes after native
   presentation such as `Button`; name the action's domain intent or the layout
   responsibility.
-- **Don't** turn every tool into primary navigation. Live, Data, Training, and
-  Rollout are activities; panel tabs are spatial grouping inside them.
+- **Don't** turn every tool into primary navigation. Live, Data, Workflow,
+  Training, and Rollout are activities; panel tabs are spatial grouping inside
+  them.
+- **Don't** put Hugging Face, MCAP, URLs, repository selectors, or import
+  controls on the Workflow canvas. Import into Spiral first, then read the
+  resulting Table relations.
 - **Don't** let a Data action mutate Live camera tabs, or derive recorded camera
   tabs from current hardware assignment.
 - **Don't** duplicate a camera stream merely because its panel moved or another

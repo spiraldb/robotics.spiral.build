@@ -15,6 +15,8 @@ use crate::frontend::screens::rollout::state::use_rollout_controller;
 use crate::frontend::screens::settings::panel::SettingsPanel;
 use crate::frontend::screens::training::state::use_training_controller;
 use crate::frontend::screens::training::workspace::TrainingWorkspace;
+use crate::frontend::screens::workflow::state::use_workflow_controller;
+use crate::frontend::screens::workflow::workspace::WorkflowWorkspace;
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
 const ECHARTS_RUNTIME: &str = "https://cdn.jsdelivr.net/npm/echarts@6.1.0/dist/echarts.min.js";
@@ -28,6 +30,8 @@ pub(crate) enum StudioRoute {
     Live {},
     #[route("/data")]
     Data {},
+    #[route("/workflow")]
+    Workflow {},
     #[route("/training")]
     Training {},
     #[route("/rollout")]
@@ -39,6 +43,7 @@ impl StudioRoute {
         match self {
             Self::Live {} => Activity::Live,
             Self::Data {} => Activity::Data,
+            Self::Workflow {} => Activity::Workflow,
             Self::Training {} => Activity::Training,
             Self::Rollout {} => Activity::Rollout,
         }
@@ -48,6 +53,7 @@ impl StudioRoute {
         match activity {
             Activity::Live => Self::Live {},
             Activity::Data => Self::Data {},
+            Activity::Workflow => Self::Workflow {},
             Activity::Training => Self::Training {},
             Activity::Rollout => Self::Rollout {},
         }
@@ -119,6 +125,7 @@ fn StudioShell() -> Element {
 
     let selected_dataset = studio.selected_dataset.read().clone();
     use_data_controller(&configuration.dataset, &selected_dataset);
+    use_workflow_controller();
     use_training_controller(
         &configuration.dataset,
         &selected_dataset,
@@ -222,6 +229,11 @@ fn Data() -> Element {
 }
 
 #[component]
+fn Workflow() -> Element {
+    rsx! { WorkflowWorkspace {} }
+}
+
+#[component]
 fn Training() -> Element {
     rsx! { TrainingWorkspace {} }
 }
@@ -239,6 +251,7 @@ mod tests {
     fn every_primary_screen_has_a_stable_route() {
         assert_eq!(StudioRoute::Live {}.to_string(), "/live");
         assert_eq!(StudioRoute::Data {}.to_string(), "/data");
+        assert_eq!(StudioRoute::Workflow {}.to_string(), "/workflow");
         assert_eq!(StudioRoute::Training {}.to_string(), "/training");
         assert_eq!(StudioRoute::Rollout {}.to_string(), "/rollout");
     }

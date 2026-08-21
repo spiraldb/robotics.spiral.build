@@ -8,6 +8,7 @@ use crate::frontend::app::activity::Activity;
 use crate::frontend::app::notifications::MessageAction;
 use crate::frontend::components::icons::{
     DataIcon, NotificationIcon, RobotPanelIcon, RolloutIcon, SettingsIcon, TrainingIcon,
+    WorkflowIcon,
 };
 
 #[component]
@@ -36,6 +37,15 @@ pub(crate) fn ActivityRail(
                 onclick: move |_| on_activity.call(Activity::Data),
                 DataIcon {}
                 span { "Data" }
+            }
+            Action {
+                purpose: ActionPurpose::Navigate,
+                variant: ActionVariant::Row,
+                class: if !settings_active && activity == Activity::Workflow { "activity-rail-item activity-rail-item-active" } else { "activity-rail-item" },
+                aria_pressed: !settings_active && activity == Activity::Workflow,
+                onclick: move |_| on_activity.call(Activity::Workflow),
+                WorkflowIcon {}
+                span { "Workflow" }
             }
             Action {
                 purpose: ActionPurpose::Navigate,
@@ -86,7 +96,9 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
             BackendReadinessState::Bootstrapping => {
                 ("Starting…", "background: var(--tone-caution)")
             }
-            BackendReadinessState::Ready if mode != Activity::Training && !connected => {
+            BackendReadinessState::Ready
+                if !matches!(mode, Activity::Training | Activity::Workflow) && !connected =>
+            {
                 ("Reconnecting", "background: var(--tone-danger)")
             }
             BackendReadinessState::Ready => ("Connected", "background: var(--tone-good)"),
@@ -144,6 +156,8 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
             },
             false,
         )
+    } else if mode == Activity::Workflow {
+        ("Workflow draft".to_owned(), false)
     } else if let Some(recording) = recording_label.as_ref() {
         (recording.clone(), true)
     } else if holding > 0 {
@@ -297,6 +311,32 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                     if let Some(step) = training_step { span { class: "status-bar-item", "{step}" } }
                     span { class: "status-bar-item", "{training_problems_label}" }
                     span { class: "status-bar-mobile-state", title: "{mobile_state}", "{mobile_state}" }
+                    NotificationTrigger { unread, open: center_open }
+                }
+            }
+        } else if mode == Activity::Workflow {
+            footer { class: "studio-status-bar",
+                div { class: "status-bar-group",
+                    span { class: "status-bar-item",
+                        title: "{snapshot.readiness.detail}",
+                        span { class: "status-dot", style: service_style }
+                        "{service_label}"
+                    }
+                    span { class: "status-bar-item", "Spiral relations" }
+                    span { class: "status-bar-item", "Static draft" }
+                }
+                if let Some(message) = latest.clone() {
+                    span {
+                        class: "status-bar-message {message.severity.class_name()}",
+                        title: "{message.text}",
+                        role: if message.severity == crate::frontend::app::notifications::MessageSeverity::Error { "alert" } else { "status" },
+                        "aria-live": if message.severity == crate::frontend::app::notifications::MessageSeverity::Error { "assertive" } else { "polite" },
+                        "{message.text}"
+                    }
+                }
+                div { class: "status-bar-group status-bar-group-right",
+                    span { class: "status-bar-item status-bar-accent", "5 nodes · 4 connections" }
+                    span { class: "status-bar-mobile-state status-bar-accent", title: "{mobile_state}", "{mobile_state}" }
                     NotificationTrigger { unread, open: center_open }
                 }
             }

@@ -176,3 +176,45 @@ fn activity_rail_actions_center_their_vertical_content() {
         "activity labels should remain centered under their icons",
     );
 }
+
+#[test]
+fn workflow_language_stays_relation_first_and_truthful() {
+    let studio = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let shell = fs::read_to_string(studio.join("src/frontend/app/shell.rs"))
+        .expect("activity rail source should be readable");
+    let workflow = fs::read_to_string(studio.join("src/frontend/screens/workflow/workspace.rs"))
+        .expect("workflow source should be readable");
+
+    let data = shell
+        .find("onclick: move |_| on_activity.call(Activity::Data)")
+        .expect("Data should be registered in the rail");
+    let workflow_position = shell
+        .find("onclick: move |_| on_activity.call(Activity::Workflow)")
+        .expect("Workflow should be registered in the rail");
+    let training = shell
+        .find("onclick: move |_| on_activity.call(Activity::Training)")
+        .expect("Training should be registered in the rail");
+    assert!(
+        data < workflow_position && workflow_position < training,
+        "Workflow belongs beside Data and before Training",
+    );
+
+    for expected in [
+        "Static draft",
+        "Agent turns are not connected in this scaffold.",
+        "Execution is not connected in this scaffold.",
+        "Workflow nodes always name Spiral relations.",
+        "workflow.siglip_scores",
+    ] {
+        assert!(
+            workflow.contains(expected),
+            "the Workflow scaffold should state {expected:?}",
+        );
+    }
+    for external_source_node in ["Hugging Face", "MCAP node", "Source node"] {
+        assert!(
+            !workflow.contains(external_source_node),
+            "external import producers do not belong on the Workflow canvas: {external_source_node}",
+        );
+    }
+}

@@ -662,7 +662,9 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             .with_class("rollout-inference-editor");
             crate::frontend::screens::rollout::screen::compose(workbench, dock_panels, inference)
         }
-        Activity::Training => unreachable!("Training owns a separate route workspace"),
+        Activity::Training | Activity::Workflow => {
+            unreachable!("Training and Workflow own separate route workspaces")
+        }
     };
     let registered_panels = definition.panels;
     let panel_roles = registered_panels
@@ -785,7 +787,7 @@ fn visible_timeline_episode(studio: Studio, activity: Activity) -> Option<String
     match activity {
         Activity::Live => studio.recording().map(|recording| recording.episode),
         Activity::Data => studio.selected_episode.peek().clone(),
-        Activity::Training | Activity::Rollout => None,
+        Activity::Workflow | Activity::Training | Activity::Rollout => None,
     }
 }
 

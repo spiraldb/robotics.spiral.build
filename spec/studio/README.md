@@ -3,14 +3,15 @@
 ## Outcome
 
 Studio gives an ML engineer one stable browser workspace centered on the
-project's robot data: Data is the home, Live produces episodes, and Training
-and Rollout consume them. It keeps feature ownership clear while allowing
-visualization panels to be arranged spatially.
+project's robot data: Data is the home, Live produces episodes, Workflow reads
+and derives Spiral relations, and Training and Rollout consume them. It keeps
+feature ownership clear while allowing visualization panels to be arranged
+spatially.
 
 ## User flow
 
-1. The user opens Studio in Data, or selects Data, Live, Training, or Rollout
-   from the activity rail.
+1. The user opens Studio in Data, or selects Data, Live, Workflow, Training, or
+   Rollout from the activity rail.
 2. The selected feature route restores its own workspace.
 3. The user arranges the panels needed for the task.
 4. The status bar and notification center report global state without moving
@@ -23,7 +24,8 @@ visualization panels to be arranged spatially.
 
 ## Routes and global shell
 
-- **STUDIO-001** Live, Data, Training, and Rollout must each have a stable URL.
+- **STUDIO-001** Live, Data, Workflow, Training, and Rollout must each have a
+  stable URL.
 - **STUDIO-002** Each route must own its semantic state, panels, and layout.
 - **STUDIO-003** A route change must update every data-driven visualization to
   the selected feature's source.
@@ -108,6 +110,17 @@ visualization panels to be arranged spatially.
   It must retain its section navigation, fixed action footer, the activity rail,
   and the status bar at desktop and narrow widths. A scope-wide destructive
   confirmation opened from Settings may still use the shared blocking dialog.
+- **STUDIO-060** Workflow must appear adjacent to Data and before Training in
+  the activity rail. Its canvas consumes qualified Spiral relations only;
+  Hugging Face, MCAP, and other import producers belong outside Workflow. One
+  import may materialize multiple Spiral relations and therefore multiple
+  Workflow Table roots.
+- **STUDIO-061** Workflow must own an independent four-panel layout scope:
+  Assistant and Node tabbed in a 30% left lane, Workflow above Results in the
+  right lane, and the standard single-panel switcher at mobile width.
+- **STUDIO-062** Until execution and agent transports exist, Workflow must
+  identify its graph as a static draft, keep Assistant and Results in explicit
+  scaffold states, and expose no control that implies a run or durable write.
 
 ## Feature relationships
 
@@ -118,6 +131,8 @@ visualization panels to be arranged spatially.
 - Data composes the [episode catalog](../data/README.md),
   [Timeline and replay](../data/timeline-and-replay.md), and
   [SQL query](../data/query.md).
+- Workflow composes the relation-first
+  [agentic enrichment workbench](../workflow.md).
 - Training and Rollout share the [policy runtime](../training/runtime.md).
 
 ## Implementation ownership

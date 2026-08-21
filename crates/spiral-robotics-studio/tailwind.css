@@ -1338,6 +1338,319 @@
 }
 
 @layer components {
+  /* Workflow -----------------------------------------------------------
+     A relation lineage bench, not an external-source builder. The canvas is
+     the working surface; Assistant and Node share the narrow reading rail and
+     Results keeps a reserved evidence lane without pretending a run exists. */
+  .workflow-assistant-editor,
+  .workflow-node-editor,
+  .workflow-canvas-editor,
+  .workflow-results-editor {
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .workflow-assistant,
+  .workflow-inspector,
+  .workflow-results,
+  .workflow-canvas {
+    @apply h-full min-h-0 w-full min-w-0 bg-surface text-ink;
+  }
+
+  .workflow-assistant {
+    @apply flex flex-col;
+  }
+
+  .workflow-assistant-scroll {
+    @apply min-h-0 flex-1 overflow-y-auto;
+  }
+
+  .workflow-assistant-intro {
+    @apply border-b border-line px-4 py-4;
+  }
+
+  .workflow-assistant-intro h2,
+  .workflow-inspector-heading h2 {
+    @apply text-xs font-semibold tracking-[-0.01em];
+  }
+
+  .workflow-assistant-intro p,
+  .workflow-inspector-heading p {
+    @apply mt-1.5 text-[11px] leading-[1.55] text-ink-soft;
+  }
+
+  .workflow-example-prompt,
+  .workflow-assistant-plan {
+    @apply border-b border-line px-4 py-4;
+  }
+
+  .workflow-example-prompt h3,
+  .workflow-assistant-plan h3,
+  .workflow-inspector-sql h3 {
+    @apply mb-2 text-[11px] font-semibold text-ink;
+  }
+
+  .workflow-example-prompt p {
+    @apply rounded border border-line bg-sunken px-3 py-2.5 font-mono text-[11px] leading-[1.55] text-ink;
+  }
+
+  .workflow-assistant-plan ol {
+    @apply grid gap-3;
+  }
+
+  .workflow-assistant-plan li {
+    @apply grid grid-cols-[1.25rem_minmax(0,1fr)] items-start gap-2;
+  }
+
+  .workflow-assistant-plan li > span {
+    @apply grid size-5 place-items-center rounded border border-line font-mono text-[10px] text-ink-soft;
+  }
+
+  .workflow-assistant-plan strong {
+    @apply text-[11px] font-medium;
+  }
+
+  .workflow-assistant-plan p {
+    @apply mt-0.5 text-[10px] leading-4 text-ink-faint;
+  }
+
+  .workflow-assistant-footer {
+    @apply shrink-0 border-t border-line bg-sunken px-4 py-2 text-[10px] text-ink-faint;
+  }
+
+  .workflow-inspector {
+    @apply overflow-y-auto;
+  }
+
+  .workflow-inspector-heading {
+    @apply border-b border-line px-4 py-4;
+  }
+
+  .workflow-inspector-kind {
+    @apply mb-2 flex items-center gap-1.5 text-[10px] font-medium text-ink-faint;
+  }
+
+  .workflow-inspector-kind .ui-icon {
+    @apply size-3.5;
+  }
+
+  .workflow-inspector-facts {
+    @apply divide-y divide-line;
+  }
+
+  .workflow-inspector-facts > div {
+    @apply grid grid-cols-[5rem_minmax(0,1fr)] items-start gap-2 px-4 py-2.5;
+  }
+
+  .workflow-inspector-facts dt {
+    @apply text-[10px] text-ink-faint;
+  }
+
+  .workflow-inspector-facts dd {
+    @apply min-w-0 text-[11px] text-ink-soft;
+    overflow-wrap: anywhere;
+  }
+
+  .workflow-inspector-facts code,
+  .workflow-inspector-sql code {
+    @apply font-mono text-[10px] text-ink;
+  }
+
+  .workflow-inspector-relations,
+  .workflow-inspector-fields {
+    @apply flex flex-wrap gap-x-2 gap-y-1;
+  }
+
+  .workflow-inspector-relations code {
+    @apply block w-full;
+  }
+
+  .workflow-inspector-sql {
+    @apply border-t border-line px-4 py-3;
+  }
+
+  .workflow-inspector-sql pre {
+    @apply overflow-auto rounded bg-sunken px-2.5 py-2 text-[10px] leading-4;
+    white-space: pre-wrap;
+  }
+
+  .workflow-inspector-boundary {
+    @apply border-t border-line px-4 py-3 text-[10px] leading-4 text-ink-faint;
+  }
+
+  .workflow-panel-empty {
+    @apply flex h-full min-h-40 flex-col items-center justify-center px-6 text-center;
+  }
+
+  .workflow-panel-empty > .ui-icon {
+    @apply mb-2 size-5 text-ink-faint;
+  }
+
+  .workflow-panel-empty strong {
+    @apply text-[12px] font-semibold text-ink;
+  }
+
+  .workflow-panel-empty p {
+    @apply mt-1 max-w-[48ch] text-[11px] leading-4 text-ink-faint;
+  }
+
+  .workflow-panel-empty span {
+    @apply mt-3 rounded bg-sunken px-2 py-1 font-mono text-[10px] text-ink-soft;
+  }
+
+  .workflow-canvas {
+    @apply flex flex-col overflow-hidden;
+  }
+
+  .workflow-canvas-toolbar {
+    @apply flex min-h-10 shrink-0 items-center gap-2 border-b border-line bg-surface px-3;
+  }
+
+  .workflow-canvas-toolbar > div {
+    @apply flex min-w-0 flex-1 items-baseline gap-2;
+  }
+
+  .workflow-canvas-toolbar strong {
+    @apply rounded bg-caution-soft px-1.5 py-0.5 text-[10px] font-medium text-caution;
+  }
+
+  .workflow-canvas-toolbar span {
+    @apply font-mono text-[10px] tabular-nums text-ink-faint;
+  }
+
+  .workflow-fit-action {
+    @apply gap-1.5 text-[10px];
+  }
+
+  .workflow-fit-action .ui-icon {
+    @apply size-3.5;
+  }
+
+  .workflow-flow-wrap {
+    @apply relative min-h-0 flex-1 overflow-hidden bg-viewport;
+  }
+
+  .workflow-flow-wrap .dioxus-flow {
+    --df-bg: var(--tone-viewport);
+    --df-node-bg: var(--tone-surface);
+    --df-node-color: var(--tone-ink);
+    --df-node-border: var(--tone-line);
+    --df-accent: var(--tone-accent);
+    --df-edge: var(--tone-ink-faint);
+    --df-edge-selected: var(--tone-accent);
+    --df-edge-label: var(--tone-ink-soft);
+    --df-handle-bg: var(--tone-surface);
+    --df-handle-border: var(--tone-ink-faint);
+    --df-grid: color-mix(in srgb, var(--tone-ink-faint) 22%, transparent);
+    --df-panel-bg: var(--tone-surface);
+    --df-panel-border: var(--tone-line);
+    --df-panel-color: var(--tone-ink-soft);
+  }
+
+  .workflow-flow .df-node {
+    animation: none;
+  }
+
+  .workflow-flow .df-node:focus-visible {
+    border-radius: 4px;
+    outline-width: 1px;
+    outline-offset: 3px;
+  }
+
+  .workflow-flow .df-edge-path {
+    stroke-width: 1.25;
+  }
+
+  .workflow-flow .df-edge-arrow {
+    fill: var(--tone-ink-faint);
+  }
+
+  .workflow-node-card {
+    @apply relative flex w-52 flex-col overflow-visible border border-line bg-surface text-ink;
+    min-height: 8.5rem;
+    border-radius: 4px;
+    transition: border-color 120ms ease-out, box-shadow 120ms ease-out;
+  }
+
+  .workflow-node-card:hover {
+    border-color: color-mix(in srgb, var(--tone-ink-faint) 52%, var(--tone-line));
+  }
+
+  .workflow-node-card.workflow-node-selected {
+    border-color: var(--tone-accent);
+    box-shadow: inset 0 0 0 1px var(--tone-accent);
+  }
+
+  .workflow-node-card.workflow-node-dragging {
+    box-shadow: 0 7px 20px rgb(0 0 0 / 0.14);
+  }
+
+  .workflow-node-heading {
+    @apply flex min-h-7 items-center gap-1.5 border-b border-line px-2.5 text-[10px] font-medium text-ink-soft;
+  }
+
+  .workflow-node-heading .ui-icon {
+    @apply size-3.5 shrink-0;
+  }
+
+  .workflow-node-body {
+    @apply min-h-0 flex-1 px-2.5 py-2;
+  }
+
+  .workflow-node-body h3 {
+    @apply truncate text-[12px] font-semibold tracking-[-0.01em];
+  }
+
+  .workflow-node-fields,
+  .workflow-node-relation {
+    @apply mt-1 truncate text-[10px] text-ink-faint;
+  }
+
+  .workflow-node-relation code {
+    @apply font-mono text-ink-soft;
+  }
+
+  .workflow-node-sql {
+    @apply mt-1.5 block overflow-hidden font-mono text-[10px] leading-3.5 text-ink-soft;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: pre-line;
+  }
+
+  .workflow-node-footer {
+    @apply flex min-h-7 items-center gap-1.5 border-t border-line px-2.5 text-[10px] text-ink-faint;
+  }
+
+  .workflow-node-status-dot {
+    @apply size-1.5 shrink-0 rounded-full;
+    background: var(--tone-ink-faint);
+  }
+
+  .workflow-node-status-dot.workflow-node-state-example {
+    background: var(--tone-good);
+  }
+
+  .workflow-node-card .df-handle {
+    width: 8px;
+    height: 8px;
+    border-width: 1px;
+    pointer-events: none;
+    cursor: default;
+  }
+
+  .workflow-results {
+    @apply flex flex-col overflow-hidden;
+  }
+
+  .workflow-results-column-preview {
+    @apply grid min-h-8 shrink-0 grid-cols-[minmax(7rem,1.6fr)_minmax(6rem,1fr)_minmax(5rem,0.8fr)_minmax(4rem,0.6fr)] items-center border-b border-line bg-sunken px-3 text-[10px] text-ink-faint;
+  }
+
+  .workflow-results > .workflow-panel-empty {
+    @apply min-h-0 flex-1;
+  }
+
   /* Rollout -------------------------------------------------------------
      The workbench stays intentionally shorter than Training: choose one
      checkpoint, verify the fixed follower, set two execution values, and run.
@@ -2784,6 +3097,10 @@ li:has(.data-episode-select[aria-pressed="true"]) .data-episode-row {
 
   .status-bar-notifications {
     min-width: 44px;
+  }
+
+  .workflow-fit-action {
+    min-height: 44px;
   }
 
   .device-chevron,

@@ -34,6 +34,7 @@ dioxus = { workspace = true, features = [
     "router",
     "signals",
 ] }
+dioxus-flow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde-wasm-bindgen = "0.6"

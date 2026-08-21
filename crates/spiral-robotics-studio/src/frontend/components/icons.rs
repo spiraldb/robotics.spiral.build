@@ -46,6 +46,68 @@ pub(crate) fn DataIcon() -> Element {
     }
 }
 
+/// Relation lineage: two Spiral tables converging on a derived result.
+#[component]
+pub(crate) fn WorkflowIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            circle { cx: "3", cy: "4", r: "1.5" }
+            circle { cx: "3", cy: "12", r: "1.5" }
+            circle { cx: "9", cy: "8", r: "1.5" }
+            circle { cx: "13.25", cy: "8", r: "1.25" }
+            path { d: "M4.5 4.6 7.6 7M4.5 11.4 7.6 9M10.5 8h1.5" }
+        }
+    }
+}
+
+#[component]
+pub(crate) fn TableNodeIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            rect { x: "2.5", y: "2.5", width: "11", height: "11", rx: "1" }
+            path { d: "M2.5 6h11M6 6v7.5M10 6v7.5" }
+        }
+    }
+}
+
+#[component]
+pub(crate) fn ModelNodeIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "m8 2.25 5 2.8v5.9l-5 2.8-5-2.8v-5.9l5-2.8Z" }
+            path { d: "m3.25 5.2 4.75 2.7 4.75-2.7M8 7.9v5.55" }
+        }
+    }
+}
+
+#[component]
+pub(crate) fn QueryNodeIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M2.5 3h11L9.25 8v4l-2.5 1V8L2.5 3Z" }
+        }
+    }
+}
+
+#[component]
+pub(crate) fn ResultNodeIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            rect { x: "2.5", y: "2.5", width: "11", height: "11", rx: "1" }
+            path { d: "M2.5 6h11M2.5 9.75h11M6.25 6v7.5" }
+        }
+    }
+}
+
+#[component]
+pub(crate) fn FitViewIcon() -> Element {
+    rsx! {
+        svg { class: "ui-icon", view_box: "0 0 16 16", "aria-hidden": "true",
+            path { d: "M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10" }
+        }
+    }
+}
+
 /// Policy training activity: a curve passing through optimization steps.
 #[component]
 pub(crate) fn TrainingIcon() -> Element {

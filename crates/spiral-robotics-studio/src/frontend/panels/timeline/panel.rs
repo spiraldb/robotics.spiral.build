@@ -484,6 +484,7 @@ pub(crate) fn StudioTimeline(
     let timeline_label = match state.subject.activity() {
         Activity::Live => "Live Timeline",
         Activity::Data => "Data Timeline",
+        Activity::Workflow => "Workflow relation timeline",
         Activity::Training => "Training step timeline",
         Activity::Rollout => "Rollout live timeline",
     };
