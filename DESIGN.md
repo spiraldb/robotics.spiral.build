@@ -222,12 +222,12 @@ learned spatial grammar without importing its visual weight: the layout is
 powerful, but the chrome remains Notion-like, compact, and quiet.
 
 The **Timeline is the shared clock**, not a footer or a dataset rail. It is
-registered in both activities and synchronizes recording, replay, camera video,
-historical 3D pose, signals, query selection, and optionally a safety-gated
-physical seek. Signals belongs to the episode on that clock. Full camera images
-belong in camera panels; robot ownership remains explicit through arm and role,
-and actionable camera failures stay inside the affected frame rather than being
-duplicated in the Live workbench.
+registered in both Live and Data and synchronizes recording, replay, camera
+video, historical 3D pose, signals, query selection, and optionally a
+safety-gated physical seek. Signals belongs to the episode on that clock. Full
+camera images belong in camera panels; robot ownership remains explicit through
+arm and role, and actionable camera failures stay inside the affected frame
+rather than being duplicated in the Live workbench.
 
 Density is the point, not a side effect. The base face is 12px, ordinary
 controls are 24px tall, and most gaps come from a 2/4/6/8px rhythm. Record is
@@ -509,21 +509,24 @@ component means or which behavior it owns.
 ```text
 StudioShell
 ├── StudioBody
-│   ├── ActivityRail                         Live / Data selection; Settings access
+│   ├── ActivityRail                         primary activity selection; Settings access
 │   └── PanelWorkspace                       layout mechanics only
 │       ├── SemanticWorkbenchPanel
 │       │   ├── LiveWorkbench                operate / record semantics
 │       │   ├── DataWorkbench                episode / query semantics
+│       │   ├── WorkflowInspectorPanels       saved graph / node-edit semantics
 │       │   ├── TrainingWorkbench            train / observe semantics
 │       │   └── RolloutWorkbench             fixed-follower policy semantics
 │       ├── PrimaryVisualizationPanel
 │       │   ├── Scene
 │       │   ├── QueryResult
+│       │   ├── WorkflowCanvas
 │       │   ├── TrainingEvidence
 │       │   └── EmptyOrLoadingState
 │       ├── CameraPanel(s)
 │       └── EvidencePanel
 │           ├── TimelinePanel                one shared episode-clock contract
+│           ├── WorkflowResultsPanel         bounded media-aware SQL results
 │           └── RolloutInferencePanel        measured policy-loop evidence
 ├── StatusBar
 └── OverlayLayer                             settings / notices / confirmations
@@ -661,6 +664,7 @@ physical motion is sent only for the committed seek.
 | Live robot and camera selection | Live Activity Controller | Live Workbench, Scene, Live camera registry |
 | Live recording and review subject | Live Activity Controller, reconciled with backend truth | Live Workbench, Timeline, recorded preview surfaces |
 | Data tool, selected episode, and query | Data Activity Controller | Data Workbench and the complete Data projection |
+| Workflow saved graph, local draft, run snapshot, and terminal result | Workflow Activity Controller, reconciled with backend truth | Assistant/Node panels, Workflow canvas, Results panel, Status Bar |
 | Rollout checkpoint, execution inputs, fixed follower, and readiness | Rollout Activity Controller, reconciled with backend truth | Rollout Workbench, live Scene, follower Camera, Inference lane |
 | Timeline subject, playhead, preview playback, and Follow Live | Timeline Controller within the active activity | Scene, Cameras, Signals, Timeline |
 | Panel geometry and active tab | `PanelWorkspace` | Panel chrome and persisted layout only |
@@ -678,6 +682,11 @@ Controller → Recorded source → Scene + Cameras + Signals + Timeline`.
 **Open Query:** `DataWorkbench → ShowQuery(query) → Data Activity Controller →
 preserved Scene + active QueryResult sibling tab + explicit episode context or
 explicit no-episode context`.
+
+**Apply and run a Workflow:** `Node inspector edits → revision-checked Apply →
+Workflow backend → run/cancel snapshot events → reconciled Canvas + bounded
+media-aware Results`, while browser-owned node geometry and panel focus remain
+stable.
 
 **Seek or rewind:** `Timeline → Seek(subject, time, phase) → Activity Controller
 → one synchronized historical projection`. A committed, explicitly armed
@@ -769,7 +778,7 @@ verb first; visual presentation never changes the verb.
   presentation variants. A local surface may own geometry but not restate
   hover, focus, selected, disabled, pending, or destructive state.
 - **Primary:** Role-blue fill with white text, once per local purpose: Record,
-  Run query, Connect, Save, Run training, or Run policy.
+  Run query, Run workflow, Connect, Save, Run training, or Run policy.
 - **Danger:** Delete, Discard, Replace, Release, and Stop use the shared red
   treatment. Their consequence determines the confirmation level; the visual
   variant does not.
@@ -895,10 +904,22 @@ This is the signature component system.
 - **Canvas:** Pale viewport surface with a subtle dot grid, thin graphite
   lineage edges, no MiniMap, and a typed Fit action. `--df-*` values map to the
   existing `--tone-*` roles rather than forming a second palette.
-- **Stage-1 truth:** Assistant and Results explicitly identify their disconnected
-  scaffold state. The canvas says Static draft and exposes no Run or persistence
-  action. Pointer selection or Enter/Space from a focused node opens the Node
-  inspector; initial rendering leaves Assistant active.
+- **Stage-2 truth:** Assistant explicitly identifies its unavailable transport
+  and owns no run action. The runnable editor is Table→Query→Result over
+  authoritative Spiral catalog relations; Model cards remain visibly unavailable
+  until Stage 3. Table and Query edits use explicit Apply with revision conflict
+  recovery, while the canvas exclusively owns Run/Cancel and prints every disabled
+  reason on-page.
+- **Runtime state:** Cards render authoritative Pending, Validating, Running,
+  Complete, Failed, Stale, Cancelling, and Cancelled states without fabricated
+  percentages. Reruns and failed/cancelled attempts retain prior rows as visibly
+  stale. Results reuse Data's bounded media-aware table instead of defining a
+  second semantic-cell renderer.
+- **Focus and reload:** Pointer selection or Enter/Space from a focused node opens
+  the Node inspector; initial rendering leaves Assistant active. SSE/reconnect
+  updates preserve node geometry and never steal panel focus. A dirty draft whose
+  base revision is obsolete can only be discarded through the explicit Reload
+  saved action.
 
 ### Timeline
 
@@ -1167,8 +1188,9 @@ another component only to rename it or copy shared mechanics.
   cannot move content between them.
 - **Do** make Workflow relation-first: multiple Spiral Table roots may converge
   through Model and Query nodes, and each Model owns a visible derived relation.
-- **Do** keep disconnected Workflow capabilities visually and verbally inert;
-  empty Assistant and Results states must not imply execution or saved output.
+- **Do** keep unavailable Workflow capabilities visually and verbally inert;
+  Assistant and Stage-2 Model nodes must not imply an agent turn, download, or
+  model execution. Empty Results must distinguish no run from real empty rows.
 - **Do** route workbench, Timeline, panel-focus, and backend events through one
   activity controller that derives the complete visible projection.
 - **Do** represent Live, Recorded Loading, Recorded Ready, Recorded Unavailable,

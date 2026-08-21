@@ -1426,6 +1426,30 @@
     @apply border-b border-line px-4 py-4;
   }
 
+  .workflow-inspector-error,
+  .workflow-validation {
+    @apply border-b border-line bg-danger-soft px-4 py-2.5 text-[10px] leading-4 text-danger;
+  }
+
+  .workflow-inspector-error strong,
+  .workflow-validation strong {
+    @apply font-medium;
+  }
+
+  .workflow-inspector-error p,
+  .workflow-validation p {
+    @apply mt-0.5;
+  }
+
+  .workflow-validation {
+    @apply border-t border-b-0;
+  }
+
+  .workflow-validation > div + div {
+    @apply mt-2 border-t pt-2;
+    border-color: color-mix(in srgb, var(--tone-danger) 20%, transparent);
+  }
+
   .workflow-inspector-kind {
     @apply mb-2 flex items-center gap-1.5 text-[10px] font-medium text-ink-faint;
   }
@@ -1478,6 +1502,31 @@
     @apply border-t border-line px-4 py-3 text-[10px] leading-4 text-ink-faint;
   }
 
+  .workflow-inspector-editor {
+    @apply border-t border-line px-4 py-3;
+  }
+
+  .workflow-inspector-query-editor {
+    @apply min-h-48;
+  }
+
+  .workflow-query-input {
+    @apply min-h-36 w-full resize-y font-mono text-[11px] leading-4;
+  }
+
+  .workflow-inspector-help {
+    @apply mt-2 text-[10px] leading-4 text-ink-faint;
+  }
+
+  .workflow-inspector-help code {
+    @apply font-mono text-ink-soft;
+  }
+
+  .workflow-inspector-unavailable {
+    color: var(--tone-caution);
+    background: var(--tone-caution-soft);
+  }
+
   .workflow-panel-empty {
     @apply flex h-full min-h-40 flex-col items-center justify-center px-6 text-center;
   }
@@ -1511,7 +1560,17 @@
   }
 
   .workflow-canvas-toolbar strong {
-    @apply rounded bg-caution-soft px-1.5 py-0.5 text-[10px] font-medium text-caution;
+    @apply rounded px-1.5 py-0.5 text-[10px] font-medium;
+  }
+
+  .workflow-toolbar-modified {
+    background: var(--tone-caution-soft);
+    color: var(--tone-caution);
+  }
+
+  .workflow-toolbar-saved {
+    background: var(--tone-good-soft);
+    color: var(--tone-good);
   }
 
   .workflow-canvas-toolbar span {
@@ -1524,6 +1583,15 @@
 
   .workflow-fit-action .ui-icon {
     @apply size-3.5;
+  }
+
+  .workflow-canvas-status {
+    @apply shrink-0 border-b border-line bg-sunken px-3 py-1.5 text-[10px] leading-4 text-ink-faint;
+  }
+
+  .workflow-canvas-status-error {
+    background: var(--tone-danger-soft);
+    color: var(--tone-danger);
   }
 
   .workflow-flow-wrap {
@@ -1627,8 +1695,24 @@
     background: var(--tone-ink-faint);
   }
 
-  .workflow-node-status-dot.workflow-node-state-example {
+  .workflow-node-status-dot.workflow-node-state-complete {
     background: var(--tone-good);
+  }
+
+  .workflow-node-status-dot.workflow-node-state-running {
+    background: var(--tone-accent);
+  }
+
+  .workflow-node-status-dot.workflow-node-state-failed {
+    background: var(--tone-danger);
+  }
+
+  .workflow-node-status-dot.workflow-node-state-stale {
+    background: var(--tone-caution);
+  }
+
+  .workflow-node-status-dot.workflow-node-state-cancelled {
+    background: var(--tone-ink-faint);
   }
 
   .workflow-node-card .df-handle {
@@ -1643,11 +1727,36 @@
     @apply flex flex-col overflow-hidden;
   }
 
+  .workflow-results-meta {
+    @apply flex min-h-8 shrink-0 items-center gap-3 border-b border-line bg-sunken px-3 text-[10px] text-ink-faint;
+  }
+
+  .workflow-results-meta > :first-child {
+    @apply font-medium text-ink-soft;
+  }
+
+  .workflow-results-stale {
+    @apply flex shrink-0 items-baseline gap-2 border-b border-line bg-caution-soft px-3 py-1.5 text-[10px] text-caution;
+  }
+
+  .workflow-results-stale strong {
+    @apply font-medium;
+  }
+
+  .workflow-results-error {
+    @apply shrink-0 border-b border-line bg-danger-soft px-3 py-1.5 text-[10px] leading-4 text-danger;
+  }
+
+  .workflow-result-body {
+    @apply flex min-h-0 flex-1 flex-col overflow-hidden;
+  }
+
   .workflow-results-column-preview {
     @apply grid min-h-8 shrink-0 grid-cols-[minmax(7rem,1.6fr)_minmax(6rem,1fr)_minmax(5rem,0.8fr)_minmax(4rem,0.6fr)] items-center border-b border-line bg-sunken px-3 text-[10px] text-ink-faint;
   }
 
-  .workflow-results > .workflow-panel-empty {
+  .workflow-results > .workflow-panel-empty,
+  .workflow-result-body > .workflow-panel-empty {
     @apply min-h-0 flex-1;
   }
 

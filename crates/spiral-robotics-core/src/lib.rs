@@ -10,3 +10,4 @@ pub mod episode;
 pub mod identity;
 pub mod operation;
 pub mod query;
+pub mod workflow;

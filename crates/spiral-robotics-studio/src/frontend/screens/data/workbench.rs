@@ -664,7 +664,7 @@ fn focus_query_tab(id: u64) {
     focus_after_render(format!("query-tab-{id}"));
 }
 
-fn render_query_result(model: &QueryViewModel) -> Element {
+pub(crate) fn render_query_result(model: &QueryViewModel) -> Element {
     rsx! {
         match &model.state {
                 QueryState::Running => rsx! {
@@ -753,7 +753,8 @@ fn preset_sql(namespace: &str, dataset_id: &str, preset: QueryPreset) -> String 
         | QueryPreset::Robots
         | QueryPreset::StudioSettings
         | QueryPreset::TrainingRuns
-        | QueryPreset::RolloutRuns => preset.sql(namespace),
+        | QueryPreset::RolloutRuns
+        | QueryPreset::WorkflowRuns => preset.sql(namespace),
     }
 }
 
@@ -773,6 +774,7 @@ fn table_preset(table: Table) -> QueryPreset {
         Table::StudioSettings => QueryPreset::StudioSettings,
         Table::TrainingRuns => QueryPreset::TrainingRuns,
         Table::RolloutRuns => QueryPreset::RolloutRuns,
+        Table::WorkflowRuns => QueryPreset::WorkflowRuns,
     }
 }
 
@@ -788,6 +790,7 @@ fn table_description(table: Table) -> &'static str {
         Table::StudioSettings => "Persistent Studio preferences",
         Table::TrainingRuns => "Training lifecycle and metric history",
         Table::RolloutRuns => "Policy rollout lifecycle and outcomes",
+        Table::WorkflowRuns => "Saved Workflow graph and latest run snapshot",
     }
 }
 

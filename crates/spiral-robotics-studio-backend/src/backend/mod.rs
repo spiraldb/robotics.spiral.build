@@ -8,5 +8,6 @@ mod robots;
 mod rollout;
 mod storage;
 mod training;
+mod workflow;
 
 pub use http::server::run;

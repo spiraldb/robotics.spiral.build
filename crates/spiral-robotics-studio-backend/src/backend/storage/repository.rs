@@ -15,7 +15,7 @@ use adbc_driver_spiraldb::{
     Connection as SpiralConnection, Database as SpiralDatabase, Driver as SpiralDriver,
     Statement as SpiralStatement,
 };
-use arrow_array::RecordBatchReader;
+use arrow_array::{Array as _, ListArray, RecordBatchReader, StringArray, StructArray};
 use arrow_schema::Schema;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -48,6 +48,12 @@ struct ConnectionConfig {
 pub(crate) struct RepositoryConnection {
     inner: SpiralConnection,
     reusable: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CatalogRelation {
+    pub name: String,
+    pub relation_type: String,
 }
 
 impl RepositoryConnection {
@@ -92,6 +98,82 @@ impl RepositoryConnection {
             batch.map_err(|error| error.to_string())?;
         }
         Ok(())
+    }
+
+    /// Enumerate the durable relations advertised by the active Spiral
+    /// project. Temporary query-session relations are intentionally absent
+    /// from the driver's ADBC catalog.
+    pub(crate) fn list_catalog_relations(
+        &self,
+        project: &str,
+    ) -> Result<Vec<CatalogRelation>, String> {
+        let reader = self
+            .inner
+            .get_objects(
+                ObjectDepth::Tables,
+                Some("spiraldb"),
+                Some(project),
+                None,
+                None,
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        let mut relations = Vec::new();
+        for batch in reader {
+            let batch = batch.map_err(|error| error.to_string())?;
+            let schema_lists = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(|| "ADBC catalog returned a non-list schema column".to_owned())?;
+            for catalog_row in 0..schema_lists.len() {
+                if schema_lists.is_null(catalog_row) {
+                    continue;
+                }
+                let schemas = schema_lists.value(catalog_row);
+                let schemas = schemas
+                    .as_any()
+                    .downcast_ref::<StructArray>()
+                    .ok_or_else(|| "ADBC catalog returned malformed schemas".to_owned())?;
+                let table_lists = schemas
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<ListArray>()
+                    .ok_or_else(|| "ADBC catalog returned a non-list tables column".to_owned())?;
+                for schema_row in 0..table_lists.len() {
+                    if table_lists.is_null(schema_row) {
+                        continue;
+                    }
+                    let tables = table_lists.value(schema_row);
+                    let tables = tables
+                        .as_any()
+                        .downcast_ref::<StructArray>()
+                        .ok_or_else(|| "ADBC catalog returned malformed tables".to_owned())?;
+                    let names = tables
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or_else(|| "ADBC catalog returned malformed table names".to_owned())?;
+                    let types = tables
+                        .column(1)
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or_else(|| "ADBC catalog returned malformed table types".to_owned())?;
+                    for table_row in 0..tables.len() {
+                        if names.is_null(table_row) || types.is_null(table_row) {
+                            continue;
+                        }
+                        relations.push(CatalogRelation {
+                            name: names.value(table_row).to_owned(),
+                            relation_type: types.value(table_row).to_owned(),
+                        });
+                    }
+                }
+            }
+        }
+        relations.sort_by(|left, right| left.name.cmp(&right.name));
+        relations.dedup_by(|left, right| left.name == right.name);
+        Ok(relations)
     }
 
     pub(crate) fn set_autocommit(&mut self, enabled: bool) -> Result<(), String> {

@@ -101,16 +101,17 @@ from it without writing glue code or operating a second data stack.
   streams match a configured robot's contract. Ingested episodes without a
   matching robot remain full citizens of the catalog.
 - **SpiralDB is the only persistent data path.** Robots, settings, episodes,
-  relational Arrow samples, MP4 assets, training runs, checkpoints, and rollout
-  state are written and read through one shared ADBC repository. There is no
-  filesystem staging, recovery spool, in-memory database mode, or second
-  connected dataset. The selected API endpoint, SpFS endpoint, and project are
-  backend bootstrap pointers. Settings may change the project across an idle
-  live cutover; a service-endpoint change is saved for the next process because
-  ADBC binds both endpoints when constructing the database. The namespace is
-  fixed when the repository is constructed. Saved runs retain only their
-  selected dataset row. One private local JSON file remembers only
-  bootstrap/auth session state, never project records or cached Spiral rows.
+  relational Arrow samples, MP4 assets, saved workflows and runs, training runs,
+  checkpoints, and rollout state are written and read through one shared ADBC
+  repository. There is no filesystem staging, recovery spool, in-memory
+  database mode, or second connected dataset. The selected API endpoint, SpFS
+  endpoint, and project are backend bootstrap pointers. Settings may change
+  the project across an idle live cutover; a service-endpoint change is saved
+  for the next process because ADBC binds both endpoints when constructing the
+  database. The namespace is fixed when the repository is constructed. Saved
+  runs retain only their selected dataset row. One private local JSON file
+  remembers only bootstrap/auth session state, never project records or cached
+  Spiral rows.
 - **The robot description is the single source of truth.** Geometry, joint
   limits, and the rendered model come from URDF rather than duplicated drawing
   constants.
@@ -175,11 +176,17 @@ never becomes the motor-control runtime.
 - Three CLIs — `spiral-robotics-find-port`, `spiral-robotics-find-cameras`, and
   `spiral-robotics-calibrate` — cover the Studio’s hardware setup flow for scripting and
   machines without a browser.
-- A fullstack Dioxus Studio with four primary operating activities:
+- A fullstack Dioxus Studio with five primary operating activities:
   - **Live** owns recording, arm selection, Hold / Release / Teleop, joint
     control, health, and camera status.
   - **Data** owns the SpiralDB episode catalog, replay/delete actions,
     selected-dataset episode import/export, and guarded read-only Spiral SQL.
+  - **Workflow** owns relation discovery and a persisted, revision-safe
+    Table → Query → Result editor over existing qualified Spiral relations. The
+    backend runs bounded read-only SQL, publishes run/cancel state through the
+    shared event stream, restores saved graphs and results after reload, and
+    rejects Model nodes until Stage 3. Workflow has no ingestion controls,
+    model execution, or agent chat today.
   - **Training** owns random anchor and camera/action sampling through the
     Spiral ADBC/Arrow path, remote HTTP runtime selection, vision ACT
     configuration, learning/resource telemetry, graceful cancellation, and
@@ -194,10 +201,10 @@ never becomes the motor-control runtime.
 - A reusable `spiral-robotics-panels` crate supplies tabbed tiles, horizontal and
   vertical splits, drag docking with five-zone previews, split resizing,
   keyboard equivalents, session-state panel reconciliation, and compact shared
-  chrome. Live and Data keep independent session layouts. The default desktop
-  composition is a one-third workbench beside a two-thirds visualization, with
-  Scene/Query, camera panels, and Timeline as movable panels rather than fixed
-  slots.
+  chrome. Live, Data, Workflow, Training, and Rollout keep independent session
+  layouts. The default desktop composition is a one-third workbench beside a
+  two-thirds visualization, with Scene/Query, camera panels, and Timeline as
+  movable panels rather than fixed slots.
 - Four backend motion modes: **Idle**, **Manual**, **Teleoperation**, and
   **Replay**. The Studio presents their operator-facing form as **Hold**
   (torque engaged and joints writable), **Release** (torque off and telemetry
@@ -297,12 +304,13 @@ today, and nothing below may be presented as existing behavior:
 **Terminology:** *robot instance* (one arm), *leader* / *follower*, *joint*,
 *calibration*, *travel*, *torque*, *Hold* / *Release* / *Teleop*, *Studio*
 (the browser interface),
-*workbench* (Live, Data, or Rollout operating panel), *panel* (one registered content
-surface), *tile* (a tab group in the layout tree), *dataset* (a collection of
-episodes), *episode* / *take* (one kept multi-stream trajectory, recorded or
-ingested; *episode* is canonical in data and wire naming), *producer* (a path
-that creates episodes: recording or ingestion), *consumer* (a use of the data
-core: query, curation, training, rollout, replay, export), *ingestion*
+*workbench* (Live, Data, Workflow, Training, or Rollout operating panel),
+*panel* (one registered content surface), *tile* (a tab group in the layout
+tree), *dataset* (a collection of episodes), *episode* / *take* (one kept
+multi-stream trajectory, recorded or ingested; *episode* is canonical in data
+and wire naming), *producer* (a path that creates episodes: recording or
+ingestion), *consumer* (a use of the data core: query, curation, training,
+rollout, replay, export), *ingestion*
 (backend-owned import of external data into the project), *Timeline* /
 *playhead* (the shared episode clock and its current time), and *Follow Δ*
 (the gap between measured and commanded joint position).
@@ -313,8 +321,8 @@ core: query, curation, training, rollout, replay, export), *ingestion*
   Studio**.
 - The interface follows a compact, information-dense Notion/Rerun direction,
   while its panel mechanics use familiar VS Code tab-and-tile behavior. Live,
-  Data, Training, and Rollout are the primary activities; panels are spatial
-  composition, not a proliferation of navigation modes.
+  Data, Workflow, Training, and Rollout are the primary activities; panels are
+  spatial composition, not a proliferation of navigation modes.
 - **Distribution:** public open source eventually, but not on the current
   timeline. Keep code and configuration honest for strangers without inventing
   an outward-facing marketing surface, users, or proof.

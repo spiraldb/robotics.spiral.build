@@ -9,6 +9,7 @@ mod data;
 mod devices;
 mod recordings;
 mod training_rollout;
+mod workflow;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
@@ -57,6 +58,7 @@ use crate::backend::storage::manager::StorageManager;
 use crate::backend::storage::settings::BackendStateStore;
 use crate::backend::storage::settings::StudioPreferencesStore;
 use crate::backend::training::manager::TrainingManager;
+use crate::backend::workflow::manager::WorkflowManager;
 use spiral_robotics_studio_application::calibration::{
     self, CalibrationHistoryActivity, CalibrationHistoryPort, ReappliedPositions,
     RobotCalibrationRepository,
@@ -143,6 +145,7 @@ pub(crate) struct AppState {
     pub preferences: Arc<StudioPreferencesStore>,
     pub storage: Arc<StorageManager>,
     pub training: Arc<TrainingManager>,
+    pub workflow: Arc<WorkflowManager>,
     pub rollout: Arc<RolloutManager>,
     pub bootstrap: BootstrapState,
     pub catalog_lease: Arc<CatalogMutationLease>,
@@ -425,6 +428,7 @@ pub(crate) fn api_router(state: AppState) -> Router {
         .merge(devices::catalog_router())
         .merge(recordings::router())
         .merge(training_rollout::router())
+        .merge(workflow::router())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_catalog_ready,
@@ -533,6 +537,7 @@ async fn events(
         snapshot_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut telemetry_timer = tokio::time::interval(TELEMETRY_INTERVAL);
         let (initial_training, mut training) = state.training.subscription();
+        let (initial_workflow, mut workflow) = state.workflow.subscription();
         let initial_rollout = RolloutManager::snapshot(state.rollout.as_ref());
         let mut rollout = state.rollout.subscribe();
         let mut last_snapshot: Option<StudioSnapshot> = None;
@@ -547,6 +552,12 @@ async fn events(
         if let Ok(event) = Event::default()
             .event("rollout_state")
             .json_data(&initial_rollout)
+        {
+            yield Ok(event);
+        }
+        if let Ok(event) = Event::default()
+            .event("workflow_snapshot")
+            .json_data(&initial_workflow)
         {
             yield Ok(event);
         }
@@ -588,6 +599,29 @@ async fn events(
                             training = replacement;
                             if let Ok(event) = Event::default()
                                 .event("training_snapshot")
+                                .json_data(&snapshot)
+                            {
+                                yield Ok(event);
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                update = workflow.recv() => {
+                    match update {
+                        Ok(update) => {
+                            if let Ok(event) = Event::default()
+                                .event("workflow_update")
+                                .json_data(&update)
+                            {
+                                yield Ok(event);
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            let (snapshot, replacement) = state.workflow.subscription();
+                            workflow = replacement;
+                            if let Ok(event) = Event::default()
+                                .event("workflow_snapshot")
                                 .json_data(&snapshot)
                             {
                                 yield Ok(event);

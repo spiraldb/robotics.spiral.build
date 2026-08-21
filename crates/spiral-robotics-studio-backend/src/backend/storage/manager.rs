@@ -24,6 +24,10 @@ use spiral_robotics_contracts::api::{
     ConnectionTestResponse, DataSettings, QueryColumn, SpiralQueryResponse, SpiralSettings,
 };
 use spiral_robotics_contracts::spiral::{self, Table, column as db};
+use spiral_robotics_contracts::workflow::{
+    WorkflowDocument, WorkflowRelation, WorkflowRelationsResponse,
+};
+use spiral_robotics_core::workflow::validate_qualified_relation;
 
 use crate::backend::recording::episodes::CompletedEpisode;
 use crate::backend::recording::spiral::{
@@ -170,6 +174,17 @@ impl StorageManager {
 
     pub(crate) fn save_rollout_snapshot<T: Serialize>(&self, value: &T) -> Result<(), String> {
         self.save_json_document(Table::RolloutRuns, "rollout_history", value)
+    }
+
+    pub(crate) fn load_workflow_document(&self) -> Result<WorkflowDocument, String> {
+        if !self.is_configured() {
+            return Ok(WorkflowDocument::default());
+        }
+        self.load_json_document(Table::WorkflowRuns, "default")
+    }
+
+    pub(crate) fn save_workflow_document(&self, value: &WorkflowDocument) -> Result<(), String> {
+        self.save_json_document(Table::WorkflowRuns, "default", value)
     }
 
     pub(crate) fn load_studio_preferences(&self) -> Result<StoredStudioPreferences, String> {
@@ -393,6 +408,90 @@ impl StorageManager {
                     max_rows.clamp(1, MAX_QUERY_ROWS),
                     MAX_QUERY_RESPONSE_BYTES,
                 )
+            })
+            .await
+    }
+
+    pub(crate) async fn workflow_relations(&self) -> Result<WorkflowRelationsResponse, String> {
+        let project = self.repository.project_id();
+        if project.is_empty() {
+            return Ok(WorkflowRelationsResponse {
+                relations: Vec::new(),
+                complete: false,
+                limitation: Some(
+                    "Choose a Spiral project in Settings to discover relations.".to_owned(),
+                ),
+            });
+        }
+        self.repository
+            .run(move |connection| {
+                let catalog = connection.list_catalog_relations(&project)?;
+                let mut relations = Vec::with_capacity(catalog.len());
+                let mut skipped = 0_usize;
+                for entry in catalog {
+                    if validate_qualified_relation(&entry.name).is_err() {
+                        skipped += 1;
+                        continue;
+                    }
+                    let schema = match connection.table_schema(&entry.name) {
+                        Ok(Some(schema)) => schema,
+                        Ok(None) => {
+                            skipped += 1;
+                            continue;
+                        }
+                        Err(error)
+                            if error.contains(
+                                "extension type cannot be converted to Arrow without a plugin",
+                            ) =>
+                        {
+                            // A project may contain an extension type this
+                            // Studio build cannot decode. Discovery remains an
+                            // honest usable subset instead of making every
+                            // relation unavailable because of one entry.
+                            skipped += 1;
+                            continue;
+                        }
+                        Err(error) => {
+                            return Err(format!(
+                                "describing Spiral relation {:?}: {error}",
+                                entry.name
+                            ));
+                        }
+                    };
+                    relations.push(WorkflowRelation {
+                        name: entry.name,
+                        relation_type: entry.relation_type,
+                        columns: schema
+                            .fields()
+                            .iter()
+                            .map(|field| QueryColumn {
+                                name: field.name().clone(),
+                                data_type: field.data_type().to_string(),
+                                nullable: field.is_nullable(),
+                                semantic_type: field
+                                    .metadata()
+                                    .get(EXTENSION_TYPE_NAME_KEY)
+                                    .cloned(),
+                            })
+                            .collect(),
+                        row_count: None,
+                    });
+                }
+                let limitation = if skipped == 0 {
+                    Some(
+                        "Row counts are omitted because the Spiral ADBC catalog does not expose bounded relation statistics."
+                            .to_owned(),
+                    )
+                } else {
+                    Some(format!(
+                        "Row counts are omitted; {skipped} catalog entries without a qualified name or Arrow schema were not returned."
+                    ))
+                };
+                Ok(WorkflowRelationsResponse {
+                    relations,
+                    complete: skipped == 0,
+                    limitation,
+                })
             })
             .await
     }

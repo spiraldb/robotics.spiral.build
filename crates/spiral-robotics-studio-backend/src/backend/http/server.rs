@@ -20,6 +20,7 @@ use crate::backend::storage::settings::{
 };
 use crate::backend::training::manager::TrainingManager;
 use crate::backend::training::remote::ConfiguredHttpTrainingBackend;
+use crate::backend::workflow::manager::WorkflowManager;
 use clap::Parser;
 use spiral_robotics::cameras;
 use spiral_robotics_studio_hardware::{
@@ -239,6 +240,7 @@ async fn serve(
         storage.clone(),
         Arc::new(ConfiguredHttpTrainingBackend::new(preferences.clone())),
     ));
+    let workflow = Arc::new(WorkflowManager::new(storage.clone()));
     let hardware = Arc::new(HardwareHandle::spawn(ControlSettings {
         max_step_counts: args.max_step,
         teleop_max_step_counts: args.teleop_max_step,
@@ -269,6 +271,7 @@ async fn serve(
         preferences,
         storage,
         training: training.clone(),
+        workflow: workflow.clone(),
         rollout: rollout.clone(),
         bootstrap: BootstrapState::new(),
         catalog_lease: Arc::new(
@@ -418,11 +421,13 @@ async fn bootstrap_catalog(state: AppState) {
         }
     };
     let training = state.training.hydrate_from_storage();
+    let workflow = state.workflow.hydrate_from_storage();
     let rollout = {
         let rollout = state.rollout.clone();
         tokio::task::spawn_blocking(move || rollout.reload_from_storage())
     };
-    let (preferences, training, rollout) = tokio::join!(preferences, training, rollout);
+    let (preferences, training, workflow, rollout) =
+        tokio::join!(preferences, training, workflow, rollout);
 
     let mut issues = Vec::new();
     if let Some(issue) = preferences {
@@ -430,6 +435,9 @@ async fn bootstrap_catalog(state: AppState) {
     }
     if let Err(error) = training {
         issues.push(format!("could not load training history: {error}"));
+    }
+    if let Err(error) = workflow {
+        issues.push(format!("could not load Workflow history: {error}"));
     }
     match rollout {
         Ok(Ok(())) => {}

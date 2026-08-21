@@ -46,6 +46,7 @@ fn feature_routers_preserve_every_public_path_exactly_once() {
         include_str!("devices.rs"),
         include_str!("recordings.rs"),
         include_str!("training_rollout.rs"),
+        include_str!("workflow.rs"),
     ]
     .join("\n");
     let paths = [
@@ -100,6 +101,12 @@ fn feature_routers_preserve_every_public_path_exactly_once() {
         "/training/runs/{id}/stop",
         "/rollout",
         "/rollout/stop",
+        "/workflow/capabilities",
+        "/workflow/relations",
+        "/workflow",
+        "/workflow/snapshot",
+        "/workflow/run",
+        "/workflow/cancel",
     ];
     for path in paths {
         assert_eq!(
@@ -108,6 +115,14 @@ fn feature_routers_preserve_every_public_path_exactly_once() {
             "route path {path:?} must be registered exactly once"
         );
     }
+}
+
+#[test]
+fn workflow_uses_named_events_on_the_single_reconnecting_stream() {
+    let source = include_str!("../routes.rs");
+    assert!(source.contains("event(\"workflow_snapshot\")"));
+    assert!(source.contains("event(\"workflow_update\")"));
+    assert_eq!(source.matches("route(\"/events\"").count(), 1);
 }
 
 #[test]

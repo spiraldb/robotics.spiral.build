@@ -22,6 +22,8 @@ pub(crate) use spiral_robotics_contracts::api::{
 use spiral_robotics_contracts::api::{
     RolloutSnapshot, StudioSnapshot, TelemetryFrame, TrainingSnapshot, TrainingUpdate,
 };
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
+use spiral_robotics_contracts::workflow::{WorkflowStateResponse, WorkflowUpdate};
 
 /// Fetch and decode a JSON resource.
 pub(crate) async fn get<T: DeserializeOwned>(path: &str) -> Result<T, String> {
@@ -225,6 +227,8 @@ pub enum StudioEvent {
     TrainingSnapshot(Box<TrainingSnapshot>),
     TrainingUpdate(Box<TrainingUpdate>),
     Rollout(Box<RolloutSnapshot>),
+    WorkflowSnapshot(Box<WorkflowStateResponse>),
+    WorkflowUpdate(Box<WorkflowUpdate>),
 }
 
 /// Consume the server's event stream, handing every message to `on_event`.
@@ -254,10 +258,19 @@ where
     let rollout = source
         .subscribe("rollout_state")
         .map_err(|error| format!("could not subscribe to rollout state: {error}"))?;
+    let workflow_snapshots = source
+        .subscribe("workflow_snapshot")
+        .map_err(|error| format!("could not subscribe to Workflow snapshots: {error}"))?;
+    let workflow_updates = source
+        .subscribe("workflow_update")
+        .map_err(|error| format!("could not subscribe to Workflow updates: {error}"))?;
 
     let mut events = stream::select(
         stream::select(stream::select(snapshots, telemetry), rollout),
-        stream::select(training_snapshots, training_updates),
+        stream::select(
+            stream::select(training_snapshots, training_updates),
+            stream::select(workflow_snapshots, workflow_updates),
+        ),
     );
     while let Some(Ok((kind, message))) = events.next().await {
         let Some(text) = message.data().as_string() else {
@@ -287,6 +300,16 @@ where
             "rollout_state" => {
                 if let Ok(snapshot) = serde_json::from_str(&text) {
                     on_event(StudioEvent::Rollout(Box::new(snapshot)));
+                }
+            }
+            "workflow_snapshot" => {
+                if let Ok(snapshot) = serde_json::from_str(&text) {
+                    on_event(StudioEvent::WorkflowSnapshot(Box::new(snapshot)));
+                }
+            }
+            "workflow_update" => {
+                if let Ok(update) = serde_json::from_str(&text) {
+                    on_event(StudioEvent::WorkflowUpdate(Box::new(update)));
                 }
             }
             _ => {}

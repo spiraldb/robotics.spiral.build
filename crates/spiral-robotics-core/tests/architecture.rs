@@ -53,7 +53,8 @@ fn core_exposes_only_domain_modules_and_has_no_outward_dependencies() {
             "episode",
             "identity",
             "operation",
-            "query"
+            "query",
+            "workflow"
         ]
     );
 }
@@ -68,6 +69,7 @@ fn every_core_source_is_free_of_delivery_frameworks_and_ambient_io() {
         ("lib.rs", include_str!("../src/lib.rs")),
         ("operation.rs", include_str!("../src/operation.rs")),
         ("query.rs", include_str!("../src/query.rs")),
+        ("workflow.rs", include_str!("../src/workflow.rs")),
     ];
     let actual = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src"))
         .unwrap()

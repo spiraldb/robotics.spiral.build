@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 use spiral_robotics_contracts::api::BackendReadinessState;
+use spiral_robotics_contracts::workflow::{WorkflowRunPhase, WorkflowStateResponse};
 use spiral_robotics_ui::{Action, ActionPurpose, ActionVariant, focus_after_render};
 
 use crate::frontend::app::activity::Activity;
@@ -87,6 +88,7 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
     let snapshot = studio.snapshot.read().clone();
     let telemetry = studio.telemetry.read().clone();
     let training = studio.training.read().clone();
+    let workflow = studio.workflow_state.read().clone();
     let connected = studio.controls_available();
     let backend_connected = (studio.live)();
     let (service_label, service_style) = if !backend_connected {
@@ -147,6 +149,12 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
     let training_step =
         training_run.map(|run| format!("step {} / {}", run.current_step, run.config.steps));
     let training_runs_label = format!("{} runs", training.runs.len());
+    let workflow_status = workflow_status_projection(
+        workflow.as_ref(),
+        backend_connected,
+        snapshot.readiness.state,
+        snapshot.readiness.catalog_available,
+    );
     let (mobile_state, mobile_state_critical) = if mode == Activity::Training {
         (
             if training.readiness.ready {
@@ -157,7 +165,7 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
             false,
         )
     } else if mode == Activity::Workflow {
-        ("Workflow draft".to_owned(), false)
+        (workflow_status.phase.clone(), false)
     } else if let Some(recording) = recording_label.as_ref() {
         (recording.clone(), true)
     } else if holding > 0 {
@@ -322,8 +330,8 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                         span { class: "status-dot", style: service_style }
                         "{service_label}"
                     }
-                    span { class: "status-bar-item", "Spiral relations" }
-                    span { class: "status-bar-item", "Static draft" }
+                    span { class: "status-bar-item", "{workflow_status.domain}" }
+                    span { class: "status-bar-item", "{workflow_status.phase}" }
                 }
                 if let Some(message) = latest.clone() {
                     span {
@@ -335,7 +343,7 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                     }
                 }
                 div { class: "status-bar-group status-bar-group-right",
-                    span { class: "status-bar-item status-bar-accent", "5 nodes · 4 connections" }
+                    span { class: "status-bar-item status-bar-accent", "{workflow_status.graph}" }
                     span { class: "status-bar-mobile-state status-bar-accent", title: "{mobile_state}", "{mobile_state}" }
                     NotificationTrigger { unread, open: center_open }
                 }
@@ -438,4 +446,104 @@ pub(crate) fn format_elapsed_status(seconds: f64) -> String {
     let minutes = (seconds / 60.0).floor() as u64;
     let remainder = seconds - minutes as f64 * 60.0;
     format!("{minutes}:{remainder:04.1}")
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct WorkflowStatusProjection {
+    domain: String,
+    phase: String,
+    graph: String,
+}
+
+fn workflow_status_projection(
+    state: Option<&WorkflowStateResponse>,
+    backend_connected: bool,
+    readiness: BackendReadinessState,
+    catalog_available: bool,
+) -> WorkflowStatusProjection {
+    if !backend_connected
+        || (readiness != BackendReadinessState::Bootstrapping && !catalog_available)
+    {
+        return WorkflowStatusProjection {
+            domain: "Workflow unavailable".to_owned(),
+            phase: "State unavailable".to_owned(),
+            graph: "Graph unavailable".to_owned(),
+        };
+    }
+
+    let Some(state) = state.filter(|_| readiness != BackendReadinessState::Bootstrapping) else {
+        return WorkflowStatusProjection {
+            domain: "Spiral relations".to_owned(),
+            phase: "Loading saved workflow…".to_owned(),
+            graph: "Loading graph…".to_owned(),
+        };
+    };
+
+    let phase = match state.snapshot.phase {
+        WorkflowRunPhase::Idle => "Idle · saved",
+        WorkflowRunPhase::Validating => "Validating",
+        WorkflowRunPhase::Running => "Running",
+        WorkflowRunPhase::Cancelling => "Cancelling",
+        WorkflowRunPhase::Completed => "Complete",
+        WorkflowRunPhase::Failed => "Failed",
+        WorkflowRunPhase::Cancelled => "Cancelled",
+        WorkflowRunPhase::Interrupted => "Interrupted",
+    };
+    let node_label = if state.workflow.nodes.len() == 1 {
+        "node"
+    } else {
+        "nodes"
+    };
+    let connection_label = if state.workflow.edges.len() == 1 {
+        "connection"
+    } else {
+        "connections"
+    };
+    WorkflowStatusProjection {
+        domain: "Spiral relations".to_owned(),
+        phase: phase.to_owned(),
+        graph: format!(
+            "{} {node_label} · {} {connection_label} · r{}",
+            state.workflow.nodes.len(),
+            state.workflow.edges.len(),
+            state.workflow.revision,
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workflow_status_projects_authoritative_graph_and_run_phase() {
+        let mut state = WorkflowStateResponse::default();
+        state.workflow.revision = 7;
+        state.snapshot.phase = WorkflowRunPhase::Running;
+
+        let status =
+            workflow_status_projection(Some(&state), true, BackendReadinessState::Ready, true);
+
+        assert_eq!(status.domain, "Spiral relations");
+        assert_eq!(status.phase, "Running");
+        assert_eq!(status.graph, "3 nodes · 2 connections · r7");
+    }
+
+    #[test]
+    fn workflow_status_does_not_invent_state_while_loading_or_unavailable() {
+        let loading =
+            workflow_status_projection(None, true, BackendReadinessState::Bootstrapping, false);
+        assert_eq!(loading.phase, "Loading saved workflow…");
+        assert_eq!(loading.graph, "Loading graph…");
+
+        let unavailable = workflow_status_projection(
+            Some(&WorkflowStateResponse::default()),
+            false,
+            BackendReadinessState::Ready,
+            true,
+        );
+        assert_eq!(unavailable.domain, "Workflow unavailable");
+        assert_eq!(unavailable.phase, "State unavailable");
+        assert_eq!(unavailable.graph, "Graph unavailable");
+    }
 }

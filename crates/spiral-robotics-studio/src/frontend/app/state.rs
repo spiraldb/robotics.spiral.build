@@ -9,6 +9,7 @@ use spiral_robotics_contracts::api::{
     RobotSummary, RobotTelemetry, RolloutSnapshot, StudioSnapshot, TelemetryFrame,
     TrainingSnapshot,
 };
+use spiral_robotics_contracts::workflow::WorkflowStateResponse;
 use spiral_robotics_viewport::{SO101_URDF, Urdf, UrdfError};
 
 use crate::frontend::api::http as api;
@@ -130,6 +131,8 @@ pub(crate) struct Studio {
     pub training: Signal<TrainingSnapshot>,
     /// Backend-owned remote inference and motor-control lifecycle.
     pub rollout: Signal<RolloutSnapshot>,
+    /// Backend-owned lifecycle and terminal payload for relation Workflows.
+    pub workflow_state: Signal<Option<WorkflowStateResponse>>,
     /// True while the event stream is connected.
     pub live: Signal<bool>,
     /// Wall-clock time of the last valid event and a periodically updated clock.
@@ -176,6 +179,7 @@ impl Studio {
         let telemetry = use_signal(TelemetryFrame::default);
         let training = use_signal(TrainingSnapshot::default);
         let rollout = use_signal(RolloutSnapshot::default);
+        let workflow_state = use_signal(|| None);
         let live = use_signal(|| false);
         let last_event_ms = use_signal(|| 0.0);
         let clock_ms = use_signal(|| 0.0);
@@ -191,6 +195,7 @@ impl Studio {
             telemetry,
             training,
             rollout,
+            workflow_state,
             live,
             last_event_ms,
             // Keep the server's first render identical to the browser's first
@@ -242,6 +247,7 @@ impl Studio {
                 mut telemetry,
                 mut training,
                 mut rollout,
+                mut workflow_state,
                 mut live,
                 mut last_event_ms,
                 mut recording_signals,
@@ -260,6 +266,10 @@ impl Studio {
                         StudioEvent::TrainingSnapshot(value) => training.set(*value),
                         StudioEvent::TrainingUpdate(update) => training.write().apply(*update),
                         StudioEvent::Rollout(value) => rollout.set(*value),
+                        StudioEvent::WorkflowSnapshot(value) => workflow_state.set(Some(*value)),
+                        StudioEvent::WorkflowUpdate(update) => {
+                            workflow_state.set(Some(update.state));
+                        }
                         StudioEvent::Telemetry(frame) => {
                             // Only a frame that can change the store touches it.
                             // Idle writes would mark the signal dirty and

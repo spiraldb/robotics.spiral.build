@@ -248,7 +248,7 @@ fn listener_binding_precedes_concurrent_external_bootstrap() {
     }
     assert!(
         server.contains("tokio::join!(catalog, camera)")
-            && server.contains("tokio::join!(preferences, training, rollout)"),
+            && server.contains("tokio::join!(preferences, training, workflow, rollout)"),
         "independent startup I/O must progress concurrently"
     );
 

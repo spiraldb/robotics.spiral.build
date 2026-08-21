@@ -27,3 +27,4 @@ pub mod rollout;
 pub mod training;
 pub mod training_execution;
 pub mod training_runs;
+pub mod workflow;

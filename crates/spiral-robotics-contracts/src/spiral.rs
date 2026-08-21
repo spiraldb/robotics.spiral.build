@@ -24,11 +24,12 @@ pub enum Table {
     StudioSettings,
     TrainingRuns,
     RolloutRuns,
+    WorkflowRuns,
 }
 
 impl Table {
     /// Relations shown in the Data schema browser.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Datasets,
         Self::Episodes,
         Self::EpisodeStreams,
@@ -39,6 +40,7 @@ impl Table {
         Self::StudioSettings,
         Self::TrainingRuns,
         Self::RolloutRuns,
+        Self::WorkflowRuns,
     ];
 
     /// Relations published for each episode, in safe deletion order.
@@ -61,6 +63,7 @@ impl Table {
             Self::StudioSettings => "studio_settings",
             Self::TrainingRuns => "training_runs",
             Self::RolloutRuns => "rollout_runs",
+            Self::WorkflowRuns => "workflow_runs",
         }
     }
 
@@ -138,7 +141,7 @@ impl Table {
             ],
             Self::Robots => &[column::ROBOT_ID, column::CONFIG_JSON, column::UPDATED_MS],
             Self::StudioSettings => &[column::KEY, column::VALUE_JSON, column::UPDATED_MS],
-            Self::TrainingRuns | Self::RolloutRuns => {
+            Self::TrainingRuns | Self::RolloutRuns | Self::WorkflowRuns => {
                 &[column::RUN_ID, column::SNAPSHOT_JSON, column::UPDATED_MS]
             }
         }
@@ -222,10 +225,11 @@ pub enum QueryPreset {
     StudioSettings,
     TrainingRuns,
     RolloutRuns,
+    WorkflowRuns,
 }
 
 impl QueryPreset {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Datasets,
         Self::Episodes,
         Self::EpisodeStreams,
@@ -236,6 +240,7 @@ impl QueryPreset {
         Self::StudioSettings,
         Self::TrainingRuns,
         Self::RolloutRuns,
+        Self::WorkflowRuns,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -250,6 +255,7 @@ impl QueryPreset {
             Self::StudioSettings => "Studio settings",
             Self::TrainingRuns => "Training runs",
             Self::RolloutRuns => "Rollout runs",
+            Self::WorkflowRuns => "Workflow runs",
         }
     }
 
@@ -265,6 +271,7 @@ impl QueryPreset {
             Self::StudioSettings => Table::StudioSettings,
             Self::TrainingRuns => Table::TrainingRuns,
             Self::RolloutRuns => Table::RolloutRuns,
+            Self::WorkflowRuns => Table::WorkflowRuns,
         }
     }
 
@@ -323,7 +330,7 @@ impl QueryPreset {
                 "SELECT * FROM {relation} ORDER BY {} LIMIT 100",
                 column::KEY,
             ),
-            Self::TrainingRuns | Self::RolloutRuns => format!(
+            Self::TrainingRuns | Self::RolloutRuns | Self::WorkflowRuns => format!(
                 "SELECT * FROM {relation} ORDER BY {} DESC LIMIT 100",
                 column::UPDATED_MS,
             ),
