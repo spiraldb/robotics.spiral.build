@@ -254,12 +254,18 @@ put reads as a bench tool.
   visible in its own row of the named camera column. Rollout narrows the
   workbench to 27% and replaces the Timeline slot with one low Inference lane.
 - Workflow uses a 30% Assistant/Node tab lane beside a right column with a
-  dominant lineage canvas above Results. It has its own layout scope.
+  dominant lineage canvas above Results; the initial 66/34 vertical split
+  favors the graph until evidence exists. It has its own layout scope.
 - Workflow's Model inspector is the truthful execution surface: one advertised
-  SigLIP capability, upstream media choice, one visual concept per line,
-  resolved score-column map, bounded row progress, warnings/quarantine, actual
-  device and timings, fingerprint, and computed/reused state. Assistant remains
-  visibly unavailable.
+  SigLIP capability; structured feature name, description, concept, candidate
+  image field, optional stream applicability, normalized source and shared
+  cache; bounded feature-cell progress; warnings/quarantine; actual device and
+  timings; and computed/reused state. The compact Assistant adds a durable
+  project-scoped conversation selector, fixed thread header, autosizing composer,
+  auto-follow/jump recovery, and collapsible terse tool summaries without displacing
+  canvas or Results as the authoritative execution surfaces. Periodic frame
+  selection is ordinary read-only candidate SQL, not a typed tool or Model
+  setting.
 - One playhead synchronizes every representation of an episode.
 - Compact 12px type, 24px controls, 32px panel tabs, small radii, and hairlines.
 - Monospace tabular figures for elapsed time, rates, durations, counts, and IDs.
@@ -660,7 +666,8 @@ physical motion is sent only for the committed seek.
 | Live robot and camera selection | Live Activity Controller | Live Workbench, Scene, Live camera registry |
 | Live recording and review subject | Live Activity Controller, reconciled with backend truth | Live Workbench, Timeline, recorded preview surfaces |
 | Data tool, selected episode, and query | Data Activity Controller | Data Workbench and the complete Data projection |
-| Workflow saved graph, local draft, model capability/configuration, run snapshot, derived-relation metadata, and terminal result | Workflow Activity Controller, reconciled with backend truth | Assistant/Node panels, Workflow canvas, Results panel, Status Bar |
+| Workflow saved graph, local draft, typed feature definitions, source-derived cache metadata, run snapshot, and terminal result | Workflow Activity Controller, reconciled with backend truth | Node panel, Workflow canvas, Results panel, Assistant, Status Bar |
+| Workflow Assistant readiness, bounded project-scoped conversations, active selection/turn, and typed tool summaries/receipts | Backend Workflow agent, reconciled by the Workflow Activity Controller | Assistant panel; canvas and Results consume only authoritative Workflow state |
 | Rollout checkpoint, execution inputs, fixed follower, and readiness | Rollout Activity Controller, reconciled with backend truth | Rollout Workbench, live Scene, follower Camera, Inference lane |
 | Timeline subject, playhead, preview playback, and Follow Live | Timeline Controller within the active activity | Scene, Cameras, Signals, Timeline |
 | Panel geometry and active tab | `PanelWorkspace` | Panel chrome and persisted layout only |
@@ -680,11 +687,23 @@ preserved Scene + active QueryResult sibling tab + explicit episode context or
 explicit no-episode context`.
 
 **Apply and run a Workflow:** `Node inspector edits → revision-checked Apply →
-Workflow backend → optional pinned SigLIP materialization → read-only Query →
+Workflow backend → optional pinned SigLIP feature-cache backfill → read-only Query →
 run/cancel snapshot events → reconciled Canvas + bounded media-aware Results`,
 while browser-owned node geometry and panel focus remain stable. The controlled
 Add/Remove model actions rewrite the Table→Query lineage and placeholder as one
 topology change; they never expose arbitrary graph editing.
+
+**Ask the Workflow Assistant:** `Composer → backend-owned provider turn →
+relation/model inspection → read-only SQL candidate definition → validated
+graph save → optional Workflow run → bounded query inspection → durable thread
++ named agent SSE`. The selected conversation alone supplies provider context;
+server-scoped create/select changes conversation state without changing the
+Workflow graph or run. Text and compact tool summaries stream in the Assistant
+lane. When a run exceeds the bounded
+wait, the backend publishes its terminal state, appends a synthetic completion,
+and resumes the same turn. Saved canvas state, run snapshots, and Results are
+authoritative throughout; Assistant activity never creates a browser-local
+graph or a second Run control.
 
 **Seek or rewind:** `Timeline → Seek(subject, time, phase) → Activity Controller
 → one synchronized historical projection`. A committed, explicitly armed
@@ -885,46 +904,119 @@ This is the signature component system.
 - **Setup:** Lives in Settings → Robots. Ports, camera assignment, calibration,
   import/export, and deletion do not compete with active motor control.
 
-### Workflow Canvas
+### Workflow Workbench
 
 - **Relation-first boundary:** Workflow begins with qualified Spiral Table
   relations. Hugging Face datasets, MCAP files, and other external sources are
   import producers owned elsewhere; they never appear as Workflow nodes or
   controls. One import may produce several Table roots.
 - **Node grammar:** Table, Model, Query, and Result are the only node kinds.
-  Model cards name their server-derived output relation. Query cards read
-  upstream relations, and Result is terminal.
+  A Query defines the Model's candidate cohort; Model cards name the
+  source-derived Studio feature cache; a final Query joins candidate/cache and
+  other evidence; Result is terminal.
 - **Card:** Paper surface, one-pixel hairline, 4px radius, 12px sentence-case
   title, 10–11px detail, and a reserved footer for semantic state. Selection is
   a role-blue inset ring and must remain legible without relying on colour.
 - **Canvas:** Pale viewport surface with a subtle dot grid, thin graphite
-  lineage edges, no MiniMap, and a typed Fit action. `--df-*` values map to the
-  existing `--tone-*` roles rather than forming a second palette.
-- **Stage-3 truth:** Assistant explicitly identifies its unavailable transport
-  and owns no run action. Manual Table→Query→Result and
-  Table→Model→Query→Result graphs run over authoritative Spiral relations. The
-  only advertised Model is pinned SigLIP; its inspector accepts a discovered
-  direct image field or durable video-manifest `media_relation`, plus one visual
-  concept per line, and shows the server-derived score-column mapping. Table,
-  Model, and Query edits use explicit Apply with revision-conflict recovery,
-  while the canvas exclusively owns Run/Cancel and prints every disabled reason
-  on-page.
-- **Controlled topology:** Add model inserts SigLIP between the first Table and
-  Query; Remove model reconnects that pair and repairs the Query placeholder.
-  Topology changes trigger left-to-right auto-layout after cards are measurable;
-  reopening a hidden narrow-screen canvas layouts changed topology or only fits
-  unchanged geometry. The canvas exposes no arbitrary connection or delete tool.
+  lineage edges, no MiniMap, and a typed Fit action. **New workflow** creates a
+  reversible unapplied blank draft; Apply persists the empty canvas and clears
+  stale Results so the Assistant's later save is visibly the source of every
+  node. The blank canvas and Results use matching activation copy rather than
+  showing graph-validation jargon. `--df-*` values map to the existing
+  `--tone-*` roles rather than forming a second palette.
+- **Current truth:** The 30% left lane keeps Assistant and Node as tabs. The
+  Assistant shows secret-free product readiness, a durable bounded
+  conversation selector, the selected message thread, safe paragraphs/lists/emphasis/inline-code/code-block
+  rendering, streaming response state, near-bottom auto-follow with explicit
+  jump recovery, and a compact disclosed execution trace that stays collapsed
+  during ordinary work. A successful turn labels nonfatal retries as recovered;
+  only a terminal failed turn opens the trace for action.
+  Completed graph/run/result tools offer stale-safe **View graph**, **View run**,
+  or **View results** receipts without moving focus until invoked. The
+  autosizing 8,000-character composer keeps Send or Stop as mutually exclusive
+  turn actions; Enter sends and Shift+Enter inserts a line. Up to 20 conversations with 80 public messages each are preserved;
+  hitting the bound disables New instead of evicting history. New/select are
+  also disabled during Agent-owned work or when Spiral history is unavailable,
+  but remain usable when only provider availability is absent. New is idempotent
+  on an already-pristine active conversation. Studio silently reads its ignored,
+  owner-only local credential fallback and applies the prototype Terra/OpenRouter
+  defaults; provider/model identities, credential names, and configuration
+  instructions never appear in the product surface. An unavailable provider
+  leaves the same stable surface with bounded retry language.
+  Manual Table→Query→Result and
+  Table→candidate Query→Model→final Query→Result graphs continue to run over
+  authoritative Spiral relations. The canvas exclusively owns manual
+  Run/Cancel and prints every disabled reason on-page; the Assistant may start
+  a run only through its bounded backend tool.
+- **Agent boundary:** Seven backend tools may list and describe existing
+  relations, list the one advertised Model capability, validate/save a complete
+  Workflow, start and wait for that Workflow, and inspect at most 50 read-only
+  query rows. The graph tool exposes only name, nodes, and edges; Studio injects
+  the server-owned workflow identity and revision before validation. There is no
+  sampling or generic mutation tool. Periodic selection
+  is an ordinary read-only candidate Query using inspected Spiral media and
+  `frame_slice` before decode; the existing pinned PIL bicubic processor remains
+  the only SigLIP resize path.
+  Tool state is summarized from bounded allow-listed output facts such as graph
+  revision, run identity/phase, query row counts, and terminal result count;
+  raw tool payloads, media/tensors, and provider credentials never appear
+  there. Only one
+  turn is active, and manual Apply or
+  Run waits until it finishes. A long Workflow run moves the turn into an
+  explicit waiting state and resumes it from a synthetic backend completion.
+  Restarted active turns become Interrupted rather than appearing to resume;
+  an incomplete trailing provider tool exchange is removed before Retry.
+- **Manual inspector:** The only advertised Model is pinned SigLIP; its
+  inspector owns structured `_feature` name, description, concept, candidate
+  image field, optional stream IDs, normalized source, and source-derived cache.
+  Untouched feature definitions collapse to one actionable completion issue;
+  entered invalid fields retain their field-specific errors. Table, Model, and
+  Query edits use explicit Apply with revision-conflict recovery.
+- **Controlled topology:** Add model preserves the existing Query as a candidate
+  cohort, inserts SigLIP plus a generated final cache-join Query, and connects
+  candidate→Model, candidate→final Query, and Model→final Query. Remove model
+  restores the candidate Query as terminal.
+  Topology changes trigger compact left-to-right auto-layout after cards are
+  measurable. First visibility also lays out before fitting so a five-rank,
+  six-node, two-Table lineage stays complete at the supported 1024px desktop minimum;
+  later activation only fits unchanged geometry. Manual Fit also clamps to the
+  0.70 readability floor and leaves wider graphs pannable. The canvas exposes no
+  arbitrary connection or delete tool.
 - **Runtime state:** Cards render authoritative Pending, Validating, Loading,
   Running, Complete, Complete-with-warnings, Failed, Stale, Cancelling, and
-  Cancelled states. Running uses bounded `completed / total rows`, never
+  Cancelled states. Model Running uses bounded `completed / total feature cells`, never
   fabricated percentages or ETA. The inspector exposes actual device,
   decode/inference timing, quarantine count/examples, warnings, fingerprint,
-  and computed/reused state. Reruns and failed/cancelled attempts retain prior
-  query rows as visibly stale. Results reuse Data's bounded media-aware table
-  instead of defining a second semantic-cell renderer.
-- **Focus and reload:** Pointer selection or Enter/Space from a focused node opens
-  the Node inspector; initial rendering leaves Assistant active. SSE/reconnect
-  updates preserve node geometry and never steal panel focus. A dirty draft whose
+  and computed/reused state. A neutral Saved/Modified identity is separate from
+  the semantic run badge: active is blue, Complete green, warnings ochre,
+  failure red, and Cancelled/Interrupted neutral. New cards use one bounded
+  left-to-right reveal when an Assistant save introduces topology. During a
+  run, only lineage feeding the active node uses marching dashes; the active
+  footer carries a restrained moving wash and real completed/total work uses a
+  semantic progress element. All three motion cues stop with the state and are
+  disabled under `prefers-reduced-motion`. Reruns and
+  failed/cancelled attempts retain prior query rows as visibly stale and expose
+  phase-specific recovery. Results reuse Data's bounded media-aware renderer;
+  exact `spql.image.Image` values render directly in their schema cells, with
+  contextual episode/stream/frame alt text. Image-bearing rows retain ordinary
+  table semantics beside their score, identity, time, frame, and joint values;
+  compact type-aware headers, aligned numbers, quiet nulls, and one metadata
+  strip avoid a duplicate evidence surface.
+- **Focus, history, and reload:** Pointer selection or Enter/Space from a focused
+  node opens the Node inspector; initial rendering leaves Assistant active.
+  Workflow and `workflow_agent` SSE/reconnect updates preserve node geometry and
+  never steal panel focus. The backend persists bounded Assistant conversations
+  and tool summaries as one server-owned schema-v2 envelope in the active Spiral
+  project; only the selected conversation is provider context, while
+  create/select leaves graph/run truth unchanged. Valid current schema-v2
+  history is preserved. This prototype atomically resets missing-schema,
+  incompatible, future, or unreadable history from its exact stored snapshot to
+  one fresh conversation; if that reset fails, history remains unavailable and
+  conversation mutation stays blocked.
+  Switching or restoring a project replaces the visible collection under a new
+  server scope instead of merging histories. Unsent Assistant drafts are keyed
+  by both server scope and conversation identity, so a cloned/imported
+  conversation identity cannot expose another project's draft. A dirty graph draft whose
   base revision is obsolete can only be discarded through the explicit Reload
   saved action.
 
@@ -1121,7 +1213,8 @@ status bar available. Robots is the default section, followed by SpiralDB,
 Training, and Video. SpiralDB owns complete-project backup and destructive restore as a
 distinct `.spiral-project` transfer; restore alone uses the shared blocking
 dialog, requires explicit confirmation, and replaces all Studio-managed
-relations. Save failures, test results, and configuration blockers remain
+relations, including the Workflow feature registry and every cache relation
+whose source-derived identity that registry validates. Save failures, test results, and configuration blockers remain
 visible beside the responsible section and its retry and exit actions.
 
 ### Inputs / Fields
@@ -1192,12 +1285,16 @@ another component only to rename it or copy shared mechanics.
   keep episode selection and camera ownership activity-scoped so switching
   cannot move content between them.
 - **Do** make Workflow relation-first: multiple Spiral Table roots may converge
-  through Model and Query nodes, and each Model owns a visible derived relation.
-- **Do** keep unavailable Workflow capabilities visually and verbally inert:
-  Assistant must not imply an agent turn or Stage-4 transport. Keep the single
-  executable SigLIP capability, actual Loading/device/fallback state, bounded
-  progress, quarantine/warnings, and computed/reused materialization evidence
-  explicit. Empty Results must distinguish no run from real empty rows.
+  through Query and Model nodes; each Model consumes a visible SQL candidate
+  cohort and owns a visible source-derived Studio feature cache.
+- **Do** keep Workflow truth layered: the Assistant may inspect, propose, save,
+  run, wait, and iterate through bounded backend tools, while the canvas, run
+  snapshot, and Results remain authoritative and the canvas keeps manual Run.
+  Keep provider readiness, active/waiting/interrupted turn state, and compact
+  tool outcomes explicit. Keep the single executable SigLIP capability, actual
+  Loading/device/fallback state, bounded progress, quarantine/warnings, and
+  computed/reused materialization evidence explicit. Empty Results must
+  distinguish no run from real empty rows.
 - **Do** route workbench, Timeline, panel-focus, and backend events through one
   activity controller that derives the complete visible projection.
 - **Do** represent Live, Recorded Loading, Recorded Ready, Recorded Unavailable,
@@ -1241,8 +1338,13 @@ another component only to rename it or copy shared mechanics.
   advertise unimplemented model variants, imply artifact/network availability,
   or turn bounded row counts into a fabricated percentage or ETA.
 - **Don't** add free-form Workflow edge drawing or generic node deletion to the
-  Stage-3 canvas. Preserve the controlled Add model / Remove model lineage
-  transformation and its server-derived relation and score-column ownership.
+  Workflow canvas. Preserve the controlled Add model / Remove model lineage
+  transformation and its candidate-query, typed-feature, and shared-cache
+  ownership.
+- **Don't** put provider keys, provider/model identity, configuration instructions,
+  raw provider payloads, media/tensors, or a second
+  manual Run control in the Assistant. Do not let chat prose override the saved
+  graph, run snapshot, or Results.
 - **Don't** let a Data action mutate Live camera tabs, or derive recorded camera
   tabs from current hardware assignment.
 - **Don't** duplicate a camera stream merely because its panel moved or another

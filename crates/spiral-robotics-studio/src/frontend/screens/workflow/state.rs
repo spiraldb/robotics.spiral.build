@@ -4,18 +4,22 @@
 //! saved graph, validation, execution phases, and result payload are backend
 //! truth and reconcile through HTTP plus the one shared SSE stream.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use dioxus::prelude::*;
 use dioxus_flow::{Edge, EdgeKind, Node, Side};
 use gloo_net::http::Method;
 use spiral_robotics_contracts::workflow::{
-    RunWorkflowRequest, SIGLIP_BASE_MODEL_ID, SaveWorkflowRequest, WorkflowCapabilities,
-    WorkflowConceptColumn, WorkflowEdgeSpec, WorkflowModelRunMetadata, WorkflowNodeConfig,
-    WorkflowNodeKind, WorkflowNodePhase, WorkflowNodeProgress, WorkflowNodeSnapshot,
-    WorkflowQuarantineSummary, WorkflowRelation, WorkflowRelationsResponse, WorkflowRunPhase,
-    WorkflowRunSnapshot, WorkflowSpec, WorkflowStateResponse, WorkflowValidationReport,
-    resolve_siglip_concepts, validate_workflow_spec, workflow_has_model,
+    CancelWorkflowRequest, RunWorkflowRequest, SIGLIP_BASE_MODEL_ID, SaveWorkflowRequest,
+    WorkflowAgentActivateConversationRequest, WorkflowAgentArtifactKind,
+    WorkflowAgentArtifactReceipt, WorkflowAgentCancelRequest,
+    WorkflowAgentCreateConversationRequest, WorkflowAgentStateResponse, WorkflowAgentTurnAccepted,
+    WorkflowAgentTurnRequest, WorkflowCapabilities, WorkflowEdgeSpec, WorkflowFeatureApplicability,
+    WorkflowFeatureDefinition, WorkflowModelRunMetadata, WorkflowNodeConfig, WorkflowNodeKind,
+    WorkflowNodePhase, WorkflowNodeProgress, WorkflowNodeSnapshot, WorkflowQuarantineSummary,
+    WorkflowRelation, WorkflowRelationsResponse, WorkflowRunPhase, WorkflowRunSnapshot,
+    WorkflowSpec, WorkflowStateResponse, WorkflowValidationReport, derived_feature_cache_relation,
+    topological_order, validate_workflow_spec, workflow_has_model,
 };
 use spiral_robotics_panels::PanelId;
 
@@ -33,16 +37,14 @@ pub(crate) struct WorkflowNodeData {
     pub kind: WorkflowNodeKind,
     pub fields: Vec<String>,
     pub relation: Option<String>,
-    pub output_relation: Option<String>,
+    pub feature_cache_relation: Option<String>,
     pub sql: Option<String>,
     pub description: String,
     pub phase: WorkflowNodePhase,
     pub detail: String,
     pub error: Option<String>,
     pub model_id: Option<String>,
-    pub media_column: Option<String>,
-    pub concepts: Vec<String>,
-    pub concept_columns: Vec<WorkflowConceptColumn>,
+    pub features: Vec<WorkflowFeatureDefinition>,
     pub progress: Option<WorkflowNodeProgress>,
     pub quarantine: WorkflowQuarantineSummary,
     pub model: Option<WorkflowModelRunMetadata>,
@@ -138,6 +140,36 @@ pub(crate) enum WorkflowCommand {
     Cancelling,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkflowAgentCommand {
+    Sending,
+    Cancelling,
+    CreatingConversation,
+    ActivatingConversation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AcceptedAgentDraft {
+    pub(crate) scope_id: String,
+    pub(crate) conversation_id: String,
+    pub(crate) text: String,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct AgentDraftKey {
+    pub(crate) scope_id: String,
+    pub(crate) conversation_id: String,
+}
+
+impl AgentDraftKey {
+    pub(crate) fn new(scope_id: &str, conversation_id: &str) -> Self {
+        Self {
+            scope_id: scope_id.to_owned(),
+            conversation_id: conversation_id.to_owned(),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct WorkflowController {
     nodes: Signal<Vec<Node<WorkflowNodeData>>>,
@@ -150,13 +182,19 @@ pub(crate) struct WorkflowController {
     loaded: Signal<bool>,
     command: Signal<Option<WorkflowCommand>>,
     load_error: Signal<Option<String>>,
+    agent: Signal<WorkflowAgentStateResponse>,
+    agent_loaded: Signal<bool>,
+    agent_command: Signal<Option<WorkflowAgentCommand>>,
+    agent_error: Signal<Option<String>>,
+    agent_accepted_draft: Signal<Option<AcceptedAgentDraft>>,
+    agent_drafts: Signal<BTreeMap<AgentDraftKey, String>>,
 }
 
 pub(crate) fn use_workflow_controller() -> WorkflowController {
     let initial = initial_state();
     let initial_spec = initial.workflow.clone();
     let initial_nodes = graph_nodes(&initial_spec, &initial.snapshot, &[]);
-    let initial_edges = graph_edges(&initial_spec.edges);
+    let initial_edges = graph_edges(&initial_spec.edges, &initial.snapshot);
     let controller = WorkflowController {
         nodes: use_signal(move || initial_nodes),
         edges: use_signal(move || initial_edges),
@@ -168,6 +206,12 @@ pub(crate) fn use_workflow_controller() -> WorkflowController {
         loaded: use_signal(|| false),
         command: use_signal(|| None),
         load_error: use_signal(|| None),
+        agent: use_signal(WorkflowAgentStateResponse::default),
+        agent_loaded: use_signal(|| false),
+        agent_command: use_signal(|| None),
+        agent_error: use_signal(|| None),
+        agent_accepted_draft: use_signal(|| None),
+        agent_drafts: use_signal(BTreeMap::new),
     };
     let studio = studio();
     use_future(move || async move {
@@ -175,7 +219,18 @@ pub(crate) fn use_workflow_controller() -> WorkflowController {
     });
     use_effect(move || {
         if let Some(state) = studio.workflow_state.read().clone() {
-            controller.reconcile_state(state);
+            let scope_changed = controller.reconcile_state(state);
+            if scope_changed {
+                let expected_scope_id = controller.server.peek().scope_id.clone();
+                dioxus::dioxus_core::spawn_forever(async move {
+                    controller.load_relations(studio, expected_scope_id).await;
+                });
+            }
+        }
+    });
+    use_effect(move || {
+        if let Some(state) = studio.workflow_agent_state.read().clone() {
+            controller.reconcile_agent(state);
         }
     });
     use_context_provider(|| controller)
@@ -235,32 +290,6 @@ impl WorkflowController {
         signature
     }
 
-    pub(crate) fn model_media_fields(&self, node_id: &str) -> Vec<String> {
-        let draft = self.draft.read();
-        let upstream_id = draft
-            .edges
-            .iter()
-            .find(|edge| edge.target == node_id)
-            .map(|edge| edge.source.as_str());
-        let relation = upstream_id.and_then(|upstream_id| {
-            draft.nodes.iter().find_map(|node| {
-                (node.id == upstream_id)
-                    .then_some(&node.config)
-                    .and_then(|config| match config {
-                        WorkflowNodeConfig::Table { relation } => Some(relation.as_str()),
-                        _ => None,
-                    })
-            })
-        });
-        let relations = self.relations.read();
-        relations
-            .relations
-            .iter()
-            .find(|candidate| Some(candidate.name.as_str()) == relation)
-            .map(relation_model_media_fields)
-            .unwrap_or_default()
-    }
-
     pub(crate) fn validation(&self) -> WorkflowValidationReport {
         validate_workflow_spec(&self.draft.read())
     }
@@ -275,6 +304,69 @@ impl WorkflowController {
 
     pub(crate) fn command(&self) -> Option<WorkflowCommand> {
         *self.command.read()
+    }
+
+    pub(crate) fn agent_state(&self) -> WorkflowAgentStateResponse {
+        self.agent.read().clone()
+    }
+
+    pub(crate) fn agent_loaded(&self) -> bool {
+        *self.agent_loaded.read()
+    }
+
+    pub(crate) fn agent_command(&self) -> Option<WorkflowAgentCommand> {
+        *self.agent_command.read()
+    }
+
+    pub(crate) fn agent_error(&self) -> Option<String> {
+        self.agent_error.read().clone()
+    }
+
+    pub(crate) const fn agent_accepted_draft(self) -> Signal<Option<AcceptedAgentDraft>> {
+        self.agent_accepted_draft
+    }
+
+    /// Shell-hoisted unsent text survives Workflow route and Settings outlet
+    /// unmounts while remaining isolated by project scope and durable
+    /// conversation identity.
+    pub(crate) const fn agent_drafts(self) -> Signal<BTreeMap<AgentDraftKey, String>> {
+        self.agent_drafts
+    }
+
+    pub(crate) fn agent_conversation_disabled_reason(
+        &self,
+        connected: bool,
+        catalog_available: bool,
+    ) -> Option<String> {
+        let agent = self.agent_state();
+        let snapshot = self.snapshot();
+        agent_conversation_change_reason(
+            self.agent_loaded(),
+            connected,
+            catalog_available,
+            self.agent_command(),
+            &agent,
+            &snapshot,
+        )
+    }
+
+    pub(crate) fn new_agent_conversation_disabled_reason(
+        &self,
+        connected: bool,
+        catalog_available: bool,
+    ) -> Option<String> {
+        if let Some(reason) = self.agent_conversation_disabled_reason(connected, catalog_available)
+        {
+            return Some(reason);
+        }
+        let agent = self.agent_state();
+        if agent.conversations.len() >= agent.conversation_limit {
+            return Some(format!(
+                "The {0}-conversation limit is reached. Previous conversations are kept; continue one of them instead.",
+                agent.conversation_limit
+            ));
+        }
+        None
     }
 
     pub(crate) fn dirty(&self) -> bool {
@@ -312,6 +404,9 @@ impl WorkflowController {
         if self.command().is_some() {
             return Some("A Workflow command is in progress.".to_owned());
         }
+        if self.agent_state().session.phase.active() || self.agent_command().is_some() {
+            return Some("The Workflow Assistant is using this graph.".to_owned());
+        }
         if self.snapshot().phase.active() {
             return Some("This Workflow is already running.".to_owned());
         }
@@ -324,6 +419,11 @@ impl WorkflowController {
         if self.dirty() {
             return Some("Apply graph changes before running.".to_owned());
         }
+        let draft = self.draft.read();
+        if draft.nodes.is_empty() && draft.edges.is_empty() {
+            return Some("Ask the Assistant to build this workflow before running.".to_owned());
+        }
+        drop(draft);
         self.validation()
             .errors
             .first()
@@ -346,6 +446,16 @@ impl WorkflowController {
         if self.command().is_some() || self.snapshot().phase.active() {
             return Some("Cancel the active run before applying changes.".to_owned());
         }
+        if self.agent_state().session.phase.active() || self.agent_command().is_some() {
+            return Some(
+                "Wait for the active Assistant turn before applying graph changes.".to_owned(),
+            );
+        }
+        let draft = self.draft.read();
+        if draft.nodes.is_empty() && draft.edges.is_empty() {
+            return None;
+        }
+        drop(draft);
         self.validation()
             .errors
             .first()
@@ -383,14 +493,45 @@ impl WorkflowController {
         self.ui.set(next);
     }
 
+    pub(crate) fn receipt_panel(&self, receipt: &WorkflowAgentArtifactReceipt) -> Option<PanelId> {
+        let dirty = self.dirty();
+        let server = self.server.read();
+        receipt_panel_id(receipt, &server, dirty).map(PanelId::from)
+    }
+
+    pub(crate) fn open_agent_receipt(mut self, receipt: WorkflowAgentArtifactReceipt) {
+        let Some(panel) = self.receipt_panel(&receipt) else {
+            return;
+        };
+        let next = reduce_workflow_ui(
+            &self.ui.peek(),
+            WorkflowUiAction::ActivatePanel(panel.to_string()),
+        );
+        self.ui.set(next);
+    }
+
     pub(crate) fn reload_saved(mut self) {
         self.draft.set(self.server.peek().workflow.clone());
         self.load_error.set(None);
         self.sync_graph();
     }
 
+    pub(crate) fn clear_workflow_draft(mut self) {
+        if topology_mutation_blocked(self.snapshot().phase, self.command())
+            || self.agent_state().session.phase.active()
+            || self.agent_command().is_some()
+        {
+            return;
+        }
+        let empty = empty_workflow_draft(&self.draft.peek());
+        self.draft.set(empty);
+        self.clear_selection();
+        self.sync_graph();
+    }
+
     pub(crate) fn set_table_relation(mut self, node_id: &str, relation: String) {
-        let changed = edit_node(&mut self.draft.write(), node_id, |config| {
+        let mut draft = self.draft.write();
+        let changed = edit_node(&mut draft, node_id, |config| {
             let WorkflowNodeConfig::Table { relation: current } = config else {
                 return false;
             };
@@ -400,6 +541,10 @@ impl WorkflowController {
             *current = relation;
             true
         });
+        if changed {
+            normalize_draft_model_sources(&mut draft);
+        }
+        drop(draft);
         if changed {
             self.sync_graph();
         }
@@ -421,44 +566,90 @@ impl WorkflowController {
         }
     }
 
-    pub(crate) fn set_model_media_column(mut self, node_id: &str, media_column: String) {
-        let changed = edit_node(&mut self.draft.write(), node_id, |config| {
-            let WorkflowNodeConfig::Model {
-                media_column: current,
-                ..
-            } = config
-            else {
+    pub(crate) fn set_model_feature(
+        mut self,
+        node_id: &str,
+        index: usize,
+        edit: impl FnOnce(&mut WorkflowFeatureDefinition),
+    ) {
+        let mut draft = self.draft.write();
+        let changed = edit_node(&mut draft, node_id, |config| {
+            let WorkflowNodeConfig::Model { features, .. } = config else {
                 return false;
             };
-            if current == &media_column {
+            let Some(feature) = features.get_mut(index) else {
                 return false;
-            }
-            *current = media_column;
+            };
+            edit(feature);
             true
         });
+        let features = draft
+            .nodes
+            .iter()
+            .find(|node| node.id == node_id)
+            .and_then(|node| match &node.config {
+                WorkflowNodeConfig::Model { features, .. } => Some(features.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        if changed {
+            refresh_generated_feature_query(&mut draft, node_id, &features);
+        }
+        drop(draft);
         if changed {
             self.sync_graph();
         }
     }
 
-    pub(crate) fn set_model_concepts(mut self, node_id: &str, value: String) {
-        let concepts = value.lines().map(str::to_owned).collect::<Vec<_>>();
-        let changed = edit_node(&mut self.draft.write(), node_id, |config| {
-            let WorkflowNodeConfig::Model {
-                concepts: current,
-                concept_columns,
-                ..
-            } = config
-            else {
+    pub(crate) fn add_model_feature(mut self, node_id: &str) {
+        let mut draft = self.draft.write();
+        let changed = edit_node(&mut draft, node_id, |config| {
+            let WorkflowNodeConfig::Model { features, .. } = config else {
                 return false;
             };
-            if current == &concepts {
+            let Some(first) = features.first() else {
                 return false;
-            }
-            *current = concepts;
-            concept_columns.clear();
+            };
+            let applicability = WorkflowFeatureApplicability {
+                source_relation: first.applicability.source_relation.clone(),
+                media_field: first.applicability.media_field.clone(),
+                stream_ids: Vec::new(),
+            };
+            features.push(WorkflowFeatureDefinition {
+                name: String::new(),
+                description: String::new(),
+                concept: String::new(),
+                applicability,
+            });
             true
         });
+        if changed {
+            let features = model_features(&draft, node_id);
+            refresh_generated_feature_query(&mut draft, node_id, &features);
+        }
+        drop(draft);
+        if changed {
+            self.sync_graph();
+        }
+    }
+
+    pub(crate) fn remove_model_feature(mut self, node_id: &str, index: usize) {
+        let mut draft = self.draft.write();
+        let changed = edit_node(&mut draft, node_id, |config| {
+            let WorkflowNodeConfig::Model { features, .. } = config else {
+                return false;
+            };
+            if features.len() <= 1 || index >= features.len() {
+                return false;
+            }
+            features.remove(index);
+            true
+        });
+        if changed {
+            let features = model_features(&draft, node_id);
+            refresh_generated_feature_query(&mut draft, node_id, &features);
+        }
+        drop(draft);
         if changed {
             self.sync_graph();
         }
@@ -468,8 +659,7 @@ impl WorkflowController {
         if self.has_model() || topology_mutation_blocked(self.snapshot().phase, self.command()) {
             return;
         }
-        let relations = self.relations.peek().relations.clone();
-        let Some(node_id) = insert_siglip_model(&mut self.draft.write(), &relations) else {
+        let Some(node_id) = insert_siglip_model(&mut self.draft.write()) else {
             return;
         };
         self.sync_graph();
@@ -492,7 +682,9 @@ impl WorkflowController {
             return;
         }
         self.command.set(Some(WorkflowCommand::Applying));
+        let requested_scope_id = self.server.peek().scope_id.clone();
         let request = SaveWorkflowRequest {
+            scope_id: requested_scope_id.clone(),
             expected_revision: self.draft.peek().revision,
             workflow: self.draft.peek().clone(),
         };
@@ -503,13 +695,13 @@ impl WorkflowController {
                 Some(&request),
             )
             .await;
-            self.command.set(None);
+            self.finish_command(&requested_scope_id);
             match response {
-                Ok(response) => self.accept_applied_state(response),
+                Ok(response) => self.accept_applied_state(response, &requested_scope_id),
                 Err(error) => {
                     studio.report_from(MessageSource::Workflow, error);
                     if let Ok(state) = api::get::<WorkflowStateResponse>("/api/workflow").await {
-                        self.reconcile_state(state);
+                        self.reconcile_state_command(state, &requested_scope_id);
                     }
                 }
             }
@@ -522,7 +714,9 @@ impl WorkflowController {
             return;
         }
         self.command.set(Some(WorkflowCommand::Starting));
+        let requested_scope_id = self.server.peek().scope_id.clone();
         let request = RunWorkflowRequest {
+            scope_id: requested_scope_id.clone(),
             revision: self.server.peek().workflow.revision,
         };
         dioxus::dioxus_core::spawn_forever(async move {
@@ -532,9 +726,9 @@ impl WorkflowController {
                 Some(&request),
             )
             .await;
-            self.command.set(None);
+            self.finish_command(&requested_scope_id);
             match response {
-                Ok(snapshot) => self.reconcile_snapshot(snapshot),
+                Ok(snapshot) => self.reconcile_snapshot(snapshot, &requested_scope_id),
                 Err(error) => studio.report_from(MessageSource::Workflow, error),
             }
         });
@@ -545,27 +739,206 @@ impl WorkflowController {
             return;
         }
         self.command.set(Some(WorkflowCommand::Cancelling));
+        let requested_scope_id = self.server.peek().scope_id.clone();
+        let request = CancelWorkflowRequest {
+            scope_id: requested_scope_id.clone(),
+        };
         dioxus::dioxus_core::spawn_forever(async move {
-            let response = api::send_json::<(), WorkflowRunSnapshot>(
+            let response = api::send_json::<_, WorkflowRunSnapshot>(
                 Method::POST,
                 "/api/workflow/cancel",
-                None,
+                Some(&request),
             )
             .await;
-            self.command.set(None);
+            self.finish_command(&requested_scope_id);
             match response {
-                Ok(snapshot) => self.reconcile_snapshot(snapshot),
+                Ok(snapshot) => self.reconcile_snapshot(snapshot, &requested_scope_id),
                 Err(error) => studio.report_from(MessageSource::Workflow, error),
             }
         });
     }
 
-    async fn load(mut self, studio: Studio) {
-        let state_loaded = match api::get::<WorkflowStateResponse>("/api/workflow").await {
-            Ok(state) => {
-                self.reconcile_state(state);
-                true
+    pub(crate) fn create_agent_conversation(mut self, studio: Studio) {
+        let catalog_available = studio.snapshot.read().readiness.catalog_available;
+        if self
+            .new_agent_conversation_disabled_reason((studio.live)(), catalog_available)
+            .is_some()
+        {
+            return;
+        }
+        let current = self.agent.peek().clone();
+        self.agent_command
+            .set(Some(WorkflowAgentCommand::CreatingConversation));
+        self.agent_error.set(None);
+        let request = WorkflowAgentCreateConversationRequest {
+            scope_id: current.scope_id.clone(),
+            expected_revision: current.revision,
+        };
+        dioxus::dioxus_core::spawn_forever(async move {
+            let response = api::send_json::<_, WorkflowAgentStateResponse>(
+                Method::POST,
+                "/api/workflow/agent/conversations",
+                Some(&request),
+            )
+            .await;
+            self.agent_command.set(None);
+            match response {
+                Ok(state) => {
+                    self.reconcile_agent_command(state, &request.scope_id);
+                }
+                Err(error) => {
+                    self.agent_error.set(Some(error.clone()));
+                    studio.report_from(MessageSource::Workflow, error);
+                }
             }
+        });
+    }
+
+    pub(crate) fn activate_agent_conversation(mut self, conversation_id: String, studio: Studio) {
+        let current = self.agent.peek().clone();
+        let catalog_available = studio.snapshot.read().readiness.catalog_available;
+        if conversation_id == current.active_conversation_id
+            || self
+                .agent_conversation_disabled_reason((studio.live)(), catalog_available)
+                .is_some()
+        {
+            return;
+        }
+        self.agent_command
+            .set(Some(WorkflowAgentCommand::ActivatingConversation));
+        self.agent_error.set(None);
+        let request = WorkflowAgentActivateConversationRequest {
+            scope_id: current.scope_id.clone(),
+            conversation_id,
+            expected_revision: current.revision,
+        };
+        dioxus::dioxus_core::spawn_forever(async move {
+            let response = api::send_json::<_, WorkflowAgentStateResponse>(
+                Method::PUT,
+                "/api/workflow/agent/conversations/active",
+                Some(&request),
+            )
+            .await;
+            self.agent_command.set(None);
+            match response {
+                Ok(state) => {
+                    self.reconcile_agent_command(state, &request.scope_id);
+                }
+                Err(error) => {
+                    self.agent_error.set(Some(error.clone()));
+                    studio.report_from(MessageSource::Workflow, error);
+                }
+            }
+        });
+    }
+
+    pub(crate) fn send_agent(mut self, text: String, studio: Studio) {
+        let text = text.trim().to_owned();
+        let state = self.agent.peek().clone();
+        if text.is_empty()
+            || !state.readiness.configured
+            || state.session.phase.active()
+            || self.agent_command.peek().is_some()
+            || self.server.peek().snapshot.phase.active()
+        {
+            return;
+        }
+        self.agent_command.set(Some(WorkflowAgentCommand::Sending));
+        self.agent_error.set(None);
+        let request = WorkflowAgentTurnRequest {
+            scope_id: state.scope_id.clone(),
+            conversation_id: state.active_conversation_id.clone(),
+            text: text.clone(),
+            expected_revision: state.revision,
+        };
+        dioxus::dioxus_core::spawn_forever(async move {
+            let response = api::send_json::<_, WorkflowAgentTurnAccepted>(
+                Method::POST,
+                "/api/workflow/agent/turn",
+                Some(&request),
+            )
+            .await;
+            self.agent_command.set(None);
+            match response {
+                Ok(accepted) => {
+                    if self.reconcile_agent_command(accepted.state, &request.scope_id) {
+                        self.agent_accepted_draft.set(Some(AcceptedAgentDraft {
+                            scope_id: request.scope_id,
+                            conversation_id: request.conversation_id,
+                            text,
+                        }));
+                    }
+                }
+                Err(error) => {
+                    self.agent_error.set(Some(error.clone()));
+                    studio.report_from(MessageSource::Workflow, error);
+                    if let Ok(state) =
+                        api::get::<WorkflowAgentStateResponse>("/api/workflow/agent").await
+                    {
+                        self.reconcile_agent_command(state, &request.scope_id);
+                    }
+                }
+            }
+        });
+    }
+
+    pub(crate) fn cancel_agent(mut self, studio: Studio) {
+        let current = self.agent.peek().clone();
+        if !current.session.phase.active() || self.agent_command.peek().is_some() {
+            return;
+        }
+        self.agent_command
+            .set(Some(WorkflowAgentCommand::Cancelling));
+        dioxus::dioxus_core::spawn_forever(async move {
+            let Some(turn_id) = current.session.active_turn_id.clone() else {
+                self.agent_command.set(None);
+                return;
+            };
+            let request = WorkflowAgentCancelRequest {
+                scope_id: current.scope_id.clone(),
+                conversation_id: current.active_conversation_id.clone(),
+                turn_id,
+            };
+            let response = api::send_json::<_, WorkflowAgentStateResponse>(
+                Method::POST,
+                "/api/workflow/agent/cancel",
+                Some(&request),
+            )
+            .await;
+            self.agent_command.set(None);
+            match response {
+                Ok(state) => {
+                    self.reconcile_agent_command(state, &request.scope_id);
+                }
+                Err(error) => {
+                    self.agent_error.set(Some(error.clone()));
+                    studio.report_from(MessageSource::Workflow, error);
+                }
+            }
+        });
+    }
+
+    pub(crate) fn retry_agent(self, studio: Studio) {
+        let text = self
+            .agent
+            .peek()
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| {
+                message.role == spiral_robotics_contracts::workflow::WorkflowAgentRole::User
+            })
+            .map(|message| message.text.clone());
+        if let Some(text) = text {
+            self.send_agent(text, studio);
+        }
+    }
+
+    async fn load(mut self, studio: Studio) {
+        let workflow_bootstrap_scope = self.server.peek().scope_id.clone();
+        let state_loaded = match api::get::<WorkflowStateResponse>("/api/workflow").await {
+            Ok(state) => self.reconcile_state_bootstrap(state, &workflow_bootstrap_scope),
             Err(error) => {
                 if !*self.loaded.peek() {
                     self.load_error.set(Some(error.clone()));
@@ -574,27 +947,48 @@ impl WorkflowController {
                 false
             }
         };
-        match api::get::<WorkflowRelationsResponse>("/api/workflow/relations").await {
-            Ok(relations) => {
-                self.relations.set(relations);
-                self.sync_graph();
-            }
-            Err(error) => {
-                studio.report_from(MessageSource::Workflow, error);
-            }
-        }
+        let relations_scope = self.server.peek().scope_id.clone();
+        self.load_relations(studio, relations_scope).await;
         match api::get::<WorkflowCapabilities>("/api/workflow/capabilities").await {
             Ok(capabilities) => self.capabilities.set(capabilities),
             Err(error) => studio.report_from(MessageSource::Workflow, error),
+        }
+        let agent_bootstrap_scope = self.agent.peek().scope_id.clone();
+        match api::get::<WorkflowAgentStateResponse>("/api/workflow/agent").await {
+            Ok(state) => self.reconcile_agent_bootstrap(state, &agent_bootstrap_scope),
+            Err(error) => {
+                if !*self.agent_loaded.peek() {
+                    self.agent_error.set(Some(error.clone()));
+                }
+                studio.report_from(MessageSource::Workflow, error);
+            }
         }
         if state_loaded {
             self.loaded.set(true);
         }
     }
 
-    fn accept_applied_state(mut self, state: WorkflowStateResponse) {
+    async fn load_relations(mut self, studio: Studio, expected_scope_id: String) {
+        match api::get::<WorkflowRelationsResponse>("/api/workflow/relations").await {
+            Ok(relations) => {
+                if relations_are_current(
+                    &self.server.peek().scope_id,
+                    &expected_scope_id,
+                    &relations,
+                ) {
+                    self.relations.set(relations);
+                    self.sync_graph();
+                }
+            }
+            Err(error) => studio.report_from(MessageSource::Workflow, error),
+        }
+    }
+
+    fn accept_applied_state(mut self, state: WorkflowStateResponse, requested_scope_id: &str) {
         let current = self.server.peek().clone();
-        if state.workflow.id != current.workflow.id
+        if current.scope_id != requested_scope_id
+            || state.scope_id != requested_scope_id
+            || state.workflow.id != current.workflow.id
             || state.workflow.revision < current.workflow.revision
         {
             return;
@@ -618,8 +1012,9 @@ impl WorkflowController {
         self.sync_graph();
     }
 
-    fn reconcile_snapshot(mut self, snapshot: WorkflowRunSnapshot) {
-        if snapshot.workflow_id != self.server.peek().workflow.id
+    fn reconcile_snapshot(mut self, snapshot: WorkflowRunSnapshot, requested_scope_id: &str) {
+        if self.server.peek().scope_id != requested_scope_id
+            || snapshot.workflow_id != self.server.peek().workflow.id
             || snapshot.workflow_revision != self.server.peek().workflow.revision
             || !snapshot_is_monotonic(&self.server.peek().snapshot, &snapshot)
         {
@@ -629,15 +1024,21 @@ impl WorkflowController {
         self.sync_graph();
     }
 
-    fn reconcile_state(mut self, state: WorkflowStateResponse) {
+    fn reconcile_state(mut self, state: WorkflowStateResponse) -> bool {
         if !server_state_is_monotonic(&self.server.peek(), &state) {
-            return;
+            return false;
         }
         // This path runs inside the shell's Workflow SSE effect. Keep draft
         // comparison untracked so the effect subscribes only to the incoming
         // backend signal instead of retriggering itself after writing server
         // state or graph projection.
-        let keep_local_draft = *self.draft.peek() != self.server.peek().workflow;
+        let scope_changed = state.scope_id != self.server.peek().scope_id;
+        let keep_local_draft = !scope_changed && *self.draft.peek() != self.server.peek().workflow;
+        if scope_changed {
+            self.relations.set(WorkflowRelationsResponse::default());
+            self.ui.set(WorkflowUiState::default());
+            self.command.set(None);
+        }
         self.server.set(state.clone());
         if !keep_local_draft {
             self.draft.set(state.workflow);
@@ -645,6 +1046,81 @@ impl WorkflowController {
         self.loaded.set(true);
         self.load_error.set(None);
         self.sync_graph();
+        scope_changed
+    }
+
+    fn reconcile_state_command(
+        self,
+        state: WorkflowStateResponse,
+        requested_scope_id: &str,
+    ) -> bool {
+        if self.server.peek().scope_id != requested_scope_id || state.scope_id != requested_scope_id
+        {
+            return false;
+        }
+        self.reconcile_state(state);
+        true
+    }
+
+    fn finish_command(mut self, requested_scope_id: &str) {
+        if self.server.peek().scope_id == requested_scope_id {
+            self.command.set(None);
+        }
+    }
+
+    fn reconcile_state_bootstrap(
+        self,
+        state: WorkflowStateResponse,
+        requested_scope_id: &str,
+    ) -> bool {
+        let current = self.server.peek();
+        if current.scope_id != requested_scope_id && state.scope_id != current.scope_id {
+            return false;
+        }
+        drop(current);
+        self.reconcile_state(state);
+        true
+    }
+
+    fn reconcile_agent(mut self, state: WorkflowAgentStateResponse) {
+        let current = self.agent.peek();
+        if !agent_state_is_monotonic(&current, &state) {
+            return;
+        }
+        drop(current);
+        self.agent.set(state);
+        self.agent_loaded.set(true);
+        self.agent_error.set(None);
+    }
+
+    fn reconcile_agent_command(
+        self,
+        state: WorkflowAgentStateResponse,
+        requested_scope_id: &str,
+    ) -> bool {
+        if !agent_command_response_is_current(&self.agent.peek(), &state, requested_scope_id) {
+            // A command issued before a project reload cannot replace the
+            // authoritative state from the newer server scope when its HTTP
+            // response arrives late.
+            return false;
+        }
+        self.reconcile_agent(state);
+        true
+    }
+
+    fn reconcile_agent_bootstrap(
+        self,
+        state: WorkflowAgentStateResponse,
+        requested_scope_id: &str,
+    ) {
+        let current = self.agent.peek();
+        if !agent_bootstrap_is_current(&current, &state, requested_scope_id) {
+            // A slower GET from the prior project/import scope must not replace
+            // a newer authoritative scope already delivered over SSE.
+            return;
+        }
+        drop(current);
+        self.reconcile_agent(state);
     }
 
     fn sync_graph(mut self) {
@@ -652,7 +1128,7 @@ impl WorkflowController {
         let snapshot = self.server.peek().snapshot.clone();
         let relations = self.relations.peek().relations.clone();
         let mut next = graph_nodes(&spec, &snapshot, &relations);
-        let next_edges = graph_edges(&spec.edges);
+        let next_edges = graph_edges(&spec.edges, &snapshot);
         let previous = self
             .nodes
             .peek()
@@ -690,9 +1166,106 @@ impl WorkflowController {
     }
 }
 
+fn receipt_panel_id(
+    receipt: &WorkflowAgentArtifactReceipt,
+    state: &WorkflowStateResponse,
+    dirty: bool,
+) -> Option<&'static str> {
+    match receipt.kind {
+        WorkflowAgentArtifactKind::Graph
+            if !dirty && receipt.revision == Some(state.workflow.revision) =>
+        {
+            Some(CANVAS_PANEL_ID)
+        }
+        WorkflowAgentArtifactKind::Run
+            if receipt.run_id.is_some()
+                && receipt.run_id.as_deref() == state.snapshot.run_id.as_deref() =>
+        {
+            Some(CANVAS_PANEL_ID)
+        }
+        WorkflowAgentArtifactKind::Results
+            if receipt.run_id.is_some()
+                && receipt.run_id.as_deref() == state.snapshot.run_id.as_deref()
+                && state.snapshot.phase == WorkflowRunPhase::Completed
+                && !state.snapshot.result_stale
+                && state.snapshot.result.is_some() =>
+        {
+            Some(RESULTS_PANEL_ID)
+        }
+        _ => None,
+    }
+}
+
+fn agent_state_is_monotonic(
+    current: &WorkflowAgentStateResponse,
+    incoming: &WorkflowAgentStateResponse,
+) -> bool {
+    incoming.session.workflow_id == current.session.workflow_id
+        && (incoming.scope_id != current.scope_id || incoming.revision >= current.revision)
+}
+
+fn agent_command_response_is_current(
+    current: &WorkflowAgentStateResponse,
+    incoming: &WorkflowAgentStateResponse,
+    requested_scope_id: &str,
+) -> bool {
+    current.scope_id == requested_scope_id && incoming.scope_id == requested_scope_id
+}
+
+fn agent_conversation_change_reason(
+    loaded: bool,
+    connected: bool,
+    catalog_available: bool,
+    command: Option<WorkflowAgentCommand>,
+    agent: &WorkflowAgentStateResponse,
+    snapshot: &WorkflowRunSnapshot,
+) -> Option<String> {
+    if !loaded {
+        return Some("Conversation history is still loading.".to_owned());
+    }
+    if !connected {
+        return Some("Reconnect to Studio before changing conversations.".to_owned());
+    }
+    if !catalog_available {
+        return Some("Configure or reconnect Spiral before changing conversations.".to_owned());
+    }
+    if !agent.history_available {
+        return Some(agent.readiness.detail.clone());
+    }
+    if command.is_some() {
+        return Some("Wait for the current conversation action to finish.".to_owned());
+    }
+    if agent.session.phase.active() {
+        return Some("Stop the active Assistant turn before changing conversations.".to_owned());
+    }
+    if snapshot.phase.active()
+        && snapshot.run_id.as_deref().is_some_and(|run_id| {
+            agent
+                .conversations
+                .iter()
+                .any(|conversation| conversation.owned_run_id.as_deref() == Some(run_id))
+        })
+    {
+        return Some(
+            "Stop the Workflow run started by the Assistant before changing conversations."
+                .to_owned(),
+        );
+    }
+    None
+}
+
+fn agent_bootstrap_is_current(
+    current: &WorkflowAgentStateResponse,
+    incoming: &WorkflowAgentStateResponse,
+    requested_scope_id: &str,
+) -> bool {
+    current.scope_id == requested_scope_id || incoming.scope_id == current.scope_id
+}
+
 fn initial_state() -> WorkflowStateResponse {
     let workflow = WorkflowSpec::default();
     WorkflowStateResponse {
+        scope_id: String::new(),
         validation: validate_workflow_spec(&workflow),
         snapshot: WorkflowRunSnapshot::idle_for(&workflow),
         workflow,
@@ -703,15 +1276,29 @@ fn server_state_is_monotonic(
     current: &WorkflowStateResponse,
     incoming: &WorkflowStateResponse,
 ) -> bool {
-    if incoming.workflow.id != current.workflow.id
-        || incoming.snapshot.workflow_id != incoming.workflow.id
+    if incoming.snapshot.workflow_id != incoming.workflow.id
         || incoming.snapshot.workflow_revision != incoming.workflow.revision
+    {
+        return false;
+    }
+    if incoming.scope_id != current.scope_id {
+        return true;
+    }
+    if incoming.workflow.id != current.workflow.id
         || incoming.workflow.revision < current.workflow.revision
     {
         return false;
     }
     incoming.workflow.revision > current.workflow.revision
         || snapshot_is_monotonic(&current.snapshot, &incoming.snapshot)
+}
+
+fn relations_are_current(
+    current_scope_id: &str,
+    requested_scope_id: &str,
+    incoming: &WorkflowRelationsResponse,
+) -> bool {
+    current_scope_id == requested_scope_id && incoming.scope_id == requested_scope_id
 }
 
 fn snapshot_is_monotonic(current: &WorkflowRunSnapshot, incoming: &WorkflowRunSnapshot) -> bool {
@@ -761,17 +1348,36 @@ fn edit_node(
         .is_some_and(|node| edit(&mut node.config))
 }
 
-fn insert_siglip_model(
-    workflow: &mut WorkflowSpec,
-    relations: &[WorkflowRelation],
-) -> Option<String> {
-    let edge_index = workflow.edges.iter().position(|edge| {
+fn insert_siglip_model(workflow: &mut WorkflowSpec) -> Option<String> {
+    let result_edge_index = workflow.edges.iter().position(|edge| {
         let source = workflow.nodes.iter().find(|node| node.id == edge.source);
         let target = workflow.nodes.iter().find(|node| node.id == edge.target);
-        source.is_some_and(|node| node.config.kind() == WorkflowNodeKind::Table)
-            && target.is_some_and(|node| node.config.kind() == WorkflowNodeKind::Query)
+        source.is_some_and(|node| node.config.kind() == WorkflowNodeKind::Query)
+            && target.is_some_and(|node| node.config.kind() == WorkflowNodeKind::Result)
     })?;
-    let replaced = workflow.edges.remove(edge_index);
+    let result_edge = workflow.edges[result_edge_index].clone();
+    let candidate_id = result_edge.source.clone();
+    let source_id = workflow
+        .edges
+        .iter()
+        .find(|edge| edge.target == candidate_id)
+        .and_then(|edge| {
+            workflow
+                .nodes
+                .iter()
+                .find(|node| node.id == edge.source)
+                .filter(|node| node.config.kind() == WorkflowNodeKind::Table)
+                .map(|_| edge.source.clone())
+        })?;
+    let source_relation = workflow
+        .nodes
+        .iter()
+        .find(|node| node.id == source_id)
+        .and_then(|node| match &node.config {
+            WorkflowNodeConfig::Table { relation } => Some(relation.clone()),
+            _ => None,
+        })?;
+    workflow.edges.remove(result_edge_index);
     let mut suffix = 1_u32;
     let node_id = loop {
         let candidate = if suffix == 1 {
@@ -784,62 +1390,73 @@ fn insert_siglip_model(
         }
         suffix += 1;
     };
-    let source_relation = workflow.nodes.iter().find_map(|node| {
-        (node.id == replaced.source)
-            .then_some(&node.config)
-            .and_then(|config| match config {
-                WorkflowNodeConfig::Table { relation } => Some(relation.as_str()),
-                _ => None,
-            })
-    });
-    let media_column = relations
-        .iter()
-        .find(|relation| Some(relation.name.as_str()) == source_relation)
-        .and_then(|relation| relation_model_media_fields(relation).into_iter().next())
-        .unwrap_or_default();
-    let query_id = replaced.target.clone();
-    if let Some(query) = workflow.nodes.iter_mut().find(|node| node.id == query_id)
-        && let WorkflowNodeConfig::Query { sql, .. } = &mut query.config
-    {
-        *sql = sql.replace(
-            &format!("{{{{node:{}}}}}", replaced.source),
-            &format!("{{{{node:{node_id}}}}}"),
-        );
-    }
+    let mut query_suffix = 1_u32;
+    let final_query_id = loop {
+        let candidate = if query_suffix == 1 {
+            "feature_query".to_owned()
+        } else {
+            format!("feature_query_{query_suffix}")
+        };
+        if !workflow.nodes.iter().any(|node| node.id == candidate) {
+            break candidate;
+        }
+        query_suffix += 1;
+    };
     let insert_at = workflow
         .nodes
         .iter()
-        .position(|node| node.id == query_id)
+        .position(|node| node.id == result_edge.target)
         .unwrap_or(workflow.nodes.len());
     workflow.nodes.insert(
         insert_at,
         spiral_robotics_contracts::workflow::WorkflowNodeSpec {
             id: node_id.clone(),
-            name: "SigLIP scores".to_owned(),
+            name: "Backfill visual features".to_owned(),
             config: WorkflowNodeConfig::Model {
                 model_id: SIGLIP_BASE_MODEL_ID.to_owned(),
-                configuration: BTreeMap::new(),
-                media_column,
-                concepts: Vec::new(),
-                concept_columns: Vec::new(),
-                output_relation: None,
+                features: vec![WorkflowFeatureDefinition {
+                    name: String::new(),
+                    description: String::new(),
+                    concept: String::new(),
+                    applicability: WorkflowFeatureApplicability {
+                        source_relation,
+                        media_field: "image".to_owned(),
+                        stream_ids: Vec::new(),
+                    },
+                }],
+                feature_cache_relation: None,
             },
         },
     );
-    workflow.edges.insert(
-        edge_index,
+    workflow.nodes.insert(
+        insert_at + 1,
+        spiral_robotics_contracts::workflow::WorkflowNodeSpec {
+            id: final_query_id.clone(),
+            name: "Join candidates and features".to_owned(),
+            config: WorkflowNodeConfig::Query {
+                sql: feature_join_sql(&candidate_id, &node_id, &[]),
+                max_rows: 100,
+            },
+        },
+    );
+    workflow.edges.extend([
         WorkflowEdgeSpec {
-            source: replaced.source,
+            source: candidate_id.clone(),
             target: node_id.clone(),
         },
-    );
-    workflow.edges.insert(
-        edge_index + 1,
+        WorkflowEdgeSpec {
+            source: candidate_id.clone(),
+            target: final_query_id.clone(),
+        },
         WorkflowEdgeSpec {
             source: node_id.clone(),
-            target: query_id,
+            target: final_query_id.clone(),
         },
-    );
+        WorkflowEdgeSpec {
+            source: final_query_id,
+            target: result_edge.target,
+        },
+    ]);
     Some(node_id)
 }
 
@@ -848,84 +1465,161 @@ fn remove_siglip_model(workflow: &mut WorkflowSpec, node_id: &str) -> Option<Str
         .nodes
         .iter()
         .position(|node| node.id == node_id && node.config.kind() == WorkflowNodeKind::Model)?;
-    let incoming_index = workflow
+    let candidate_id = workflow
         .edges
         .iter()
-        .position(|edge| edge.target == node_id)?;
-    let outgoing_index = workflow
+        .find(|edge| edge.target == node_id)
+        .map(|edge| edge.source.clone())?;
+    let final_query_id = workflow
         .edges
         .iter()
-        .position(|edge| edge.source == node_id)?;
-    let incoming = workflow.edges[incoming_index].clone();
-    let outgoing = workflow.edges[outgoing_index].clone();
-    let table_is_upstream = workflow
+        .find(|edge| edge.source == node_id)
+        .map(|edge| edge.target.clone())?;
+    let result_id = workflow
+        .edges
+        .iter()
+        .find(|edge| edge.source == final_query_id)
+        .map(|edge| edge.target.clone())?;
+    let query_is_upstream = workflow
         .nodes
         .iter()
-        .any(|node| node.id == incoming.source && node.config.kind() == WorkflowNodeKind::Table);
+        .any(|node| node.id == candidate_id && node.config.kind() == WorkflowNodeKind::Query);
     let query_is_downstream = workflow
         .nodes
         .iter()
-        .any(|node| node.id == outgoing.target && node.config.kind() == WorkflowNodeKind::Query);
-    if !table_is_upstream || !query_is_downstream {
+        .any(|node| node.id == final_query_id && node.config.kind() == WorkflowNodeKind::Query);
+    if !query_is_upstream || !query_is_downstream {
         return None;
     }
 
     workflow.nodes.remove(model_index);
+    workflow.nodes.retain(|node| node.id != final_query_id);
+    workflow.edges.retain(|edge| {
+        edge.source != node_id
+            && edge.target != node_id
+            && edge.source != final_query_id
+            && edge.target != final_query_id
+    });
+    workflow.edges.push(WorkflowEdgeSpec {
+        source: candidate_id.clone(),
+        target: result_id,
+    });
+    Some(candidate_id)
+}
+
+fn model_features(workflow: &WorkflowSpec, model_id: &str) -> Vec<WorkflowFeatureDefinition> {
     workflow
+        .nodes
+        .iter()
+        .find(|node| node.id == model_id)
+        .and_then(|node| match &node.config {
+            WorkflowNodeConfig::Model { features, .. } => Some(features.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn refresh_generated_feature_query(
+    workflow: &mut WorkflowSpec,
+    model_id: &str,
+    features: &[WorkflowFeatureDefinition],
+) {
+    let Some(candidate_id) = workflow
         .edges
-        .retain(|edge| edge.source != node_id && edge.target != node_id);
-    workflow.edges.insert(
-        incoming_index.min(outgoing_index).min(workflow.edges.len()),
-        WorkflowEdgeSpec {
-            source: incoming.source.clone(),
-            target: outgoing.target.clone(),
-        },
-    );
+        .iter()
+        .find(|edge| edge.target == model_id)
+        .map(|edge| edge.source.clone())
+    else {
+        return;
+    };
+    let Some(final_query_id) = workflow
+        .edges
+        .iter()
+        .find(|edge| edge.source == model_id)
+        .map(|edge| edge.target.clone())
+    else {
+        return;
+    };
     if let Some(query) = workflow
         .nodes
         .iter_mut()
-        .find(|node| node.id == outgoing.target)
+        .find(|node| node.id == final_query_id)
         && let WorkflowNodeConfig::Query { sql, .. } = &mut query.config
     {
-        *sql = sql.replace(
-            &format!("{{{{node:{node_id}}}}}"),
-            &format!("{{{{node:{}}}}}", incoming.source),
-        );
+        *sql = feature_join_sql(&candidate_id, model_id, features);
     }
-    Some(outgoing.target)
+}
+
+/// Keep deterministic server-owned Model fields visible and valid while the
+/// user edits its one authoritative source Table. The backend repeats this
+/// normalization at admission; the browser never chooses a cache relation.
+fn normalize_draft_model_sources(workflow: &mut WorkflowSpec) {
+    let incoming = workflow.edges.iter().fold(
+        BTreeMap::<String, Vec<String>>::new(),
+        |mut incoming, edge| {
+            incoming
+                .entry(edge.target.clone())
+                .or_default()
+                .push(edge.source.clone());
+            incoming
+        },
+    );
+    let nodes = workflow
+        .nodes
+        .iter()
+        .map(|node| (node.id.clone(), node.config.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for node in &mut workflow.nodes {
+        let WorkflowNodeConfig::Model {
+            features,
+            feature_cache_relation,
+            ..
+        } = &mut node.config
+        else {
+            continue;
+        };
+        let mut sources = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        let mut pending = incoming.get(&node.id).cloned().unwrap_or_default();
+        while let Some(upstream_id) = pending.pop() {
+            if !visited.insert(upstream_id.clone()) {
+                continue;
+            }
+            match nodes.get(&upstream_id) {
+                Some(WorkflowNodeConfig::Table { relation }) if !relation.is_empty() => {
+                    sources.insert(relation.clone());
+                }
+                Some(_) => pending.extend(incoming.get(&upstream_id).cloned().unwrap_or_default()),
+                None => {}
+            }
+        }
+        let source = (sources.len() == 1)
+            .then(|| sources.into_iter().next())
+            .flatten();
+        *feature_cache_relation = source.as_deref().map(derived_feature_cache_relation);
+        for feature in features {
+            feature.applicability.source_relation = source.clone().unwrap_or_default();
+        }
+    }
+}
+
+fn feature_join_sql(
+    candidate_id: &str,
+    model_id: &str,
+    features: &[WorkflowFeatureDefinition],
+) -> String {
+    let feature_projection = features
+        .iter()
+        .filter(|feature| !feature.name.is_empty())
+        .map(|feature| format!(", features.{}", feature.name))
+        .collect::<String>();
+    format!(
+        "SELECT candidates.*{feature_projection} FROM {{{{node:{candidate_id}}}}} candidates JOIN {{{{node:{model_id}}}}} features ON candidates.episode_id = features.episode_id AND candidates.stream_id = features.stream_id AND candidates.segment_index = features.segment_index AND candidates.frame_index = features.frame_index AND candidates.episode_time_ns = features.episode_time_ns"
+    )
 }
 
 fn topology_mutation_blocked(phase: WorkflowRunPhase, command: Option<WorkflowCommand>) -> bool {
     phase.active() || command.is_some()
-}
-
-fn relation_model_media_fields(relation: &WorkflowRelation) -> Vec<String> {
-    let mut fields = relation
-        .columns
-        .iter()
-        .filter(|column| column.semantic_type.as_deref() == Some("spql.image.Image"))
-        .map(|column| column.name.clone())
-        .collect::<Vec<_>>();
-    let names = relation
-        .columns
-        .iter()
-        .map(|column| column.name.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    if [
-        "episode_id",
-        "stream_id",
-        "segment_index",
-        "timeline_offset_ns",
-        "fps",
-        "frames",
-        "media_relation",
-    ]
-    .iter()
-    .all(|field| names.contains(field))
-    {
-        fields.push("media_relation".to_owned());
-    }
-    fields
 }
 
 fn revision_conflict(draft: &WorkflowSpec, server: &WorkflowSpec) -> bool {
@@ -937,6 +1631,15 @@ fn graph_nodes(
     snapshot: &WorkflowRunSnapshot,
     relations: &[WorkflowRelation],
 ) -> Vec<Node<WorkflowNodeData>> {
+    // Keep the fallback coordinates aligned with the canvas' layered-layout
+    // geometry. The flow handle may not be ready for the first mount-time
+    // layout pass, and widely spaced fallback ranks force Fit against the
+    // readability-preserving minimum zoom at the 1024 px desktop floor.
+    const FIRST_RANK_X: f64 = 24.0;
+    // Smooth-step edges reserve a 20-unit stub at both endpoints. The
+    // fallback must therefore keep more than 40 units between cards even
+    // when the first mount-time auto-layout is not ready yet.
+    const RANK_STEP_X: f64 = 224.0; // 10.5 rem card + 56 flow-unit rank gap.
     let relation_index = relations
         .iter()
         .map(|relation| (relation.name.as_str(), relation))
@@ -946,42 +1649,24 @@ fn graph_nodes(
         .iter()
         .map(|node| (node.node_id.as_str(), node))
         .collect::<BTreeMap<_, _>>();
-    let mut table_index = 0_usize;
-    let mut model_index = 0_usize;
-    let mut query_index = 0_usize;
-    let mut result_index = 0_usize;
-    let has_model = workflow_has_model(workflow);
+    let ranks = fallback_node_ranks(workflow);
+    let mut rank_indices = BTreeMap::<usize, usize>::new();
     workflow
         .nodes
         .iter()
         .map(|node| {
-            let (position, type_name) = match node.config.kind() {
-                WorkflowNodeKind::Table => {
-                    let position = (24.0, 30.0 + table_index as f64 * 178.0);
-                    table_index += 1;
-                    (position, "table")
-                }
-                WorkflowNodeKind::Model => {
-                    let position = (320.0, 70.0 + model_index as f64 * 178.0);
-                    model_index += 1;
-                    (position, "model")
-                }
-                WorkflowNodeKind::Query => {
-                    let position = (
-                        if has_model { 640.0 } else { 400.0 },
-                        70.0 + query_index as f64 * 178.0,
-                    );
-                    query_index += 1;
-                    (position, "query")
-                }
-                WorkflowNodeKind::Result => {
-                    let position = (
-                        if has_model { 980.0 } else { 760.0 },
-                        70.0 + result_index as f64 * 178.0,
-                    );
-                    result_index += 1;
-                    (position, "result")
-                }
+            let rank = ranks.get(node.id.as_str()).copied().unwrap_or_default();
+            let rank_index = rank_indices.entry(rank).or_default();
+            let position = (
+                FIRST_RANK_X + RANK_STEP_X * rank as f64,
+                30.0 + *rank_index as f64 * 178.0,
+            );
+            *rank_index += 1;
+            let type_name = match node.config.kind() {
+                WorkflowNodeKind::Table => "table",
+                WorkflowNodeKind::Model => "model",
+                WorkflowNodeKind::Query => "query",
+                WorkflowNodeKind::Result => "result",
             };
             Node::with_data(
                 node.id.clone(),
@@ -998,6 +1683,28 @@ fn graph_nodes(
             .sides(Side::Left, Side::Right)
         })
         .collect()
+}
+
+fn fallback_node_ranks(workflow: &WorkflowSpec) -> BTreeMap<&str, usize> {
+    let mut ranks = workflow
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), 0_usize))
+        .collect::<BTreeMap<_, _>>();
+    let order = topological_order(workflow).unwrap_or_else(|_| {
+        // Invalid drafts are not runnable, but still need deterministic finite
+        // fallback geometry while validation explains the graph error.
+        workflow.nodes.iter().map(|node| node.id.clone()).collect()
+    });
+    for source in order {
+        let source_rank = ranks.get(source.as_str()).copied().unwrap_or_default();
+        for edge in workflow.edges.iter().filter(|edge| edge.source == source) {
+            if let Some(target_rank) = ranks.get_mut(edge.target.as_str()) {
+                *target_rank = (*target_rank).max(source_rank.saturating_add(1));
+            }
+        }
+    }
+    ranks
 }
 
 fn node_data(
@@ -1034,7 +1741,7 @@ fn node_data(
                     })
                     .unwrap_or_default(),
                 relation: (!relation.is_empty()).then(|| relation.clone()),
-                output_relation: None,
+                feature_cache_relation: None,
                 sql: None,
                 description: metadata.map_or_else(
                     || "Choose an existing qualified Spiral relation.".to_owned(),
@@ -1050,9 +1757,7 @@ fn node_data(
                 detail,
                 error,
                 model_id: None,
-                media_column: None,
-                concepts: Vec::new(),
-                concept_columns: Vec::new(),
+                features: Vec::new(),
                 progress,
                 quarantine,
                 model: model_snapshot,
@@ -1061,40 +1766,28 @@ fn node_data(
         }
         WorkflowNodeConfig::Model {
             model_id,
-            media_column,
-            concepts,
-            concept_columns,
-            output_relation,
+            features,
+            feature_cache_relation,
             ..
         } => WorkflowNodeData {
             kind: WorkflowNodeKind::Model,
-            fields: if concept_columns.is_empty() {
-                resolve_siglip_concepts(concepts)
-                    .into_iter()
-                    .map(|mapping| mapping.score_column)
-                    .collect()
-            } else {
-                concept_columns
-                    .iter()
-                    .map(|mapping| mapping.score_column.clone())
-                    .collect()
-            },
+            fields: features
+                .iter()
+                .map(|feature| feature.name.trim())
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect(),
             relation: None,
-            output_relation: output_relation.clone(),
+            feature_cache_relation: feature_cache_relation.clone(),
             sql: None,
-            description: "Pinned SigLIP zero-shot scoring over an upstream Spiral image field."
-                .to_owned(),
+            description:
+                "Pinned SigLIP backfills registered features for a SQL-defined candidate cohort."
+                    .to_owned(),
             phase,
             detail,
             error,
             model_id: Some(model_id.clone()),
-            media_column: Some(media_column.clone()),
-            concepts: concepts.clone(),
-            concept_columns: if concept_columns.is_empty() {
-                resolve_siglip_concepts(concepts)
-            } else {
-                concept_columns.clone()
-            },
+            features: features.clone(),
             progress,
             quarantine,
             model: model_snapshot,
@@ -1104,7 +1797,7 @@ fn node_data(
             kind: WorkflowNodeKind::Query,
             fields: Vec::new(),
             relation: None,
-            output_relation: None,
+            feature_cache_relation: None,
             sql: Some(sql.clone()),
             description: "Bounded read-only Spiral SQL with server-owned relation placeholders."
                 .to_owned(),
@@ -1112,9 +1805,7 @@ fn node_data(
             detail,
             error,
             model_id: None,
-            media_column: None,
-            concepts: Vec::new(),
-            concept_columns: Vec::new(),
+            features: Vec::new(),
             progress,
             quarantine,
             model: model_snapshot,
@@ -1134,16 +1825,14 @@ fn node_data(
                 })
                 .unwrap_or_default(),
             relation: None,
-            output_relation: None,
+            feature_cache_relation: None,
             sql: None,
             description: "Terminal media-aware query result.".to_owned(),
             phase,
             detail,
             error,
             model_id: None,
-            media_column: None,
-            concepts: Vec::new(),
-            concept_columns: Vec::new(),
+            features: Vec::new(),
             progress,
             quarantine,
             model: model_snapshot,
@@ -1152,11 +1841,45 @@ fn node_data(
     }
 }
 
-fn graph_edges(edges: &[WorkflowEdgeSpec]) -> Vec<Edge> {
+fn graph_edges(edges: &[WorkflowEdgeSpec], snapshot: &WorkflowRunSnapshot) -> Vec<Edge> {
+    let active_targets = snapshot
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.phase,
+                WorkflowNodePhase::Validating
+                    | WorkflowNodePhase::Loading
+                    | WorkflowNodePhase::Running
+                    | WorkflowNodePhase::Cancelling
+            )
+        })
+        .map(|node| node.node_id.as_str())
+        .collect::<BTreeSet<_>>();
     edges
         .iter()
-        .map(|edge| Edge::new(edge.source.clone(), edge.target.clone()).kind(EdgeKind::SmoothStep))
+        .map(|edge| {
+            let active = active_targets.contains(edge.target.as_str());
+            let edge = Edge::new(edge.source.clone(), edge.target.clone())
+                .kind(EdgeKind::SmoothStep)
+                .animated(active);
+            if active {
+                edge.class("workflow-edge-running")
+            } else {
+                edge
+            }
+        })
         .collect()
+}
+
+fn empty_workflow_draft(current: &WorkflowSpec) -> WorkflowSpec {
+    WorkflowSpec {
+        id: current.id.clone(),
+        name: "Untitled workflow".to_owned(),
+        revision: current.revision,
+        nodes: Vec::new(),
+        edges: Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -1198,64 +1921,276 @@ mod tests {
         let workflow = WorkflowSpec::default();
         let snapshot = WorkflowRunSnapshot::idle_for(&workflow);
         let nodes = graph_nodes(&workflow, &snapshot, &[]);
-        let edges = graph_edges(&workflow.edges);
+        let edges = graph_edges(&workflow.edges, &snapshot);
         assert_eq!(nodes.len(), 3);
         assert_eq!(edges.len(), 2);
         assert_eq!(nodes[0].id, "table");
         assert_eq!(nodes[2].id, "result");
+        assert_eq!(nodes[1].position.x - nodes[0].position.x, 224.0);
+        assert_eq!(nodes[2].position.x - nodes[1].position.x, 224.0);
     }
 
     #[test]
-    fn inserting_siglip_rewrites_lineage_and_selects_the_authoritative_image_field() {
+    fn starting_fresh_preserves_server_identity_but_removes_all_topology() {
+        let mut workflow = WorkflowSpec::default();
+        workflow.id = "inspection".to_owned();
+        workflow.revision = 17;
+
+        let empty = empty_workflow_draft(&workflow);
+
+        assert_eq!(empty.id, "inspection");
+        assert_eq!(empty.revision, 17);
+        assert_eq!(empty.name, "Untitled workflow");
+        assert!(empty.nodes.is_empty());
+        assert!(empty.edges.is_empty());
+        assert!(!validate_workflow_spec(&empty).valid());
+        assert!(graph_nodes(&empty, &WorkflowRunSnapshot::idle_for(&empty), &[]).is_empty());
+        assert!(graph_edges(&empty.edges, &WorkflowRunSnapshot::idle_for(&empty)).is_empty());
+    }
+
+    #[test]
+    fn only_edges_feeding_the_active_node_animate() {
+        let workflow = WorkflowSpec::default();
+        let mut snapshot = WorkflowRunSnapshot::idle_for(&workflow);
+        snapshot.nodes[1].phase = WorkflowNodePhase::Running;
+
+        let edges = graph_edges(&workflow.edges, &snapshot);
+
+        assert!(edges[0].animated);
+        assert_eq!(edges[0].class.as_deref(), Some("workflow-edge-running"));
+        assert!(!edges[1].animated);
+        assert!(edges[1].class.is_none());
+    }
+
+    #[test]
+    fn inserting_siglip_makes_candidate_backfill_and_final_join_visible() {
         let mut workflow = WorkflowSpec::default();
         let WorkflowNodeConfig::Table { relation } = &mut workflow.nodes[0].config else {
             unreachable!()
         };
         *relation = "pick_place.camera_frames".to_owned();
-        let relations = vec![WorkflowRelation {
-            name: relation.clone(),
-            relation_type: "TABLE".to_owned(),
-            columns: vec![spiral_robotics_contracts::api::QueryColumn {
-                name: "image".to_owned(),
-                data_type: "Struct".to_owned(),
-                nullable: false,
-                semantic_type: Some("spql.image.Image".to_owned()),
-            }],
-            row_count: None,
-        }];
-        let node_id = insert_siglip_model(&mut workflow, &relations).unwrap();
+        let node_id = insert_siglip_model(&mut workflow).unwrap();
         assert_eq!(node_id, "siglip");
-        assert_eq!(workflow.nodes.len(), 4);
-        assert_eq!(workflow.edges.len(), 3);
+        assert_eq!(workflow.nodes.len(), 5);
+        assert_eq!(workflow.edges.len(), 5);
         assert_eq!(workflow.edges[0].source, "table");
-        assert_eq!(workflow.edges[0].target, "siglip");
-        assert_eq!(workflow.edges[1].source, "siglip");
-        assert_eq!(workflow.edges[1].target, "query");
-        let WorkflowNodeConfig::Model { media_column, .. } = &workflow.nodes[1].config else {
+        assert_eq!(workflow.edges[0].target, "query");
+        assert!(
+            workflow
+                .edges
+                .iter()
+                .any(|edge| edge.source == "query" && edge.target == "siglip")
+        );
+        assert!(
+            workflow
+                .edges
+                .iter()
+                .any(|edge| edge.source == "query" && edge.target == "feature_query")
+        );
+        assert!(
+            workflow
+                .edges
+                .iter()
+                .any(|edge| edge.source == "siglip" && edge.target == "feature_query")
+        );
+        assert!(
+            workflow
+                .edges
+                .iter()
+                .any(|edge| edge.source == "feature_query" && edge.target == "result")
+        );
+        let WorkflowNodeConfig::Model { features, .. } = &workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "siglip")
+            .unwrap()
+            .config
+        else {
             unreachable!()
         };
-        assert_eq!(media_column, "image");
-        let WorkflowNodeConfig::Query { sql, .. } = &workflow.nodes[2].config else {
+        assert_eq!(features[0].applicability.media_field, "image");
+        assert_eq!(
+            features[0].applicability.source_relation,
+            "pick_place.camera_frames"
+        );
+        let WorkflowNodeConfig::Query { sql, .. } = &workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "feature_query")
+            .unwrap()
+            .config
+        else {
             unreachable!()
         };
+        assert!(sql.contains("{{node:query}}"));
         assert!(sql.contains("{{node:siglip}}"));
-        assert!(!sql.contains("{{node:table}}"));
     }
 
     #[test]
-    fn removing_siglip_restores_table_query_lineage_and_placeholder() {
+    fn model_fallback_uses_five_topology_ranks_with_two_table_roots() {
         let mut workflow = WorkflowSpec::default();
-        insert_siglip_model(&mut workflow, &[]).unwrap();
+        let WorkflowNodeConfig::Table { relation } = &mut workflow.nodes[0].config else {
+            unreachable!()
+        };
+        *relation = "pick_place.camera_frames".to_owned();
+        insert_siglip_model(&mut workflow).unwrap();
+        let mut joint_state = workflow.nodes[0].clone();
+        joint_state.id = "joint_state".to_owned();
+        joint_state.name = "Joint state".to_owned();
+        joint_state.config = WorkflowNodeConfig::Table {
+            relation: "pick_place.joint_state".to_owned(),
+        };
+        workflow.nodes.push(joint_state);
+        workflow.edges.push(WorkflowEdgeSpec {
+            source: "joint_state".to_owned(),
+            target: "feature_query".to_owned(),
+        });
+
+        let ranks = fallback_node_ranks(&workflow);
+        assert_eq!(ranks["table"], 0);
+        assert_eq!(ranks["joint_state"], 0);
+        assert_eq!(ranks["query"], 1);
+        assert_eq!(ranks["siglip"], 2);
+        assert_eq!(ranks["feature_query"], 3);
+        assert_eq!(ranks["result"], 4);
+
+        let snapshot = WorkflowRunSnapshot::idle_for(&workflow);
+        let nodes = graph_nodes(&workflow, &snapshot, &[]);
+        let positions = nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node.position.x))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(positions["query"] - positions["table"], 224.0);
+        assert_eq!(positions["siglip"] - positions["query"], 224.0);
+        assert_eq!(positions["feature_query"] - positions["siglip"], 224.0);
+        assert_eq!(positions["result"] - positions["feature_query"], 224.0);
+    }
+
+    #[test]
+    fn rejected_model_insertion_never_mutates_a_chained_query_graph() {
+        let mut workflow = WorkflowSpec::default();
+        workflow
+            .nodes
+            .push(spiral_robotics_contracts::workflow::WorkflowNodeSpec {
+                id: "second_query".to_owned(),
+                name: "Second query".to_owned(),
+                config: WorkflowNodeConfig::Query {
+                    sql: "SELECT * FROM {{node:query}}".to_owned(),
+                    max_rows: 100,
+                },
+            });
+        workflow
+            .edges
+            .retain(|edge| !(edge.source == "query" && edge.target == "result"));
+        workflow.edges.extend([
+            WorkflowEdgeSpec {
+                source: "query".to_owned(),
+                target: "second_query".to_owned(),
+            },
+            WorkflowEdgeSpec {
+                source: "second_query".to_owned(),
+                target: "result".to_owned(),
+            },
+        ]);
+        let before = workflow.clone();
+
+        assert!(insert_siglip_model(&mut workflow).is_none());
+        assert_eq!(workflow, before);
+    }
+
+    #[test]
+    fn configured_source_and_feature_make_the_manual_model_draft_applicable() {
+        let mut workflow = WorkflowSpec::default();
+        let model_id = insert_siglip_model(&mut workflow).unwrap();
+        let blank_report = validate_workflow_spec(&workflow);
+        assert_eq!(
+            blank_report
+                .errors
+                .iter()
+                .filter(|issue| issue.code == "incomplete_feature_definition")
+                .count(),
+            1
+        );
+        assert!(!blank_report.errors.iter().any(|issue| matches!(
+            issue.code.as_str(),
+            "invalid_feature_name" | "invalid_feature_description" | "invalid_feature_concept"
+        )));
+        let WorkflowNodeConfig::Table { relation } = &mut workflow.nodes[0].config else {
+            unreachable!()
+        };
+        *relation = "pick_place.camera_frames".to_owned();
+        let WorkflowNodeConfig::Model { features, .. } = &mut workflow
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == model_id)
+            .unwrap()
+            .config
+        else {
+            unreachable!()
+        };
+        features[0].name = "is_raining_feature".to_owned();
+        features[0].description = "Probability that the frame shows rain".to_owned();
+        features[0].concept = "raining".to_owned();
+        let features = features.clone();
+        refresh_generated_feature_query(&mut workflow, &model_id, &features);
+        normalize_draft_model_sources(&mut workflow);
+
+        assert!(validate_workflow_spec(&workflow).valid());
+        let WorkflowNodeConfig::Model {
+            features,
+            feature_cache_relation,
+            ..
+        } = &workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == model_id)
+            .unwrap()
+            .config
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            features[0].applicability.source_relation,
+            "pick_place.camera_frames"
+        );
+        assert_eq!(
+            feature_cache_relation.as_deref(),
+            Some(derived_feature_cache_relation("pick_place.camera_frames").as_str())
+        );
+        let WorkflowNodeConfig::Query { sql, .. } = &workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == "feature_query")
+            .unwrap()
+            .config
+        else {
+            unreachable!()
+        };
+        assert!(sql.contains("features.is_raining_feature"));
+    }
+
+    #[test]
+    fn removing_siglip_restores_the_candidate_query_as_terminal() {
+        let mut workflow = WorkflowSpec::default();
+        insert_siglip_model(&mut workflow).unwrap();
 
         let selected = remove_siglip_model(&mut workflow, "siglip").unwrap();
 
         assert_eq!(selected, "query");
         assert_eq!(workflow.nodes.len(), 3);
         assert_eq!(workflow.edges.len(), 2);
-        assert_eq!(workflow.edges[0].source, "table");
-        assert_eq!(workflow.edges[0].target, "query");
-        assert_eq!(workflow.edges[1].source, "query");
-        assert_eq!(workflow.edges[1].target, "result");
+        assert!(
+            workflow
+                .edges
+                .iter()
+                .any(|edge| edge.source == "table" && edge.target == "query")
+        );
+        assert!(
+            workflow
+                .edges
+                .iter()
+                .any(|edge| edge.source == "query" && edge.target == "result")
+        );
         let WorkflowNodeConfig::Query { sql, .. } = &workflow.nodes[1].config else {
             unreachable!()
         };
@@ -1279,14 +2214,19 @@ mod tests {
             name: "SigLIP scores".to_owned(),
             config: WorkflowNodeConfig::Model {
                 model_id: SIGLIP_BASE_MODEL_ID.to_owned(),
-                configuration: BTreeMap::new(),
-                media_column: "image".to_owned(),
-                concepts: vec!["red cube".to_owned()],
-                concept_columns: vec![WorkflowConceptColumn {
+                features: vec![WorkflowFeatureDefinition {
+                    name: "is_red_cube_feature".to_owned(),
+                    description: "Probability that a red cube is visible".to_owned(),
                     concept: "red cube".to_owned(),
-                    score_column: "score_red_cube".to_owned(),
+                    applicability: WorkflowFeatureApplicability {
+                        source_relation: "pick_place.camera_frames".to_owned(),
+                        media_field: "image".to_owned(),
+                        stream_ids: Vec::new(),
+                    },
                 }],
-                output_relation: Some("workflow.siglip".to_owned()),
+                feature_cache_relation: Some(
+                    "workflow.features_pick_place_camera_frames".to_owned(),
+                ),
             },
         };
         let snapshot = WorkflowNodeSnapshot {
@@ -1296,7 +2236,7 @@ mod tests {
             progress: Some(WorkflowNodeProgress {
                 completed: 8,
                 total: 8,
-                unit: "rows".to_owned(),
+                unit: "feature cells".to_owned(),
             }),
             quarantine: WorkflowQuarantineSummary {
                 count: 1,
@@ -1313,7 +2253,7 @@ mod tests {
         assert_eq!(projected.phase, WorkflowNodePhase::CompleteWithWarnings);
         assert_eq!(projected.progress.as_ref().unwrap().completed, 8);
         assert_eq!(projected.quarantine.count, 1);
-        assert_eq!(projected.fields, ["score_red_cube"]);
+        assert_eq!(projected.fields, ["is_red_cube_feature"]);
     }
 
     #[test]
@@ -1329,8 +2269,58 @@ mod tests {
     }
 
     #[test]
+    fn assistant_receipt_navigation_never_opens_stale_artifacts() {
+        let mut state = WorkflowStateResponse::default();
+        state.workflow.revision = 4;
+        state.snapshot.workflow_revision = 4;
+        let graph = WorkflowAgentArtifactReceipt {
+            kind: WorkflowAgentArtifactKind::Graph,
+            label: "View graph".to_owned(),
+            revision: Some(4),
+            run_id: None,
+            row_count: None,
+        };
+        assert_eq!(
+            receipt_panel_id(&graph, &state, false),
+            Some(CANVAS_PANEL_ID)
+        );
+        assert_eq!(receipt_panel_id(&graph, &state, true), None);
+        let mut old_graph = graph.clone();
+        old_graph.revision = Some(3);
+        assert_eq!(receipt_panel_id(&old_graph, &state, false), None);
+
+        state.snapshot.run_id = Some("run-4".to_owned());
+        state.snapshot.phase = WorkflowRunPhase::Completed;
+        state.snapshot.result = Some(spiral_robotics_contracts::api::SpiralQueryResponse {
+            columns: Vec::new(),
+            rows: Vec::new(),
+            truncated: false,
+            elapsed_ms: 1,
+        });
+        let results = WorkflowAgentArtifactReceipt {
+            kind: WorkflowAgentArtifactKind::Results,
+            label: "View results".to_owned(),
+            revision: None,
+            run_id: Some("run-4".to_owned()),
+            row_count: Some(0),
+        };
+        assert_eq!(
+            receipt_panel_id(&results, &state, false),
+            Some(RESULTS_PANEL_ID),
+            "zero-row completed results remain authoritative"
+        );
+        state.snapshot.result_stale = true;
+        assert_eq!(receipt_panel_id(&results, &state, false), None);
+        state.snapshot.result_stale = false;
+        let mut old_results = results;
+        old_results.run_id = Some("run-3".to_owned());
+        assert_eq!(receipt_panel_id(&old_results, &state, false), None);
+    }
+
+    #[test]
     fn slower_bootstrap_response_cannot_regress_newer_sse_state() {
         let mut current = WorkflowStateResponse::default();
+        current.scope_id = "project-a-scope".to_owned();
         current.workflow.revision = 2;
         current.snapshot.workflow_revision = 2;
         let mut stale_bootstrap = current.clone();
@@ -1342,6 +2332,119 @@ mod tests {
         newer.workflow.revision = 3;
         newer.snapshot.workflow_revision = 3;
         assert!(server_state_is_monotonic(&current, &newer));
+
+        let mut project_b = WorkflowStateResponse::default();
+        project_b.scope_id = "project-b-scope".to_owned();
+        assert!(
+            server_state_is_monotonic(&current, &project_b),
+            "a new project scope owns an independent revision sequence"
+        );
+
+        let project_a_relations = WorkflowRelationsResponse {
+            scope_id: "project-a-scope".to_owned(),
+            ..Default::default()
+        };
+        let project_b_relations = WorkflowRelationsResponse {
+            scope_id: "project-b-scope".to_owned(),
+            ..Default::default()
+        };
+        assert!(!relations_are_current(
+            "project-b-scope",
+            "project-a-scope",
+            &project_a_relations
+        ));
+        assert!(relations_are_current(
+            "project-b-scope",
+            "project-b-scope",
+            &project_b_relations
+        ));
+    }
+
+    #[test]
+    fn slower_agent_bootstrap_cannot_regress_streamed_history() {
+        let mut current = WorkflowAgentStateResponse::default();
+        current.scope_id = "project-a-scope".to_owned();
+        current.revision = 8;
+        let mut stale = current.clone();
+        stale.revision = 7;
+        assert!(!agent_state_is_monotonic(&current, &stale));
+        let mut next = current.clone();
+        next.revision = 9;
+        assert!(agent_state_is_monotonic(&current, &next));
+        next.session.workflow_id = "other".to_owned();
+        assert!(!agent_state_is_monotonic(&current, &next));
+
+        let mut project_b = current.clone();
+        project_b.scope_id = "project-b-scope".to_owned();
+        project_b.revision = 1;
+        assert!(
+            agent_state_is_monotonic(&current, &project_b),
+            "a new project scope owns an independent revision sequence"
+        );
+        assert!(!agent_bootstrap_is_current(
+            &project_b,
+            &current,
+            "project-a-scope"
+        ));
+        assert!(agent_bootstrap_is_current(
+            &project_b,
+            &project_b,
+            "project-a-scope"
+        ));
+        let mut command_response = current.clone();
+        command_response.revision += 1;
+        assert!(agent_command_response_is_current(
+            &current,
+            &command_response,
+            "project-a-scope"
+        ));
+        assert!(!agent_command_response_is_current(
+            &project_b,
+            &command_response,
+            "project-a-scope"
+        ));
+    }
+
+    #[test]
+    fn conversation_switching_is_gated_only_by_authoritative_active_work() {
+        let mut agent = WorkflowAgentStateResponse::default();
+        agent.history_available = true;
+        agent.conversations.push(
+            spiral_robotics_contracts::workflow::WorkflowAgentConversationSummary {
+                conversation_id: "conversation-a".to_owned(),
+                title: "Inspect relations".to_owned(),
+                ..Default::default()
+            },
+        );
+        let mut snapshot = WorkflowRunSnapshot::default();
+        assert!(
+            agent_conversation_change_reason(true, true, true, None, &agent, &snapshot).is_none()
+        );
+
+        assert_eq!(
+            agent_conversation_change_reason(true, true, false, None, &agent, &snapshot).as_deref(),
+            Some("Configure or reconnect Spiral before changing conversations.")
+        );
+
+        agent.session.phase = spiral_robotics_contracts::workflow::WorkflowAgentPhase::Responding;
+        assert_eq!(
+            agent_conversation_change_reason(true, true, true, None, &agent, &snapshot).as_deref(),
+            Some("Stop the active Assistant turn before changing conversations.")
+        );
+        agent.session.phase = spiral_robotics_contracts::workflow::WorkflowAgentPhase::Idle;
+
+        snapshot.phase = WorkflowRunPhase::Running;
+        snapshot.run_id = Some("run-agent".to_owned());
+        agent.conversations[0].owned_run_id = Some("run-agent".to_owned());
+        assert_eq!(
+            agent_conversation_change_reason(true, true, true, None, &agent, &snapshot).as_deref(),
+            Some("Stop the Workflow run started by the Assistant before changing conversations.")
+        );
+        agent.conversations[0].owned_run_id = Some("other-run".to_owned());
+        assert!(
+            agent_conversation_change_reason(true, true, true, None, &agent, &snapshot).is_none(),
+            "a manual or unrelated run does not falsely claim Assistant conversation ownership"
+        );
     }
 
     #[test]

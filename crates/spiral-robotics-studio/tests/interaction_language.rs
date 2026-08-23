@@ -232,6 +232,9 @@ fn workflow_language_stays_relation_first_and_truthful() {
         .split("#[cfg(test)]")
         .next()
         .expect("production Workflow source should precede its tests");
+    let workflow_state = fs::read_to_string(studio.join("src/frontend/screens/workflow/state.rs"))
+        .expect("workflow controller source should be readable");
+    let workflow_language = format!("{workflow}\n{workflow_state}");
 
     let data = shell
         .find("onclick: move |_| on_activity.call(Activity::Data)")
@@ -248,14 +251,27 @@ fn workflow_language_stays_relation_first_and_truthful() {
     );
 
     for expected in [
-        "Assistant is not connected",
-        "Agent turns arrive in a later stage.",
-        "manual Workflow nodes run now",
-        "Workflow reads relations already materialized in the active project.",
-        "configure SigLIP scoring",
+        "Workflow Assistant",
+        "What should we find?",
+        "Enter to send · Shift+Enter for a new line.",
+        "Find moments when the gripper holds an object",
+        "Jump to latest",
+        "Retry last turn",
+        "Conversation",
+        "New Assistant conversation",
+        "Configure or reconnect Spiral before changing conversations.",
+        "Stop the active Assistant turn before changing conversations.",
+        "Previous conversations are kept",
+        "New workflow",
+        "Empty workflow",
+        "Apply to start fresh",
+        "Its saved nodes and connections will appear here.",
+        "Ask the Assistant to build this workflow before running.",
+        "No workflow yet",
+        "Results will appear here after it runs.",
     ] {
         assert!(
-            workflow.contains(expected),
+            workflow_language.contains(expected),
             "the Workflow scaffold should state {expected:?}",
         );
     }
@@ -274,13 +290,100 @@ fn workflow_model_warning_and_detail_states_have_structured_styles() {
         .expect("Workflow styles should be readable");
     for class in [
         ".workflow-node-status-dot.workflow-node-state-warning",
+        ".workflow-node-card.workflow-node-state-running",
+        ".df-edge.workflow-edge-running",
+        ".workflow-node-progress",
+        ".workflow-flow-empty",
         ".workflow-inspector-warning",
-        ".workflow-model-column-map",
+        ".workflow-feature-definition",
         ".workflow-quarantine-examples",
     ] {
         assert!(
             styles.contains(class),
             "Workflow Model state is missing structured style {class:?}",
+        );
+    }
+    for copy in [
+        "Feature name",
+        "Description",
+        "Model concept",
+        "Candidate image field",
+        "Streams (optional)",
+        "Add feature",
+    ] {
+        assert!(
+            fs::read_to_string(studio.join("src/frontend/screens/workflow/workspace.rs"))
+                .expect("Workflow workspace should be readable")
+                .contains(copy),
+            "Workflow Model definition editor is missing {copy:?}",
+        );
+    }
+}
+
+#[test]
+fn workflow_assistant_receipts_results_and_run_states_are_explicit() {
+    let studio = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace = fs::read_to_string(studio.join("src/frontend/screens/workflow/workspace.rs"))
+        .expect("Workflow source should be readable");
+    let backend = fs::read_to_string(
+        studio
+            .parent()
+            .expect("Studio should live in crates/")
+            .join("spiral-robotics-studio-backend/src/backend/workflow/agent.rs"),
+    )
+    .expect("Workflow agent source should be readable");
+    let data = fs::read_to_string(studio.join("src/frontend/screens/data/workbench.rs"))
+        .expect("query result source should be readable");
+    let styles = fs::read_to_string(studio.join("tailwind.css"))
+        .expect("Workflow styles should be readable");
+
+    for receipt in ["View graph", "View run", "View results"] {
+        assert!(
+            backend.contains(receipt),
+            "the execution trace needs the contextual receipt {receipt:?}",
+        );
+    }
+    for expectation in [
+        "workflow-edit-badge",
+        "workflow-run-badge",
+        "Run cancelled",
+        "Uncommitted feature work was discarded",
+        "any cache publication that completed before cancellation remains authoritative",
+        "Run again",
+        "render_assistant_text",
+        "role: \"status\"",
+        "\"aria-live\": \"polite\"",
+    ] {
+        assert!(
+            workspace.contains(expectation),
+            "Workflow interaction language is missing {expectation:?}",
+        );
+    }
+    for expectation in [
+        "query-media-cell",
+        "query-image-preview",
+        "query_image_alt",
+        "query-result-count",
+        "Query results",
+    ] {
+        assert!(
+            data.contains(expectation),
+            "shared inline query results are missing {expectation:?}",
+        );
+    }
+    for selector in [
+        ".workflow-agent-message-body",
+        ".workflow-agent-receipt-action",
+        ".workflow-run-badge.is-complete",
+        ".query-media-cell",
+        ".query-image-preview",
+        ".query-column-type",
+        ".query-value-number",
+        ".query-value-null",
+    ] {
+        assert!(
+            styles.contains(selector),
+            "Workflow repair styling is missing {selector:?}",
         );
     }
 }

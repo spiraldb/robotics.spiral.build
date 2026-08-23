@@ -78,19 +78,23 @@ from it without writing glue code or operating a second data stack.
   workbench: viewers show files, the Studio owns a queryable project.
 - **One trusted Rust backend, one portable browser frontend.** The backend owns
   hardware, safety, recording, ingestion, media encoding, data services, and
-  replay. The browser is an interchangeable operating surface that talks only
-  to that backend; it never holds service credentials or drives hardware
-  directly.
+  replay. It also owns Workflow's OpenAI-compatible Assistant transport,
+  credentials, tool loop, and durable project-scoped conversations. The browser is
+  an interchangeable operating surface that talks only to that backend; it
+  never holds service credentials or drives hardware directly.
 - **Rust owns the system boundary.** The motor bus, camera capture,
   calibration, kinematics, server, run supervision, data contracts, and web
   interface are Rust. Workflow runs its one advertised enrichment model as
-  pinned SigLIP safetensors through candle inside the backend, over direct
-  Spiral image values or engine-decoded video manifests, and writes derived
-  score relations back to Spiral. Training's dedicated ADBC connection reads
+  pinned SigLIP safetensors through candle inside the backend over SQL-defined
+  candidate image cohorts, and atomically publishes Studio-owned source-scoped
+  feature caches plus registry provenance. Its Assistant uses backend-owned,
+  OpenAI-compatible tool calling to inspect existing relations and propose,
+  save, run, and iterate the same bounded relation-first graph. Training's
+  dedicated ADBC connection reads
   Arrow state, action, and Spiral-decoded image tensors, then streams Arrow IPC
   batches over HTTP to a selected remote ACT/CVAE compute runtime. That runtime
   owns PyTorch policy sessions for rollout inference. Rust owns lifecycle,
-  cancellation, validation, remote telemetry, derived-relation persistence,
+  cancellation, validation, remote telemetry, feature-cache persistence,
   and SafeTensors checkpoint persistence without linking the Studio server to
   LibTorch.
 - **One arm is one robot instance in SpiralDB.** Serial port, cameras, motors,
@@ -135,7 +139,9 @@ Spiral Robotics backend
       ├── robot connections and safety
       ├── recording and MP4 encoding
       ├── SpiralDB persistence and read-only queries
-      ├── pinned Workflow SigLIP enrichment and derived relations
+      ├── pinned Workflow SigLIP enrichment and source-scoped feature caches
+      ├── bounded Workflow Assistant and tool supervision
+      │        └── HTTPS ──► configured OpenAI-compatible provider
       ├── policy-training supervision and checkpoint persistence
       ├── episode validation and bounded follower control
       └── Arrow IPC / HTTP ──► selected compute runtime
@@ -152,7 +158,9 @@ Spiral Robotics backend
   replay execution. As ingestion arrives, it also owns external-source
   credentials and ingestion jobs. It already owns Workflow's pinned model
   artifact resolution, local candle execution, cancellation, and derived
-  relation lifecycle; the browser only configures and observes that work.
+  relation lifecycle. It also owns Workflow provider configuration, the
+  bounded tool loop, durable bounded Assistant conversations, and provider cancellation; the
+  browser composes turns and observes secret-free state.
 - **The wire API is a product boundary.** The Dioxus browser is the current
   client, not a privileged bypass. Hardware and safety behavior must remain
   correct for any client that uses the API.
@@ -192,20 +200,46 @@ never becomes the motor-control runtime.
   - **Data** owns the SpiralDB episode catalog, replay/delete actions,
     selected-dataset episode import/export, and guarded read-only Spiral SQL.
   - **Workflow** owns relation discovery and a persisted, revision-safe
-    Table → optional Model → Query → Result editor over existing qualified
+    Table → Query → optional Model/backfill → final Query → Result editor over existing qualified
     Spiral relations. The backend runs bounded read-only SQL and one executable
     model capability: `siglip-base`, backed by
     `google/siglip-base-patch16-224` at exact revision
-    `7fd15f0689c79d79e38b1c2e2e2370a7bf2761ed`. It accepts direct
-    `spql.image.Image` fields or durable video-segment manifests, performs
-    in-engine video decode, maps visual concepts to server-derived score
-    columns, and persists deterministic derived relations with bounded
-    progress, quarantine, cancellation, and reuse metadata. Metal is preferred
+    `7fd15f0689c79d79e38b1c2e2e2370a7bf2761ed`. Read-only Query nodes define
+    exact candidate cohorts with five stable frame keys plus decoded
+    `spql.image.Image` fields. Typed feature definitions then backfill only
+    missing applicable cells in a Studio-owned wide cache derived from the
+    authoritative source relation. A Studio feature registry binds every
+    `_feature` column to its description, concept, applicability, source, and
+    pinned producer provenance; the cache and registry publish atomically.
+    Compatible cells are reusable across workflows over the same source, while
+    different sources cannot collide. Metal is preferred
     where available and an actual CPU fallback is reported rather than hidden.
     The Model inspector owns typed configuration, measured run state, controlled
-    insertion/removal, and topology-aware layout. Workflow has no ingestion
-    controls or agent chat; Hugging Face is used here only to resolve the pinned
-    model artifacts, while Assistant/LLM execution remains future work.
+    insertion/removal, and topology-aware layout. A compact Assistant shares
+    the 30% left lane with Node and uses backend-owned OpenAI-compatible tool
+    calling to inspect the active catalog, draft and save valid relation-first
+    graphs, start them, wait for bounded or long runs, inspect bounded query
+    results, and iterate. Periodic frame selection is ordinary read-only Spiral
+    SQL authored in a candidate Query, not a special tool or Model setting; the
+    pinned application-side bicubic processor still owns SigLIP resizing.
+    Up to 20 project-scoped conversations retain 80 public messages each
+    without silently erasing older chats; only the selected conversation enters
+    provider context. The server persists them in one versioned schema-v2
+    envelope and preserves valid current-format history. Because this is a
+    prototype, missing-schema, incompatible, future, or unreadable active-project
+    history is atomically reset from its exact stored snapshot to one fresh
+    conversation; a failed reset leaves history unavailable rather than
+    presenting an in-memory fiction. Its durable selected thread safely renders compact structured text
+    and exposes bounded graph/run/result receipts as explicit navigation,
+    while the canvas, authoritative run snapshot, and Results remain the source
+    of truth; the canvas continues to own the manual Run/Cancel controls.
+    Image-bearing query results stay in the shared table: each decoded image is
+    rendered in its own schema column beside the matching identity, feature,
+    and joint values. Compact type-aware headers, numeric alignment, explicit
+    nulls, and one result metadata strip keep Data and Workflow on the same
+    ordinary result format.
+    Workflow still has no ingestion controls. Hugging Face is used here only to
+    resolve the pinned model artifacts.
   - **Training** owns random anchor and camera/action sampling through the
     Spiral ADBC/Arrow path, remote HTTP runtime selection, vision ACT
     configuration, learning/resource telemetry, graceful cancellation, and
@@ -244,7 +278,8 @@ never becomes the motor-control runtime.
   episode can be selected, deleted, or replayed on a compatible follower.
   Data transfers the selected dataset's episodes as `.spiral-episodes`;
   Settings imports and exports the complete active project—including binary
-  MP4 and checkpoint data—as one versioned `.spiral-project` file.
+  MP4, checkpoint data, and Studio-owned Workflow feature registry/cache
+  relations—as one versioned `.spiral-project` file.
 - Replay ramps a compatible calibrated follower to the first pose before
   playback. Pause/resume keeps the current replay frame rather than restarting
   the episode.
@@ -305,6 +340,15 @@ today, and nothing below may be presented as existing behavior:
   history, checkpoint ingest, and bounded hardware control. Workflow enrichment
   is separate: its one pinned SigLIP capability runs locally in the trusted Rust
   backend and does not become another configurable policy endpoint.
+- **Backend-scoped Workflow provider.** The trusted backend can obtain
+  `LLM_API_KEY` from explicit process state or the ignored, owner-only
+  repository-root `.env.local`; the application loads that fallback itself.
+  `LLM_MODEL` and `LLM_BASE_URL` are optional developer overrides; with only
+  the key, the prototype defaults to Terra through OpenRouter's OpenAI-compatible endpoint. A
+  custom endpoint must use HTTPS, except localhost may use HTTP. The key is
+  used only by the backend transport and never enters browser state, Spiral
+  persistence, or provider prompts. Browser readiness leaves provider and model
+  fields empty, and the product never asks an operator to configure them.
 - **Nix flake** provides the development environment and web toolchain (`dx`,
   Tailwind CLI, `wasm-bindgen`, and `wasm-opt`).
 - **Safety is enforced by the server.** Enabling torque first copies measured
@@ -366,9 +410,12 @@ Real, in-repo:
 - `crates/spiral-robotics-studio-backend/src/backend/robotics/video.rs` — server-owned MP4 capture and
   timeline-aligned segment manifests.
 - `crates/spiral-robotics-studio-backend/src/backend/workflow/model.rs` — the
-  pinned SigLIP runner, direct-image and durable-manifest input contracts,
-  derived-relation persistence, bounded pipeline, quarantine, cancellation,
-  and deterministic reuse.
+  pinned SigLIP runner, SQL-candidate contract, source-derived feature cache,
+  Studio feature registry, atomic publication, bounded pipeline, quarantine,
+  cancellation, and cross-workflow reuse.
+- `crates/spiral-robotics-studio-backend/src/backend/workflow/agent.rs` and
+  `provider.rs` — the bounded relation-first tool loop, project-scoped durable
+  session, long-run continuation, and OpenAI-compatible streaming transport.
 - A detailed `README.md` maintained in the repository.
 
 Deliberately absent, and not to be fabricated: there are **no users,
@@ -377,8 +424,15 @@ pricing, or deployment/endorsement claims**. Development tests do retain
 measured SigLIP timing and golden-score evidence, but those observations are
 not product performance claims. The project has not been released. There is
 **no ingestion implementation yet**; ingestion is a committed direction, not
-a shipped capability. Workflow's Assistant/LLM transport is likewise not
-implemented.
+a shipped capability. No provider credential is shipped as a distributable
+product fixture; a developer supplies one in the ignored local secret file or
+production secret manager, after which provider setup is invisible in Studio.
+Development verification has used a private backend-only OpenRouter
+configuration for a bounded Terra smoke and configured-provider screenshot;
+that evidence is not a release, endorsement, availability guarantee, or bundled
+credential. Local mocked OpenAI-compatible transport tests cover streaming
+text, fragmented multiple tool calls, bounded 429 retry, malformed and
+oversized streams, cancellation, and secret redaction.
 
 ## Product Principles
 

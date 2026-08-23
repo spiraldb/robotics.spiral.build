@@ -9,8 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::{Deserialize, Serialize};
 use spiral_robotics_core::query::{ReadOnlyMode, ensure_read_only, is_identifier};
 use spiral_robotics_core::workflow::{
-    SIGLIP_SCORE_COLUMN_PREFIX, is_workflow_node_id, scan_node_placeholders,
-    siglip_score_column_stem, validate_qualified_relation,
+    is_workflow_node_id, scan_node_placeholders, validate_qualified_relation,
 };
 
 use crate::api::{QueryColumn, SpiralQueryResponse};
@@ -20,14 +19,22 @@ pub const MAX_WORKFLOW_QUERY_ROWS: usize = 1_000;
 pub const SIGLIP_BASE_MODEL_ID: &str = "siglip-base";
 pub const SIGLIP_BASE_REPOSITORY: &str = "google/siglip-base-patch16-224";
 pub const SIGLIP_BASE_REVISION: &str = "7fd15f0689c79d79e38b1c2e2e2370a7bf2761ed";
-pub const MAX_SIGLIP_CONCEPTS: usize = 32;
+pub const MAX_SIGLIP_FEATURES: usize = 32;
 pub const MAX_SIGLIP_CONCEPT_LENGTH: usize = 80;
+pub const MAX_WORKFLOW_FEATURE_NAME_LENGTH: usize = 96;
+pub const MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH: usize = 240;
+pub const MAX_WORKFLOW_FEATURE_STREAMS: usize = 8;
+pub const WORKFLOW_FEATURE_REGISTRY_RELATION: &str = "workflow.feature_registry";
+pub const MAX_WORKFLOW_AGENT_INPUT_CHARS: usize = 8_000;
+pub const MAX_WORKFLOW_AGENT_CONVERSATIONS: usize = 20;
+pub const MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION: usize = 80;
+pub const MAX_WORKFLOW_AGENT_CONVERSATION_TITLE_CHARS: usize = 64;
+pub const MAX_WORKFLOW_AGENT_QUERY_ROWS: usize = 50;
 
-pub fn derived_model_output_relation(workflow_id: &str, node_id: &str) -> String {
+pub fn derived_feature_cache_relation(source_relation: &str) -> String {
     format!(
-        "workflow.{}_{}",
-        crate::spiral::identifier_component(workflow_id),
-        crate::spiral::identifier_component(node_id)
+        "workflow.features_{}",
+        crate::spiral::identifier_component(source_relation)
     )
 }
 
@@ -98,23 +105,13 @@ pub enum WorkflowNodeConfig {
     Table {
         relation: String,
     },
-    /// The server derives `output_relation`; callers do not choose a writable
-    /// identifier.
+    /// The server derives `feature_cache_relation`; callers do not choose a
+    /// writable identifier.
     Model {
         model_id: String,
-        /// Kept for wire compatibility with older saved drafts. SigLIP has a
-        /// typed configuration below; executable graphs reject opaque values.
-        #[serde(default)]
-        configuration: BTreeMap<String, String>,
-        #[serde(default)]
-        media_column: String,
-        #[serde(default)]
-        concepts: Vec<String>,
-        /// Echoed, server-derived mapping. Callers never choose SQL columns.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        concept_columns: Vec<WorkflowConceptColumn>,
+        features: Vec<WorkflowFeatureDefinition>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        output_relation: Option<String>,
+        feature_cache_relation: Option<String>,
     },
     Query {
         sql: String,
@@ -125,9 +122,19 @@ pub enum WorkflowNodeConfig {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct WorkflowConceptColumn {
+pub struct WorkflowFeatureDefinition {
+    pub name: String,
+    pub description: String,
     pub concept: String,
-    pub score_column: String,
+    pub applicability: WorkflowFeatureApplicability,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkflowFeatureApplicability {
+    pub source_relation: String,
+    pub media_field: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stream_ids: Vec<String>,
 }
 
 fn default_workflow_query_rows() -> usize {
@@ -196,17 +203,28 @@ pub struct WorkflowValidationIssue {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SaveWorkflowRequest {
+    pub scope_id: String,
     pub expected_revision: u64,
     pub workflow: WorkflowSpec,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RunWorkflowRequest {
+    pub scope_id: String,
     pub revision: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CancelWorkflowRequest {
+    pub scope_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct WorkflowStateResponse {
+    /// Ephemeral server identity for the active Spiral destination/project.
+    /// Revisions are monotonic only within one scope.
+    #[serde(default)]
+    pub scope_id: String,
     pub workflow: WorkflowSpec,
     pub validation: WorkflowValidationReport,
     pub snapshot: WorkflowRunSnapshot,
@@ -216,6 +234,7 @@ impl Default for WorkflowStateResponse {
     fn default() -> Self {
         let workflow = WorkflowSpec::default();
         Self {
+            scope_id: String::new(),
             validation: validate_workflow_spec(&workflow),
             snapshot: WorkflowRunSnapshot::idle_for(&workflow),
             workflow,
@@ -326,9 +345,9 @@ pub struct WorkflowNodeProgress {
 pub struct WorkflowModelRunMetadata {
     pub model_id: String,
     pub artifact_revision: String,
-    pub output_relation: String,
+    pub feature_cache_relation: String,
     #[serde(default)]
-    pub concept_columns: Vec<WorkflowConceptColumn>,
+    pub features: Vec<WorkflowFeatureDefinition>,
     pub fingerprint: String,
     pub reused: bool,
     pub device: String,
@@ -364,6 +383,224 @@ pub struct WorkflowUpdate {
     pub state: WorkflowStateResponse,
 }
 
+/// Public, secret-free readiness for the backend-owned Workflow agent.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkflowAgentReadiness {
+    pub configured: bool,
+    pub status: WorkflowAgentReadinessStatus,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+    pub detail: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowAgentReadinessStatus {
+    #[default]
+    Unconfigured,
+    Ready,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowAgentRole {
+    User,
+    Assistant,
+    Synthetic,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowAgentMessagePhase {
+    Streaming,
+    Complete,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowAgentToolPhase {
+    Running,
+    Complete,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowAgentArtifactKind {
+    Graph,
+    Run,
+    Results,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowAgentArtifactReceipt {
+    pub kind: WorkflowAgentArtifactKind,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_count: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowAgentToolSummary {
+    pub call_id: String,
+    pub name: String,
+    pub phase: WorkflowAgentToolPhase,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<WorkflowAgentArtifactReceipt>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowAgentMessage {
+    pub id: String,
+    pub sequence: u64,
+    pub role: WorkflowAgentRole,
+    pub phase: WorkflowAgentMessagePhase,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub tools: Vec<WorkflowAgentToolSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub created_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowAgentPhase {
+    #[default]
+    Idle,
+    Responding,
+    WaitingForRun,
+    Cancelling,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+impl WorkflowAgentPhase {
+    pub const fn active(self) -> bool {
+        matches!(
+            self,
+            Self::Responding | Self::WaitingForRun | Self::Cancelling
+        )
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowAgentSession {
+    pub workflow_id: String,
+    #[serde(default, alias = "session_id")]
+    pub conversation_id: String,
+    pub revision: u64,
+    pub phase: WorkflowAgentPhase,
+    #[serde(default)]
+    pub messages: Vec<WorkflowAgentMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub updated_ms: u64,
+}
+
+impl Default for WorkflowAgentSession {
+    fn default() -> Self {
+        Self {
+            workflow_id: DEFAULT_WORKFLOW_ID.to_owned(),
+            conversation_id: String::new(),
+            revision: 0,
+            phase: WorkflowAgentPhase::Idle,
+            messages: Vec::new(),
+            active_turn_id: None,
+            deferred_run_id: None,
+            error: None,
+            updated_ms: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkflowAgentConversationSummary {
+    pub conversation_id: String,
+    pub title: String,
+    pub created_ms: u64,
+    pub updated_ms: u64,
+    pub message_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_run_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkflowAgentStateResponse {
+    pub readiness: WorkflowAgentReadiness,
+    pub history_available: bool,
+    pub scope_id: String,
+    pub revision: u64,
+    pub active_conversation_id: String,
+    #[serde(default)]
+    pub conversations: Vec<WorkflowAgentConversationSummary>,
+    pub conversation_limit: usize,
+    pub session: WorkflowAgentSession,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkflowAgentTurnRequest {
+    pub scope_id: String,
+    pub conversation_id: String,
+    pub text: String,
+    pub expected_revision: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkflowAgentCreateConversationRequest {
+    pub scope_id: String,
+    pub expected_revision: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkflowAgentActivateConversationRequest {
+    pub scope_id: String,
+    pub conversation_id: String,
+    pub expected_revision: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkflowAgentCancelRequest {
+    pub scope_id: String,
+    pub conversation_id: String,
+    pub turn_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkflowAgentTurnAccepted {
+    pub turn_id: String,
+    pub state: WorkflowAgentStateResponse,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkflowAgentUpdate {
+    pub state: WorkflowAgentStateResponse,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowCapabilities {
     pub schema_version: u32,
@@ -377,7 +614,7 @@ pub struct WorkflowCapabilities {
 impl Default for WorkflowCapabilities {
     fn default() -> Self {
         Self {
-            schema_version: 2,
+            schema_version: 3,
             node_kinds: vec![
                 WorkflowNodeCapability {
                     kind: WorkflowNodeKind::Table,
@@ -422,7 +659,7 @@ pub struct WorkflowModelCapability {
     pub repository: String,
     pub artifact_revision: String,
     pub input_contract: String,
-    pub max_concepts: usize,
+    pub max_features: usize,
     pub device_policy: String,
 }
 
@@ -433,9 +670,9 @@ impl WorkflowModelCapability {
             label: "SigLIP base".to_owned(),
             repository: SIGLIP_BASE_REPOSITORY.to_owned(),
             artifact_revision: SIGLIP_BASE_REVISION.to_owned(),
-            input_contract: "One upstream Table with a decoded Spiral image semantic column or a durable video-segment media_relation manifest."
+            input_contract: "One upstream Query that returns the stable frame identity fields plus each decoded spql.image.Image field named by a typed feature definition. The Model registers compatible definitions and backfills nullable cells in the source-scoped Studio feature cache."
                 .to_owned(),
-            max_concepts: MAX_SIGLIP_CONCEPTS,
+            max_features: MAX_SIGLIP_FEATURES,
             device_policy: "Metal when available; CPU fallback".to_owned(),
         }
     }
@@ -443,6 +680,10 @@ impl WorkflowModelCapability {
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowRelationsResponse {
+    /// Must match [`WorkflowStateResponse::scope_id`] before the catalog may
+    /// be projected into the editor.
+    #[serde(default)]
+    pub scope_id: String,
     pub relations: Vec<WorkflowRelation>,
     pub complete: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -473,31 +714,10 @@ pub struct WorkflowDocument {
     pub snapshot: WorkflowRunSnapshot,
 }
 
-/// Canonicalize user-facing concepts and derive collision-free SQL columns in
-/// source order. Empty concepts are omitted here and reported by validation.
-pub fn resolve_siglip_concepts(concepts: &[String]) -> Vec<WorkflowConceptColumn> {
-    let mut seen_concepts = BTreeSet::new();
-    let mut used_columns = BTreeSet::new();
-    let mut resolved = Vec::new();
-    for concept in concepts {
-        let concept = concept.trim();
-        if concept.is_empty() || !seen_concepts.insert(concept.to_ascii_lowercase()) {
-            continue;
-        }
-        let stem = siglip_score_column_stem(concept);
-        let base = format!("{SIGLIP_SCORE_COLUMN_PREFIX}{stem}");
-        let mut score_column = base.clone();
-        let mut suffix = 2_u32;
-        while !used_columns.insert(score_column.clone()) {
-            score_column = format!("{base}_{suffix}");
-            suffix += 1;
-        }
-        resolved.push(WorkflowConceptColumn {
-            concept: concept.to_owned(),
-            score_column,
-        });
-    }
-    resolved
+pub fn is_workflow_feature_name(value: &str) -> bool {
+    spiral_robotics_core::query::is_identifier(value)
+        && value.ends_with("_feature")
+        && value.len() <= MAX_WORKFLOW_FEATURE_NAME_LENGTH
 }
 
 impl Default for WorkflowDocument {
@@ -565,11 +785,8 @@ pub fn validate_workflow_spec(spec: &WorkflowSpec) -> WorkflowValidationReport {
             }
             WorkflowNodeConfig::Model {
                 model_id,
-                configuration,
-                media_column,
-                concepts,
-                concept_columns,
-                output_relation,
+                features,
+                feature_cache_relation,
             } => {
                 if model_id != SIGLIP_BASE_MODEL_ID {
                     report.errors.push(issue(
@@ -579,80 +796,107 @@ pub fn validate_workflow_spec(spec: &WorkflowSpec) -> WorkflowValidationReport {
                         "Choose SigLIP base from the advertised Workflow capabilities.",
                     ));
                 }
-                if !configuration.is_empty() {
+                if features.is_empty() {
                     report.errors.push(issue(
-                        "opaque_model_configuration",
+                        "model_features_required",
                         Some(&node.id),
-                        "Opaque Model configuration values are not executable.",
-                        "Clear legacy configuration and use the typed media column and concepts fields.",
+                        "SigLIP needs at least one typed feature definition.",
+                        "Add a descriptive feature such as is_gripper_open_feature.",
                     ));
                 }
-                if !is_identifier(media_column) {
+                if features.len() > MAX_SIGLIP_FEATURES {
                     report.errors.push(issue(
-                        "invalid_media_column",
-                        Some(&node.id),
-                        "The Model media column must be one unquoted Spiral field identifier.",
-                        "Choose an image field discovered on the upstream Table.",
-                    ));
-                }
-                if concepts.is_empty() {
-                    report.errors.push(issue(
-                        "model_concepts_required",
-                        Some(&node.id),
-                        "SigLIP needs at least one concept to score.",
-                        "Add a short visual concept such as red cube.",
-                    ));
-                }
-                if concepts.len() > MAX_SIGLIP_CONCEPTS {
-                    report.errors.push(issue(
-                        "too_many_model_concepts",
+                        "too_many_model_features",
                         Some(&node.id),
                         &format!(
-                            "SigLIP supports at most {MAX_SIGLIP_CONCEPTS} concepts per Model node."
+                            "SigLIP supports at most {MAX_SIGLIP_FEATURES} features per Model node."
                         ),
-                        "Remove concepts or split the work into sequential Model nodes.",
+                        "Remove features or split the work into sequential Model nodes.",
                     ));
                 }
-                for concept in concepts {
-                    if concept.trim().is_empty() {
+                let mut feature_names = BTreeSet::new();
+                for (feature_index, feature) in features.iter().enumerate() {
+                    let untouched = feature.name.trim().is_empty()
+                        && feature.description.trim().is_empty()
+                        && feature.concept.trim().is_empty();
+                    if untouched {
                         report.errors.push(issue(
-                            "empty_model_concept",
+                            "incomplete_feature_definition",
                             Some(&node.id),
-                            "SigLIP concepts cannot be blank.",
-                            "Remove the blank line or enter a visual concept.",
+                            &format!("Complete Feature {}.", feature_index + 1),
+                            "Enter a feature name, description, and model concept.",
                         ));
-                    } else if concept.chars().count() > MAX_SIGLIP_CONCEPT_LENGTH {
+                    } else {
+                        if !is_workflow_feature_name(&feature.name) {
+                            report.errors.push(issue(
+                                "invalid_feature_name",
+                                Some(&node.id),
+                                "Feature names must be safe descriptive identifiers ending in _feature.",
+                                "Use a name such as is_raining_feature or is_gripper_open_feature.",
+                            ));
+                        } else if !feature_names.insert(feature.name.as_str()) {
+                            report.errors.push(issue(
+                                "duplicate_feature_name",
+                                Some(&node.id),
+                                "Feature names must be unique within one Model node.",
+                                "Remove the duplicate feature definition.",
+                            ));
+                        }
+                        if feature.description.trim().is_empty()
+                            || feature.description.chars().count()
+                                > MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH
+                        {
+                            report.errors.push(issue(
+                                "invalid_feature_description",
+                                Some(&node.id),
+                                "Feature descriptions must be present and bounded.",
+                                "Describe what a non-null probability means in 240 characters or fewer.",
+                            ));
+                        }
+                        if feature.concept.trim().is_empty()
+                            || feature.concept.chars().count() > MAX_SIGLIP_CONCEPT_LENGTH
+                        {
+                            report.errors.push(issue(
+                                "invalid_feature_concept",
+                                Some(&node.id),
+                                "Feature model text must be present and bounded.",
+                                "Use a short visual phrase of 80 characters or fewer.",
+                            ));
+                        }
+                    }
+                    if validate_qualified_relation(&feature.applicability.source_relation).is_err()
+                    {
                         report.errors.push(issue(
-                            "model_concept_too_long",
+                            "invalid_feature_source",
                             Some(&node.id),
-                            &format!("SigLIP concepts must be at most {MAX_SIGLIP_CONCEPT_LENGTH} characters."),
-                            "Shorten the concept while keeping the visual meaning.",
+                            "Feature applicability needs one authoritative qualified source relation.",
+                            "Choose the upstream source Table relation.",
+                        ));
+                    }
+                    if !is_identifier(&feature.applicability.media_field) {
+                        report.errors.push(issue(
+                            "invalid_feature_media_field",
+                            Some(&node.id),
+                            "Feature applicability media_field must be one safe candidate image field.",
+                            "Project a decoded image with a stable field name such as image.",
+                        ));
+                    }
+                    let streams = &feature.applicability.stream_ids;
+                    if streams.len() > MAX_WORKFLOW_FEATURE_STREAMS
+                        || streams
+                            .iter()
+                            .any(|stream| stream.trim().is_empty() || stream.len() > 128)
+                        || streams.iter().collect::<BTreeSet<_>>().len() != streams.len()
+                    {
+                        report.errors.push(issue(
+                            "invalid_feature_streams",
+                            Some(&node.id),
+                            "Feature applicability supports up to eight unique non-empty stream IDs.",
+                            "Remove duplicate or unsupported stream filters.",
                         ));
                     }
                 }
-                let resolved = resolve_siglip_concepts(concepts);
-                if resolved.len()
-                    < concepts
-                        .iter()
-                        .filter(|concept| !concept.trim().is_empty())
-                        .count()
-                {
-                    report.warnings.push(issue(
-                        "duplicate_model_concept",
-                        Some(&node.id),
-                        "Repeated SigLIP concepts are scored once.",
-                        "Review the server-resolved concept-to-column mapping before running.",
-                    ));
-                }
-                if !concept_columns.is_empty() && concept_columns != &resolved {
-                    report.errors.push(issue(
-                        "invalid_concept_column_map",
-                        Some(&node.id),
-                        "The SigLIP concept-to-column mapping is not server-derived.",
-                        "Apply the workflow again so the server can derive safe score columns.",
-                    ));
-                }
-                if output_relation
+                if feature_cache_relation
                     .as_ref()
                     .is_some_and(|relation| validate_qualified_relation(relation).is_err())
                 {
@@ -745,7 +989,7 @@ pub fn validate_workflow_spec(spec: &WorkflowSpec) -> WorkflowValidationReport {
                     source.config.kind().label(),
                     target.config.kind().label(),
                 ),
-                "Use Table→Query, Table→Model, Model→Query, or Query→Result.",
+                "Use Table→Query, Query→Model, Query→Query, Model→Query, or Query→Result.",
             ));
         }
         outgoing
@@ -829,9 +1073,23 @@ pub fn validate_workflow_spec(spec: &WorkflowSpec) -> WorkflowValidationReport {
             WorkflowNodeConfig::Model { .. } if in_degree != 1 => report.errors.push(issue(
                 "model_input_count",
                 Some(&node.id),
-                "A SigLIP Model node needs exactly one upstream Table.",
-                "Connect one Table containing the selected image field.",
+                "A SigLIP Model node needs exactly one upstream candidate Query.",
+                "Connect one read-only Query that returns stable frame identity and a decoded image field.",
             )),
+            WorkflowNodeConfig::Model { .. }
+                if incoming
+                    .get(node.id.as_str())
+                    .and_then(|sources| sources.first())
+                    .and_then(|source| nodes.get(*source))
+                    .is_some_and(|source| source.config.kind() != WorkflowNodeKind::Query) =>
+            {
+                report.errors.push(issue(
+                    "model_input_kind",
+                    Some(&node.id),
+                    "A SigLIP Model enriches the rows selected by an upstream candidate Query.",
+                    "Insert a Query between the source Table and this Model, and project the stable frame keys plus one decoded image field.",
+                ));
+            }
             WorkflowNodeConfig::Query { sql, .. } => {
                 if let Ok(placeholders) = scan_node_placeholders(sql) {
                     let upstream = incoming
@@ -854,7 +1112,7 @@ pub fn validate_workflow_spec(spec: &WorkflowSpec) -> WorkflowValidationReport {
                                 "unknown_placeholder",
                                 Some(&node.id),
                                 &format!("Workflow SQL references unknown node {placeholder:?}."),
-                                "Reference an existing upstream Table or Model node.",
+                                "Reference an existing connected upstream Table, Query, or Model node.",
                             ));
                         } else if !upstream.contains(placeholder.as_str()) {
                             report.errors.push(issue(
@@ -882,6 +1140,61 @@ pub fn validate_workflow_spec(spec: &WorkflowSpec) -> WorkflowValidationReport {
                 }
             }
             _ => {}
+        }
+        if let WorkflowNodeConfig::Model {
+            features,
+            feature_cache_relation,
+            ..
+        } = &node.config
+        {
+            let mut table_sources = BTreeSet::new();
+            let mut visited = BTreeSet::new();
+            let mut pending = incoming.get(node.id.as_str()).cloned().unwrap_or_default();
+            while let Some(upstream_id) = pending.pop() {
+                if !visited.insert(upstream_id) {
+                    continue;
+                }
+                let Some(upstream) = nodes.get(upstream_id) else {
+                    continue;
+                };
+                match &upstream.config {
+                    WorkflowNodeConfig::Table { relation } => {
+                        table_sources.insert(relation.as_str());
+                    }
+                    _ => pending.extend(incoming.get(upstream_id).into_iter().flatten().copied()),
+                }
+            }
+            if table_sources.len() != 1 {
+                report.errors.push(issue(
+                    "model_source_count",
+                    Some(&node.id),
+                    "A Model feature cache must belong to exactly one authoritative source relation.",
+                    "Build the candidate Query from one source Table; join other evidence only after the Model.",
+                ));
+            } else if let Some(source) = table_sources.first() {
+                if feature_cache_relation
+                    .as_ref()
+                    .is_some_and(|output| output != &derived_feature_cache_relation(source))
+                {
+                    report.errors.push(issue(
+                        "invalid_model_output",
+                        Some(&node.id),
+                        "The Model feature-cache relation is not derived from its source relation.",
+                        "Apply the workflow again so the server can derive the source-scoped cache.",
+                    ));
+                }
+                if features
+                    .iter()
+                    .any(|feature| feature.applicability.source_relation != **source)
+                {
+                    report.errors.push(issue(
+                        "feature_source_mismatch",
+                        Some(&node.id),
+                        "Feature applicability does not match the Model's authoritative source Table.",
+                        "Apply the workflow again so the server can normalize every feature source.",
+                    ));
+                }
+            }
         }
     }
 
@@ -949,8 +1262,9 @@ pub fn workflow_has_model(spec: &WorkflowSpec) -> bool {
 fn allowed_transition(source: WorkflowNodeKind, target: WorkflowNodeKind) -> bool {
     matches!(
         (source, target),
-        (WorkflowNodeKind::Table, WorkflowNodeKind::Model)
-            | (WorkflowNodeKind::Table, WorkflowNodeKind::Query)
+        (WorkflowNodeKind::Table, WorkflowNodeKind::Query)
+            | (WorkflowNodeKind::Query, WorkflowNodeKind::Model)
+            | (WorkflowNodeKind::Query, WorkflowNodeKind::Query)
             | (WorkflowNodeKind::Model, WorkflowNodeKind::Query)
             | (WorkflowNodeKind::Query, WorkflowNodeKind::Result)
     )
@@ -973,6 +1287,19 @@ fn issue(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn feature(source: &str, name: &str, concept: &str) -> WorkflowFeatureDefinition {
+        WorkflowFeatureDefinition {
+            name: name.to_owned(),
+            description: format!("Probability that the frame shows {concept}."),
+            concept: concept.to_owned(),
+            applicability: WorkflowFeatureApplicability {
+                source_relation: source.to_owned(),
+                media_field: "image".to_owned(),
+                stream_ids: Vec::new(),
+            },
+        }
+    }
 
     fn runnable_spec() -> WorkflowSpec {
         WorkflowSpec {
@@ -1026,6 +1353,7 @@ mod tests {
     fn api_state_and_sse_update_round_trip_as_one_authoritative_shape() {
         let workflow = runnable_spec();
         let state = WorkflowStateResponse {
+            scope_id: "workflow-scope-1".to_owned(),
             validation: validate_workflow_spec(&workflow),
             snapshot: WorkflowRunSnapshot::idle_for(&workflow),
             workflow,
@@ -1035,6 +1363,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(json["state"]["workflow"]["id"], DEFAULT_WORKFLOW_ID);
+        assert_eq!(json["state"]["scope_id"], "workflow-scope-1");
         assert_eq!(json["state"]["snapshot"]["phase"], "idle");
         assert!(
             json["state"]["validation"]["errors"]
@@ -1044,6 +1373,114 @@ mod tests {
         );
         let decoded: WorkflowUpdate = serde_json::from_value(json).unwrap();
         assert_eq!(decoded.state, state);
+    }
+
+    #[test]
+    fn agent_state_and_named_update_are_serde_stable_and_secret_free() {
+        let mut state = WorkflowAgentStateResponse::default();
+        state.readiness = WorkflowAgentReadiness {
+            configured: true,
+            status: WorkflowAgentReadinessStatus::Ready,
+            provider: "provider.example".to_owned(),
+            model: "model-a".to_owned(),
+            detail: "Ready".to_owned(),
+        };
+        state.scope_id = "agent-scope-1".to_owned();
+        state.history_available = true;
+        state.revision = 3;
+        state.active_conversation_id = "conversation-1".to_owned();
+        state.conversation_limit = MAX_WORKFLOW_AGENT_CONVERSATIONS;
+        state.conversations.push(WorkflowAgentConversationSummary {
+            conversation_id: "conversation-1".to_owned(),
+            title: "Inspect the catalog".to_owned(),
+            created_ms: 9,
+            updated_ms: 10,
+            message_count: 1,
+            owned_run_id: None,
+        });
+        state.session.conversation_id = "conversation-1".to_owned();
+        state.session.messages.push(WorkflowAgentMessage {
+            id: "message-1".to_owned(),
+            sequence: 1,
+            role: WorkflowAgentRole::Assistant,
+            phase: WorkflowAgentMessagePhase::Complete,
+            text: "I inspected the catalog.".to_owned(),
+            tools: vec![WorkflowAgentToolSummary {
+                call_id: "call-1".to_owned(),
+                name: "list_relations".to_owned(),
+                phase: WorkflowAgentToolPhase::Complete,
+                summary: "Relation catalog complete".to_owned(),
+                error: None,
+                receipt: None,
+            }],
+            run_id: None,
+            created_ms: 10,
+        });
+        state.session.revision = 2;
+        let json = serde_json::to_value(WorkflowAgentUpdate {
+            state: state.clone(),
+        })
+        .unwrap();
+        assert_eq!(json["state"]["session"]["revision"], 2);
+        assert_eq!(json["state"]["readiness"]["status"], "ready");
+        assert_eq!(json["state"]["revision"], 3);
+        assert_eq!(json["state"]["active_conversation_id"], "conversation-1");
+        assert_eq!(
+            json["state"]["conversations"][0]["title"],
+            "Inspect the catalog"
+        );
+        let encoded = json.to_string();
+        assert!(!encoded.contains("api_key"));
+        assert!(!encoded.contains("client_secret"));
+        let decoded: WorkflowAgentUpdate = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.state, state);
+    }
+
+    #[test]
+    fn agent_conversation_commands_are_explicitly_scoped_and_secret_free() {
+        let create = WorkflowAgentCreateConversationRequest {
+            scope_id: "scope-1".to_owned(),
+            expected_revision: 4,
+        };
+        let activate = WorkflowAgentActivateConversationRequest {
+            scope_id: "scope-1".to_owned(),
+            conversation_id: "conversation-2".to_owned(),
+            expected_revision: 4,
+        };
+        let cancel = WorkflowAgentCancelRequest {
+            scope_id: "scope-1".to_owned(),
+            conversation_id: "conversation-2".to_owned(),
+            turn_id: "turn-8".to_owned(),
+        };
+        for encoded in [
+            serde_json::to_string(&create).unwrap(),
+            serde_json::to_string(&activate).unwrap(),
+            serde_json::to_string(&cancel).unwrap(),
+        ] {
+            assert!(!encoded.contains("api_key"));
+            assert!(!encoded.contains("provider_messages"));
+            assert!(encoded.contains("scope-1"));
+        }
+    }
+
+    #[test]
+    fn feature_cache_relation_is_server_owned_and_stable() {
+        assert_eq!(
+            derived_feature_cache_relation("pick/place"),
+            format!(
+                "workflow.features_{}",
+                crate::spiral::identifier_component("pick/place")
+            )
+        );
+    }
+
+    #[test]
+    fn agent_phase_reports_only_real_active_work() {
+        assert!(WorkflowAgentPhase::Responding.active());
+        assert!(WorkflowAgentPhase::WaitingForRun.active());
+        assert!(WorkflowAgentPhase::Cancelling.active());
+        assert!(!WorkflowAgentPhase::Idle.active());
+        assert!(!WorkflowAgentPhase::Failed.active());
     }
 
     #[test]
@@ -1147,99 +1584,178 @@ mod tests {
 
         let mut model = runnable_spec();
         model.nodes.insert(
-            1,
+            2,
             WorkflowNodeSpec {
                 id: "model".to_owned(),
                 name: "Reserved model".to_owned(),
                 config: WorkflowNodeConfig::Model {
                     model_id: SIGLIP_BASE_MODEL_ID.to_owned(),
-                    configuration: BTreeMap::new(),
-                    media_column: "image".to_owned(),
-                    concepts: vec!["red cube".to_owned(), "gripper".to_owned()],
-                    concept_columns: vec![
-                        WorkflowConceptColumn {
-                            concept: "red cube".to_owned(),
-                            score_column: "score_red_cube".to_owned(),
-                        },
-                        WorkflowConceptColumn {
-                            concept: "gripper".to_owned(),
-                            score_column: "score_gripper".to_owned(),
-                        },
+                    features: vec![
+                        feature(
+                            "pick_place.camera_frames",
+                            "is_red_cube_feature",
+                            "red cube",
+                        ),
+                        feature("pick_place.camera_frames", "is_gripper_feature", "gripper"),
                     ],
-                    output_relation: Some("workflow.model_output".to_owned()),
+                    feature_cache_relation: Some(derived_feature_cache_relation(
+                        "pick_place.camera_frames",
+                    )),
                 },
             },
         );
-        model.edges[0].target = "model".to_owned();
+        model.nodes.insert(
+            3,
+            WorkflowNodeSpec {
+                id: "final_query".to_owned(),
+                name: "Join features".to_owned(),
+                config: WorkflowNodeConfig::Query {
+                    sql: "SELECT candidates.*, features.is_red_cube_feature, features.is_gripper_feature FROM {{node:query}} candidates JOIN {{node:model}} features ON candidates.episode_id = features.episode_id AND candidates.stream_id = features.stream_id AND candidates.segment_index = features.segment_index AND candidates.frame_index = features.frame_index AND candidates.episode_time_ns = features.episode_time_ns".to_owned(),
+                    max_rows: 100,
+                },
+            },
+        );
         model.edges.insert(
             1,
             WorkflowEdgeSpec {
-                source: "model".to_owned(),
-                target: "query".to_owned(),
+                source: "query".to_owned(),
+                target: "model".to_owned(),
             },
         );
-        let WorkflowNodeConfig::Query { sql, .. } = &mut model.nodes[2].config else {
-            unreachable!()
-        };
-        *sql = "SELECT * FROM {{node:model}}".to_owned();
+        model.edges.insert(
+            2,
+            WorkflowEdgeSpec {
+                source: "query".to_owned(),
+                target: "final_query".to_owned(),
+            },
+        );
+        model.edges.insert(
+            3,
+            WorkflowEdgeSpec {
+                source: "model".to_owned(),
+                target: "final_query".to_owned(),
+            },
+        );
+        model.edges[4].source = "final_query".to_owned();
         assert!(workflow_has_model(&model));
         assert!(validate_workflow_spec(&model).valid());
     }
 
     #[test]
-    fn siglip_concepts_are_deduplicated_and_mapped_to_safe_unique_columns() {
-        let concepts = vec![
-            " Red cube ".to_owned(),
-            "red cube".to_owned(),
-            "red-cube".to_owned(),
-            "🤖".to_owned(),
-        ];
-        assert_eq!(
-            resolve_siglip_concepts(&concepts),
-            vec![
-                WorkflowConceptColumn {
-                    concept: "Red cube".to_owned(),
-                    score_column: "score_red_cube".to_owned(),
+    fn sql_candidate_model_cache_and_joint_table_converge_in_final_query() {
+        let spec = WorkflowSpec {
+            id: "demo".to_owned(),
+            name: "Holding evidence".to_owned(),
+            revision: 0,
+            nodes: vec![
+                WorkflowNodeSpec {
+                    id: "manifest".to_owned(),
+                    name: "Camera manifest".to_owned(),
+                    config: WorkflowNodeConfig::Table {
+                        relation: "pick_place.video_manifest".to_owned(),
+                    },
                 },
-                WorkflowConceptColumn {
-                    concept: "red-cube".to_owned(),
-                    score_column: "score_red_cube_2".to_owned(),
+                WorkflowNodeSpec {
+                    id: "candidates".to_owned(),
+                    name: "Periodic candidates".to_owned(),
+                    config: WorkflowNodeConfig::Query {
+                        sql: "SELECT episode_id, stream_id, segment_index, frame_index, episode_time_ns, image FROM {{node:manifest}}".to_owned(),
+                        max_rows: 100,
+                    },
                 },
-                WorkflowConceptColumn {
-                    concept: "🤖".to_owned(),
-                    score_column: "score_concept".to_owned(),
+                WorkflowNodeSpec {
+                    id: "holding_features".to_owned(),
+                    name: "Backfill holding feature".to_owned(),
+                    config: WorkflowNodeConfig::Model {
+                        model_id: SIGLIP_BASE_MODEL_ID.to_owned(),
+                        features: vec![feature(
+                            "pick_place.video_manifest",
+                            "is_holding_cube_feature",
+                            "holding cube",
+                        )],
+                        feature_cache_relation: Some(derived_feature_cache_relation("pick_place.video_manifest")),
+                    },
                 },
-            ]
+                WorkflowNodeSpec {
+                    id: "joints".to_owned(),
+                    name: "Joint evidence".to_owned(),
+                    config: WorkflowNodeConfig::Table {
+                        relation: "pick_place.joint_samples".to_owned(),
+                    },
+                },
+                WorkflowNodeSpec {
+                    id: "query".to_owned(),
+                    name: "Join evidence".to_owned(),
+                    config: WorkflowNodeConfig::Query {
+                        sql: "SELECT candidates.*, features.is_holding_cube_feature, joints.positions FROM {{node:candidates}} candidates JOIN {{node:holding_features}} features ON candidates.episode_id = features.episode_id AND candidates.frame_index = features.frame_index JOIN {{node:joints}} joints ON candidates.episode_id = joints.episode_id".to_owned(),
+                        max_rows: 100,
+                    },
+                },
+                WorkflowNodeSpec {
+                    id: "result".to_owned(),
+                    name: "Matching moments".to_owned(),
+                    config: WorkflowNodeConfig::Result,
+                },
+            ],
+            edges: vec![
+                WorkflowEdgeSpec { source: "manifest".to_owned(), target: "candidates".to_owned() },
+                WorkflowEdgeSpec { source: "candidates".to_owned(), target: "holding_features".to_owned() },
+                WorkflowEdgeSpec { source: "candidates".to_owned(), target: "query".to_owned() },
+                WorkflowEdgeSpec { source: "holding_features".to_owned(), target: "query".to_owned() },
+                WorkflowEdgeSpec { source: "joints".to_owned(), target: "query".to_owned() },
+                WorkflowEdgeSpec { source: "query".to_owned(), target: "result".to_owned() },
+            ],
+        };
+
+        assert!(validate_workflow_spec(&spec).valid());
+
+        let mut direct_table_model = spec.clone();
+        direct_table_model.edges[1].source = "manifest".to_owned();
+        assert!(
+            validate_workflow_spec(&direct_table_model)
+                .errors
+                .iter()
+                .any(|issue| issue.code == "model_input_kind")
         );
     }
 
     #[test]
-    fn legacy_model_json_defaults_to_an_invalid_typed_configuration() {
+    fn typed_feature_names_are_descriptive_and_safe() {
+        assert!(is_workflow_feature_name("is_raining_feature"));
+        assert!(is_workflow_feature_name("is_gripper_open_feature"));
+        assert!(!is_workflow_feature_name("score_1"));
+        assert!(!is_workflow_feature_name("is-raining-feature"));
+    }
+
+    #[test]
+    fn model_wire_shape_requires_typed_feature_definitions() {
         let model: WorkflowNodeConfig = serde_json::from_value(serde_json::json!({
             "kind": "model",
             "model_id": "siglip-base",
-            "configuration": {},
-            "output_relation": "workflow.output"
+            "features": [{
+                "name": "is_raining_feature",
+                "description": "Probability that rain is visible.",
+                "concept": "raining",
+                "applicability": {
+                    "source_relation": "weather.camera_frames",
+                    "media_field": "image",
+                    "stream_ids": ["camera.front"]
+                }
+            }],
+            "feature_cache_relation": "workflow.features_weather"
         }))
         .unwrap();
-        let WorkflowNodeConfig::Model {
-            media_column,
-            concepts,
-            concept_columns,
-            ..
-        } = model
-        else {
+        let WorkflowNodeConfig::Model { features, .. } = model else {
             unreachable!()
         };
-        assert!(media_column.is_empty());
-        assert!(concepts.is_empty());
-        assert!(concept_columns.is_empty());
+        assert_eq!(features[0].name, "is_raining_feature");
+        assert_eq!(features[0].applicability.stream_ids, ["camera.front"]);
     }
 
     #[test]
     fn capabilities_pin_the_executable_siglip_artifact() {
         let capabilities = WorkflowCapabilities::default();
-        assert_eq!(capabilities.schema_version, 2);
+        assert_eq!(capabilities.schema_version, 3);
         assert_eq!(
             capabilities.models,
             [WorkflowModelCapability::siglip_base()]

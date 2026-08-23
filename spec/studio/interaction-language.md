@@ -26,7 +26,9 @@ meaning, location, state, confirmation, and focus behavior from its verb.
 
 Start, Stop, Cancel, Import, Export, Navigate, Select, and Toggle keep their
 literal meanings. A visible label may be more specific, such as **Run query**,
-while its typed purpose remains Start.
+while its typed purpose remains Start. Workflow Assistant **Send** also uses
+Start; its **Stop** ends the active Assistant turn and any still-active
+Workflow run owned by that turn.
 
 Panel reordering is a workspace gesture with pointer and keyboard paths, not a
 product `Action` purpose.
@@ -120,6 +122,32 @@ browser confirmation dialogs.
   states, support pointer activation plus Enter or Space from keyboard focus,
   and open the Node inspector only after explicit selection. Initial rendering
   must leave Assistant active.
+- **STUDIO-066** Workflow Assistant Send, Stop, and Retry must use the shared
+  typed actions and single-flight pending states. Plain Enter submits the
+  composer; Shift+Enter inserts a new line, and the shortcut remains visible
+  beside the action. The compact **Conversation** selector and typed **New** action must
+  preserve older conversations, keep one shell-hoisted draft per project scope and conversation
+  across activity and Settings view unmounts, clear only an accepted draft, and expose
+  the exact disabled reason at the 20-conversation bound, during active Agent
+  work, or when Spiral history is unavailable. Provider-unconfigured alone
+  must not disable conversation management. Switching conversations must not
+  change the Workflow graph, run, Results, or panel focus. The
+  current streaming message and live turn phase may announce without replaying
+  restored history. Assistant prose must render safe typed
+  paragraphs/lists/emphasis/inline-code/code-block nodes, never raw HTML.
+  Completed tool summaries collapse behind a native disclosure while running
+  or failed work remains open. Near-bottom threads follow streaming work; a
+  user who scrolls away gets an explicit **Jump to latest** recovery. Tool summaries must use human bounded receipts; matching saved-graph, run,
+  or result receipts may expose explicit Navigate actions
+  without stealing focus, while stale receipts remain inert. An unavailable provider must keep Send disabled
+  with bounded temporary-unavailable copy on the page, never provider, model,
+  environment-variable, or backend-configuration instructions.
+- **STUDIO-068** Workflow Results rows with one or more exact
+  `spql.image.Image` fields must keep the complete table and render every image
+  directly in its corresponding schema cell. Image cells use bounded previews
+  and contextual episode/stream/frame alt text; other cells retain their normal
+  values with type-aware headers, aligned numbers, quiet nulls, and one shared
+  result metadata strip.
 
 ## Implementation ownership
 

@@ -26,6 +26,22 @@ cd crates/spiral-robotics-studio
 dx serve --release
 ```
 
+For a developer-local Workflow Assistant, put the backend-only credential in
+the repository root's ignored `.env.local` file. Studio reads this file
+automatically when a corresponding process value is absent, so it works
+without direnv or manually exporting secrets:
+
+```dotenv
+LLM_API_KEY=your-provider-key
+```
+
+The default is `openai/gpt-5.6-terra` through OpenRouter. `LLM_MODEL` and
+`LLM_BASE_URL` remain optional developer overrides, and explicit process values
+take precedence over `.env.local`. Keep the file owner-readable only
+(`chmod 600 .env.local`). Never commit it. Production deployments should
+continue to inject the same values through their secret manager rather than a
+repository-local file.
+
 Start the Python policy compute runtime separately (on the same machine or a
 remote compute host). It owns PyTorch for both training and rollout inference:
 

@@ -23,7 +23,9 @@ use spiral_robotics_contracts::api::{
     RolloutSnapshot, StudioSnapshot, TelemetryFrame, TrainingSnapshot, TrainingUpdate,
 };
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
-use spiral_robotics_contracts::workflow::{WorkflowStateResponse, WorkflowUpdate};
+use spiral_robotics_contracts::workflow::{
+    WorkflowAgentStateResponse, WorkflowStateResponse, WorkflowUpdate,
+};
 
 /// Fetch and decode a JSON resource.
 pub(crate) async fn get<T: DeserializeOwned>(path: &str) -> Result<T, String> {
@@ -229,6 +231,7 @@ pub enum StudioEvent {
     Rollout(Box<RolloutSnapshot>),
     WorkflowSnapshot(Box<WorkflowStateResponse>),
     WorkflowUpdate(Box<WorkflowUpdate>),
+    WorkflowAgent(Box<WorkflowAgentStateResponse>),
 }
 
 /// Consume the server's event stream, handing every message to `on_event`.
@@ -264,12 +267,18 @@ where
     let workflow_updates = source
         .subscribe("workflow_update")
         .map_err(|error| format!("could not subscribe to Workflow updates: {error}"))?;
+    let workflow_agent = source
+        .subscribe("workflow_agent")
+        .map_err(|error| format!("could not subscribe to Workflow Assistant updates: {error}"))?;
 
     let mut events = stream::select(
         stream::select(stream::select(snapshots, telemetry), rollout),
         stream::select(
             stream::select(training_snapshots, training_updates),
-            stream::select(workflow_snapshots, workflow_updates),
+            stream::select(
+                stream::select(workflow_snapshots, workflow_updates),
+                workflow_agent,
+            ),
         ),
     );
     while let Some(Ok((kind, message))) = events.next().await {
@@ -310,6 +319,11 @@ where
             "workflow_update" => {
                 if let Ok(update) = serde_json::from_str(&text) {
                     on_event(StudioEvent::WorkflowUpdate(Box::new(update)));
+                }
+            }
+            "workflow_agent" => {
+                if let Ok(state) = serde_json::from_str(&text) {
+                    on_event(StudioEvent::WorkflowAgent(Box::new(state)));
                 }
             }
             _ => {}

@@ -26,7 +26,7 @@ use spiral_robotics_contracts::api::{
 };
 use spiral_robotics_contracts::spiral::{self, Table, column as db};
 use spiral_robotics_contracts::workflow::{
-    WorkflowDocument, WorkflowRelation, WorkflowRelationsResponse, derived_model_output_relation,
+    WorkflowDocument, WorkflowRelation, WorkflowRelationsResponse,
 };
 use spiral_robotics_core::workflow::validate_qualified_relation;
 
@@ -185,61 +185,126 @@ impl StorageManager {
         if !self.is_configured() {
             return Ok(WorkflowDocument::default());
         }
-        self.load_json_document(Table::WorkflowRuns, "default")
+        self.load_json_document_resetting_incompatible(Table::WorkflowRuns, "default")
     }
 
     pub(crate) fn save_workflow_document(&self, value: &WorkflowDocument) -> Result<(), String> {
         self.save_json_document(Table::WorkflowRuns, "default", value)
     }
 
-    pub(crate) fn save_workflow_document_and_drop_models(
-        &self,
-        value: &WorkflowDocument,
-        removed_model_ids: &[String],
-    ) -> Result<(), String> {
-        if removed_model_ids.is_empty() {
-            return self.save_workflow_document(value);
+    pub(crate) fn load_workflow_agent_snapshot_json(&self) -> Result<Option<String>, String> {
+        if !self.is_configured() {
+            return Ok(None);
         }
-        let removed_relations = removed_model_ids
-            .iter()
-            .map(|node_id| derived_model_output_relation(&value.workflow.id, node_id))
-            .collect::<Vec<_>>();
+        self.load_json_document_raw_optional(Table::WorkflowRuns, "agent:default")
+    }
+
+    pub(crate) fn save_workflow_agent_document<T: Serialize>(
+        &self,
+        value: &T,
+    ) -> Result<(), String> {
         let namespace = self.repository.namespace().to_owned();
         let relation = sql::relation(&namespace, Table::WorkflowRuns);
-        let key = "default".to_owned();
         let json = serde_json::to_string(value)
-            .map_err(|error| format!("encoding {} snapshot: {error}", Table::WorkflowRuns))?;
-        let removed_relations = removed_relations.to_vec();
+            .map_err(|error| format!("encoding Workflow runs snapshot: {error}"))?;
+        self.repository.run_exclusive_blocking(move |connection| {
+            ensure_dataset_namespace(connection, &namespace)?;
+            connection.set_autocommit(false)?;
+            let mutation = save_json_document_on_connection(
+                connection,
+                Table::WorkflowRuns,
+                &relation,
+                "agent:default".to_owned(),
+                json,
+            )
+            .and_then(|()| connection.commit());
+            match mutation {
+                Ok(()) => match connection.set_autocommit(true) {
+                    Ok(()) => Ok(()),
+                    Err(_) => {
+                        // The document is committed. Discard the connection so
+                        // manual-commit state can never leak into the pool, but
+                        // do not tell the manager that durable state is old.
+                        connection.discard();
+                        Ok(())
+                    }
+                },
+                Err(error) => {
+                    let rollback = connection.rollback();
+                    let restore = connection.set_autocommit(true);
+                    let mut detail = error;
+                    if let Err(rollback) = rollback {
+                        detail.push_str(&format!(
+                            "; rolling back Assistant history failed: {rollback}"
+                        ));
+                    }
+                    if let Err(restore) = restore {
+                        detail.push_str(&format!("; restoring ADBC autocommit failed: {restore}"));
+                    }
+                    // Returning an error prevents run_exclusive_blocking from
+                    // checking this uncertain connection back into the pool.
+                    Err(detail)
+                }
+            }
+        })
+    }
+
+    /// Replace an incompatible prototype Assistant document only when the
+    /// durable raw snapshot is still exactly the one Studio inspected. The
+    /// compare and replacement share one catalog transaction, so a newer
+    /// document from another Studio cannot be overwritten.
+    pub(crate) fn reset_workflow_agent_document<T: Serialize>(
+        &self,
+        expected_raw_snapshot: &str,
+        value: &T,
+    ) -> Result<(), String> {
+        let namespace = self.repository.namespace().to_owned();
+        let relation = sql::relation(&namespace, Table::WorkflowRuns);
+        let expected_digest = Sha256::digest(expected_raw_snapshot.as_bytes()).to_vec();
+        let json = serde_json::to_string(value)
+            .map_err(|error| format!("encoding reset Assistant history: {error}"))?;
         self.repository.run_exclusive_blocking(move |connection| {
             connection.set_autocommit(false)?;
             let mutation = (|| {
-                ensure_dataset_namespace(connection, &namespace)?;
+                let current = load_json_document_raw_optional_on_connection(
+                    connection,
+                    &relation,
+                    "agent:default",
+                )?
+                .ok_or_else(|| {
+                    "Assistant history changed before reset. Reload the current project."
+                        .to_owned()
+                })?;
+                if Sha256::digest(current.as_bytes()).as_slice() != expected_digest.as_slice() {
+                    return Err(
+                        "Assistant history changed before reset. Reload the current project."
+                            .to_owned(),
+                    );
+                }
                 save_json_document_on_connection(
                     connection,
                     Table::WorkflowRuns,
                     &relation,
-                    key,
+                    "agent:default".to_owned(),
                     json,
                 )?;
-                for removed in removed_relations {
-                    execute_update_sql(connection, &format!("DROP TABLE IF EXISTS {removed}"))?;
-                }
                 connection.commit()
             })();
-            if mutation.is_err() {
-                let _ = connection.rollback();
+            let rollback = mutation.is_err().then(|| connection.rollback());
+            if rollback.as_ref().is_some_and(Result::is_err) {
+                connection.discard();
             }
             let restore = connection.set_autocommit(true);
-            match (mutation, restore) {
-                (Ok(()), Ok(())) => Ok(()),
-                (Err(error), Ok(())) => Err(error),
-                (Ok(()), Err(_)) => {
-                    connection.discard();
-                    Ok(())
-                }
-                (Err(error), Err(restore)) => Err(format!(
-                    "{error}; restoring ADBC autocommit also failed: {restore}"
+            if restore.is_err() {
+                connection.discard();
+            }
+            match (mutation, rollback, restore) {
+                (Ok(()), None, Ok(())) | (Ok(()), None, Err(_)) => Ok(()),
+                (Err(error), Some(Ok(())), Ok(())) => Err(error),
+                (Err(error), Some(rollback), restore) => Err(format!(
+                    "{error}; Assistant reset cleanup was uncertain (rollback: {rollback:?}, autocommit: {restore:?})"
                 )),
+                _ => unreachable!("recovery rollback follows the mutation outcome"),
             }
         })
     }
@@ -379,6 +444,84 @@ impl StorageManager {
         })
     }
 
+    fn load_json_document_raw_optional(
+        &self,
+        table: Table,
+        key: &str,
+    ) -> Result<Option<String>, String> {
+        let relation = sql::relation(self.repository.namespace(), table);
+        let key = key.to_owned();
+        self.repository.run_blocking(move |connection| {
+            load_json_document_raw_optional_on_connection(connection, &relation, &key)
+        })
+    }
+
+    /// Workflow wire shapes are prototype-owned rather than a compatibility
+    /// surface. Replace an obsolete snapshot with the current empty document
+    /// in one transaction so every later hydration sees the same truth.
+    fn load_json_document_resetting_incompatible<T>(
+        &self,
+        table: Table,
+        key: &str,
+    ) -> Result<T, String>
+    where
+        T: DeserializeOwned + Default + Serialize,
+    {
+        let relation = sql::relation(self.repository.namespace(), table);
+        let key = key.to_owned();
+        self.repository.run_exclusive_blocking(move |connection| {
+            if !table_exists(connection, &relation)? {
+                return Ok(T::default());
+            }
+            let result = run_query(
+                connection,
+                &format!(
+                    "SELECT {} FROM {relation} WHERE {} = {} ORDER BY {} DESC LIMIT 1",
+                    db::SNAPSHOT_JSON,
+                    db::RUN_ID,
+                    sql::string_literal(&key),
+                    db::UPDATED_MS,
+                ),
+                1,
+            )?;
+            let Some(value) = result
+                .rows
+                .first()
+                .and_then(|row| row.get(db::SNAPSHOT_JSON))
+                .and_then(JsonValue::as_str)
+            else {
+                return Ok(T::default());
+            };
+            let (document, incompatible) = decode_json_document_or_default(value);
+            if !incompatible {
+                return Ok(document);
+            }
+
+            let json = serde_json::to_string(&document)
+                .map_err(|error| format!("encoding reset {table} snapshot: {error}"))?;
+            connection.set_autocommit(false)?;
+            let mutation = (|| {
+                save_json_document_on_connection(connection, table, &relation, key, json)?;
+                connection.commit()
+            })();
+            if mutation.is_err() {
+                let _ = connection.rollback();
+            }
+            let restore = connection.set_autocommit(true);
+            match (mutation, restore) {
+                (Ok(()), Ok(())) => Ok(document),
+                (Err(error), Ok(())) => Err(error),
+                (Ok(()), Err(_)) => {
+                    connection.discard();
+                    Ok(document)
+                }
+                (Err(error), Err(restore)) => Err(format!(
+                    "{error}; restoring ADBC autocommit after resetting obsolete Workflow history also failed: {restore}"
+                )),
+            }
+        })
+    }
+
     fn save_json_document<T: Serialize>(
         &self,
         table: Table,
@@ -452,6 +595,7 @@ impl StorageManager {
         let project = self.repository.project_id();
         if project.is_empty() {
             return Ok(WorkflowRelationsResponse {
+                scope_id: String::new(),
                 relations: Vec::new(),
                 complete: false,
                 limitation: Some(
@@ -524,6 +668,7 @@ impl StorageManager {
                     ))
                 };
                 Ok(WorkflowRelationsResponse {
+                    scope_id: String::new(),
                     relations,
                     complete: skipped == 0,
                     limitation,
@@ -667,6 +812,43 @@ fn save_json_document_on_connection(
     )
     .map_err(|error| format!("building {table} snapshot batch: {error}"))?;
     ingest_batch(connection, relation, batch)
+}
+
+fn load_json_document_raw_optional_on_connection(
+    connection: &mut RepositoryConnection,
+    relation: &str,
+    key: &str,
+) -> Result<Option<String>, String> {
+    if !table_exists(connection, relation)? {
+        return Ok(None);
+    }
+    let result = run_query(
+        connection,
+        &format!(
+            "SELECT {} FROM {relation} WHERE {} = {} ORDER BY {} DESC LIMIT 1",
+            db::SNAPSHOT_JSON,
+            db::RUN_ID,
+            sql::string_literal(key),
+            db::UPDATED_MS,
+        ),
+        1,
+    )?;
+    Ok(result
+        .rows
+        .first()
+        .and_then(|row| row.get(db::SNAPSHOT_JSON))
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned))
+}
+
+fn decode_json_document_or_default<T>(value: &str) -> (T, bool)
+where
+    T: DeserializeOwned + Default,
+{
+    match serde_json::from_str(value) {
+        Ok(document) => (document, false),
+        Err(_) => (T::default(), true),
+    }
 }
 
 /// Decode remote replay data without dropping malformed joints or inventing a
@@ -1985,6 +2167,25 @@ mod tests {
     use std::collections::HashMap;
 
     use arrow_array::builder::{FixedSizeListBuilder, Int32Builder, ListBuilder, UInt8Builder};
+
+    #[derive(Debug, Default, PartialEq, serde::Deserialize)]
+    struct CurrentPrototypeDocument {
+        features: Vec<String>,
+    }
+
+    #[test]
+    fn obsolete_workflow_json_resets_once_instead_of_poisoning_bootstrap() {
+        let (document, incompatible) =
+            decode_json_document_or_default::<CurrentPrototypeDocument>(r#"{"concepts":["cube"]}"#);
+        assert!(incompatible);
+        assert_eq!(document, CurrentPrototypeDocument::default());
+
+        let (document, incompatible) = decode_json_document_or_default::<CurrentPrototypeDocument>(
+            r#"{"features":["is_cube_feature"]}"#,
+        );
+        assert!(!incompatible);
+        assert_eq!(document.features, ["is_cube_feature"]);
+    }
 
     #[test]
     fn backend_owned_arrow_schemas_match_the_shared_contract() {

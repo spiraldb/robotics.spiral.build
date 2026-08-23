@@ -58,6 +58,7 @@ use crate::backend::storage::manager::StorageManager;
 use crate::backend::storage::settings::BackendStateStore;
 use crate::backend::storage::settings::StudioPreferencesStore;
 use crate::backend::training::manager::TrainingManager;
+use crate::backend::workflow::agent::WorkflowAgentManager;
 use crate::backend::workflow::manager::WorkflowManager;
 use spiral_robotics_studio_application::calibration::{
     self, CalibrationHistoryActivity, CalibrationHistoryPort, ReappliedPositions,
@@ -146,6 +147,7 @@ pub(crate) struct AppState {
     pub storage: Arc<StorageManager>,
     pub training: Arc<TrainingManager>,
     pub workflow: Arc<WorkflowManager>,
+    pub workflow_agent: Arc<WorkflowAgentManager>,
     pub rollout: Arc<RolloutManager>,
     pub bootstrap: BootstrapState,
     pub catalog_lease: Arc<CatalogMutationLease>,
@@ -538,6 +540,12 @@ async fn events(
         let mut telemetry_timer = tokio::time::interval(TELEMETRY_INTERVAL);
         let (initial_training, mut training) = state.training.subscription();
         let (initial_workflow, mut workflow) = state.workflow.subscription();
+        let mut last_workflow = initial_workflow.clone();
+        let (initial_agent, mut workflow_agent) = state.workflow_agent.subscription();
+        let mut last_agent_cursor = (
+            initial_agent.scope_id.clone(),
+            initial_agent.revision,
+        );
         let initial_rollout = RolloutManager::snapshot(state.rollout.as_ref());
         let mut rollout = state.rollout.subscribe();
         let mut last_snapshot: Option<StudioSnapshot> = None;
@@ -558,6 +566,12 @@ async fn events(
         if let Ok(event) = Event::default()
             .event("workflow_snapshot")
             .json_data(&initial_workflow)
+        {
+            yield Ok(event);
+        }
+        if let Ok(event) = Event::default()
+            .event("workflow_agent")
+            .json_data(&initial_agent)
         {
             yield Ok(event);
         }
@@ -609,7 +623,19 @@ async fn events(
                 }
                 update = workflow.recv() => {
                     match update {
-                        Ok(update) => {
+                        Ok(_) => {
+                            // Broadcast values are wakeups. A queued update
+                            // from the project that was just replaced must not
+                            // overwrite the manager's newer, lower-revision
+                            // scoped state.
+                            let snapshot = state.workflow.state();
+                            if snapshot == last_workflow {
+                                continue;
+                            }
+                            last_workflow = snapshot.clone();
+                            let update = spiral_robotics_contracts::workflow::WorkflowUpdate {
+                                state: snapshot,
+                            };
                             if let Ok(event) = Event::default()
                                 .event("workflow_update")
                                 .json_data(&update)
@@ -620,8 +646,47 @@ async fn events(
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             let (snapshot, replacement) = state.workflow.subscription();
                             workflow = replacement;
+                            if snapshot == last_workflow {
+                                continue;
+                            }
+                            last_workflow = snapshot.clone();
                             if let Ok(event) = Event::default()
                                 .event("workflow_snapshot")
+                                .json_data(&snapshot)
+                            {
+                                yield Ok(event);
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                update = workflow_agent.recv() => {
+                    match update {
+                        Ok(_) => {
+                            // Broadcast values are wakeups. Snapshot current
+                            // manager truth so a queued update from a prior
+                            // conversation or project scope cannot regress SSE.
+                            let snapshot = state.workflow_agent.state();
+                            let cursor = (snapshot.scope_id.clone(), snapshot.revision);
+                            if !replace_agent_cursor(&mut last_agent_cursor, &cursor) {
+                                continue;
+                            }
+                            if let Ok(event) = Event::default()
+                                .event("workflow_agent")
+                                .json_data(&snapshot)
+                            {
+                                yield Ok(event);
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            let (snapshot, replacement) = state.workflow_agent.subscription();
+                            workflow_agent = replacement;
+                            let cursor = (snapshot.scope_id.clone(), snapshot.revision);
+                            if !replace_agent_cursor(&mut last_agent_cursor, &cursor) {
+                                continue;
+                            }
+                            if let Ok(event) = Event::default()
+                                .event("workflow_agent")
                                 .json_data(&snapshot)
                             {
                                 yield Ok(event);
@@ -647,6 +712,14 @@ async fn events(
     };
 
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+fn replace_agent_cursor(last: &mut (String, u64), next: &(String, u64)) -> bool {
+    if last == next {
+        return false;
+    }
+    *last = next.clone();
+    true
 }
 
 #[cfg(test)]

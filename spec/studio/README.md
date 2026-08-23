@@ -4,9 +4,9 @@
 
 Studio gives an ML engineer one stable browser workspace centered on the
 project's robot data: Data is the home, Live produces episodes, Workflow reads
-and derives Spiral relations, and Training and Rollout consume them. It keeps
-feature ownership clear while allowing visualization panels to be arranged
-spatially.
+and derives Spiral relations through manual editing or a bounded Assistant,
+and Training and Rollout consume them. It keeps feature ownership clear while
+allowing visualization panels to be arranged spatially.
 
 ## User flow
 
@@ -82,7 +82,8 @@ spatially.
 - **STUDIO-026** Whole-project import and export must live in Settings →
   SpiralDB. Import must explicitly warn that it overwrites every Studio-owned
   relation in the active project; export must include the full project rather
-  than only the selected dataset.
+  than only the selected dataset, including the validated Workflow feature
+  registry and all cache relations it declares.
 - **STUDIO-051** Studio must bind its backend listener before external-service
   probes, camera discovery, project hydration, or saved-robot connection. Its
   application contract must distinguish Bootstrapping, Ready, and Degraded;
@@ -118,16 +119,60 @@ spatially.
 - **STUDIO-061** Workflow must own an independent four-panel layout scope:
   Assistant and Node tabbed in a 30% left lane, Workflow above Results in the
   right lane.
-- **STUDIO-062** Workflow's manual graph execution must keep Assistant in an
-  explicit unavailable state with no run authority. The canvas owns Apply,
-  Run/Cancel, and the controlled Add model action; Model removal must reconnect
-  its Table directly to Query and repair that Query's placeholder. A topology
-  change must auto-layout left-to-right once the cards are measurable, including
-  after its tab makes the canvas visible, without exposing
-  arbitrary edge drawing or generic node deletion. The Model inspector must
-  show the one advertised SigLIP capability, eligible upstream media fields,
-  concept-to-score-column mapping, bounded progress, warnings/quarantine,
-  actual device and measured timings, and computed/reused fingerprint state.
+- **STUDIO-062** Workflow manual editing and execution must remain available
+  independently of the Assistant. The Node inspector owns explicit Apply; the
+  canvas owns manual Run/Cancel and the controlled Add model action. Add model
+  must preserve the existing Query as the candidate cohort, insert the Model
+  and a final cache-join Query, and keep both paths visible. Model removal must
+  restore the candidate Query as the terminal read. A topology change must auto-layout left-to-right once the cards
+  are measurable, including after its tab makes the canvas visible, without
+  exposing arbitrary edge drawing or generic node deletion. The Model
+  inspector must show the one advertised SigLIP capability; typed feature name,
+  description, concept, candidate image field, optional stream applicability,
+  authoritative source and source-derived shared cache; bounded feature-cell
+  progress; warnings/quarantine; actual device and measured timings; and
+  computed/reused state. Untouched definitions use one consolidated completion
+  error, and Fit must retain readable 0.70 zoom at the 1024px minimum.
+- **STUDIO-064** Workflow Assistant must use the existing 30% Assistant/Node
+  lane as one compact one-light thread and composer. It must show secret-free
+  product readiness, durable user/assistant/synthetic messages,
+  safe structured paragraphs/lists/emphasis/code, streaming/waiting/interrupted
+  state, near-bottom auto-follow with an explicit jump recovery, and a compact
+  running/complete/failed execution trace whose completed steps collapse. Completed
+  graph/run/result tools must expose stale-safe explicit artifact navigation.
+  The Assistant has exactly seven typed tools and no sampling or generic
+  mutation tool. Periodic frame selection is ordinary read-only Query SQL over
+  inspected Spiral relations; that Query feeds the Model as a candidate cohort.
+  Restored history and streaming token deltas must not replay through a live
+  region; live turn status may announce. Exactly one turn may be active. Send and Stop must remain in the
+  composer; the Assistant must not add a second manual Run control or treat
+  chat prose as graph, run, or Results truth. Studio must discover its local
+  backend-only credential automatically and default the prototype provider/model;
+  provider hostnames, model slugs, credential names, and configuration instructions
+  must not appear in the product surface. Temporary provider failure keeps the
+  stable panel and bounded retry language without implying an active turn.
+- **STUDIO-065** Assistant history must be scoped to the active Spiral project,
+  hold 1–20 durable conversations without silently deleting an older one, and
+  retain at most 80 public messages per conversation. Only the selected
+  conversation supplies provider context. New/select must use server scope and
+  collection revision, must not mutate the Workflow graph or run, and must be
+  idempotent when New is invoked on an already-pristine active conversation.
+  They must be
+  disabled while a turn or Agent-owned run is active or when the Spiral history
+  store is unavailable. Project change or restore replaces rather than merges
+  the conversation collection, and named `workflow_agent` events reconcile it
+  monotonically without splitting retained tool exchanges. Canvas graph, run
+  snapshot, and Results continue to reconcile from authoritative Workflow state
+  while a turn streams or automatically resumes after a long run.
+- **STUDIO-067** Workflow canvas identity and run state must remain separate:
+  Saved/Modified is neutral edit truth, while active/complete/warning/failed and
+  neutral cancelled/interrupted states use their semantic roles. First visible
+  activation and later panel/window resizes must compact-layout or refit the complete expected five-rank,
+  six-node, two-Table lineage at the 1024px desktop minimum. Image-bearing shared query
+  Results must preserve the full table and render each decoded image directly
+  in its schema cell beside the corresponding score, identity, joint, and other
+  values. The table keeps one result metadata strip, type-aware headers,
+  aligned numbers, quiet nulls, and contextual image alt text.
 
 ## Feature relationships
 

@@ -107,6 +107,11 @@ fn feature_routers_preserve_every_public_path_exactly_once() {
         "/workflow/snapshot",
         "/workflow/run",
         "/workflow/cancel",
+        "/workflow/agent",
+        "/workflow/agent/conversations",
+        "/workflow/agent/conversations/active",
+        "/workflow/agent/turn",
+        "/workflow/agent/cancel",
     ];
     for path in paths {
         assert_eq!(
@@ -122,7 +127,30 @@ fn workflow_uses_named_events_on_the_single_reconnecting_stream() {
     let source = include_str!("../routes.rs");
     assert!(source.contains("event(\"workflow_snapshot\")"));
     assert!(source.contains("event(\"workflow_update\")"));
+    assert!(source.contains("event(\"workflow_agent\")"));
+    assert!(
+        source.contains("let snapshot = state.workflow.state();"),
+        "Workflow broadcasts are wakeups so an old queued scope cannot regress SSE"
+    );
     assert_eq!(source.matches("route(\"/events\"").count(), 1);
+}
+
+#[test]
+fn workflow_agent_sse_cursor_coalesces_duplicate_wakeups_and_accepts_new_scopes() {
+    let mut cursor = ("scope-a".to_owned(), 8);
+    assert!(!super::replace_agent_cursor(
+        &mut cursor,
+        &("scope-a".to_owned(), 8)
+    ));
+    assert!(super::replace_agent_cursor(
+        &mut cursor,
+        &("scope-a".to_owned(), 9)
+    ));
+    assert!(super::replace_agent_cursor(
+        &mut cursor,
+        &("scope-b".to_owned(), 1)
+    ));
+    assert_eq!(cursor, ("scope-b".to_owned(), 1));
 }
 
 #[test]

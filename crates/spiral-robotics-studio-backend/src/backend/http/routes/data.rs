@@ -122,6 +122,10 @@ async fn import_project(
         .workflow
         .reload_from_storage()
         .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    state
+        .workflow_agent
+        .reload_from_storage()
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
     Ok(Json(summary))
 }
 
@@ -203,7 +207,7 @@ fn require_import_idle(state: &AppState, subject: &str) -> Result<(), Failure> {
         .any(|connection| connection.connected);
     if import_activity_is_busy(state, &hardware) || connected {
         return Err(Failure::conflict(format!(
-            "Disconnect robots and stop recording, replay, rollout, training, and Workflow before importing {subject}"
+            "Disconnect robots and stop recording, replay, rollout, training, Workflow, or the Workflow Assistant before importing {subject}"
         )));
     }
     Ok(())
@@ -213,7 +217,7 @@ fn require_project_import_idle(state: &AppState) -> Result<(), Failure> {
     let hardware = state.hardware.state();
     if import_activity_is_busy(state, &hardware) {
         return Err(Failure::conflict(
-            "Stop recording, replay, rollout, training, and Workflow before importing a project",
+            "Stop recording, replay, rollout, training, Workflow, or the Workflow Assistant before importing a project",
         ));
     }
     Ok(())
@@ -239,6 +243,7 @@ fn import_activity_is_busy(state: &AppState, hardware: &HardwareState) -> bool {
                 | ApplicationRolloutPhase::Stopping
         )
         || state.workflow.is_active()
+        || state.workflow_agent.is_active()
 }
 
 async fn disconnect_all_robots(state: &AppState) -> Result<(), Failure> {
@@ -364,6 +369,10 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
                 .map_err(ApplicationError::External)?;
             self.state
                 .workflow
+                .reload_from_storage()
+                .map_err(ApplicationError::External)?;
+            self.state
+                .workflow_agent
                 .reload_from_storage()
                 .map_err(ApplicationError::External)?;
         }
@@ -701,6 +710,11 @@ async fn update_data_settings(
             lease: state.catalog_lease.clone(),
             token,
         };
+        if state.workflow_agent.is_active() {
+            return Err(Failure::conflict(
+                "Stop the active Workflow Assistant turn before changing the Spiral destination",
+            ));
+        }
         let hardware = state.hardware.state();
         let rollout_is_active = matches!(
             rollout_application::snapshot(&super::training_rollout::RolloutHttpAdapter(

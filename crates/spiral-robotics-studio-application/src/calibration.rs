@@ -66,7 +66,7 @@ pub struct ReapplyCalibrationOutput {
 
 /// Historical episode boundary for applying a robot's current calibration.
 pub trait CalibrationHistoryPort {
-    fn reserve_catalog_mutation(&self) -> Option<CatalogLeaseToken>;
+    fn reserve_catalog_mutation(&self) -> Result<Option<CatalogLeaseToken>, ApplicationError>;
     fn release_catalog_mutation(&self, token: CatalogLeaseToken);
     fn activity(&self) -> CalibrationHistoryActivity;
     fn current_calibration(&self, robot: &str) -> Result<Option<Calibration>, ApplicationError>;
@@ -168,7 +168,7 @@ pub async fn reapply_history<P>(
 where
     P: CalibrationHistoryPort + ?Sized,
 {
-    let Some(token) = port.reserve_catalog_mutation() else {
+    let Some(token) = port.reserve_catalog_mutation()? else {
         return Err(ApplicationError::Conflict(
             "another recording or dataset mutation is active; wait for it to finish".to_owned(),
         ));
@@ -420,9 +420,10 @@ mod tests {
     }
 
     impl CalibrationHistoryPort for History {
-        fn reserve_catalog_mutation(&self) -> Option<CatalogLeaseToken> {
-            self.lease
-                .try_acquire(CatalogLeaseOwner::CalibrationReapply)
+        fn reserve_catalog_mutation(&self) -> Result<Option<CatalogLeaseToken>, ApplicationError> {
+            Ok(self
+                .lease
+                .try_acquire(CatalogLeaseOwner::CalibrationReapply))
         }
 
         fn release_catalog_mutation(&self, token: CatalogLeaseToken) {

@@ -20,6 +20,7 @@ use crate::backend::storage::settings::{
 };
 use crate::backend::training::manager::TrainingManager;
 use crate::backend::training::remote::ConfiguredHttpTrainingBackend;
+use crate::backend::workflow::agent::WorkflowAgentManager;
 use crate::backend::workflow::manager::WorkflowManager;
 use clap::Parser;
 use spiral_robotics::cameras;
@@ -241,6 +242,14 @@ async fn serve(
         Arc::new(ConfiguredHttpTrainingBackend::new(preferences.clone())),
     ));
     let workflow = Arc::new(WorkflowManager::new(storage.clone()));
+    let catalog_lease = Arc::new(
+        spiral_robotics_studio_application::catalog_lease::CatalogMutationLease::default(),
+    );
+    let workflow_agent = Arc::new(WorkflowAgentManager::new(
+        storage.clone(),
+        workflow.clone(),
+        catalog_lease.clone(),
+    ));
     let hardware = Arc::new(HardwareHandle::spawn(ControlSettings {
         max_step_counts: args.max_step,
         teleop_max_step_counts: args.teleop_max_step,
@@ -272,11 +281,10 @@ async fn serve(
         storage,
         training: training.clone(),
         workflow: workflow.clone(),
+        workflow_agent: workflow_agent.clone(),
         rollout: rollout.clone(),
         bootstrap: BootstrapState::new(),
-        catalog_lease: Arc::new(
-            spiral_robotics_studio_application::catalog_lease::CatalogMutationLease::default(),
-        ),
+        catalog_lease,
         recording_video: Arc::new(tokio::sync::Mutex::new(None)),
         video_encoder: VideoEncoderSettings {
             executable: args.ffmpeg.clone(),
@@ -323,6 +331,7 @@ async fn serve(
     };
     tracing::info!("releasing motors and cameras");
     let cleanup = async {
+        workflow_agent.shutdown().await;
         workflow.shutdown().await;
         training.shutdown().await;
         rollout.shutdown().await;
@@ -423,12 +432,13 @@ async fn bootstrap_catalog(state: AppState) {
     };
     let training = state.training.hydrate_from_storage();
     let workflow = state.workflow.hydrate_from_storage();
+    let workflow_agent = state.workflow_agent.hydrate_from_storage();
     let rollout = {
         let rollout = state.rollout.clone();
         tokio::task::spawn_blocking(move || rollout.reload_from_storage())
     };
-    let (preferences, training, workflow, rollout) =
-        tokio::join!(preferences, training, workflow, rollout);
+    let (preferences, training, workflow, workflow_agent, rollout) =
+        tokio::join!(preferences, training, workflow, workflow_agent, rollout);
 
     let mut issues = Vec::new();
     if let Some(issue) = preferences {
@@ -439,6 +449,11 @@ async fn bootstrap_catalog(state: AppState) {
     }
     if let Err(error) = workflow {
         issues.push(format!("could not load Workflow history: {error}"));
+    }
+    if let Err(error) = workflow_agent {
+        issues.push(format!(
+            "could not load Workflow Assistant history: {error}"
+        ));
     }
     match rollout {
         Ok(Ok(())) => {}

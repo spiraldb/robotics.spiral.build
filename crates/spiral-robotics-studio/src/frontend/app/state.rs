@@ -9,7 +9,7 @@ use spiral_robotics_contracts::api::{
     RobotSummary, RobotTelemetry, RolloutSnapshot, StudioSnapshot, TelemetryFrame,
     TrainingSnapshot,
 };
-use spiral_robotics_contracts::workflow::WorkflowStateResponse;
+use spiral_robotics_contracts::workflow::{WorkflowAgentStateResponse, WorkflowStateResponse};
 use spiral_robotics_viewport::{SO101_URDF, Urdf, UrdfError};
 
 use crate::frontend::api::http as api;
@@ -133,6 +133,8 @@ pub(crate) struct Studio {
     pub rollout: Signal<RolloutSnapshot>,
     /// Backend-owned lifecycle and terminal payload for relation Workflows.
     pub workflow_state: Signal<Option<WorkflowStateResponse>>,
+    /// Backend-owned Workflow Assistant readiness and durable conversation.
+    pub workflow_agent_state: Signal<Option<WorkflowAgentStateResponse>>,
     /// True while the event stream is connected.
     pub live: Signal<bool>,
     /// Wall-clock time of the last valid event and a periodically updated clock.
@@ -180,6 +182,7 @@ impl Studio {
         let training = use_signal(TrainingSnapshot::default);
         let rollout = use_signal(RolloutSnapshot::default);
         let workflow_state = use_signal(|| None);
+        let workflow_agent_state = use_signal(|| None);
         let live = use_signal(|| false);
         let last_event_ms = use_signal(|| 0.0);
         let clock_ms = use_signal(|| 0.0);
@@ -196,6 +199,7 @@ impl Studio {
             training,
             rollout,
             workflow_state,
+            workflow_agent_state,
             live,
             last_event_ms,
             // Keep the server's first render identical to the browser's first
@@ -248,6 +252,7 @@ impl Studio {
                 mut training,
                 mut rollout,
                 mut workflow_state,
+                mut workflow_agent_state,
                 mut live,
                 mut last_event_ms,
                 mut recording_signals,
@@ -269,6 +274,15 @@ impl Studio {
                         StudioEvent::WorkflowSnapshot(value) => workflow_state.set(Some(*value)),
                         StudioEvent::WorkflowUpdate(update) => {
                             workflow_state.set(Some(update.state));
+                        }
+                        StudioEvent::WorkflowAgent(value) => {
+                            // The backend treats its broadcast values as
+                            // wakeups and emits the latest authoritative agent
+                            // snapshot on this one ordered EventSource. HTTP
+                            // bootstrap/command responses are guarded in the
+                            // Workflow controller; do not perform a second
+                            // different-scope acceptance policy here.
+                            workflow_agent_state.set(Some(*value));
                         }
                         StudioEvent::Telemetry(frame) => {
                             // Only a frame that can change the store touches it.

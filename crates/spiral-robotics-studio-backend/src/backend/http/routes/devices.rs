@@ -1,4 +1,7 @@
 use super::*;
+use spiral_robotics_studio_application::catalog_lease::{
+    CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease,
+};
 
 /// Camera discovery and preview do not depend on SpiralDB, so they remain
 /// useful while catalog bootstrap is still running or needs repair.
@@ -385,10 +388,13 @@ struct CalibrationHistoryHttpAdapter<'a> {
 }
 
 impl CalibrationHistoryPort for CalibrationHistoryHttpAdapter<'_> {
-    fn reserve_catalog_mutation(&self) -> Option<CatalogLeaseToken> {
-        self.state
-            .catalog_lease
-            .try_acquire(CatalogLeaseOwner::CalibrationReapply)
+    fn reserve_catalog_mutation(&self) -> Result<Option<CatalogLeaseToken>, ApplicationError> {
+        reserve_calibration_history_mutation(&self.state.catalog_lease, || {
+            (
+                self.state.workflow.is_active(),
+                self.state.workflow_agent.is_active(),
+            )
+        })
     }
 
     fn release_catalog_mutation(&self, token: CatalogLeaseToken) {
@@ -462,6 +468,36 @@ impl CalibrationHistoryPort for CalibrationHistoryHttpAdapter<'_> {
             warnings: result.warnings,
         })
     }
+}
+
+fn reserve_calibration_history_mutation(
+    lease: &CatalogMutationLease,
+    activity: impl FnOnce() -> (bool, bool),
+) -> Result<Option<CatalogLeaseToken>, ApplicationError> {
+    let Some(token) = lease.try_acquire(CatalogLeaseOwner::CalibrationReapply) else {
+        return Ok(None);
+    };
+    let (workflow_active, assistant_active) = activity();
+    let conflict = if workflow_active {
+        Some(
+            "Wait for the active Workflow run to finish before reapplying calibration to episode history.",
+        )
+    } else if assistant_active {
+        Some(
+            "Wait for the active Workflow Assistant turn to finish before reapplying calibration to episode history.",
+        )
+    } else {
+        None
+    };
+    if let Some(message) = conflict {
+        let released = lease.release(token);
+        debug_assert!(
+            released,
+            "rejected calibration-history admission releases its exact catalog lease"
+        );
+        return Err(ApplicationError::Conflict(message.to_owned()));
+    }
+    Ok(Some(token))
 }
 
 async fn list_ports(
@@ -975,4 +1011,57 @@ async fn set_mode(
     };
     mode_control::set_mode(state.hardware.as_ref(), mode).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    #[test]
+    fn active_workflow_or_assistant_blocks_history_rewrite_and_releases_admission() {
+        for (activity, expected, next_owner) in [
+            (
+                (true, false),
+                "active Workflow run",
+                CatalogLeaseOwner::WorkflowStart,
+            ),
+            (
+                (false, true),
+                "active Workflow Assistant turn",
+                CatalogLeaseOwner::WorkflowAgentStart,
+            ),
+        ] {
+            let lease = CatalogMutationLease::default();
+            let error = reserve_calibration_history_mutation(&lease, || activity)
+                .expect_err("published activity must block a later history rewrite");
+            assert!(error.to_string().contains(expected));
+
+            let next = lease
+                .try_acquire(next_owner)
+                .expect("a rejected history rewrite must release its admission lease");
+            assert!(lease.release(next));
+        }
+    }
+
+    #[test]
+    fn admitted_history_rewrite_blocks_later_workflow_and_assistant_admission() {
+        let lease = CatalogMutationLease::default();
+        let calibration = reserve_calibration_history_mutation(&lease, || (false, false))
+            .expect("idle activity check")
+            .expect("calibration-history admission");
+
+        assert!(
+            lease
+                .try_acquire(CatalogLeaseOwner::WorkflowStart)
+                .is_none(),
+            "manual Workflow cannot pass an admitted history rewrite"
+        );
+        assert!(
+            lease
+                .try_acquire(CatalogLeaseOwner::WorkflowAgentStart)
+                .is_none(),
+            "Assistant cannot pass an admitted history rewrite"
+        );
+        assert!(lease.release(calibration));
+    }
 }

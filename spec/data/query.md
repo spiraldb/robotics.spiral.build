@@ -39,6 +39,12 @@ inside the Data route.
 - **QUERY-011** A result that identifies one video asset by episode, stream,
   and segment must provide an inline browser video preview through the bounded
   byte-range media endpoint. Query JSON must not carry an MP4 payload.
+- **QUERY-012** Results must remain one ordinary scrollable table. Semantic
+  image and video values render directly in their corresponding cells rather
+  than in a duplicate selected-row evidence surface. Headers show the field
+  name and readable type; numbers align consistently, nulls remain explicit but
+  quiet, and row count, elapsed time, limit, truncation, and SQL occupy one
+  compact metadata strip.
 
 ## Implementation ownership
 

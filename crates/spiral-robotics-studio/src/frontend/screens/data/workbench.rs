@@ -615,14 +615,17 @@ pub(crate) fn QueryResultView() -> Element {
                     tabindex: "0",
                     "aria-labelledby": "query-tab-{tab.id}",
                     header { class: "query-result-meta",
-                        span { "Limit · {tab.model.max_rows} rows" }
+                        if let QueryState::Ready(result) = &tab.model.state {
+                            span { class: "query-result-count", role: "status",
+                                strong { "{result.rows.len()} rows" }
+                                span { "{result.elapsed_ms} ms" }
+                            }
+                            if result.truncated { span { class: "chip chip-caution", "Truncated" } }
+                        }
+                        span { class: "query-result-limit", "Limit · {tab.model.max_rows} rows" }
                         details {
                             summary { "SQL" }
                             code { "{tab.model.sql}" }
-                        }
-                        if let QueryState::Ready(result) = &tab.model.state {
-                            span { class: "font-mono tabular-nums", role: "status", "{result.rows.len()} rows · {result.elapsed_ms} ms" }
-                            if result.truncated { span { class: "chip chip-caution", "Truncated" } }
                         }
                     }
                     {render_query_result(&tab.model)}
@@ -665,6 +668,11 @@ fn focus_query_tab(id: u64) {
 }
 
 pub(crate) fn render_query_result(model: &QueryViewModel) -> Element {
+    rsx! { QueryResultContent { model: model.clone() } }
+}
+
+#[component]
+fn QueryResultContent(model: QueryViewModel) -> Element {
     rsx! {
         match &model.state {
                 QueryState::Running => rsx! {
@@ -688,18 +696,24 @@ pub(crate) fn render_query_result(model: &QueryViewModel) -> Element {
                     }
                 },
                 QueryState::Ready(result) => {
-                    let has_video_previews = query_has_video_previews(result);
+                    let has_video_previews = query_needs_video_preview_column(result);
+                    let result_row_count = result.rows.len();
                     rsx! {
-                        div { class: "min-h-0 flex-1 overflow-auto",
-                            table { class: "query-table",
+                        div { class: "query-result-ready",
+                            div { class: "query-result-table-scroll",
+                            table { class: "query-table", "aria-label": "Query results",
                                 thead { tr {
                                     if has_video_previews {
-                                        th { class: "query-media-heading", scope: "col", "Preview" }
+                                        th { class: "query-media-heading", scope: "col",
+                                            span { class: "query-column-name", "Preview" }
+                                            span { class: "query-column-type", "Video" }
+                                        }
                                     }
                                     for column in &result.columns {
                                         th { key: "{column.name}", scope: "col",
                                             title: query_column_title(column),
-                                            "{column.name}"
+                                            span { class: "query-column-name", "{column.name}" }
+                                            span { class: "query-column-type", "{query_column_kind(column)}" }
                                         }
                                     }
                                 } }
@@ -710,11 +724,12 @@ pub(crate) fn render_query_result(model: &QueryViewModel) -> Element {
                                                 {render_query_video_cell(row, index)}
                                             }
                                             for column in &result.columns {
-                                                {render_query_cell(column, row.get(&column.name), index)}
+                                                {render_query_cell(column, row, index, result_row_count)}
                                             }
                                         }
                                     }
                                 }
+                            }
                             }
                         }
                     }
@@ -849,37 +864,121 @@ fn query_column_title(column: &QueryColumn) -> String {
     title
 }
 
+fn humanize_query_column(name: &str) -> String {
+    let words = name
+        .trim_end_matches("_preview")
+        .trim_end_matches("_image")
+        .split('_')
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    let mut label = words.join(" ");
+    if let Some(first) = label.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    if label.is_empty() {
+        "Image".to_owned()
+    } else {
+        label
+    }
+}
+
+fn query_image_alt(
+    column: &QueryColumn,
+    row: &serde_json::Map<String, serde_json::Value>,
+    row_index: usize,
+    row_count: usize,
+) -> String {
+    let prefix = column
+        .name
+        .strip_suffix("_preview")
+        .or_else(|| column.name.strip_suffix("_image"));
+    let mut context = Vec::new();
+    for (label, field) in [
+        ("episode", "episode_id"),
+        ("stream", "stream_id"),
+        ("frame", "frame_index"),
+    ] {
+        let specific = prefix.map(|prefix| format!("{prefix}_{field}"));
+        let value = specific
+            .as_deref()
+            .and_then(|field| row.get(field))
+            .or_else(|| row.get(field))
+            .map(query_cell_value)
+            .filter(|value| value != "null");
+        if let Some(value) = value {
+            context.push(format!("{label} {value}"));
+        }
+    }
+    let context = if context.is_empty() {
+        String::new()
+    } else {
+        format!(" for {}", context.join(", "))
+    };
+    format!(
+        "{}{}; result {} of {}",
+        humanize_query_column(&column.name),
+        context,
+        row_index + 1,
+        row_count
+    )
+}
+
+fn query_cell_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(value) => value.clone(),
+        value => value.to_string(),
+    }
+}
+
 fn render_query_cell(
     column: &QueryColumn,
-    value: Option<&serde_json::Value>,
+    row: &serde_json::Map<String, serde_json::Value>,
     row_index: usize,
+    row_count: usize,
 ) -> Element {
-    if query_image_src(column, value).is_some() {
-        let src = value
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+    let value = row.get(&column.name);
+    if query_is_image_column(column) {
         return rsx! {
             td { key: "{column.name}", class: "query-media-cell",
-                img {
-                    class: "query-image-preview",
-                    src,
-                    alt: "Query image in {column.name}, row {row_index + 1}",
-                    loading: "lazy",
-                    decoding: "async",
-                    draggable: "false",
+                if let Some(src) = query_image_src(column, value) {
+                    img {
+                        class: "query-image-preview",
+                        src,
+                        alt: query_image_alt(column, row, row_index, row_count),
+                        loading: "lazy",
+                        decoding: "async",
+                        draggable: "false",
+                    }
+                } else {
+                    span { class: "query-image-unavailable", "No image" }
                 }
             }
         };
     }
     if column.semantic_type.as_deref() == Some(ENCODED_MEDIA_EXTENSION_NAME) {
-        return rsx! {
-            td { key: "{column.name}", class: "query-media-reference", title: "Spiral encoded media reference",
-                "Video reference"
-            }
-        };
+        return render_query_video_cell(row, row_index);
     }
     let rendered = query_cell(value);
-    rsx! { td { key: "{column.name}", title: "{rendered}", "{rendered}" } }
+    let display = if value.is_none_or(serde_json::Value::is_null) {
+        "—"
+    } else {
+        rendered.as_str()
+    };
+    rsx! {
+        td {
+            key: "{column.name}",
+            class: query_value_class(value),
+            title: "{rendered}",
+            "{display}"
+        }
+    }
+}
+
+fn query_is_image_column(column: &QueryColumn) -> bool {
+    matches!(
+        column.semantic_type.as_deref(),
+        Some(IMAGE_EXTENSION_NAME | VARIABLE_TENSOR_EXTENSION_NAME)
+    )
 }
 
 fn query_image_src<'a>(
@@ -894,7 +993,14 @@ fn query_image_src<'a>(
     .filter(|value| value.starts_with("data:image/"))
 }
 
-fn query_has_video_previews(result: &SpiralQueryResponse) -> bool {
+fn query_needs_video_preview_column(result: &SpiralQueryResponse) -> bool {
+    if result
+        .columns
+        .iter()
+        .any(|column| column.semantic_type.as_deref() == Some(ENCODED_MEDIA_EXTENSION_NAME))
+    {
+        return false;
+    }
     let has = |name: &str| result.columns.iter().any(|column| column.name == name);
     has("episode_id")
         && has("stream_id")
@@ -904,6 +1010,23 @@ fn query_has_video_previews(result: &SpiralQueryResponse) -> bool {
             || result.columns.iter().any(|column| {
                 column.semantic_type.as_deref() == Some(ENCODED_MEDIA_EXTENSION_NAME)
             }))
+}
+
+fn query_column_kind(column: &QueryColumn) -> &str {
+    match column.semantic_type.as_deref() {
+        Some(IMAGE_EXTENSION_NAME | VARIABLE_TENSOR_EXTENSION_NAME) => "Image",
+        Some(ENCODED_MEDIA_EXTENSION_NAME) => "Video",
+        _ => &column.data_type,
+    }
+}
+
+fn query_value_class(value: Option<&serde_json::Value>) -> &'static str {
+    match value {
+        None | Some(serde_json::Value::Null) => "query-value-null",
+        Some(serde_json::Value::Number(_)) => "query-value-number",
+        Some(serde_json::Value::Bool(_)) => "query-value-boolean",
+        _ => "",
+    }
 }
 
 fn render_query_video_cell(
@@ -1052,6 +1175,54 @@ mod tests {
     }
 
     #[test]
+    fn image_semantics_render_as_inline_image_columns() {
+        let image = query_column("top_preview", Some(IMAGE_EXTENSION_NAME));
+        let tensor = query_column("wrist_preview", Some(VARIABLE_TENSOR_EXTENSION_NAME));
+        let plain = query_column("episode_id", None);
+
+        assert!(query_is_image_column(&image));
+        assert!(query_is_image_column(&tensor));
+        assert!(!query_is_image_column(&plain));
+        assert_eq!(query_column_kind(&image), "Image");
+        assert_eq!(query_column_kind(&tensor), "Image");
+        assert_eq!(query_column_kind(&plain), "Utf8");
+    }
+
+    #[test]
+    fn inline_image_alt_uses_camera_specific_identity_and_row_position() {
+        let column = query_column("wrist_preview", Some(IMAGE_EXTENSION_NAME));
+        let row = serde_json::Map::from_iter([
+            ("episode_id".to_owned(), serde_json::json!("take-12")),
+            (
+                "wrist_stream_id".to_owned(),
+                serde_json::json!("follower/wrist"),
+            ),
+            ("wrist_frame_index".to_owned(), serde_json::json!(42)),
+        ]);
+        assert_eq!(
+            query_image_alt(&column, &row, 2, 18),
+            "Wrist for episode take-12, stream follower/wrist, frame 42; result 3 of 18"
+        );
+    }
+
+    #[test]
+    fn nulls_and_numbers_have_stable_table_treatment() {
+        assert_eq!(query_value_class(None), "query-value-null");
+        assert_eq!(
+            query_value_class(Some(&serde_json::Value::Null)),
+            "query-value-null"
+        );
+        assert_eq!(
+            query_value_class(Some(&serde_json::json!(0.82))),
+            "query-value-number"
+        );
+        assert_eq!(
+            query_value_class(Some(&serde_json::json!(true))),
+            "query-value-boolean"
+        );
+    }
+
+    #[test]
     fn video_rows_map_to_the_exact_range_streaming_endpoint() {
         let columns = vec![
             query_column("episode_id", None),
@@ -1071,7 +1242,7 @@ mod tests {
             truncated: false,
             elapsed_ms: 1,
         };
-        assert!(query_has_video_previews(&result));
+        assert!(query_needs_video_preview_column(&result));
         assert_eq!(
             query_video_preview(&row),
             Some((
@@ -1079,6 +1250,17 @@ mod tests {
                 "wrist".to_owned(),
             ))
         );
+
+        let encoded = SpiralQueryResponse {
+            columns: vec![
+                query_column("episode_id", None),
+                query_column("stream_id", None),
+                query_column("segment_index", None),
+                query_column("media", Some(ENCODED_MEDIA_EXTENSION_NAME)),
+            ],
+            ..result
+        };
+        assert!(!query_needs_video_preview_column(&encoded));
     }
 
     #[test]

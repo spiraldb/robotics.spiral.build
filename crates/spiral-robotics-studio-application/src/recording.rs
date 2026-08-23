@@ -59,7 +59,7 @@ pub trait RecordingPort {
     type MediaOutput;
 
     /// Atomically claim the one recording-start transaction.
-    fn reserve_recording_start(&self) -> Option<CatalogLeaseToken>;
+    fn reserve_recording_start(&self) -> Result<Option<CatalogLeaseToken>, ApplicationError>;
     fn bind_recording_lease(&self, token: CatalogLeaseToken, episode: String);
     fn claim_recording_lease(&self) -> Result<Option<CatalogLeaseToken>, ApplicationError>;
     fn release_recording_lease(&self, token: CatalogLeaseToken);
@@ -160,7 +160,7 @@ pub async fn start_recording<P: RecordingPort + ?Sized>(
     port: &P,
     command: StartRecordingCommand,
 ) -> Result<RecordingResult, ApplicationError> {
-    let Some(token) = port.reserve_recording_start() else {
+    let Some(token) = port.reserve_recording_start()? else {
         return Err(ApplicationError::Conflict(
             "another recording is already opening; wait for it to finish".to_owned(),
         ));
@@ -522,11 +522,12 @@ mod tests {
         type MediaCapture = String;
         type MediaOutput = Vec<String>;
 
-        fn reserve_recording_start(&self) -> Option<CatalogLeaseToken> {
+        fn reserve_recording_start(&self) -> Result<Option<CatalogLeaseToken>, ApplicationError> {
             self.events.lock().unwrap().push("reserve-start".to_owned());
-            self.start_available
+            Ok(self
+                .start_available
                 .then(|| self.catalog.try_acquire(CatalogLeaseOwner::Recording))
-                .flatten()
+                .flatten())
         }
 
         fn bind_recording_lease(&self, token: CatalogLeaseToken, episode: String) {

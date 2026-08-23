@@ -16,6 +16,9 @@ pub enum CatalogLeaseOwner {
     ProjectImport,
     ProjectSwitch,
     WorkflowStart,
+    WorkflowCatalogRead,
+    WorkflowAgentStart,
+    WorkflowAgentHistory,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -224,5 +227,51 @@ mod tests {
             .try_acquire(CatalogLeaseOwner::EpisodeImport)
             .expect("import may perform its active-state check after Workflow releases handshake");
         assert!(lease.release(import));
+    }
+
+    #[test]
+    fn assistant_admission_linearizes_with_manual_workflow_and_destination_changes() {
+        let lease = CatalogMutationLease::default();
+        let agent = lease
+            .try_acquire(CatalogLeaseOwner::WorkflowAgentStart)
+            .expect("Assistant claims the empty handshake slot");
+        assert!(
+            lease
+                .try_acquire(CatalogLeaseOwner::WorkflowStart)
+                .is_none()
+        );
+        assert!(
+            lease
+                .try_acquire(CatalogLeaseOwner::ProjectSwitch)
+                .is_none()
+        );
+        assert!(lease.release(agent));
+
+        let manual = lease
+            .try_acquire(CatalogLeaseOwner::WorkflowStart)
+            .expect("manual Apply or Run claims the handshake slot");
+        assert!(
+            lease
+                .try_acquire(CatalogLeaseOwner::WorkflowAgentStart)
+                .is_none()
+        );
+        assert!(lease.release(manual));
+
+        let history = lease
+            .try_acquire(CatalogLeaseOwner::WorkflowAgentHistory)
+            .expect("Assistant conversation persistence claims the handshake slot");
+        assert!(
+            lease
+                .try_acquire(CatalogLeaseOwner::ProjectImport)
+                .is_none(),
+            "project import cannot replace history during conversation persistence"
+        );
+        assert!(
+            lease
+                .try_acquire(CatalogLeaseOwner::ProjectSwitch)
+                .is_none(),
+            "destination cutover cannot replace history during conversation persistence"
+        );
+        assert!(lease.release(history));
     }
 }

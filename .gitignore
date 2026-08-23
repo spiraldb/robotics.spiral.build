@@ -18,3 +18,6 @@ __pycache__/
 .uv-tool/
 *.egg-info/
 node_modules/
+
+# Developer-local provider credentials. Never commit this file.
+/.env.local
