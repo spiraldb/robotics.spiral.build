@@ -70,6 +70,7 @@
                 rustToolchain
                 pkgs.actionlint
                 pkgs.ffmpeg
+                pkgs.openssl
                 pkgs.pkg-config
                 pkgs.python312
                 pkgs.uv
