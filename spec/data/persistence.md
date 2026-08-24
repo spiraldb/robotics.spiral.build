@@ -150,10 +150,11 @@ flowchart TD
   Spiral repository adapter. During active co-development, the Studio backend
   must link the native `adbc-driver-spiraldb` Rust crate from SpiralDB's
   `develop` branch through Cargo's Git source at the revision pinned by
-  `Cargo.lock`. Standard CI must exclude the native backend until a separate
-  SpiralDB integration lane exists; it must not fetch the private driver or
-  connect to SpiralDB, SpFS, or a disposable hosted project. Studio must
-  construct the native driver directly; it must not accept a driver-library
+  `Cargo.lock`. Standard CI must use selected-package dependency resolution to
+  exclude the native backend until a separate SpiralDB integration lane
+  exists; it must not fetch the private driver or connect to SpiralDB, SpFS, or
+  a disposable hosted project. Studio must construct the native driver
+  directly; it must not accept a driver-library
   path, use an ADBC driver manager, or load the Spiral driver
   dynamically. For each active project, the adapter must own one native
   database/engine runtime, expose only repository-owned connection and

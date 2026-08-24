@@ -15,6 +15,23 @@ jobs:
     name: Nix / Rust / Python
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      # Clippy invokes Cargo as a subprocess, so use Cargo's inherited
+      # configuration form rather than a command-line `-Z` flag.
+      CARGO_UNSTABLE_AVOID_DEV_DEPS: "true"
+      CI_RUST_PACKAGES: >-
+        -p spiral-robotics
+        -p spiral-robotics-boundary-build
+        -p spiral-robotics-contracts
+        -p spiral-robotics-core
+        -p spiral-robotics-inference
+        -p spiral-robotics-ui
+        -p spiral-robotics-studio
+        -p spiral-robotics-studio-application
+        -p spiral-robotics-studio-hardware
+        -p spiral-robotics-training
+        -p spiral-robotics-training-http
+        -p spiral-robotics-viewport
 
     steps:
       - name: Checkout
@@ -35,18 +52,21 @@ jobs:
         run: nix develop .#ci --command cargo fmt --all -- --check
 
       - name: Lint
-        run: >-
-          nix develop .#ci --command cargo clippy --workspace
-          --exclude spiral-robotics-studio-backend --all-targets --
-          -D warnings -A clippy::suspicious-else-formatting
+        run: |
+          read -r -a package_args <<< "$CI_RUST_PACKAGES"
+          nix develop .#ci --command cargo clippy "${package_args[@]}" \
+            --all-targets --locked -- \
+            -D warnings -A clippy::suspicious-else-formatting
 
       # The native Studio backend is omitted until a separate SpiralDB
-      # integration lane exists. Standard CI runs only components that do not
-      # require the private driver source or any external service.
+      # integration lane exists. Explicit package selection and
+      # `avoid-dev-deps` keep Cargo's lock resolver off the backend and its
+      # private driver source. Standard CI uses the pinned nightly toolchain.
       - name: Test without external services
-        run: >-
-          nix develop .#ci --command cargo test --workspace
-          --exclude spiral-robotics-studio-backend --no-fail-fast
+        run: |
+          read -r -a package_args <<< "$CI_RUST_PACKAGES"
+          nix develop .#ci --command cargo test "${package_args[@]}" \
+            --no-fail-fast --locked
 
       - name: Install locked Python runtime
         run: nix develop .#ci --command uv sync --project training --frozen --extra dev
