@@ -10,10 +10,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ci-service-free-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   checks:
     name: Nix / Rust / Python
@@ -30,9 +26,6 @@ jobs:
 
       - name: Install Nix
         uses: DeterminateSystems/determinate-nix-action@v3
-
-      - name: Cache Nix store
-        uses: DeterminateSystems/magic-nix-cache-action@v14
 
       - name: Configure locked Spiral driver source
         env:
