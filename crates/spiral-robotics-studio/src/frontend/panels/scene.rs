@@ -21,7 +21,7 @@ use dioxus_elements::geometry::WheelDelta;
 use dioxus_elements::input_data::MouseButton;
 use spiral_robotics_contracts::api::{MotorCondition, RobotSummary};
 use spiral_robotics_core::arm::{JointAngles, counts_to_degrees};
-use spiral_robotics_core::calibration::{Direction, denormalize_centered_raw};
+use spiral_robotics_core::calibration::Direction;
 use spiral_robotics_ui::{Action, ActionPurpose, ActionVariant};
 use spiral_robotics_viewport::glam::Vec3;
 use spiral_robotics_viewport::robot::BENCH_SPACING;
@@ -727,7 +727,7 @@ fn historical_angles(arm: &RobotSummary, sample: &TimelineArmSample) -> Option<J
                 .find(|motor| motor.name == *joint)?
                 .calibration
                 .as_ref()?;
-            let raw = denormalize_centered_raw(calibration, normalized).ok()?;
+            let raw = calibration.denormalize(normalized).ok()?;
             let degrees = counts_to_degrees(raw.saturating_sub(calibration.center));
             let degrees = match calibration.direction {
                 Direction::Normal => degrees,

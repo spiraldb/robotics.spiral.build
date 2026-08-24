@@ -6,6 +6,9 @@ description = "Backend-neutral training contracts for Spiral Robotics"
 readme = "README.md"
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 serde.workspace = true
 thiserror = "2"

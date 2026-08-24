@@ -1261,10 +1261,10 @@ mod tests {
         let sql = default_training_sql("robotics", "pick-place");
         assert!(sql.contains(&format!(
             "FROM {}",
-            spiral::relation("robotics", Table::JointSamples)
+            Table::JointSamples.qualified_name("robotics")
         )));
-        assert!(sql.contains(&spiral::relation("robotics", Table::Episodes)));
-        assert!(sql.contains(&spiral::relation("robotics", Table::EpisodeStreams)));
+        assert!(sql.contains(&Table::Episodes.qualified_name("robotics")));
+        assert!(sql.contains(&Table::EpisodeStreams.qualified_name("robotics")));
         assert!(sql.contains(&format!("j.{}", spiral::column::STATE_VALID)));
         assert!(sql.contains(&format!("j.{}", spiral::column::ACTION_VALID)));
         assert!(sql.contains("LIKE '%follower%'"));

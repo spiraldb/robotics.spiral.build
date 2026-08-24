@@ -38,12 +38,11 @@ use spiral_robotics_contracts::api::{
 use spiral_robotics_core::arm;
 use spiral_robotics_core::calibration::{
     Calibration, CalibrationError, CalibrationInput, Direction, MotorCalibration, MotorSpec,
-    RangeTracker, denormalize_centered_raw, normalize_centered_raw,
-    validate_calibration_for_motors, validate_motor_specs,
+    RangeTracker, validate_motor_specs,
 };
 use spiral_robotics_studio_application::calibration::CalibrationControlPort;
 use spiral_robotics_studio_application::control_session::{
-    self, CalibrationAdmission, ControlMode, ControlState, Decision as ControlDecision,
+    CalibrationAdmission, ControlMode, ControlState, Decision as ControlDecision,
     Effect as ControlEffect, Event as ControlEvent, Intent as ControlIntent,
     ReplayDecision as ReplayPolicyDecision, ReplayEvent as ReplayPolicyEvent,
     ReplayState as ReplayPolicyState, RobotAdmission,
@@ -1137,7 +1136,7 @@ impl ConnectedRobot {
             normalized.push(
                 calibration
                     .and_then(|calibration| calibration.motors.get(joint))
-                    .and_then(|motor| normalize_centered_raw(motor, counts).ok()),
+                    .and_then(|motor| motor.normalize_raw(counts).ok()),
             );
         }
         (normalized, raw)
@@ -1158,7 +1157,7 @@ impl ConnectedRobot {
                 .map(|joint| {
                     let counts = self.commanded.get(joint).copied()?;
                     let motor = calibration.motors.get(joint)?;
-                    normalize_centered_raw(motor, counts).ok()
+                    motor.normalize_raw(counts).ok()
                 })
                 .collect(),
         )
@@ -1225,7 +1224,7 @@ impl ConnectedRobot {
                     id: spec.id,
                     raw,
                     degrees: motor.map(|motor| joint_degrees(motor, raw)),
-                    normalized: motor.and_then(|motor| normalize_centered_raw(motor, raw).ok()),
+                    normalized: motor.and_then(|motor| motor.normalize_raw(raw).ok()),
                     goal_raw: self
                         .torque
                         .is_engaged()
@@ -1937,12 +1936,14 @@ impl Controller {
         validate_motor_specs(&spec.motors)
             .map_err(|error| format!("robot {:?} has invalid motors: {error}", spec.id))?;
         if let Some(calibration) = &spec.calibration {
-            validate_calibration_for_motors(&spec.motors, calibration).map_err(|error| {
-                format!(
-                    "calibration for robot {:?} does not match its configured motors: {error}",
-                    spec.id
-                )
-            })?;
+            calibration
+                .validate_for_motor_specs(&spec.motors)
+                .map_err(|error| {
+                    format!(
+                        "calibration for robot {:?} does not match its configured motors: {error}",
+                        spec.id
+                    )
+                })?;
         }
         // Two robots cannot share one physical serial port.
         let holder = self
@@ -2190,7 +2191,8 @@ impl Controller {
                 .motors
                 .get(name)
                 .ok_or_else(|| format!("joint {name:?} has no calibration on robot {id:?}"))?;
-            let raw = denormalize_centered_raw(motor, *value)
+            let raw = motor
+                .denormalize(*value)
                 .map_err(|error| format!("joint {name:?}: {error}"))?;
             targets.insert(name.clone(), raw);
         }
@@ -2203,13 +2205,17 @@ impl Controller {
     }
 
     fn decide_and_execute(&mut self, intent: ControlIntent) -> Result<(), String> {
-        let decision = control_session::decide(&self.control_state(), intent)
+        let decision = self
+            .control_state()
+            .decide(intent)
             .map_err(|error| error.to_string())?;
         self.execute_control_decision(decision)
     }
 
     fn authorize(&self, intent: ControlIntent) -> Result<(), String> {
-        let decision = control_session::decide(&self.control_state(), intent)
+        let decision = self
+            .control_state()
+            .decide(intent)
             .map_err(|error| error.to_string())?;
         debug_assert!(decision.effects.is_empty(), "authorization is state-free");
         Ok(())
@@ -2225,7 +2231,7 @@ impl Controller {
                 let calibration = match robot.spec.calibration.as_ref() {
                     None => CalibrationAdmission::Missing,
                     Some(calibration) => {
-                        match validate_calibration_for_motors(&robot.spec.motors, calibration) {
+                        match calibration.validate_for_motor_specs(&robot.spec.motors) {
                             Ok(()) => CalibrationAdmission::Ready(
                                 calibration.motors.keys().cloned().collect(),
                             ),
@@ -2268,7 +2274,7 @@ impl Controller {
                     on_failure,
                 } => {
                     if let Err(error) = self.set_torque(&robot, engaged) {
-                        let recovery = control_session::effect_failed(on_failure, error);
+                        let recovery = on_failure.failure_decision(error);
                         // Recovery is deliberately limited to state-only
                         // effects, so a second driver fault cannot prevent the
                         // policy from surrendering ownership to Idle.
@@ -2348,7 +2354,7 @@ impl Controller {
             .calibration
             .as_ref()
             .ok_or_else(|| format!("robot {id:?} must be calibrated first"))?;
-        validate_calibration_for_motors(&robot.spec.motors, calibration).map_err(|error| {
+        calibration.validate_for_motor_specs(&robot.spec.motors).map_err(|error| {
             format!(
                 "robot {id:?} has calibration that does not match its configured motors: {error}"
             )
@@ -2409,9 +2415,13 @@ impl Controller {
             .robots
             .get_mut(id)
             .ok_or_else(|| format!("robot {id:?} is not connected"))?;
-        validate_calibration_for_motors(&robot.spec.motors, &calibration).map_err(|error| {
-            format!("calibration for robot {id:?} does not match its configured motors: {error}")
-        })?;
+        calibration
+            .validate_for_motor_specs(&robot.spec.motors)
+            .map_err(|error| {
+                format!(
+                    "calibration for robot {id:?} does not match its configured motors: {error}"
+                )
+            })?;
         robot.spec.calibration = Some(calibration);
         Ok(())
     }
@@ -2528,10 +2538,9 @@ impl Controller {
                 leader_robot.spec.calibration.as_ref(),
                 follower_robot.spec.calibration.as_ref(),
             ) else {
-                let decision = control_session::decide_event(
-                    &self.control_state(),
-                    ControlEvent::TeleoperationUnavailable,
-                );
+                let decision = self
+                    .control_state()
+                    .decide_event(ControlEvent::TeleoperationUnavailable);
                 self.execute_control_decision(decision)
                     .expect("teleoperation observation contains no physical effects");
                 return;
@@ -2543,8 +2552,8 @@ impl Controller {
                 .filter_map(|(name, raw)| {
                     let source = leader_calibration.motors.get(name)?;
                     let destination = follower_calibration.motors.get(name)?;
-                    let normalized = normalize_centered_raw(source, *raw).ok()?;
-                    let target = denormalize_centered_raw(destination, normalized).ok()?;
+                    let normalized = source.normalize_raw(*raw).ok()?;
+                    let target = destination.denormalize(normalized).ok()?;
                     Some((name.clone(), target))
                 })
                 .collect::<BTreeMap<_, _>>()
@@ -2567,8 +2576,7 @@ impl Controller {
     /// whatever rate this loop is managing today.
     fn apply_replay(&mut self) {
         let Some(replay) = self.replay.as_mut() else {
-            let decision =
-                control_session::decide_event(&self.control_state(), ControlEvent::ReplayLost);
+            let decision = self.control_state().decide_event(ControlEvent::ReplayLost);
             self.execute_control_decision(decision)
                 .expect("replay-loss policy contains no physical effects");
             return;
@@ -2576,34 +2584,28 @@ impl Controller {
         let (robot_id, episode) = (replay.robot.clone(), replay.episode.clone());
 
         if replay.paused {
-            let decision = control_session::decide_replay(
-                replay_policy_state(replay.phase),
-                ReplayPolicyEvent::Paused,
-            )
-            .expect("pause is legal in every replay phase");
+            let decision = replay_policy_state(replay.phase)
+                .decide(ReplayPolicyEvent::Paused)
+                .expect("pause is legal in every replay phase");
             debug_assert_eq!(decision, ReplayPolicyDecision::Keep);
             return;
         }
 
         let Some(robot) = self.robots.get(&robot_id) else {
-            let decision = control_session::decide_replay(
-                replay_policy_state(replay.phase),
-                ReplayPolicyEvent::Failed(
+            let decision = replay_policy_state(replay.phase)
+                .decide(ReplayPolicyEvent::Failed(
                     "stopped Replay: the arm is no longer connected".to_owned(),
-                ),
-            )
-            .expect("failure is legal in every replay phase");
+                ))
+                .expect("failure is legal in every replay phase");
             self.apply_replay_policy(&robot_id, decision);
             return;
         };
         let Some(calibration) = robot.spec.calibration.clone() else {
-            let decision = control_session::decide_replay(
-                replay_policy_state(replay.phase),
-                ReplayPolicyEvent::Failed(format!(
+            let decision = replay_policy_state(replay.phase)
+                .decide(ReplayPolicyEvent::Failed(format!(
                     "stopped Replay: robot {robot_id:?} is no longer calibrated"
-                )),
-            )
-            .expect("failure is legal in every replay phase");
+                )))
+                .expect("failure is legal in every replay phase");
             self.apply_replay_policy(&robot_id, decision);
             return;
         };
@@ -2625,7 +2627,7 @@ impl Controller {
                     .get(joint)
                     .copied()
                     .ok_or_else(|| format!("robot stopped reporting replay joint {joint:?}"))?;
-                let actual = normalize_centered_raw(motor, measured).map_err(|error| {
+                let actual = motor.normalize_raw(measured).map_err(|error| {
                     format!("could not normalize replay joint {joint:?}: {error}")
                 })?;
                 Ok::<bool, String>(arrived && (actual - wanted).abs() <= REPLAY_SEEK_TOLERANCE)
@@ -2633,11 +2635,11 @@ impl Controller {
             let arrived = match arrived {
                 Ok(arrived) => arrived,
                 Err(error) => {
-                    let decision = control_session::decide_replay(
-                        ReplayPolicyState::Seeking,
-                        ReplayPolicyEvent::Failed(format!("stopped Replay: {error}")),
-                    )
-                    .expect("failure is legal while seeking");
+                    let decision = ReplayPolicyState::Seeking
+                        .decide(ReplayPolicyEvent::Failed(format!(
+                            "stopped Replay: {error}"
+                        )))
+                        .expect("failure is legal while seeking");
                     self.apply_replay_policy(&robot_id, decision);
                     return;
                 }
@@ -2645,9 +2647,7 @@ impl Controller {
 
             if !arrived && replay.seeking_since.elapsed() >= REPLAY_SEEK_TIMEOUT {
                 let waited = REPLAY_SEEK_TIMEOUT.as_secs();
-                let decision = control_session::decide_replay(
-                    ReplayPolicyState::Seeking,
-                    ReplayPolicyEvent::Failed(format!(
+                let decision = ReplayPolicyState::Seeking.decide(ReplayPolicyEvent::Failed(format!(
                         "stopped Replay: {robot_id} did not reach the requested pose in {episode} within {waited} seconds. Check whether a joint is obstructed."
                     )),
                 )
@@ -2655,11 +2655,9 @@ impl Controller {
                 self.apply_replay_policy(&robot_id, decision);
                 return;
             }
-            let decision = control_session::decide_replay(
-                ReplayPolicyState::Seeking,
-                ReplayPolicyEvent::SeekObserved { arrived },
-            )
-            .expect("seek observation is legal while seeking");
+            let decision = ReplayPolicyState::Seeking
+                .decide(ReplayPolicyEvent::SeekObserved { arrived })
+                .expect("seek observation is legal while seeking");
             if self.apply_replay_policy(&robot_id, decision) {
                 return;
             }
@@ -2669,13 +2667,11 @@ impl Controller {
             return;
         };
         if replay.phase == ReplayPhase::Playing {
-            let decision = control_session::decide_replay(
-                ReplayPolicyState::Playing,
-                ReplayPolicyEvent::PlaybackObserved {
+            let decision = ReplayPolicyState::Playing
+                .decide(ReplayPolicyEvent::PlaybackObserved {
                     finished: replay.finished(),
-                },
-            )
-            .expect("playback observation is legal while playing");
+                })
+                .expect("playback observation is legal while playing");
             if self.apply_replay_policy(&robot_id, decision) {
                 return;
             }
@@ -2698,7 +2694,7 @@ impl Controller {
                 let motor = calibration.motors.get(joint).ok_or_else(|| {
                     format!("calibration no longer contains replay joint {joint:?}")
                 })?;
-                let target = denormalize_centered_raw(motor, *value).map_err(|error| {
+                let target = motor.denormalize(*value).map_err(|error| {
                     format!("could not command replay joint {joint:?}: {error}")
                 })?;
                 Ok((joint.clone(), target))
@@ -2712,11 +2708,11 @@ impl Controller {
                     .as_ref()
                     .map(|replay| replay_policy_state(replay.phase))
                     .unwrap_or(ReplayPolicyState::Playing);
-                let decision = control_session::decide_replay(
-                    state,
-                    ReplayPolicyEvent::Failed(format!("stopped Replay: {error}")),
-                )
-                .expect("failure is legal in every replay phase");
+                let decision = state
+                    .decide(ReplayPolicyEvent::Failed(format!(
+                        "stopped Replay: {error}"
+                    )))
+                    .expect("failure is legal in every replay phase");
                 self.apply_replay_policy(&robot_id, decision);
                 return;
             }
@@ -2742,10 +2738,9 @@ impl Controller {
             ReplayPolicyDecision::FinishToIdle => {
                 // Completion leaves the arm holding its final pose; only the
                 // exclusive replay owner is released.
-                let decision = control_session::decide_event(
-                    &self.control_state(),
-                    ControlEvent::ReplayFinished,
-                );
+                let decision = self
+                    .control_state()
+                    .decide_event(ControlEvent::ReplayFinished);
                 self.execute_control_decision(decision)
                     .expect("replay completion contains no physical effects");
                 true
@@ -2758,26 +2753,22 @@ impl Controller {
     }
 
     fn fail_replay(&mut self, robot_id: &str, error: String) {
-        let decision = control_session::decide_event(
-            &self.control_state(),
-            ControlEvent::ReplayFailed {
+        let decision = self
+            .control_state()
+            .decide_event(ControlEvent::ReplayFailed {
                 robot: robot_id.to_owned(),
                 error,
-            },
-        );
+            });
         self.execute_control_decision(decision)
             .expect("replay failure policy contains no physical effects");
     }
 
     /// Fall back to idle when a robot the current mode depends on goes away.
     fn leave_mode_involving(&mut self, id: &str, reason: &str) {
-        let decision = control_session::decide_event(
-            &self.control_state(),
-            ControlEvent::RobotLost {
-                robot: id.to_owned(),
-                reason: reason.to_owned(),
-            },
-        );
+        let decision = self.control_state().decide_event(ControlEvent::RobotLost {
+            robot: id.to_owned(),
+            reason: reason.to_owned(),
+        });
         self.execute_control_decision(decision)
             .expect("robot-loss policy contains no fallible physical effects");
     }
@@ -2954,7 +2945,7 @@ mod tests {
     use std::sync::Arc;
 
     use spiral_robotics::bus::BusError;
-    use spiral_robotics_core::calibration::{MotorReading, build_calibration};
+    use spiral_robotics_core::calibration::MotorReading;
 
     use super::*;
 
@@ -2979,7 +2970,7 @@ mod tests {
                 })
                 .collect(),
         };
-        build_calibration(&motors, &input).expect("calibration")
+        input.build(&motors).expect("calibration")
     }
 
     fn spec(id: &str, calibration: Option<Calibration>) -> RobotSpec {

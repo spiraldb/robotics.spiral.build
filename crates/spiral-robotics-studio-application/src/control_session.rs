@@ -170,103 +170,105 @@ impl fmt::Display for AdmissionError {
 }
 
 /// Decide one complete control-session transition.
-pub fn decide(state: &ControlState, intent: Intent) -> Result<Decision, AdmissionError> {
-    match intent {
-        Intent::Select(mode) => select(state, mode),
-        Intent::Hold { robot } => {
-            let mut decision = select(
-                state,
-                ControlMode::Manual {
+impl ControlState {
+    pub fn decide(&self, intent: Intent) -> Result<Decision, AdmissionError> {
+        match intent {
+            Intent::Select(mode) => select(self, mode),
+            Intent::Hold { robot } => {
+                let mut decision = select(
+                    self,
+                    ControlMode::Manual {
+                        robot: robot.clone(),
+                    },
+                )?;
+                decision.effects.push(Effect::SetTorque {
                     robot: robot.clone(),
-                },
-            )?;
-            decision.effects.push(Effect::SetTorque {
-                robot: robot.clone(),
-                engaged: true,
-                on_failure: FailureAction::AbandonHold { robot },
-            });
-            Ok(decision)
-        }
-        Intent::Release { robot } => {
-            let mut decision = select(state, ControlMode::Idle)?;
-            decision.effects.push(Effect::SetTorque {
-                robot: robot.clone(),
-                engaged: false,
-                on_failure: FailureAction::ReportRelease { robot },
-            });
-            Ok(decision)
-        }
-        Intent::AuthorizeManualCommand { robot } => {
-            if matches!(&state.mode, ControlMode::Manual { robot: owner } if owner == &robot) {
-                Ok(Decision {
-                    effects: Vec::new(),
-                })
-            } else {
-                Err(AdmissionError::ManualCommandNotOwned(robot))
+                    engaged: true,
+                    on_failure: FailureAction::AbandonHold { robot },
+                });
+                Ok(decision)
             }
-        }
-        Intent::AuthorizePolicyCommand { robot, session } => {
-            if matches!(
-                &state.mode,
-                ControlMode::Policy { robot: owner, session: active }
-                    if owner == &robot && active == &session
-            ) {
-                Ok(Decision {
-                    effects: Vec::new(),
-                })
-            } else {
-                Err(AdmissionError::PolicyCommandNotOwned { robot, session })
+            Intent::Release { robot } => {
+                let mut decision = select(self, ControlMode::Idle)?;
+                decision.effects.push(Effect::SetTorque {
+                    robot: robot.clone(),
+                    engaged: false,
+                    on_failure: FailureAction::ReportRelease { robot },
+                });
+                Ok(decision)
             }
+            Intent::AuthorizeManualCommand { robot } => {
+                if matches!(&self.mode, ControlMode::Manual { robot: owner } if owner == &robot) {
+                    Ok(Decision {
+                        effects: Vec::new(),
+                    })
+                } else {
+                    Err(AdmissionError::ManualCommandNotOwned(robot))
+                }
+            }
+            Intent::AuthorizePolicyCommand { robot, session } => {
+                if matches!(
+                    &self.mode,
+                    ControlMode::Policy { robot: owner, session: active }
+                        if owner == &robot && active == &session
+                ) {
+                    Ok(Decision {
+                        effects: Vec::new(),
+                    })
+                } else {
+                    Err(AdmissionError::PolicyCommandNotOwned { robot, session })
+                }
+            }
+            Intent::StartCalibration { robot } => Ok(start_calibration(self, robot)),
         }
-        Intent::StartCalibration { robot } => Ok(start_calibration(state, robot)),
     }
-}
 
-/// Decide the ownership consequence of an observed outer-layer event.
-pub fn decide_event(state: &ControlState, event: Event) -> Decision {
-    match event {
-        Event::ReplayLost => Decision {
-            effects: vec![
-                Effect::ClearReplay,
-                Effect::ResetAllTargets,
-                Effect::CommitModeWithError {
-                    mode: ControlMode::Idle,
-                    error: "the replay was lost".to_owned(),
-                },
-            ],
-        },
-        Event::TeleoperationUnavailable => Decision {
-            effects: vec![Effect::SetActivity {
-                active: false,
-                error: Some("both arms must be calibrated".to_owned()),
-            }],
-        },
-        Event::ReplayFinished => Decision {
-            effects: vec![Effect::ClearReplay, Effect::CommitMode(ControlMode::Idle)],
-        },
-        Event::ReplayFailed { robot, error } => Decision {
-            effects: vec![
-                Effect::ClearReplay,
-                Effect::ResetTargets { robot },
-                Effect::CommitModeWithError {
-                    mode: ControlMode::Idle,
-                    error,
-                },
-            ],
-        },
-        Event::RobotLost { robot, reason } if state.mode.involves(&robot) => Decision {
-            effects: vec![
-                Effect::ClearReplay,
-                Effect::ResetAllTargets,
-                Effect::CommitModeWithError {
-                    mode: ControlMode::Idle,
-                    error: format!("stopped {}: {reason}", state.mode.label()),
-                },
-            ],
-        },
-        Event::RobotLost { .. } => Decision {
-            effects: Vec::new(),
-        },
+    /// Decide the ownership consequence of an observed outer-layer event.
+    pub fn decide_event(&self, event: Event) -> Decision {
+        match event {
+            Event::ReplayLost => Decision {
+                effects: vec![
+                    Effect::ClearReplay,
+                    Effect::ResetAllTargets,
+                    Effect::CommitModeWithError {
+                        mode: ControlMode::Idle,
+                        error: "the replay was lost".to_owned(),
+                    },
+                ],
+            },
+            Event::TeleoperationUnavailable => Decision {
+                effects: vec![Effect::SetActivity {
+                    active: false,
+                    error: Some("both arms must be calibrated".to_owned()),
+                }],
+            },
+            Event::ReplayFinished => Decision {
+                effects: vec![Effect::ClearReplay, Effect::CommitMode(ControlMode::Idle)],
+            },
+            Event::ReplayFailed { robot, error } => Decision {
+                effects: vec![
+                    Effect::ClearReplay,
+                    Effect::ResetTargets { robot },
+                    Effect::CommitModeWithError {
+                        mode: ControlMode::Idle,
+                        error,
+                    },
+                ],
+            },
+            Event::RobotLost { robot, reason } if self.mode.involves(&robot) => Decision {
+                effects: vec![
+                    Effect::ClearReplay,
+                    Effect::ResetAllTargets,
+                    Effect::CommitModeWithError {
+                        mode: ControlMode::Idle,
+                        error: format!("stopped {}: {reason}", self.mode.label()),
+                    },
+                ],
+            },
+            Event::RobotLost { .. } => Decision {
+                effects: Vec::new(),
+            },
+        }
     }
 }
 
@@ -386,28 +388,30 @@ pub struct FailureDecision {
 }
 
 /// Decide the state consequence of a physical effect failure.
-pub fn effect_failed(action: FailureAction, cause: String) -> FailureDecision {
-    match action {
-        FailureAction::AbandonTransition => FailureDecision {
-            effects: idle_effects(),
-            error: format!(
-                "could not establish the requested control mode: {cause}; returned control to Idle"
-            ),
-        },
-        FailureAction::AbandonHold { robot } => FailureDecision {
-            effects: idle_effects(),
-            error: format!(
-                "could not engage holding torque for robot {robot:?}: {cause}; returned control to Idle"
-            ),
-        },
-        FailureAction::ReportRelease { robot } => FailureDecision {
-            effects: Vec::new(),
-            error: format!("entered Idle but could not release robot {robot:?}: {cause}"),
-        },
-        FailureAction::Propagate => FailureDecision {
-            effects: Vec::new(),
-            error: cause,
-        },
+impl FailureAction {
+    pub fn failure_decision(self, cause: String) -> FailureDecision {
+        match self {
+            FailureAction::AbandonTransition => FailureDecision {
+                effects: idle_effects(),
+                error: format!(
+                    "could not establish the requested control mode: {cause}; returned control to Idle"
+                ),
+            },
+            FailureAction::AbandonHold { robot } => FailureDecision {
+                effects: idle_effects(),
+                error: format!(
+                    "could not engage holding torque for robot {robot:?}: {cause}; returned control to Idle"
+                ),
+            },
+            FailureAction::ReportRelease { robot } => FailureDecision {
+                effects: Vec::new(),
+                error: format!("entered Idle but could not release robot {robot:?}: {cause}"),
+            },
+            FailureAction::Propagate => FailureDecision {
+                effects: Vec::new(),
+                error: cause,
+            },
+        }
     }
 }
 
@@ -449,30 +453,29 @@ pub enum ReplayTransitionError {
 
 /// Own the legal replay lifecycle; clocks, positions, and target conversion
 /// remain observations supplied by the hardware adapter.
-pub fn decide_replay(
-    state: ReplayState,
-    event: ReplayEvent,
-) -> Result<ReplayDecision, ReplayTransitionError> {
-    match (state, event) {
-        (_, ReplayEvent::Paused) => Ok(ReplayDecision::Keep),
-        (_, ReplayEvent::Failed(error)) => Ok(ReplayDecision::FailToIdle(error)),
-        (ReplayState::Seeking, ReplayEvent::SeekObserved { arrived: true }) => {
-            Ok(ReplayDecision::EnterPlaying)
-        }
-        (ReplayState::Seeking, ReplayEvent::SeekObserved { arrived: false }) => {
-            Ok(ReplayDecision::Keep)
-        }
-        (ReplayState::Playing, ReplayEvent::PlaybackObserved { finished: true }) => {
-            Ok(ReplayDecision::FinishToIdle)
-        }
-        (ReplayState::Playing, ReplayEvent::PlaybackObserved { finished: false }) => {
-            Ok(ReplayDecision::Keep)
-        }
-        (ReplayState::Seeking, ReplayEvent::PlaybackObserved { .. }) => {
-            Err(ReplayTransitionError::PlaybackObservedWhileSeeking)
-        }
-        (ReplayState::Playing, ReplayEvent::SeekObserved { .. }) => {
-            Err(ReplayTransitionError::SeekObservedWhilePlaying)
+impl ReplayState {
+    pub fn decide(self, event: ReplayEvent) -> Result<ReplayDecision, ReplayTransitionError> {
+        match (self, event) {
+            (_, ReplayEvent::Paused) => Ok(ReplayDecision::Keep),
+            (_, ReplayEvent::Failed(error)) => Ok(ReplayDecision::FailToIdle(error)),
+            (ReplayState::Seeking, ReplayEvent::SeekObserved { arrived: true }) => {
+                Ok(ReplayDecision::EnterPlaying)
+            }
+            (ReplayState::Seeking, ReplayEvent::SeekObserved { arrived: false }) => {
+                Ok(ReplayDecision::Keep)
+            }
+            (ReplayState::Playing, ReplayEvent::PlaybackObserved { finished: true }) => {
+                Ok(ReplayDecision::FinishToIdle)
+            }
+            (ReplayState::Playing, ReplayEvent::PlaybackObserved { finished: false }) => {
+                Ok(ReplayDecision::Keep)
+            }
+            (ReplayState::Seeking, ReplayEvent::PlaybackObserved { .. }) => {
+                Err(ReplayTransitionError::PlaybackObservedWhileSeeking)
+            }
+            (ReplayState::Playing, ReplayEvent::SeekObserved { .. }) => {
+                Err(ReplayTransitionError::SeekObservedWhilePlaying)
+            }
         }
     }
 }
@@ -503,7 +506,7 @@ mod tests {
 
     #[test]
     fn idle_clears_replay_resets_targets_then_commits() {
-        let decision = decide(&state(), Intent::Select(ControlMode::Idle)).unwrap();
+        let decision = state().decide(Intent::Select(ControlMode::Idle)).unwrap();
         assert_eq!(decision.effects, idle_effects());
     }
 
@@ -512,7 +515,7 @@ mod tests {
         let mode = ControlMode::Manual {
             robot: "leader".to_owned(),
         };
-        let decision = decide(&state(), Intent::Select(mode.clone())).unwrap();
+        let decision = state().decide(Intent::Select(mode.clone())).unwrap();
         assert_eq!(
             decision.effects,
             vec![
@@ -525,13 +528,11 @@ mod tests {
 
     #[test]
     fn hold_commits_manual_before_engaging_and_rolls_back_on_failure() {
-        let decision = decide(
-            &state(),
-            Intent::Hold {
+        let decision = state()
+            .decide(Intent::Hold {
                 robot: "leader".to_owned(),
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
         assert_eq!(
             decision.effects.last(),
             Some(&Effect::SetTorque {
@@ -542,25 +543,21 @@ mod tests {
                 }
             })
         );
-        let recovery = effect_failed(
-            FailureAction::AbandonHold {
-                robot: "leader".to_owned(),
-            },
-            "driver refused".to_owned(),
-        );
+        let recovery = FailureAction::AbandonHold {
+            robot: "leader".to_owned(),
+        }
+        .failure_decision("driver refused".to_owned());
         assert_eq!(recovery.effects, idle_effects());
         assert!(recovery.error.contains("returned control to Idle"));
     }
 
     #[test]
     fn release_enters_idle_before_attempting_torque_off() {
-        let decision = decide(
-            &state(),
-            Intent::Release {
+        let decision = state()
+            .decide(Intent::Release {
                 robot: "leader".to_owned(),
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
         assert_eq!(&decision.effects[..3], idle_effects());
         assert_eq!(
             decision.effects[3],
@@ -580,7 +577,7 @@ mod tests {
             leader: "leader".to_owned(),
             follower: "follower".to_owned(),
         };
-        let decision = decide(&state(), Intent::Select(mode.clone())).unwrap();
+        let decision = state().decide(Intent::Select(mode.clone())).unwrap();
         assert_eq!(
             decision.effects,
             vec![
@@ -613,7 +610,7 @@ mod tests {
                 session: "run".to_owned(),
             },
         ] {
-            let decision = decide(&state(), Intent::Select(mode.clone())).unwrap();
+            let decision = state().decide(Intent::Select(mode.clone())).unwrap();
             assert_eq!(decision.effects.last(), Some(&Effect::CommitMode(mode)));
             assert!(decision.effects.iter().any(|effect| matches!(
                 effect,
@@ -628,7 +625,7 @@ mod tests {
             robot: "leader".to_owned(),
             episode: "replacement".to_owned(),
         };
-        let decision = decide(&state(), Intent::Select(mode)).unwrap();
+        let decision = state().decide(Intent::Select(mode)).unwrap();
         assert_eq!(decision.effects.first(), Some(&Effect::ClearReplay));
     }
 
@@ -654,44 +651,35 @@ mod tests {
             },
         ] {
             assert!(matches!(
-                decide(&state, Intent::Select(mode)),
+                state.decide(Intent::Select(mode)),
                 Err(AdmissionError::CalibrationInProgress(_))
             ));
         }
-        assert!(decide(&state, Intent::Select(ControlMode::Idle)).is_ok());
+        assert!(state.decide(Intent::Select(ControlMode::Idle)).is_ok());
     }
 
     #[test]
     fn connection_and_calibration_admission_fail_closed() {
         let mut state = state();
         assert_eq!(
-            decide(
-                &state,
-                Intent::Select(ControlMode::Manual {
-                    robot: "absent".to_owned()
-                })
-            ),
+            state.decide(Intent::Select(ControlMode::Manual {
+                robot: "absent".to_owned()
+            })),
             Err(AdmissionError::NotConnected("absent".to_owned()))
         );
         state.robots.get_mut("leader").unwrap().calibration = CalibrationAdmission::Missing;
         assert!(matches!(
-            decide(
-                &state,
-                Intent::Select(ControlMode::Manual {
-                    robot: "leader".to_owned()
-                })
-            ),
+            state.decide(Intent::Select(ControlMode::Manual {
+                robot: "leader".to_owned()
+            })),
             Err(AdmissionError::MissingCalibration(_))
         ));
         state.robots.get_mut("leader").unwrap().calibration =
             CalibrationAdmission::Invalid("motor mismatch".to_owned());
         assert!(matches!(
-            decide(
-                &state,
-                Intent::Select(ControlMode::Manual {
-                    robot: "leader".to_owned()
-                })
-            ),
+            state.decide(Intent::Select(ControlMode::Manual {
+                robot: "leader".to_owned()
+            })),
             Err(AdmissionError::InvalidCalibration { .. })
         ));
     }
@@ -699,23 +687,17 @@ mod tests {
     #[test]
     fn teleoperation_requires_distinct_robots_with_a_shared_joint() {
         assert_eq!(
-            decide(
-                &state(),
-                Intent::Select(ControlMode::Teleoperate {
-                    leader: "leader".to_owned(),
-                    follower: "leader".to_owned(),
-                })
-            ),
+            state().decide(Intent::Select(ControlMode::Teleoperate {
+                leader: "leader".to_owned(),
+                follower: "leader".to_owned(),
+            })),
             Err(AdmissionError::SameTeleoperationRobot)
         );
         assert!(matches!(
-            decide(
-                &state(),
-                Intent::Select(ControlMode::Teleoperate {
-                    leader: "leader".to_owned(),
-                    follower: "other".to_owned(),
-                })
-            ),
+            state().decide(Intent::Select(ControlMode::Teleoperate {
+                leader: "leader".to_owned(),
+                follower: "other".to_owned(),
+            })),
             Err(AdmissionError::NoSharedCalibratedJoints { .. })
         ));
     }
@@ -727,23 +709,17 @@ mod tests {
             robot: "leader".to_owned(),
         };
         assert_eq!(
-            decide(
-                &state,
-                Intent::AuthorizeManualCommand {
-                    robot: "leader".to_owned()
-                }
-            ),
+            state.decide(Intent::AuthorizeManualCommand {
+                robot: "leader".to_owned()
+            }),
             Ok(Decision {
                 effects: Vec::new()
             })
         );
         assert_eq!(
-            decide(
-                &state,
-                Intent::AuthorizeManualCommand {
-                    robot: "follower".to_owned()
-                }
-            ),
+            state.decide(Intent::AuthorizeManualCommand {
+                robot: "follower".to_owned()
+            }),
             Err(AdmissionError::ManualCommandNotOwned("follower".to_owned()))
         );
 
@@ -752,26 +728,20 @@ mod tests {
             session: "run-1".to_owned(),
         };
         assert_eq!(
-            decide(
-                &state,
-                Intent::AuthorizePolicyCommand {
-                    robot: "leader".to_owned(),
-                    session: "run-1".to_owned(),
-                }
-            ),
+            state.decide(Intent::AuthorizePolicyCommand {
+                robot: "leader".to_owned(),
+                session: "run-1".to_owned(),
+            }),
             Ok(Decision {
                 effects: Vec::new()
             })
         );
         for (robot, session) in [("follower", "run-1"), ("leader", "run-2")] {
             assert!(matches!(
-                decide(
-                    &state,
-                    Intent::AuthorizePolicyCommand {
-                        robot: robot.to_owned(),
-                        session: session.to_owned(),
-                    }
-                ),
+                state.decide(Intent::AuthorizePolicyCommand {
+                    robot: robot.to_owned(),
+                    session: session.to_owned(),
+                }),
                 Err(AdmissionError::PolicyCommandNotOwned { .. })
             ));
         }
@@ -785,14 +755,12 @@ mod tests {
             episode: "take".to_owned(),
         };
         assert_eq!(
-            decide(
-                &state,
-                Intent::StartCalibration {
+            state
+                .decide(Intent::StartCalibration {
                     robot: "leader".to_owned()
-                }
-            )
-            .unwrap()
-            .effects,
+                })
+                .unwrap()
+                .effects,
             vec![
                 Effect::ClearReplay,
                 Effect::ResetAllTargets,
@@ -810,14 +778,12 @@ mod tests {
 
         state.mode = ControlMode::Idle;
         assert_eq!(
-            decide(
-                &state,
-                Intent::StartCalibration {
+            state
+                .decide(Intent::StartCalibration {
                     robot: "leader".to_owned()
-                }
-            )
-            .unwrap()
-            .effects,
+                })
+                .unwrap()
+                .effects,
             vec![Effect::SetTorque {
                 robot: "leader".to_owned(),
                 engaged: false,
@@ -825,7 +791,7 @@ mod tests {
             }]
         );
         assert_eq!(
-            effect_failed(FailureAction::Propagate, "driver refused".to_owned()),
+            FailureAction::Propagate.failure_decision("driver refused".to_owned()),
             FailureDecision {
                 effects: Vec::new(),
                 error: "driver refused".to_owned(),
@@ -841,14 +807,12 @@ mod tests {
             follower: "follower".to_owned(),
         };
         assert_eq!(
-            decide_event(
-                &state,
-                Event::RobotLost {
+            state
+                .decide_event(Event::RobotLost {
                     robot: "leader".to_owned(),
                     reason: "its bus stopped responding".to_owned(),
-                }
-            )
-            .effects,
+                })
+                .effects,
             vec![
                 Effect::ClearReplay,
                 Effect::ResetAllTargets,
@@ -859,15 +823,13 @@ mod tests {
             ]
         );
         assert!(
-            decide_event(
-                &state,
-                Event::RobotLost {
+            state
+                .decide_event(Event::RobotLost {
                     robot: "other".to_owned(),
                     reason: "gone".to_owned(),
-                }
-            )
-            .effects
-            .is_empty()
+                })
+                .effects
+                .is_empty()
         );
     }
 
@@ -875,7 +837,7 @@ mod tests {
     fn runtime_observations_have_explicit_ownership_and_target_effects() {
         let state = state();
         assert_eq!(
-            decide_event(&state, Event::ReplayLost).effects,
+            state.decide_event(Event::ReplayLost).effects,
             vec![
                 Effect::ClearReplay,
                 Effect::ResetAllTargets,
@@ -886,25 +848,23 @@ mod tests {
             ]
         );
         assert_eq!(
-            decide_event(&state, Event::TeleoperationUnavailable).effects,
+            state.decide_event(Event::TeleoperationUnavailable).effects,
             vec![Effect::SetActivity {
                 active: false,
                 error: Some("both arms must be calibrated".to_owned()),
             }]
         );
         assert_eq!(
-            decide_event(&state, Event::ReplayFinished).effects,
+            state.decide_event(Event::ReplayFinished).effects,
             vec![Effect::ClearReplay, Effect::CommitMode(ControlMode::Idle)]
         );
         assert_eq!(
-            decide_event(
-                &state,
-                Event::ReplayFailed {
+            state
+                .decide_event(Event::ReplayFailed {
                     robot: "leader".to_owned(),
                     error: "unsafe trajectory".to_owned(),
-                }
-            )
-            .effects,
+                })
+                .effects,
             vec![
                 Effect::ClearReplay,
                 Effect::ResetTargets {
@@ -921,54 +881,33 @@ mod tests {
     #[test]
     fn replay_lifecycle_has_only_legal_phase_transitions() {
         assert_eq!(
-            decide_replay(
-                ReplayState::Seeking,
-                ReplayEvent::SeekObserved { arrived: false }
-            ),
+            ReplayState::Seeking.decide(ReplayEvent::SeekObserved { arrived: false }),
             Ok(ReplayDecision::Keep)
         );
         assert_eq!(
-            decide_replay(
-                ReplayState::Seeking,
-                ReplayEvent::SeekObserved { arrived: true }
-            ),
+            ReplayState::Seeking.decide(ReplayEvent::SeekObserved { arrived: true }),
             Ok(ReplayDecision::EnterPlaying)
         );
         assert_eq!(
-            decide_replay(
-                ReplayState::Playing,
-                ReplayEvent::PlaybackObserved { finished: false }
-            ),
+            ReplayState::Playing.decide(ReplayEvent::PlaybackObserved { finished: false }),
             Ok(ReplayDecision::Keep)
         );
         assert_eq!(
-            decide_replay(
-                ReplayState::Playing,
-                ReplayEvent::PlaybackObserved { finished: true }
-            ),
+            ReplayState::Playing.decide(ReplayEvent::PlaybackObserved { finished: true }),
             Ok(ReplayDecision::FinishToIdle)
         );
         assert_eq!(
-            decide_replay(
-                ReplayState::Seeking,
-                ReplayEvent::PlaybackObserved { finished: true }
-            ),
+            ReplayState::Seeking.decide(ReplayEvent::PlaybackObserved { finished: true }),
             Err(ReplayTransitionError::PlaybackObservedWhileSeeking)
         );
         assert_eq!(
-            decide_replay(
-                ReplayState::Playing,
-                ReplayEvent::SeekObserved { arrived: true }
-            ),
+            ReplayState::Playing.decide(ReplayEvent::SeekObserved { arrived: true }),
             Err(ReplayTransitionError::SeekObservedWhilePlaying)
         );
         for state in [ReplayState::Seeking, ReplayState::Playing] {
+            assert_eq!(state.decide(ReplayEvent::Paused), Ok(ReplayDecision::Keep));
             assert_eq!(
-                decide_replay(state, ReplayEvent::Paused),
-                Ok(ReplayDecision::Keep)
-            );
-            assert_eq!(
-                decide_replay(state, ReplayEvent::Failed("fault".to_owned())),
+                state.decide(ReplayEvent::Failed("fault".to_owned())),
                 Ok(ReplayDecision::FailToIdle("fault".to_owned()))
             );
         }

@@ -11,7 +11,7 @@ use std::marker::PhantomData;
 use serde::de::{self, DeserializeOwned, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use spiral_robotics_core::calibration::{
-    Calibration, CalibrationInput, Direction, MotorCalibration, MotorReading, validate_calibration,
+    Calibration, CalibrationInput, Direction, MotorCalibration, MotorReading,
 };
 
 /// Serialize a domain direction at a delivery or persistence edge.
@@ -108,13 +108,13 @@ fn calibration_from_wire(wire: CalibrationWire) -> serde_json::Result<Calibratio
             .map(|(name, motor)| (name, motor.into()))
             .collect(),
     };
-    validate_calibration(&calibration).map_err(json_error)?;
+    calibration.validate().map_err(json_error)?;
     Ok(calibration)
 }
 
 /// Encode a validated calibration document for a robot file.
 pub fn encode_calibration(calibration: &Calibration) -> serde_json::Result<serde_json::Value> {
-    validate_calibration(calibration).map_err(json_error)?;
+    calibration.validate().map_err(json_error)?;
     serde_json::to_value(CalibrationWire {
         format_version: calibration.format_version,
         units: calibration.units.clone(),

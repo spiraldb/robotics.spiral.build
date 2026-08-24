@@ -125,7 +125,11 @@ flowchart TD
   durable storage. HTTP import must move the received buffer into storage work
   without cloning the entire archive. Import must bind all Arrow record batches
   for one relation as one ADBC stream rather than executing one ingest per IPC
-  batch.
+  batch. Before decoding, import must enforce that the cumulative declared
+  decoded Arrow buffers fit the same bound, including compressed buffers at
+  their declared decompressed sizes. It must not reject an otherwise bounded
+  stream by counting one shared IPC message-body allocation once per column
+  slice.
 - **PERSIST-031** One private backend-local JSON file may persist only the
   bootstrap state needed before Spiral can be opened: the API endpoint, SpFS
   endpoint, selected project ID, and optional client ID and client secret. It
@@ -178,8 +182,10 @@ flowchart TD
   Blob outlining and provider placement, and the shared MP4 source view must
   forward that Blob without wrapping a materialized Binary value. Portable
   project and episode exports must deliberately materialize Blob bytes into
-  their bounded Arrow IPC payloads; import must normalize both those payloads
-  and legacy Binary payloads back to the canonical Blob type before ingest.
+  their bounded Arrow IPC payloads; import must accept that portable binary
+  field as nullable or required and normalize Binary, LargeBinary, or
+  BinaryView payloads back to the canonical Blob type before ingest, while
+  still rejecting a null payload value.
   Catalog startup and destination changes must migrate a legacy Binary
   `video_assets` relation before the destination is considered ready.
 

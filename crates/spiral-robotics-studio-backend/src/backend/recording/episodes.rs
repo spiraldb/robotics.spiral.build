@@ -13,7 +13,7 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use spiral_robotics_contracts::api::{EpisodeArm, EpisodeSummary, MotorLimits, RecordingGap};
 use spiral_robotics_contracts::spiral::{Table, column as db};
 use spiral_robotics_core::arm::SO101_JOINTS;
-use spiral_robotics_core::calibration::{Calibration, normalize_centered_raw};
+use spiral_robotics_core::calibration::Calibration;
 pub(crate) use spiral_robotics_core::episode::MAX_EPISODE_FRAMES;
 use spiral_robotics_studio_hardware::RecordingWriter;
 pub(crate) use spiral_robotics_studio_hardware::{ArmConditionSummary, EpisodeCheckpoint, Sample};
@@ -65,105 +65,105 @@ impl std::error::Error for EpisodeError {}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ArmCondition {
-    pub arm: String,
-    pub temperature_celsius: Vec<Option<f64>>,
-    pub voltage_volts: Vec<Option<f64>>,
-    pub limits: Vec<MotorLimits>,
+    pub(crate) arm: String,
+    pub(crate) temperature_celsius: Vec<Option<f64>>,
+    pub(crate) voltage_volts: Vec<Option<f64>>,
+    pub(crate) limits: Vec<MotorLimits>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct EpisodeStart {
-    pub id: String,
-    pub dataset_id: String,
-    pub started_ms: i64,
-    pub sample_hz: f64,
-    pub source: String,
-    pub note: Option<String>,
-    pub arms: Vec<EpisodeArm>,
-    pub condition: Vec<ArmCondition>,
+    pub(crate) id: String,
+    pub(crate) dataset_id: String,
+    pub(crate) started_ms: i64,
+    pub(crate) sample_hz: f64,
+    pub(crate) source: String,
+    pub(crate) note: Option<String>,
+    pub(crate) arms: Vec<EpisodeArm>,
+    pub(crate) condition: Vec<ArmCondition>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct EpisodeCompletion {
-    pub duration_seconds: f64,
-    pub recording_gaps: Vec<RecordingGap>,
-    pub max_follow_error_degrees: Option<f64>,
-    pub discarded: bool,
-    pub condition: Vec<ArmConditionSummary>,
+    pub(crate) duration_seconds: f64,
+    pub(crate) recording_gaps: Vec<RecordingGap>,
+    pub(crate) max_follow_error_degrees: Option<f64>,
+    pub(crate) discarded: bool,
+    pub(crate) condition: Vec<ArmConditionSummary>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct CompletedEpisode {
-    pub start: EpisodeStart,
-    pub samples: Vec<Sample>,
-    pub completion: EpisodeCompletion,
+    pub(crate) start: EpisodeStart,
+    pub(crate) samples: Vec<Sample>,
+    pub(crate) completion: EpisodeCompletion,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct EpisodeInspection {
-    pub episode: CompletedEpisode,
-    pub summary: EpisodeSummary,
-    pub videos: Vec<VideoAssetMetadata>,
+    pub(crate) episode: CompletedEpisode,
+    pub(crate) summary: EpisodeSummary,
+    pub(crate) videos: Vec<VideoAssetMetadata>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ReappliedEpisodePositions {
-    pub updated_episode_ids: Vec<String>,
-    pub frames_updated: u64,
-    pub episodes_unchanged: u64,
-    pub episodes_skipped: u64,
-    pub warnings: Vec<String>,
+    pub(crate) updated_episode_ids: Vec<String>,
+    pub(crate) frames_updated: u64,
+    pub(crate) episodes_unchanged: u64,
+    pub(crate) episodes_skipped: u64,
+    pub(crate) warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub(crate) struct TimelineMetadata {
-    pub samples: u64,
-    pub first_seconds: Option<f64>,
-    pub last_seconds: Option<f64>,
+    pub(crate) samples: u64,
+    pub(crate) first_seconds: Option<f64>,
+    pub(crate) last_seconds: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub(crate) struct TimelineArmSample {
-    pub arm: String,
-    pub normalized: BTreeMap<String, Option<f64>>,
-    pub raw: BTreeMap<String, i64>,
-    pub velocity: Option<BTreeMap<String, Option<f64>>>,
-    pub effort: Option<BTreeMap<String, Option<f64>>>,
-    pub action: Option<BTreeMap<String, Option<f64>>>,
+    pub(crate) arm: String,
+    pub(crate) normalized: BTreeMap<String, Option<f64>>,
+    pub(crate) raw: BTreeMap<String, i64>,
+    pub(crate) velocity: Option<BTreeMap<String, Option<f64>>>,
+    pub(crate) effort: Option<BTreeMap<String, Option<f64>>>,
+    pub(crate) action: Option<BTreeMap<String, Option<f64>>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub(crate) struct TimelineSample {
-    pub frame: u64,
-    pub seconds: f64,
-    pub follow_error_degrees: Option<f64>,
-    pub arms: Vec<TimelineArmSample>,
+    pub(crate) frame: u64,
+    pub(crate) seconds: f64,
+    pub(crate) follow_error_degrees: Option<f64>,
+    pub(crate) arms: Vec<TimelineArmSample>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub(crate) struct TimelineTraces {
-    pub episode: String,
-    pub samples: u64,
-    pub buckets: usize,
-    pub start_seconds: Option<f64>,
-    pub end_seconds: Option<f64>,
-    pub lanes: Vec<TimelineTraceLane>,
+    pub(crate) episode: String,
+    pub(crate) samples: u64,
+    pub(crate) buckets: usize,
+    pub(crate) start_seconds: Option<f64>,
+    pub(crate) end_seconds: Option<f64>,
+    pub(crate) lanes: Vec<TimelineTraceLane>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub(crate) struct TimelineTraceLane {
-    pub joint: String,
-    pub series: Vec<TimelineTraceSeries>,
+    pub(crate) joint: String,
+    pub(crate) series: Vec<TimelineTraceSeries>,
 }
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub(crate) struct TimelineTraceSeries {
-    pub arm: String,
-    pub points: Vec<TimelineTracePoint>,
+    pub(crate) arm: String,
+    pub(crate) points: Vec<TimelineTracePoint>,
 }
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub(crate) struct TimelineTracePoint {
-    pub seconds: f64,
-    pub value: Option<f64>,
+    pub(crate) seconds: f64,
+    pub(crate) value: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -257,8 +257,8 @@ impl EpisodeStore {
 
     pub(crate) fn completed(&self, id: &str) -> Result<CompletedEpisode, EpisodeError> {
         validate_episode_id(id)?;
-        let episodes = sql::relation(self.repository.namespace(), Table::Episodes);
-        let samples = sql::relation(self.repository.namespace(), Table::JointSamples);
+        let episodes = Table::Episodes.qualified_name(self.repository.namespace());
+        let samples = Table::JointSamples.qualified_name(self.repository.namespace());
         let episode_value = sql::string_literal(id);
         let sample_query = sql::episode_samples(self.repository.namespace(), id);
         self.repository
@@ -405,7 +405,7 @@ impl EpisodeStore {
             let mut changed = false;
             for sample in &mut episode.samples {
                 let normalized = joints.iter().enumerate().map(|(joint_index, joint)| {
-                    normalize_centered_raw(&calibration.motors[joint], sample.raw[arm_index][joint_index]).map(Some).map_err(|error| EpisodeError::Invalid(format!("could not reapply calibration to take {:?} joint {joint:?}: {error}", summary.id)))
+                    calibration.motors[joint].normalize_raw(sample.raw[arm_index][joint_index]).map(Some).map_err(|error| EpisodeError::Invalid(format!("could not reapply calibration to take {:?} joint {joint:?}: {error}", summary.id)))
                 }).collect::<Result<Vec<_>, _>>()?;
                 if sample.normalized[arm_index] != normalized {
                     sample.normalized[arm_index] = normalized;
@@ -615,7 +615,7 @@ impl EpisodeStore {
         &self,
         id: &str,
     ) -> Result<Vec<VideoAssetMetadata>, EpisodeError> {
-        let relation = sql::relation(self.repository.namespace(), Table::VideoAssets);
+        let relation = Table::VideoAssets.qualified_name(self.repository.namespace());
         let id = sql::string_literal(id);
         self.repository.run_blocking(move |connection| {
             if !table_exists(connection, &relation)? { return Ok(Vec::new()); }
@@ -625,7 +625,7 @@ impl EpisodeStore {
     }
 
     fn try_list(&self) -> Result<Vec<EpisodeSummary>, EpisodeError> {
-        let relation = sql::relation(self.repository.namespace(), Table::Episodes);
+        let relation = Table::Episodes.qualified_name(self.repository.namespace());
         self.repository
             .run_blocking(move |connection| {
                 if !table_exists(connection, &relation)? {
@@ -655,7 +655,7 @@ impl EpisodeStore {
         let namespace = self.repository.namespace().to_owned();
         self.repository
             .run_blocking(move |connection| {
-                let relation = sql::relation(&namespace, Table::Episodes);
+                let relation = Table::Episodes.qualified_name(&namespace);
                 execute_update_sql(
                     connection,
                     &sql::delete_episode(&relation, &episode.start.id),
@@ -679,8 +679,8 @@ impl EpisodeStore {
         let namespace = self.repository.namespace().to_owned();
         self.repository
             .run_blocking(move |connection| {
-                let sample_relation = sql::relation(&namespace, Table::JointSamples);
-                let episode_relation = sql::relation(&namespace, Table::Episodes);
+                let sample_relation = Table::JointSamples.qualified_name(&namespace);
+                let episode_relation = Table::Episodes.qualified_name(&namespace);
                 execute_update_sql(
                     connection,
                     &sql::delete_episode(&sample_relation, &episode.start.id),

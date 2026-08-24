@@ -12,7 +12,7 @@ use crate::frontend::api::http as api;
 use crate::frontend::app::notifications::MessageSource;
 use crate::frontend::app::state::Studio;
 use crate::frontend::screens::data::workbench::{
-    DEFAULT_QUERY_ROWS, QueryState, QueryTab, QueryViewModel, default_query_sql,
+    DEFAULT_QUERY_ROWS, QueryExecutionPresentation, QueryState, QueryTab, default_query_sql,
 };
 use crate::frontend::screens::sql_draft::rebase_generated_sql;
 
@@ -117,7 +117,7 @@ impl DataController {
     }
 
     pub(crate) fn select_query(mut self, id: u64) {
-        if self.query_tabs.peek().iter().any(|tab| tab.id == id) {
+        if self.query_tabs.peek().iter().any(|tab| tab.id() == id) {
             self.active_query.set(Some(id));
         }
     }
@@ -173,15 +173,11 @@ impl DataController {
         let id = self.next_query_id.peek().to_owned();
         self.next_query_id.set(id.wrapping_add(1));
         let title = query_title(&statement, id);
-        let running = QueryTab {
+        let running = QueryTab::new(
             id,
             title,
-            model: QueryViewModel {
-                sql: statement.clone(),
-                max_rows: rows,
-                state: QueryState::Running,
-            },
-        };
+            QueryExecutionPresentation::new(statement.clone(), rows, QueryState::Running),
+        );
         let mut tabs = self.query_tabs.peek().clone();
         push_bounded_query_tab(&mut tabs, running);
         self.query_tabs.set(tabs);
@@ -230,12 +226,8 @@ impl DataController {
                 }
             };
             let mut tabs = self.query_tabs.peek().clone();
-            if let Some(tab) = tabs.iter_mut().find(|tab| tab.id == id) {
-                tab.model = QueryViewModel {
-                    sql: statement,
-                    max_rows: rows,
-                    state,
-                };
+            if let Some(tab) = tabs.iter_mut().find(|tab| tab.id() == id) {
+                tab.replace_presentation(QueryExecutionPresentation::new(statement, rows, state));
                 self.query_tabs.set(tabs);
             }
             self.active_request.set(None);
@@ -248,15 +240,15 @@ impl DataController {
         };
         request.abort();
         let mut tabs = self.query_tabs.peek().clone();
-        if let Some(tab) = tabs.iter_mut().find(|tab| tab.id == request.id) {
-            tab.model.state = QueryState::Failed("Cancelled by operator.".to_owned());
+        if let Some(tab) = tabs.iter_mut().find(|tab| tab.id() == request.id) {
+            tab.mark_cancelled();
             self.query_tabs.set(tabs);
         }
     }
 }
 
 fn close_query_tab(tabs: &mut Vec<QueryTab>, active: &mut Option<u64>, id: u64) -> bool {
-    let Some(index) = tabs.iter().position(|tab| tab.id == id) else {
+    let Some(index) = tabs.iter().position(|tab| tab.id() == id) else {
         return false;
     };
     tabs.remove(index);
@@ -265,7 +257,7 @@ fn close_query_tab(tabs: &mut Vec<QueryTab>, active: &mut Option<u64>, id: u64) 
             .checked_sub(1)
             .and_then(|index| tabs.get(index))
             .or_else(|| tabs.get(index))
-            .map(|tab| tab.id);
+            .map(QueryTab::id);
     }
     true
 }
@@ -296,7 +288,9 @@ fn query_title(sql: &str, id: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::frontend::screens::data::workbench::{QueryState, QueryTab, QueryViewModel};
+    use crate::frontend::screens::data::workbench::{
+        QueryExecutionPresentation, QueryState, QueryTab,
+    };
 
     use super::{MAX_QUERY_TABS, close_query_tab, push_bounded_query_tab, query_title};
 
@@ -311,39 +305,35 @@ mod tests {
 
     #[test]
     fn closing_the_active_result_selects_a_neighbor_without_touching_others() {
-        let tab = |id| QueryTab {
-            id,
-            title: format!("Query {id}"),
-            model: QueryViewModel {
-                sql: format!("SELECT {id}"),
-                max_rows: 100,
-                state: QueryState::Running,
-            },
+        let tab = |id| {
+            QueryTab::new(
+                id,
+                format!("Query {id}"),
+                QueryExecutionPresentation::new(format!("SELECT {id}"), 100, QueryState::Running),
+            )
         };
         let mut tabs = vec![tab(1), tab(2), tab(3)];
         let mut active = Some(2);
 
         assert!(close_query_tab(&mut tabs, &mut active, 2));
         assert_eq!(active, Some(1));
-        assert_eq!(tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(), [1, 3]);
-        assert_eq!(tabs[1].model.sql, "SELECT 3");
+        assert_eq!(tabs.iter().map(QueryTab::id).collect::<Vec<_>>(), [1, 3]);
+        assert_eq!(tabs[1].presentation().sql(), "SELECT 3");
     }
 
     #[test]
     fn retained_query_results_are_bounded_to_the_newest_tabs() {
-        let tab = |id| QueryTab {
-            id,
-            title: format!("Query {id}"),
-            model: QueryViewModel {
-                sql: format!("SELECT {id}"),
-                max_rows: 100,
-                state: QueryState::Running,
-            },
+        let tab = |id| {
+            QueryTab::new(
+                id,
+                format!("Query {id}"),
+                QueryExecutionPresentation::new(format!("SELECT {id}"), 100, QueryState::Running),
+            )
         };
         let mut tabs = (1..=MAX_QUERY_TABS as u64).map(tab).collect::<Vec<_>>();
         push_bounded_query_tab(&mut tabs, tab(99));
         assert_eq!(tabs.len(), MAX_QUERY_TABS);
-        assert_eq!(tabs.first().map(|tab| tab.id), Some(2));
-        assert_eq!(tabs.last().map(|tab| tab.id), Some(99));
+        assert_eq!(tabs.first().map(QueryTab::id), Some(2));
+        assert_eq!(tabs.last().map(QueryTab::id), Some(99));
     }
 }

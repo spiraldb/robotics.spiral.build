@@ -145,6 +145,16 @@ These rules apply to every feature:
 - The Cargo workspace root must remain a virtual manifest. All first-party Rust
   packages and Rust source must live under `crates/`; do not add root `src/`,
   root `tests/`, or an in-repository dependency `patches/` tree.
+- Names must describe domain purpose; placeholder type or module names such as
+  `Built`, `Common`, or `View` are not acceptable substitutes for the artifact,
+  responsibility, summary, record, or validation input being modeled.
+- Behavior with a natural owner must be implemented as a member method. Use
+  `From` or `TryFrom` for type-owned conversions; reserve free functions for
+  genuinely stateless operations without a meaningful receiver.
+- Every item must use the narrowest useful visibility. Fields are private and
+  exposed through methods unless they are intentionally part of a public data
+  contract; the workspace lint policy denies unreachable public items for every
+  first-party package.
 - Critical invariants must be enforced by core or application policy, not only
   by UI controls.
 - Pure feature tests must run without hardware, HTTP, SpiralDB, or a compute

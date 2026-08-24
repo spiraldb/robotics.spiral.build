@@ -67,7 +67,7 @@ pub struct MotorReading {
     pub range_max: i64,
 }
 
-/// Input accepted by [`build_calibration`].
+/// Input accepted by [`CalibrationInput::build`].
 ///
 /// `Direct` accepts readings already reduced to extrema. `Sweep` derives the
 /// extrema from one or more complete snapshots. Domain validation rejects
@@ -289,164 +289,171 @@ pub fn validate_motor_specs(specs: &BTreeMap<String, MotorSpec>) -> Result<(), C
     Ok(())
 }
 
-/// Validate a fully materialized calibration, including deserialized data.
-pub fn validate_calibration(calibration: &Calibration) -> Result<(), CalibrationError> {
-    if calibration.format_version != CALIBRATION_FORMAT_VERSION {
-        return Err(CalibrationError::UnsupportedFormatVersion(
-            calibration.format_version,
-        ));
-    }
-    if calibration.units != CALIBRATION_UNITS {
-        return Err(CalibrationError::UnsupportedUnits(
-            calibration.units.clone(),
-        ));
-    }
-    if calibration.coordinate_space != CALIBRATION_COORDINATE_SPACE {
-        return Err(CalibrationError::UnsupportedCoordinateSpace(
-            calibration.coordinate_space.clone(),
-        ));
-    }
-    if calibration.motors.is_empty() {
-        return Err(CalibrationError::NoMotors);
-    }
-
-    let mut ids = BTreeMap::<u32, &str>::new();
-    for (name, motor) in &calibration.motors {
-        validate_motor_name(name)?;
-        if let Some(first) = ids.insert(motor.id, name) {
-            return Err(CalibrationError::DuplicateMotorId {
-                id: motor.id,
-                first: first.to_owned(),
-                second: name.clone(),
-            });
+impl Calibration {
+    /// Validate a fully materialized calibration, including deserialized data.
+    pub fn validate(&self) -> Result<(), CalibrationError> {
+        let calibration = self;
+        if calibration.format_version != CALIBRATION_FORMAT_VERSION {
+            return Err(CalibrationError::UnsupportedFormatVersion(
+                calibration.format_version,
+            ));
         }
-        validate_range(
-            name,
-            MotorReading {
-                center: motor.center,
-                range_min: motor.range_min,
-                range_max: motor.range_max,
-            },
-        )?;
-    }
-    Ok(())
-}
-
-/// Validate that a calibration belongs to one exact configured motor set.
-///
-/// A calibration range is meaningful only for the named physical motor it was
-/// measured from. Matching names alone is insufficient: changing a bus ID or
-/// direction while retaining an old range would make normalized commands refer
-/// to different hardware semantics.
-pub fn validate_calibration_for_motors(
-    specs: &BTreeMap<String, MotorSpec>,
-    calibration: &Calibration,
-) -> Result<(), CalibrationError> {
-    validate_motor_specs(specs)?;
-    validate_calibration(calibration)?;
-    validate_keys(specs, &calibration.motors, "calibration")?;
-
-    for (name, spec) in specs {
-        let motor = calibration
-            .motors
-            .get(name)
-            .expect("validated calibration keys must contain every configured motor");
-        if motor.id != spec.id || motor.direction != spec.direction {
-            return Err(CalibrationError::MotorSpecMismatch {
-                motor: name.clone(),
-                expected_id: spec.id,
-                calibration_id: motor.id,
-                expected_direction: spec.direction,
-                calibration_direction: motor.direction,
-            });
+        if calibration.units != CALIBRATION_UNITS {
+            return Err(CalibrationError::UnsupportedUnits(
+                calibration.units.clone(),
+            ));
         }
-    }
-    Ok(())
-}
-
-/// Build a calibration from direct readings or a raw range sweep.
-pub fn build_calibration(
-    specs: &BTreeMap<String, MotorSpec>,
-    input: &CalibrationInput,
-) -> Result<Calibration, CalibrationError> {
-    validate_motor_specs(specs)?;
-
-    let readings = match input {
-        CalibrationInput::Direct { motors } => {
-            validate_keys(specs, motors, "direct readings")?;
-            motors.clone()
+        if calibration.coordinate_space != CALIBRATION_COORDINATE_SPACE {
+            return Err(CalibrationError::UnsupportedCoordinateSpace(
+                calibration.coordinate_space.clone(),
+            ));
         }
-        CalibrationInput::Sweep { center, samples } => {
-            validate_keys(specs, center, "center readings")?;
-            if samples.is_empty() {
-                return Err(CalibrationError::EmptySamples);
+        if calibration.motors.is_empty() {
+            return Err(CalibrationError::NoMotors);
+        }
+
+        let mut ids = BTreeMap::<u32, &str>::new();
+        for (name, motor) in &calibration.motors {
+            validate_motor_name(name)?;
+            if let Some(first) = ids.insert(motor.id, name) {
+                return Err(CalibrationError::DuplicateMotorId {
+                    id: motor.id,
+                    first: first.to_owned(),
+                    second: name.clone(),
+                });
             }
-
-            let mut extrema = specs
-                .keys()
-                .map(|name| (name.clone(), (i64::MAX, i64::MIN)))
-                .collect::<BTreeMap<_, _>>();
-            for (index, sample) in samples.iter().enumerate() {
-                validate_keys(specs, sample, &format!("sweep sample {index}"))?;
-                for (name, value) in sample {
-                    let (minimum, maximum) = extrema
-                        .get_mut(name)
-                        .expect("validated sample key must have an extrema entry");
-                    *minimum = (*minimum).min(*value);
-                    *maximum = (*maximum).max(*value);
-                }
-            }
-
-            specs
-                .keys()
-                .map(|name| {
-                    let &(range_min, range_max) = extrema
-                        .get(name)
-                        .expect("every motor must have an extrema entry");
-                    let &center = center
-                        .get(name)
-                        .expect("validated center must contain every motor");
-                    (
-                        name.clone(),
-                        MotorReading {
-                            center,
-                            range_min,
-                            range_max,
-                        },
-                    )
-                })
-                .collect()
-        }
-    };
-
-    let motors = specs
-        .iter()
-        .map(|(name, spec)| {
-            let reading = *readings
-                .get(name)
-                .expect("validated input must contain every motor");
-            validate_range(name, reading)?;
-            Ok((
-                name.clone(),
-                MotorCalibration {
-                    id: spec.id,
-                    direction: spec.direction,
-                    range_min: reading.range_min,
-                    center: reading.center,
-                    range_max: reading.range_max,
+            validate_range(
+                name,
+                MotorReading {
+                    center: motor.center,
+                    range_min: motor.range_min,
+                    range_max: motor.range_max,
                 },
-            ))
-        })
-        .collect::<Result<BTreeMap<_, _>, CalibrationError>>()?;
+            )?;
+        }
+        Ok(())
+    }
 
-    let calibration = Calibration {
-        format_version: CALIBRATION_FORMAT_VERSION,
-        units: CALIBRATION_UNITS.to_owned(),
-        coordinate_space: CALIBRATION_COORDINATE_SPACE.to_owned(),
-        motors,
-    };
-    validate_calibration(&calibration)?;
-    Ok(calibration)
+    /// Validate that a calibration belongs to one exact configured motor set.
+    ///
+    /// A calibration range is meaningful only for the named physical motor it was
+    /// measured from. Matching names alone is insufficient: changing a bus ID or
+    /// direction while retaining an old range would make normalized commands refer
+    /// to different hardware semantics.
+    pub fn validate_for_motor_specs(
+        &self,
+        specs: &BTreeMap<String, MotorSpec>,
+    ) -> Result<(), CalibrationError> {
+        let calibration = self;
+        validate_motor_specs(specs)?;
+        calibration.validate()?;
+        validate_keys(specs, &calibration.motors, "calibration")?;
+
+        for (name, spec) in specs {
+            let motor = calibration
+                .motors
+                .get(name)
+                .expect("validated calibration keys must contain every configured motor");
+            if motor.id != spec.id || motor.direction != spec.direction {
+                return Err(CalibrationError::MotorSpecMismatch {
+                    motor: name.clone(),
+                    expected_id: spec.id,
+                    calibration_id: motor.id,
+                    expected_direction: spec.direction,
+                    calibration_direction: motor.direction,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+impl CalibrationInput {
+    /// Build a calibration from direct readings or a raw range sweep.
+    pub fn build(
+        &self,
+        specs: &BTreeMap<String, MotorSpec>,
+    ) -> Result<Calibration, CalibrationError> {
+        let input = self;
+        validate_motor_specs(specs)?;
+
+        let readings = match input {
+            CalibrationInput::Direct { motors } => {
+                validate_keys(specs, motors, "direct readings")?;
+                motors.clone()
+            }
+            CalibrationInput::Sweep { center, samples } => {
+                validate_keys(specs, center, "center readings")?;
+                if samples.is_empty() {
+                    return Err(CalibrationError::EmptySamples);
+                }
+
+                let mut extrema = specs
+                    .keys()
+                    .map(|name| (name.clone(), (i64::MAX, i64::MIN)))
+                    .collect::<BTreeMap<_, _>>();
+                for (index, sample) in samples.iter().enumerate() {
+                    validate_keys(specs, sample, &format!("sweep sample {index}"))?;
+                    for (name, value) in sample {
+                        let (minimum, maximum) = extrema
+                            .get_mut(name)
+                            .expect("validated sample key must have an extrema entry");
+                        *minimum = (*minimum).min(*value);
+                        *maximum = (*maximum).max(*value);
+                    }
+                }
+
+                specs
+                    .keys()
+                    .map(|name| {
+                        let &(range_min, range_max) = extrema
+                            .get(name)
+                            .expect("every motor must have an extrema entry");
+                        let &center = center
+                            .get(name)
+                            .expect("validated center must contain every motor");
+                        (
+                            name.clone(),
+                            MotorReading {
+                                center,
+                                range_min,
+                                range_max,
+                            },
+                        )
+                    })
+                    .collect()
+            }
+        };
+
+        let motors = specs
+            .iter()
+            .map(|(name, spec)| {
+                let reading = *readings
+                    .get(name)
+                    .expect("validated input must contain every motor");
+                validate_range(name, reading)?;
+                Ok((
+                    name.clone(),
+                    MotorCalibration {
+                        id: spec.id,
+                        direction: spec.direction,
+                        range_min: reading.range_min,
+                        center: reading.center,
+                        range_max: reading.range_max,
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, CalibrationError>>()?;
+
+        let calibration = Calibration {
+            format_version: CALIBRATION_FORMAT_VERSION,
+            units: CALIBRATION_UNITS.to_owned(),
+            coordinate_space: CALIBRATION_COORDINATE_SPACE.to_owned(),
+            motors,
+        };
+        calibration.validate()?;
+        Ok(calibration)
+    }
 }
 
 /// Normalize an unhomed raw reading to `[-1.0, 1.0]` around its center.
@@ -455,36 +462,36 @@ pub fn build_calibration(
 /// register encoding or LeRobot wire-format conversion. Values outside the
 /// observed range are clamped, asymmetric sides are scaled independently, and
 /// [`Direction::Reversed`] negates the result.
-pub fn normalize_centered_raw(
-    calibration: &MotorCalibration,
-    raw: i64,
-) -> Result<f64, CalibrationError> {
-    validate_range(
-        &format!("id {}", calibration.id),
-        MotorReading {
-            center: calibration.center,
-            range_min: calibration.range_min,
-            range_max: calibration.range_max,
-        },
-    )?;
+impl MotorCalibration {
+    pub fn normalize_raw(&self, raw: i64) -> Result<f64, CalibrationError> {
+        let calibration = self;
+        validate_range(
+            &format!("id {}", calibration.id),
+            MotorReading {
+                center: calibration.center,
+                range_min: calibration.range_min,
+                range_max: calibration.range_max,
+            },
+        )?;
 
-    let bounded = raw.clamp(calibration.range_min, calibration.range_max);
-    let (numerator, denominator) = if bounded < calibration.center {
-        (
-            i128::from(bounded) - i128::from(calibration.center),
-            i128::from(calibration.center) - i128::from(calibration.range_min),
-        )
-    } else {
-        (
-            i128::from(bounded) - i128::from(calibration.center),
-            i128::from(calibration.range_max) - i128::from(calibration.center),
-        )
-    };
-    let normalized = numerator as f64 / denominator as f64;
-    Ok(match calibration.direction {
-        Direction::Normal => normalized,
-        Direction::Reversed => -normalized,
-    })
+        let bounded = raw.clamp(calibration.range_min, calibration.range_max);
+        let (numerator, denominator) = if bounded < calibration.center {
+            (
+                i128::from(bounded) - i128::from(calibration.center),
+                i128::from(calibration.center) - i128::from(calibration.range_min),
+            )
+        } else {
+            (
+                i128::from(bounded) - i128::from(calibration.center),
+                i128::from(calibration.range_max) - i128::from(calibration.center),
+            )
+        };
+        let normalized = numerator as f64 / denominator as f64;
+        Ok(match calibration.direction {
+            Direction::Normal => normalized,
+            Direction::Reversed => -normalized,
+        })
+    }
 }
 
 /// The travel one motor has shown so far during a live calibration sweep.
@@ -515,7 +522,7 @@ pub struct RangeTracker {
 /// Encoder counts a joint must travel before its range is considered usable.
 ///
 /// Two counts is the smallest span that leaves the center strictly inside the
-/// range, which [`build_calibration`] requires.
+/// range, which [`CalibrationInput::build`] requires.
 pub const MINIMUM_CALIBRATION_TRAVEL: i64 = 2;
 
 impl RangeTracker {
@@ -615,52 +622,52 @@ impl RangeTracker {
 
 /// Map a normalized `[-1.0, 1.0]` command back to an unhomed raw position.
 ///
-/// This is the exact inverse of [`normalize_centered_raw`] up to rounding: the
+/// This is the exact inverse of [`MotorCalibration::normalize_raw`] up to rounding: the
 /// command is clamped to `[-1.0, 1.0]`, the direction is undone, each side of
 /// the center is scaled by its own half-range, and the result is clamped to the
 /// calibrated range so a caller can never command a joint past a limit it was
 /// calibrated against. Non-finite input is rejected: silently translating a
 /// corrupt command into motion toward center can move a physical arm while
 /// hiding the upstream fault.
-pub fn denormalize_centered_raw(
-    calibration: &MotorCalibration,
-    normalized: f64,
-) -> Result<i64, CalibrationError> {
-    validate_range(
-        &format!("id {}", calibration.id),
-        MotorReading {
-            center: calibration.center,
-            range_min: calibration.range_min,
-            range_max: calibration.range_max,
-        },
-    )?;
+impl MotorCalibration {
+    pub fn denormalize(&self, normalized: f64) -> Result<i64, CalibrationError> {
+        let calibration = self;
+        validate_range(
+            &format!("id {}", calibration.id),
+            MotorReading {
+                center: calibration.center,
+                range_min: calibration.range_min,
+                range_max: calibration.range_max,
+            },
+        )?;
 
-    if !normalized.is_finite() {
-        return Err(CalibrationError::NonFiniteNormalizedCommand);
+        if !normalized.is_finite() {
+            return Err(CalibrationError::NonFiniteNormalizedCommand);
+        }
+        let command = normalized;
+        let command = command.clamp(-1.0, 1.0);
+        let command = match calibration.direction {
+            Direction::Normal => command,
+            Direction::Reversed => -command,
+        };
+
+        let half_range = if command < 0.0 {
+            i128::from(calibration.center) - i128::from(calibration.range_min)
+        } else {
+            i128::from(calibration.range_max) - i128::from(calibration.center)
+        };
+        let offset = command * half_range as f64;
+        let raw = (calibration.center as f64 + offset).round();
+
+        // f64 cannot represent every i64, so clamp in float space before casting.
+        Ok(if raw <= calibration.range_min as f64 {
+            calibration.range_min
+        } else if raw >= calibration.range_max as f64 {
+            calibration.range_max
+        } else {
+            (raw as i64).clamp(calibration.range_min, calibration.range_max)
+        })
     }
-    let command = normalized;
-    let command = command.clamp(-1.0, 1.0);
-    let command = match calibration.direction {
-        Direction::Normal => command,
-        Direction::Reversed => -command,
-    };
-
-    let half_range = if command < 0.0 {
-        i128::from(calibration.center) - i128::from(calibration.range_min)
-    } else {
-        i128::from(calibration.range_max) - i128::from(calibration.center)
-    };
-    let offset = command * half_range as f64;
-    let raw = (calibration.center as f64 + offset).round();
-
-    // f64 cannot represent every i64, so clamp in float space before casting.
-    Ok(if raw <= calibration.range_min as f64 {
-        calibration.range_min
-    } else if raw >= calibration.range_max as f64 {
-        calibration.range_max
-    } else {
-        (raw as i64).clamp(calibration.range_min, calibration.range_max)
-    })
 }
 
 fn validate_motor_name(name: &str) -> Result<(), CalibrationError> {
@@ -761,7 +768,7 @@ mod tests {
     fn direct_input_preserves_truthful_unhomed_raw_values() {
         let mut specs = two_specs();
         specs.get_mut("elbow").unwrap().direction = Direction::Reversed;
-        let calibration = build_calibration(&specs, &direct_input()).unwrap();
+        let calibration = direct_input().build(&specs).unwrap();
 
         assert_eq!(calibration.coordinate_space, "unhomed_raw");
         assert_eq!(calibration.motors["shoulder"].center, 2100);
@@ -779,7 +786,7 @@ mod tests {
                 BTreeMap::from([("shoulder".to_owned(), 2800), ("elbow".to_owned(), 900)]),
             ],
         };
-        let calibration = build_calibration(&two_specs(), &input).unwrap();
+        let calibration = input.build(&two_specs()).unwrap();
         assert_eq!(calibration.motors["shoulder"].range_min, 1500);
         assert_eq!(calibration.motors["shoulder"].range_max, 2800);
         assert_eq!(calibration.motors["elbow"].range_min, 900);
@@ -811,23 +818,20 @@ mod tests {
     #[test]
     fn calibration_must_match_motor_names_ids_and_directions() {
         let specs = two_specs();
-        let calibration = build_calibration(&specs, &direct_input()).unwrap();
-        assert_eq!(
-            validate_calibration_for_motors(&specs, &calibration),
-            Ok(())
-        );
+        let calibration = direct_input().build(&specs).unwrap();
+        assert_eq!(calibration.validate_for_motor_specs(&specs), Ok(()));
 
         let mut missing = calibration.clone();
         missing.motors.remove("elbow");
         assert!(matches!(
-            validate_calibration_for_motors(&specs, &missing),
+            missing.validate_for_motor_specs(&specs),
             Err(CalibrationError::KeyMismatch { .. })
         ));
 
         let mut wrong_id = calibration.clone();
         wrong_id.motors.get_mut("elbow").unwrap().id = 99;
         assert!(matches!(
-            validate_calibration_for_motors(&specs, &wrong_id),
+            wrong_id.validate_for_motor_specs(&specs),
             Err(CalibrationError::MotorSpecMismatch {
                 motor,
                 expected_id: 2,
@@ -843,7 +847,7 @@ mod tests {
             .unwrap()
             .direction = Direction::Reversed;
         assert!(matches!(
-            validate_calibration_for_motors(&specs, &wrong_direction),
+            wrong_direction.validate_for_motor_specs(&specs),
             Err(CalibrationError::MotorSpecMismatch {
                 motor,
                 expected_direction: Direction::Normal,
@@ -867,7 +871,7 @@ mod tests {
             )]),
         };
         assert!(matches!(
-            build_calibration(&specs, &direct),
+            direct.build(&specs),
             Err(CalibrationError::KeyMismatch { .. })
         ));
 
@@ -876,7 +880,7 @@ mod tests {
             samples: Vec::new(),
         };
         assert_eq!(
-            build_calibration(&specs, &empty_sweep),
+            empty_sweep.build(&specs),
             Err(CalibrationError::EmptySamples)
         );
     }
@@ -904,7 +908,7 @@ mod tests {
                 motors: BTreeMap::from([("joint".to_owned(), reading)]),
             };
             assert!(matches!(
-                build_calibration(&BTreeMap::from([("joint".to_owned(), spec(1))]), &input),
+                input.build(&BTreeMap::from([("joint".to_owned(), spec(1))])),
                 Err(CalibrationError::InvalidRange { .. })
             ));
         }
@@ -919,17 +923,17 @@ mod tests {
             center: 25,
             range_max: 100,
         };
-        assert_eq!(normalize_centered_raw(&normal, -10).unwrap(), -1.0);
-        assert_eq!(normalize_centered_raw(&normal, 25).unwrap(), 0.0);
-        assert_eq!(normalize_centered_raw(&normal, 1000).unwrap(), 1.0);
-        assert!((normalize_centered_raw(&normal, 50).unwrap() - (1.0 / 3.0)).abs() < 1e-12);
+        assert_eq!(normal.normalize_raw(-10).unwrap(), -1.0);
+        assert_eq!(normal.normalize_raw(25).unwrap(), 0.0);
+        assert_eq!(normal.normalize_raw(1000).unwrap(), 1.0);
+        assert!((normal.normalize_raw(50).unwrap() - (1.0 / 3.0)).abs() < 1e-12);
 
         let reversed = MotorCalibration {
             direction: Direction::Reversed,
             ..normal
         };
-        assert_eq!(normalize_centered_raw(&reversed, 0).unwrap(), 1.0);
-        assert_eq!(normalize_centered_raw(&reversed, 100).unwrap(), -1.0);
+        assert_eq!(reversed.normalize_raw(0).unwrap(), 1.0);
+        assert_eq!(reversed.normalize_raw(100).unwrap(), -1.0);
     }
 
     #[test]
@@ -1043,7 +1047,7 @@ mod tests {
             ]))
             .unwrap();
 
-        let calibration = build_calibration(&two_specs(), &tracker.into_input().unwrap()).unwrap();
+        let calibration = tracker.into_input().unwrap().build(&two_specs()).unwrap();
         assert_eq!(calibration.motors["shoulder"].range_min, 900);
         assert_eq!(calibration.motors["shoulder"].center, 2100);
         assert_eq!(calibration.motors["shoulder"].range_max, 3300);
@@ -1060,22 +1064,19 @@ mod tests {
         };
 
         for raw in [900, 1500, 2048, 2900, 3300] {
-            let normalized = normalize_centered_raw(&calibration, raw).unwrap();
-            assert_eq!(
-                denormalize_centered_raw(&calibration, normalized).unwrap(),
-                raw
-            );
+            let normalized = calibration.normalize_raw(raw).unwrap();
+            assert_eq!(calibration.denormalize(normalized).unwrap(), raw);
         }
 
         // Commands beyond the calibrated travel stop at the limits.
-        assert_eq!(denormalize_centered_raw(&calibration, -5.0).unwrap(), 900);
-        assert_eq!(denormalize_centered_raw(&calibration, 5.0).unwrap(), 3300);
+        assert_eq!(calibration.denormalize(-5.0).unwrap(), 900);
+        assert_eq!(calibration.denormalize(5.0).unwrap(), 3300);
         assert_eq!(
-            denormalize_centered_raw(&calibration, f64::NAN),
+            calibration.denormalize(f64::NAN),
             Err(CalibrationError::NonFiniteNormalizedCommand)
         );
         assert_eq!(
-            denormalize_centered_raw(&calibration, f64::INFINITY),
+            calibration.denormalize(f64::INFINITY),
             Err(CalibrationError::NonFiniteNormalizedCommand)
         );
 
@@ -1083,8 +1084,8 @@ mod tests {
             direction: Direction::Reversed,
             ..calibration
         };
-        assert_eq!(denormalize_centered_raw(&reversed, 1.0).unwrap(), 900);
-        assert_eq!(denormalize_centered_raw(&reversed, -1.0).unwrap(), 3300);
+        assert_eq!(reversed.denormalize(1.0).unwrap(), 900);
+        assert_eq!(reversed.denormalize(-1.0).unwrap(), 3300);
     }
 
     #[test]
@@ -1118,15 +1119,9 @@ mod tests {
             range_max: i64::MAX,
         };
 
-        assert_eq!(
-            denormalize_centered_raw(&calibration, -1.0).unwrap(),
-            i64::MIN
-        );
-        assert_eq!(
-            denormalize_centered_raw(&calibration, 1.0).unwrap(),
-            i64::MAX
-        );
-        assert_eq!(denormalize_centered_raw(&calibration, 0.0).unwrap(), 0);
+        assert_eq!(calibration.denormalize(-1.0).unwrap(), i64::MIN);
+        assert_eq!(calibration.denormalize(1.0).unwrap(), i64::MAX);
+        assert_eq!(calibration.denormalize(0.0).unwrap(), 0);
     }
 
     #[test]
@@ -1138,10 +1133,7 @@ mod tests {
             center: 0,
             range_max: i64::MAX,
         };
-        assert_eq!(
-            normalize_centered_raw(&calibration, i64::MIN).unwrap(),
-            -1.0
-        );
-        assert_eq!(normalize_centered_raw(&calibration, i64::MAX).unwrap(), 1.0);
+        assert_eq!(calibration.normalize_raw(i64::MIN).unwrap(), -1.0);
+        assert_eq!(calibration.normalize_raw(i64::MAX).unwrap(), 1.0);
     }
 }

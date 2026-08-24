@@ -463,7 +463,7 @@ impl EpisodeCatalogPort for EpisodeHttpAdapter<'_> {
 }
 
 impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
-    fn episodes(&self) -> Vec<EpisodeView> {
+    fn episodes(&self) -> Vec<EpisodeRecord> {
         self.state
             .episodes
             .list()
@@ -493,7 +493,7 @@ impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
     fn timeline_traces(
         &self,
         query: EpisodeTraceQuery,
-    ) -> Result<TimelineTracesView, ApplicationError> {
+    ) -> Result<TimelineTraceCollection, ApplicationError> {
         self.state
             .episodes
             .timeline_traces(&query.episode, query.buckets)
@@ -501,7 +501,7 @@ impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
             .map_err(episode_application_error)
     }
 
-    fn timeline(&self, episode: String) -> Result<EpisodeTimelineView, ApplicationError> {
+    fn timeline(&self, episode: String) -> Result<EpisodeTimelineRecord, ApplicationError> {
         let samples = self
             .state
             .episodes
@@ -522,9 +522,9 @@ impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
             .into_iter()
             .map(application_video_asset)
             .collect();
-        Ok(EpisodeTimelineView {
+        Ok(EpisodeTimelineRecord {
             episode: application_episode(summary),
-            samples: TimelineMetadataView {
+            samples: TimelineMetadataRecord {
                 samples: samples.samples,
                 first_seconds: samples.first_seconds,
                 last_seconds: samples.last_seconds,
@@ -533,7 +533,7 @@ impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
         })
     }
 
-    fn inspection(&self, episode: String) -> Result<EpisodeInspectionView, ApplicationError> {
+    fn inspection(&self, episode: String) -> Result<EpisodeInspectionRecord, ApplicationError> {
         self.state
             .episodes
             .inspection(&episode)
@@ -545,7 +545,7 @@ impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
         &self,
         episode: String,
         seconds: f64,
-    ) -> Result<TimelineSampleView, ApplicationError> {
+    ) -> Result<TimelineSampleRecord, ApplicationError> {
         self.state
             .episodes
             .sample_at(&episode, seconds)
@@ -554,14 +554,14 @@ impl EpisodeQueryPort for EpisodeHttpAdapter<'_> {
     }
 }
 
-fn application_episode(episode: EpisodeSummary) -> EpisodeView {
-    EpisodeView {
+fn application_episode(episode: EpisodeSummary) -> EpisodeRecord {
+    EpisodeRecord {
         id: episode.id,
         dataset_id: episode.dataset_id,
         arms: episode
             .arms
             .into_iter()
-            .map(|arm| EpisodeArmView {
+            .map(|arm| EpisodeArmRecord {
                 id: arm.id,
                 robot_type: arm.robot_type,
                 joints: arm.joints,
@@ -572,7 +572,7 @@ fn application_episode(episode: EpisodeSummary) -> EpisodeView {
         recording_gaps: episode
             .recording_gaps
             .into_iter()
-            .map(|gap| RecordingGapView {
+            .map(|gap| RecordingGapRecord {
                 after_seconds: gap.after_seconds,
                 duration_seconds: gap.duration_seconds,
             })
@@ -586,7 +586,7 @@ fn application_episode(episode: EpisodeSummary) -> EpisodeView {
     }
 }
 
-pub(super) fn contract_episode(episode: EpisodeView) -> EpisodeSummary {
+pub(super) fn contract_episode(episode: EpisodeRecord) -> EpisodeSummary {
     EpisodeSummary {
         id: episode.id,
         dataset_id: episode.dataset_id,
@@ -618,8 +618,8 @@ pub(super) fn contract_episode(episode: EpisodeView) -> EpisodeSummary {
     }
 }
 
-fn application_video_asset(video: VideoAssetMetadata) -> VideoAssetView {
-    VideoAssetView {
+fn application_video_asset(video: VideoAssetMetadata) -> VideoAssetRecord {
+    VideoAssetRecord {
         stream_id: video.stream_id,
         camera_id: video.camera_id,
         width: video.width,
@@ -632,7 +632,7 @@ fn application_video_asset(video: VideoAssetMetadata) -> VideoAssetView {
     }
 }
 
-fn application_episode_inspection(inspection: EpisodeInspection) -> EpisodeInspectionView {
+fn application_episode_inspection(inspection: EpisodeInspection) -> EpisodeInspectionRecord {
     let samples = &inspection.episode.samples;
     let arms = inspection
         .episode
@@ -642,7 +642,7 @@ fn application_episode_inspection(inspection: EpisodeInspection) -> EpisodeInspe
         .enumerate()
         .map(|(arm_index, arm)| {
             let joint_count = arm.joints.len();
-            EpisodeInspectionArmView {
+            EpisodeInspectionArmRecord {
                 arm: arm.id.clone(),
                 joints: arm.joints.clone(),
                 normalized: samples
@@ -692,7 +692,7 @@ fn application_episode_inspection(inspection: EpisodeInspection) -> EpisodeInspe
             }
         })
         .collect();
-    EpisodeInspectionView {
+    EpisodeInspectionRecord {
         episode: application_episode(inspection.summary),
         sample_times_seconds: samples.iter().map(|sample| sample.seconds).collect(),
         follow_error_degrees: samples
@@ -716,7 +716,7 @@ fn application_optional_frame_matrix(
         &'a crate::backend::recording::episodes::Sample,
         usize,
     ) -> Option<&'a [Option<f64>]>,
-) -> OptionalFrameMatrixView {
+) -> OptionalFrameMatrixRecord {
     let mut present = Vec::with_capacity(samples.len());
     let mut values = Vec::with_capacity(samples.len().saturating_mul(joint_count));
     for sample in samples {
@@ -732,10 +732,10 @@ fn application_optional_frame_matrix(
             }
         }
     }
-    OptionalFrameMatrixView { present, values }
+    OptionalFrameMatrixRecord { present, values }
 }
 
-fn contract_video_asset(video: VideoAssetView) -> VideoAssetMetadata {
+fn contract_video_asset(video: VideoAssetRecord) -> VideoAssetMetadata {
     VideoAssetMetadata {
         stream_id: video.stream_id,
         camera_id: video.camera_id,
@@ -749,7 +749,7 @@ fn contract_video_asset(video: VideoAssetView) -> VideoAssetMetadata {
     }
 }
 
-fn contract_episode_inspection(inspection: EpisodeInspectionView) -> EpisodeInspectionSnapshot {
+fn contract_episode_inspection(inspection: EpisodeInspectionRecord) -> EpisodeInspectionSnapshot {
     EpisodeInspectionSnapshot {
         episode: contract_episode(inspection.episode),
         sample_times_seconds: inspection.sample_times_seconds,
@@ -785,22 +785,22 @@ fn contract_episode_inspection(inspection: EpisodeInspectionView) -> EpisodeInsp
     }
 }
 
-fn contract_optional_frame_matrix(matrix: OptionalFrameMatrixView) -> EpisodeOptionalFrameMatrix {
+fn contract_optional_frame_matrix(matrix: OptionalFrameMatrixRecord) -> EpisodeOptionalFrameMatrix {
     EpisodeOptionalFrameMatrix {
         present: matrix.present,
         values: matrix.values,
     }
 }
 
-fn application_timeline_sample(sample: TimelineSample) -> TimelineSampleView {
-    TimelineSampleView {
+fn application_timeline_sample(sample: TimelineSample) -> TimelineSampleRecord {
+    TimelineSampleRecord {
         frame: sample.frame,
         seconds: sample.seconds,
         follow_error_degrees: sample.follow_error_degrees,
         arms: sample
             .arms
             .into_iter()
-            .map(|arm| TimelineArmSampleView {
+            .map(|arm| TimelineArmSampleRecord {
                 arm: arm.arm,
                 normalized: arm.normalized,
                 raw: arm.raw,
@@ -812,7 +812,7 @@ fn application_timeline_sample(sample: TimelineSample) -> TimelineSampleView {
     }
 }
 
-fn contract_timeline_sample(sample: TimelineSampleView) -> TimelineSample {
+fn contract_timeline_sample(sample: TimelineSampleRecord) -> TimelineSample {
     TimelineSample {
         frame: sample.frame,
         seconds: sample.seconds,
@@ -834,8 +834,8 @@ fn contract_timeline_sample(sample: TimelineSampleView) -> TimelineSample {
     }
 }
 
-fn application_timeline_traces(traces: TimelineTraces) -> TimelineTracesView {
-    TimelineTracesView {
+fn application_timeline_traces(traces: TimelineTraces) -> TimelineTraceCollection {
+    TimelineTraceCollection {
         episode: traces.episode,
         samples: traces.samples,
         buckets: traces.buckets,
@@ -844,17 +844,17 @@ fn application_timeline_traces(traces: TimelineTraces) -> TimelineTracesView {
         lanes: traces
             .lanes
             .into_iter()
-            .map(|lane| TimelineTraceLaneView {
+            .map(|lane| TimelineTraceLaneRecord {
                 joint: lane.joint,
                 series: lane
                     .series
                     .into_iter()
-                    .map(|series| TimelineTraceSeriesView {
+                    .map(|series| TimelineTraceSeriesRecord {
                         arm: series.arm,
                         points: series
                             .points
                             .into_iter()
-                            .map(|point| TimelineTracePointView {
+                            .map(|point| TimelineTracePointRecord {
                                 seconds: point.seconds,
                                 value: point.value,
                             })
@@ -866,7 +866,7 @@ fn application_timeline_traces(traces: TimelineTraces) -> TimelineTracesView {
     }
 }
 
-fn contract_timeline_traces(traces: TimelineTracesView) -> TimelineTraces {
+fn contract_timeline_traces(traces: TimelineTraceCollection) -> TimelineTraces {
     TimelineTraces {
         episode: traces.episode,
         samples: traces.samples,
@@ -1014,7 +1014,8 @@ async fn list_episodes(State(state): State<AppState>) -> Json<EpisodeCatalogResp
         .telemetry
         .recording
         .map(|progress| progress.episode);
-    let episodes = episode_queries::list(&EpisodeHttpAdapter::catalog(&state))
+    let episodes = EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
+        .list()
         .into_iter()
         .filter(|episode| Some(&episode.id) != recording.as_ref())
         .map(contract_episode)
@@ -1308,8 +1309,7 @@ async fn episode_trace(
     Query(query): Query<TraceQuery>,
 ) -> Result<Json<Vec<Option<f64>>>, Failure> {
     let trace = tokio::task::spawn_blocking(move || {
-        episode_queries::follow_error_trace(
-            &EpisodeHttpAdapter::catalog(&state),
+        EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state)).follow_error_trace(
             EpisodeTraceQuery {
                 episode: id,
                 buckets: query.buckets,
@@ -1327,14 +1327,12 @@ async fn episode_timeline_traces(
     Query(query): Query<TraceQuery>,
 ) -> Result<Json<TimelineTraces>, Failure> {
     let traces = tokio::task::spawn_blocking(move || {
-        episode_queries::timeline_traces(
-            &EpisodeHttpAdapter::catalog(&state),
-            EpisodeTraceQuery {
+        EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
+            .timeline_traces(EpisodeTraceQuery {
                 episode: id,
                 buckets: query.buckets,
-            },
-        )
-        .map(contract_timeline_traces)
+            })
+            .map(contract_timeline_traces)
     })
     .await
     .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
@@ -1346,7 +1344,8 @@ async fn episode_inspection(
     Path(id): Path<String>,
 ) -> Result<Json<EpisodeInspectionSnapshot>, Failure> {
     let inspection = tokio::task::spawn_blocking(move || {
-        episode_queries::inspection(&EpisodeHttpAdapter::catalog(&state), id)
+        EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
+            .inspection(id)
             .map(contract_episode_inspection)
     })
     .await
@@ -1366,7 +1365,7 @@ async fn episode_timeline(
     Path(id): Path<String>,
 ) -> Result<Json<EpisodeTimelineResponse>, Failure> {
     let result = tokio::task::spawn_blocking(move || {
-        let timeline = episode_queries::timeline(&EpisodeHttpAdapter::catalog(&state), id)?;
+        let timeline = EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state)).timeline(id)?;
         Ok::<_, Failure>(EpisodeTimelineResponse {
             episode: contract_episode(timeline.episode),
             samples: TimelineMetadata {
@@ -1397,7 +1396,8 @@ async fn episode_timeline_sample(
     Query(query): Query<TimelineSampleQuery>,
 ) -> Result<Json<TimelineSample>, Failure> {
     let sample = tokio::task::spawn_blocking(move || {
-        episode_queries::timeline_sample(&EpisodeHttpAdapter::catalog(&state), id, query.at)
+        EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
+            .timeline_sample(id, query.at)
             .map(contract_timeline_sample)
     })
     .await
@@ -1480,7 +1480,7 @@ async fn episode_video(
 ) -> Result<Response, Failure> {
     // Looking up the episode first prevents an orphaned media row from becoming
     // an independent serving namespace.
-    episode_queries::authorize_asset(&EpisodeHttpAdapter::catalog(&state), id.clone())?;
+    EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state)).authorize_asset(id.clone())?;
     let length = state
         .storage
         .video_asset_size(&id, &stream, query.segment)

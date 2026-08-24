@@ -187,11 +187,11 @@ fn LiveCameraFrame(robot: String, role: String, device: String) -> Element {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct HistoricalCamera {
-    pub label: String,
-    pub url: String,
-    pub video_seconds: f64,
-    pub episode_seconds: f64,
-    pub approximate: bool,
+    pub(crate) label: String,
+    pub(crate) url: String,
+    pub(crate) video_seconds: f64,
+    pub(crate) episode_seconds: f64,
+    pub(crate) approximate: bool,
 }
 
 #[cfg(test)]
@@ -199,7 +199,7 @@ pub(crate) fn historical_camera(
     preview: &HistoricalPreview,
     selected: Option<&(String, String, String)>,
 ) -> Option<HistoricalCamera> {
-    historical_camera_at(preview, selected, preview.sample.seconds)
+    historical_camera_at(preview, selected, preview.sample().seconds)
 }
 
 pub(crate) fn historical_camera_at(
@@ -210,14 +210,14 @@ pub(crate) fn historical_camera_at(
     let expected = selected.map(|(robot, role, _)| format!("{robot}.camera.{role}"));
     let stream_id = if let Some(expected) = expected.as_deref() {
         preview
-            .timeline
+            .timeline()
             .videos
             .iter()
             .find(|asset| asset.stream_id == expected)
             .map(|asset| asset.stream_id.as_str())?
     } else {
         preview
-            .timeline
+            .timeline()
             .videos
             .first()
             .map(|asset| asset.stream_id.as_str())?
@@ -240,7 +240,7 @@ pub(crate) fn recorded_scene_source(
     let source = source
         .filter(|source| source.episode == episode)
         .cloned()
-        .map(|source| source.map(|preview| preview.sample))
+        .map(|source| source.map(HistoricalPreview::into_sample))
         .unwrap_or_else(|| RecordedSource {
             episode: episode.to_owned(),
             seconds: 0.0,
@@ -335,7 +335,7 @@ pub(crate) fn recorded_camera_registry_placeholder(
 
 pub(crate) fn recorded_camera_streams(preview: &HistoricalPreview) -> Vec<(String, String)> {
     let mut streams = Vec::new();
-    for asset in &preview.timeline.videos {
+    for asset in &preview.timeline().videos {
         if streams
             .iter()
             .any(|(stream_id, _)| stream_id == &asset.stream_id)
@@ -361,7 +361,7 @@ pub(crate) fn historical_camera_for_stream_at(
     at: f64,
 ) -> Option<HistoricalCamera> {
     let assets = preview
-        .timeline
+        .timeline()
         .videos
         .iter()
         .filter(|asset| asset.stream_id == stream_id)
@@ -403,7 +403,7 @@ pub(crate) fn historical_camera_for_stream_at(
             })?
     };
     let label = label.to_owned();
-    let episode_duration = preview.timeline.episode.duration_seconds.max(0.0);
+    let episode_duration = preview.timeline().episode.duration_seconds.max(0.0);
     let (video_seconds, approximate) = if let Some(offset) = asset.timeline_offset_seconds {
         (
             (at - offset).clamp(0.0, asset.duration_seconds.max(0.0)),
@@ -418,7 +418,7 @@ pub(crate) fn historical_camera_for_stream_at(
         (ratio * asset.duration_seconds.max(0.0), true)
     };
     let url = crate::frontend::api::http::episode_video_url(
-        &preview.episode,
+        preview.episode(),
         &asset.stream_id,
         asset.segment_index,
     );

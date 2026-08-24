@@ -5,6 +5,9 @@ edition.workspace = true
 description = "Framework-free application policy for Spiral Robotics Studio"
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 spiral-robotics-core.workspace = true
 url = "2"

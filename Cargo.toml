@@ -21,6 +21,9 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[workspace.lints.rust]
+unreachable_pub = "deny"
+
 [workspace.dependencies]
 adbc-driver-spiraldb = { git = "https://github.com/spiraldb/spiraldb.git", branch = "develop", default-features = false }
 base64 = "0.22"

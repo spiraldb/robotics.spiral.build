@@ -12,26 +12,26 @@ use crate::backend::robotics::cameras::{CameraManager, Frame};
 
 #[derive(Clone, Debug)]
 pub(crate) struct CameraCaptureSpec {
-    pub stream_id: String,
-    pub camera_id: String,
-    pub width: u32,
-    pub height: u32,
-    pub fps: u32,
+    pub(crate) stream_id: String,
+    pub(crate) camera_id: String,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) fps: u32,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct VideoAsset {
-    pub stream_id: String,
-    pub camera_id: String,
-    pub payload: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
-    pub fps: u32,
-    pub frames: u64,
+    pub(crate) stream_id: String,
+    pub(crate) camera_id: String,
+    pub(crate) payload: Vec<u8>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) fps: u32,
+    pub(crate) frames: u64,
     /// Zero-based active interval for this logical camera stream.
-    pub segment_index: u32,
+    pub(crate) segment_index: u32,
     /// Start of this segment on the gap-free episode timeline.
-    pub timeline_offset_seconds: Option<f64>,
+    pub(crate) timeline_offset_seconds: Option<f64>,
 }
 
 /// Filesystem-free metadata safe to expose to a remote studio client.
@@ -41,15 +41,15 @@ pub(crate) struct VideoAsset {
 /// joint samples; `segment_index` selects its local HTTP asset.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct VideoAssetMetadata {
-    pub stream_id: String,
-    pub camera_id: String,
-    pub width: u32,
-    pub height: u32,
-    pub fps: u32,
-    pub frames: u64,
-    pub duration_seconds: f64,
-    pub segment_index: u32,
-    pub timeline_offset_seconds: Option<f64>,
+    pub(crate) stream_id: String,
+    pub(crate) camera_id: String,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) fps: u32,
+    pub(crate) frames: u64,
+    pub(crate) duration_seconds: f64,
+    pub(crate) segment_index: u32,
+    pub(crate) timeline_offset_seconds: Option<f64>,
 }
 
 impl VideoAsset {
@@ -117,8 +117,8 @@ enum CaptureState {
 
 #[derive(Clone, Debug)]
 pub(crate) struct VideoEncoderSettings {
-    pub executable: String,
-    pub codec: String,
+    pub(crate) executable: String,
+    pub(crate) codec: String,
 }
 
 impl VideoCapture {

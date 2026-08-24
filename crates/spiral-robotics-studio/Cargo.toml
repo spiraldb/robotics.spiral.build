@@ -5,6 +5,9 @@ edition.workspace = true
 description = "Web studio for setting up, calibrating, and operating SO-ARM101 arms"
 publish = false
 
+[lints]
+workspace = true
+
 [features]
 default = []
 web = ["charming/wasm", "dioxus/web", "spiral-robotics-ui/web"]

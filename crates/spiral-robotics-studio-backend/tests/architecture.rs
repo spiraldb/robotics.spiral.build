@@ -108,15 +108,15 @@ fn read_controllers_delegate_selection_and_admission_to_application_use_cases() 
     let routes = fs::read_to_string(root.join("routes.rs")).expect("routes source");
     for seam in [
         "robots::list(&robot_adapter)",
-        "device_discovery::list_cameras(&devices::CameraDiscoveryAdapter(",
+        "devices::CameraDiscoveryAdapter(state.cameras.clone())",
     ] {
         assert!(routes.contains(seam), "state snapshot bypasses {seam}");
     }
 
     let devices = fs::read_to_string(root.join("routes/devices.rs")).expect("device routes");
     for seam in [
-        "device_discovery::list_serial_ports",
-        "device_discovery::list_cameras",
+        ".serial_ports()",
+        ".cameras()",
         "robots::list(&adapter)",
         "robots::get(&RobotHttpAdapter::new(&state), id)",
     ] {
@@ -129,12 +129,12 @@ fn read_controllers_delegate_selection_and_admission_to_application_use_cases() 
     let recordings =
         fs::read_to_string(root.join("routes/recordings.rs")).expect("recording routes");
     for seam in [
-        "episode_queries::list",
-        "episode_queries::follow_error_trace",
-        "episode_queries::timeline_traces",
-        "episode_queries::timeline(",
-        "episode_queries::timeline_sample",
-        "episode_queries::authorize_asset",
+        "EpisodeQueries::new",
+        ".follow_error_trace(",
+        ".timeline_traces(",
+        ".timeline(id)",
+        ".timeline_sample(",
+        ".authorize_asset(",
     ] {
         assert!(
             recordings.contains(seam),
@@ -144,7 +144,7 @@ fn read_controllers_delegate_selection_and_admission_to_application_use_cases() 
 
     let data = fs::read_to_string(root.join("routes/data.rs")).expect("data routes");
     assert!(
-        data.contains("data_application::video_asset"),
+        data.contains(".load(&DataHttpAdapter"),
         "remote video identity and selection bypass the application use case"
     );
 }

@@ -62,8 +62,8 @@ impl StudioRoute {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StudioConfiguration {
-    pub dataset: String,
-    pub spiral_query_available: bool,
+    pub(crate) dataset: String,
+    pub(crate) spiral_query_available: bool,
 }
 
 impl Default for StudioConfiguration {

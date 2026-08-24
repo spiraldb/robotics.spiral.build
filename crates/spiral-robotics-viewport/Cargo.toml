@@ -5,6 +5,9 @@ edition.workspace = true
 description = "The studio's 3D bench: a WebGL scene of addressable, pickable entities"
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 spiral-robotics-core.workspace = true
 glam.workspace = true

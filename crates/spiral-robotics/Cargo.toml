@@ -5,6 +5,9 @@ edition.workspace = true
 description = "Rust-native hardware adapters for real-world robotics"
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 spiral-robotics-core.workspace = true
 image.workspace = true

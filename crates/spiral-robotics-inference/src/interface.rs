@@ -21,7 +21,7 @@ pub enum ImageFormat {
 /// A borrowed image plane. `row_stride` allows callers to pass camera buffers
 /// without repacking them first.
 #[derive(Clone, Copy, Debug)]
-pub struct ImageView<'a> {
+pub struct ImageFrame<'a> {
     pub name: &'a str,
     pub width: usize,
     pub height: usize,
@@ -30,7 +30,7 @@ pub struct ImageView<'a> {
     pub data: &'a [u8],
 }
 
-impl<'a> ImageView<'a> {
+impl<'a> ImageFrame<'a> {
     pub fn packed_rgb8(name: &'a str, width: usize, height: usize, data: &'a [u8]) -> Result<Self> {
         let row_stride = width.checked_mul(3).ok_or_else(|| {
             crate::Error::Input("packed RGB row stride overflows usize".to_owned())
@@ -50,7 +50,7 @@ impl<'a> ImageView<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct InferenceInput<'a> {
     pub state: &'a [f32],
-    pub images: &'a [ImageView<'a>],
+    pub images: &'a [ImageFrame<'a>],
 }
 
 /// Stable model contract that the integration layer can validate before any
@@ -173,7 +173,7 @@ pub trait PolicyLoader: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActionChunk, ImageView, InferenceStats};
+    use super::{ActionChunk, ImageFrame, InferenceStats};
 
     #[test]
     fn action_chunks_cannot_misrepresent_their_storage() {
@@ -183,6 +183,6 @@ mod tests {
 
     #[test]
     fn packed_images_report_stride_overflow() {
-        assert!(ImageView::packed_rgb8("camera", usize::MAX, 1, &[]).is_err());
+        assert!(ImageFrame::packed_rgb8("camera", usize::MAX, 1, &[]).is_err());
     }
 }

@@ -5,6 +5,9 @@ edition.workspace = true
 description = "Framework-neutral inference contracts and model artifacts"
 publish = false
 
+[lints]
+workspace = true
+
 [features]
 default = []
 download = ["dep:dirs", "dep:reqwest", "dep:tempfile"]

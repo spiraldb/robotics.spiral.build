@@ -13,7 +13,7 @@ use spiral_robotics_contracts::api::{
     RolloutPhase as ContractRolloutPhase, RolloutSnapshot as ContractRolloutSnapshot,
     StartRolloutRequest,
 };
-use spiral_robotics_inference::{ActionChunk, ImageView, InferenceInput, Policy, PolicyLoader};
+use spiral_robotics_inference::{ActionChunk, ImageFrame, InferenceInput, Policy, PolicyLoader};
 use spiral_robotics_training_http::HttpPolicyLoader;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -1206,7 +1206,7 @@ fn infer_observation(
     let decoded = decode_images(images)?;
     let views = decoded
         .iter()
-        .map(|image| ImageView::packed_rgb8(&image.name, image.width, image.height, &image.pixels))
+        .map(|image| ImageFrame::packed_rgb8(&image.name, image.width, image.height, &image.pixels))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("preparing camera input: {error}"))?;
     let chunk = policy

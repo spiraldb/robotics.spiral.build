@@ -52,8 +52,8 @@ pub(crate) struct RepositoryConnection {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CatalogRelation {
-    pub name: String,
-    pub relation_type: String,
+    pub(crate) name: String,
+    pub(crate) relation_type: String,
 }
 
 impl RepositoryConnection {

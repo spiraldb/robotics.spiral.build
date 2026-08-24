@@ -5,6 +5,9 @@ edition.workspace = true
 description = "Motor control runtime for Spiral Robotics Studio"
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 spiral-robotics.workspace = true
 spiral-robotics-contracts.workspace = true

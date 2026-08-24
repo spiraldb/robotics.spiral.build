@@ -524,7 +524,7 @@ fn PortSection(
                         move |event: Event<FormData>| {
                             let value = event.value();
                             if !value.is_empty() {
-                                assign_port(studio, id.clone(), baud, value);
+                                studio.assign_port(id.clone(), baud, value);
                             }
                         }
                     },
@@ -558,7 +558,7 @@ fn PortSection(
                 step: identify_step,
                 on_found: {
                     let id = id.clone();
-                    move |path: String| assign_port(studio, id.clone(), baud, path)
+                    move |path: String| studio.assign_port(id.clone(), baud, path)
                 },
             }
         }
@@ -587,17 +587,19 @@ fn PortOption(port: SerialPortSummary, owner: String, selected: bool) -> Element
 }
 
 /// Record a serial port on a robot, keeping its existing baud rate.
-fn assign_port(studio: Studio, id: String, baud_rate: u32, path: String) {
-    let request = UpdateRobotRequest {
-        port: Some(PortSettings {
-            path: path.clone(),
-            baud_rate,
-        }),
-        ..UpdateRobotRequest::default()
-    };
-    studio.run(format!("Assigned {path}."), async move {
-        api::send(Method::PATCH, &format!("/api/robots/{id}"), Some(&request)).await
-    });
+impl Studio {
+    fn assign_port(self, id: String, baud_rate: u32, path: String) {
+        let request = UpdateRobotRequest {
+            port: Some(PortSettings {
+                path: path.clone(),
+                baud_rate,
+            }),
+            ..UpdateRobotRequest::default()
+        };
+        self.run(format!("Assigned {path}."), async move {
+            api::send(Method::PATCH, &format!("/api/robots/{id}"), Some(&request)).await
+        });
+    }
 }
 
 /// Where the operator is in the unplug-and-compare workflow.
@@ -767,7 +769,7 @@ fn CameraSection(robot: RobotSummary) -> Element {
                                     .filter(|camera| camera.name != binding.name)
                                     .cloned()
                                     .collect::<Vec<_>>();
-                                move |_| save_cameras(studio, id.clone(), remaining.clone(), saving_cameras)
+                                move |_| studio.save_cameras(id.clone(), remaining.clone(), saving_cameras)
                             },
                             UnassignIcon {}
                         }
@@ -840,7 +842,7 @@ fn CameraSection(robot: RobotSummary) -> Element {
                                         .cloned()
                                         .collect::<Vec<_>>();
                                     bindings.push(CameraBinding { name, id: device_id, mount: None });
-                                    save_cameras(studio, id.clone(), bindings, saving_cameras);
+                                    studio.save_cameras(id.clone(), bindings, saving_cameras);
                                 }
                             },
                             {if saving_cameras() { "Saving…" } else if taken { "Reassign" } else { "Assign" }}
@@ -853,20 +855,22 @@ fn CameraSection(robot: RobotSummary) -> Element {
 }
 
 /// Replace a robot's camera assignments.
-fn save_cameras(studio: Studio, id: String, bindings: Vec<CameraBinding>, saving: Signal<bool>) {
-    if saving.peek().to_owned() {
-        return;
+impl Studio {
+    fn save_cameras(self, id: String, bindings: Vec<CameraBinding>, saving: Signal<bool>) {
+        if saving.peek().to_owned() {
+            return;
+        }
+        let request = UpdateRobotRequest {
+            cameras: Some(bindings),
+            ..UpdateRobotRequest::default()
+        };
+        self.run("", async move {
+            single_flight(
+                saving,
+                api::send(Method::PATCH, &format!("/api/robots/{id}"), Some(&request)),
+            )
+            .await
+            .unwrap_or(Ok(()))
+        });
     }
-    let request = UpdateRobotRequest {
-        cameras: Some(bindings),
-        ..UpdateRobotRequest::default()
-    };
-    studio.run("", async move {
-        single_flight(
-            saving,
-            api::send(Method::PATCH, &format!("/api/robots/{id}"), Some(&request)),
-        )
-        .await
-        .unwrap_or(Ok(()))
-    });
 }

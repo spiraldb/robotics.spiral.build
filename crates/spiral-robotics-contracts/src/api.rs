@@ -744,8 +744,7 @@ impl TrainingSnapshot {
             }
             TrainingUpdate::Metric { run_id, point } => {
                 if let Some(run) = self.runs.iter_mut().find(|run| run.id == run_id) {
-                    run.current_step = run.current_step.max(point.step);
-                    insert_training_metric(&mut run.metrics, *point);
+                    run.insert_metric(*point);
                 }
             }
             TrainingUpdate::Checkpoint { run_id, checkpoint } => {
@@ -774,83 +773,90 @@ impl TrainingSnapshot {
     }
 }
 
-fn insert_training_metric(metrics: &mut Vec<TrainingMetricPoint>, point: TrainingMetricPoint) {
-    match metrics.binary_search_by_key(&point.step, |existing| existing.step) {
-        Ok(index) => metrics[index] = point,
-        Err(index) => metrics.insert(index, point),
-    }
-    if metrics.len() > MAX_TRAINING_METRIC_POINTS {
-        compact_training_metrics(metrics);
-    }
-}
-
-/// Keep a bounded, whole-run view instead of deleting the oldest steps.
-///
-/// Event samples, endpoints, and the extrema of every plotted metric survive
-/// each compaction pass. Remaining capacity is filled uniformly so reconnecting
-/// clients retain continuous temporal coverage while the newest interval stays
-/// dense between passes.
-fn compact_training_metrics(metrics: &mut Vec<TrainingMetricPoint>) {
-    use std::collections::BTreeSet;
-
-    if metrics.len() <= TRAINING_METRIC_COMPACTION_TARGET {
-        return;
-    }
-
-    let source = std::mem::take(metrics);
-    let mut keep = BTreeSet::from([0, source.len() - 1]);
-    let event_indices = source
-        .iter()
-        .enumerate()
-        .filter_map(|(index, point)| point.event.is_some().then_some(index))
-        .collect::<Vec<_>>();
-    retain_evenly(
-        &mut keep,
-        &event_indices,
-        TRAINING_METRIC_COMPACTION_TARGET / 8,
-    );
-
-    let extrema_capacity = TRAINING_METRIC_COMPACTION_TARGET.saturating_sub(keep.len());
-    let bucket_count = extrema_capacity / (TRAINING_METRIC_SERIES_COUNT * 2);
-    if bucket_count > 0 {
-        let bucket_size = source.len().div_ceil(bucket_count);
-        for bucket_start in (0..source.len()).step_by(bucket_size) {
-            let bucket_end = (bucket_start + bucket_size).min(source.len());
-            for series in 0..TRAINING_METRIC_SERIES_COUNT {
-                let values = (bucket_start..bucket_end).filter_map(|index| {
-                    training_metric_value(&source[index], series)
-                        .filter(|value| value.is_finite())
-                        .map(|value| (index, value))
-                });
-                let mut minimum = None::<(usize, f64)>;
-                let mut maximum = None::<(usize, f64)>;
-                for (index, value) in values {
-                    if minimum.is_none_or(|(_, current)| value < current) {
-                        minimum = Some((index, value));
-                    }
-                    if maximum.is_none_or(|(_, current)| value > current) {
-                        maximum = Some((index, value));
-                    }
-                }
-                if let Some((index, _)) = minimum {
-                    keep.insert(index);
-                }
-                if let Some((index, _)) = maximum {
-                    keep.insert(index);
-                }
-            }
+impl TrainingRun {
+    fn insert_metric(&mut self, point: TrainingMetricPoint) {
+        self.current_step = self.current_step.max(point.step);
+        match self
+            .metrics
+            .binary_search_by_key(&point.step, |existing| existing.step)
+        {
+            Ok(index) => self.metrics[index] = point,
+            Err(index) => self.metrics.insert(index, point),
+        }
+        if self.metrics.len() > MAX_TRAINING_METRIC_POINTS {
+            self.compact_metrics();
         }
     }
 
-    let remaining = TRAINING_METRIC_COMPACTION_TARGET.saturating_sub(keep.len());
-    let all_indices = (0..source.len()).collect::<Vec<_>>();
-    retain_evenly(&mut keep, &all_indices, remaining);
+    /// Keep a bounded, whole-run view instead of deleting the oldest steps.
+    ///
+    /// Event samples, endpoints, and the extrema of every plotted metric survive
+    /// each compaction pass. Remaining capacity is filled uniformly so reconnecting
+    /// clients retain continuous temporal coverage while the newest interval stays
+    /// dense between passes.
+    fn compact_metrics(&mut self) {
+        use std::collections::BTreeSet;
 
-    *metrics = source
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, point)| keep.contains(&index).then_some(point))
-        .collect();
+        if self.metrics.len() <= TRAINING_METRIC_COMPACTION_TARGET {
+            return;
+        }
+
+        let source = std::mem::take(&mut self.metrics);
+        let mut keep = BTreeSet::from([0, source.len() - 1]);
+        let event_indices = source
+            .iter()
+            .enumerate()
+            .filter_map(|(index, point)| point.event.is_some().then_some(index))
+            .collect::<Vec<_>>();
+        retain_evenly(
+            &mut keep,
+            &event_indices,
+            TRAINING_METRIC_COMPACTION_TARGET / 8,
+        );
+
+        let extrema_capacity = TRAINING_METRIC_COMPACTION_TARGET.saturating_sub(keep.len());
+        let bucket_count = extrema_capacity / (TRAINING_METRIC_SERIES_COUNT * 2);
+        if bucket_count > 0 {
+            let bucket_size = source.len().div_ceil(bucket_count);
+            for bucket_start in (0..source.len()).step_by(bucket_size) {
+                let bucket_end = (bucket_start + bucket_size).min(source.len());
+                for series in 0..TRAINING_METRIC_SERIES_COUNT {
+                    let values = (bucket_start..bucket_end).filter_map(|index| {
+                        source[index]
+                            .series_value(series)
+                            .filter(|value| value.is_finite())
+                            .map(|value| (index, value))
+                    });
+                    let mut minimum = None::<(usize, f64)>;
+                    let mut maximum = None::<(usize, f64)>;
+                    for (index, value) in values {
+                        if minimum.is_none_or(|(_, current)| value < current) {
+                            minimum = Some((index, value));
+                        }
+                        if maximum.is_none_or(|(_, current)| value > current) {
+                            maximum = Some((index, value));
+                        }
+                    }
+                    if let Some((index, _)) = minimum {
+                        keep.insert(index);
+                    }
+                    if let Some((index, _)) = maximum {
+                        keep.insert(index);
+                    }
+                }
+            }
+        }
+
+        let remaining = TRAINING_METRIC_COMPACTION_TARGET.saturating_sub(keep.len());
+        let all_indices = (0..source.len()).collect::<Vec<_>>();
+        retain_evenly(&mut keep, &all_indices, remaining);
+
+        self.metrics = source
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, point)| keep.contains(&index).then_some(point))
+            .collect();
+    }
 }
 
 fn retain_evenly(keep: &mut std::collections::BTreeSet<usize>, candidates: &[usize], limit: usize) {
@@ -867,21 +873,23 @@ fn retain_evenly(keep: &mut std::collections::BTreeSet<usize>, candidates: &[usi
     }
 }
 
-fn training_metric_value(point: &TrainingMetricPoint, series: usize) -> Option<f64> {
-    match series {
-        0 => Some(point.train_loss),
-        1 => point.validation_loss,
-        2 => Some(point.transfer_bytes_per_second),
-        3 => Some(point.examples_per_second),
-        4 => point.cpu_percent,
-        5 => point.gpu_percent,
-        6 => point.memory_bytes.map(|value| value as f64),
-        7 => point.loader_ms,
-        8 => point.arrow_encode_ms,
-        9 => point.upload_ms,
-        10 => point.device_copy_ms,
-        11 => point.model_ms,
-        _ => None,
+impl TrainingMetricPoint {
+    fn series_value(&self, series: usize) -> Option<f64> {
+        match series {
+            0 => Some(self.train_loss),
+            1 => self.validation_loss,
+            2 => Some(self.transfer_bytes_per_second),
+            3 => Some(self.examples_per_second),
+            4 => self.cpu_percent,
+            5 => self.gpu_percent,
+            6 => self.memory_bytes.map(|value| value as f64),
+            7 => self.loader_ms,
+            8 => self.arrow_encode_ms,
+            9 => self.upload_ms,
+            10 => self.device_copy_ms,
+            11 => self.model_ms,
+            _ => None,
+        }
     }
 }
 

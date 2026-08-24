@@ -8,10 +8,6 @@
 use spiral_robotics_contracts::spiral::{self, Table, column};
 pub(crate) use spiral_robotics_core::query::ReadOnlyMode;
 
-pub(crate) fn relation(dataset: &str, table: Table) -> String {
-    spiral::relation(dataset, table)
-}
-
 pub(crate) fn count_rows(relation: &str) -> String {
     format!("SELECT COUNT(*) AS rows FROM {relation}")
 }
@@ -41,9 +37,9 @@ pub(crate) fn delete_training_run(relation: &str, run_id: &str) -> String {
 }
 
 pub(crate) fn trajectory(dataset: &str, episode_id: &str, stream_id: &str) -> String {
-    let episodes = relation(dataset, Table::Episodes);
-    let streams = relation(dataset, Table::EpisodeStreams);
-    let samples = relation(dataset, Table::JointSamples);
+    let episodes = Table::Episodes.qualified_name(dataset);
+    let streams = Table::EpisodeStreams.qualified_name(dataset);
+    let samples = Table::JointSamples.qualified_name(dataset);
     format!(
         "SELECT e.{sample_hz}, s.{joint_names}, \
          COALESCE(j.{action}, j.{state}) AS {replay} \
@@ -67,7 +63,7 @@ pub(crate) fn trajectory(dataset: &str, episode_id: &str, stream_id: &str) -> St
 pub(crate) fn episode_samples(dataset: &str, episode_id: &str) -> String {
     format!(
         "SELECT * FROM {} WHERE {} = {} ORDER BY {}, {}",
-        relation(dataset, Table::JointSamples),
+        Table::JointSamples.qualified_name(dataset),
         column::EPISODE_ID,
         string_literal(episode_id),
         column::SAMPLE_INDEX,
@@ -81,7 +77,7 @@ pub(crate) fn video_asset_size(
     stream_id: &str,
     segment: Option<u32>,
 ) -> String {
-    let assets = relation(dataset, Table::VideoAssets);
+    let assets = Table::VideoAssets.qualified_name(dataset);
     let segment_filter = segment
         .map(|segment| format!(" AND {} = {segment}", column::SEGMENT_INDEX))
         .unwrap_or_default();
@@ -127,7 +123,7 @@ pub(crate) fn video_asset_range(
 }
 
 pub(crate) fn training_checkpoint(dataset: &str, run_id: &str, step: u64) -> String {
-    let checkpoints = relation(dataset, Table::TrainingCheckpoints);
+    let checkpoints = Table::TrainingCheckpoints.qualified_name(dataset);
     format!(
         "SELECT {config}, {checkpoint} FROM {checkpoints} \
          WHERE {run_column} = {run_id} AND {step_column} = {step} \
@@ -295,7 +291,7 @@ mod tests {
     fn generated_training_relations_follow_the_shared_contract() {
         let sql = trajectory("robotics", "episode-1", "leader");
         for table in [Table::Episodes, Table::EpisodeStreams, Table::JointSamples] {
-            assert!(sql.contains(&relation("robotics", table)));
+            assert!(sql.contains(&table.qualified_name("robotics")));
         }
     }
 

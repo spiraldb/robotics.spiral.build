@@ -1,5 +1,4 @@
 #![allow(async_fn_in_trait)]
-
 //! Framework-neutral application actions.
 //!
 //! Delivery adapters call these services with plain commands. The services

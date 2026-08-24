@@ -205,7 +205,7 @@ impl StorageManager {
         value: &T,
     ) -> Result<(), String> {
         let namespace = self.repository.namespace().to_owned();
-        let relation = sql::relation(&namespace, Table::WorkflowRuns);
+        let relation = Table::WorkflowRuns.qualified_name(&namespace);
         let json = serde_json::to_string(value)
             .map_err(|error| format!("encoding Workflow runs snapshot: {error}"))?;
         self.repository.run_exclusive_blocking(move |connection| {
@@ -260,7 +260,7 @@ impl StorageManager {
         value: &T,
     ) -> Result<(), String> {
         let namespace = self.repository.namespace().to_owned();
-        let relation = sql::relation(&namespace, Table::WorkflowRuns);
+        let relation = Table::WorkflowRuns.qualified_name(&namespace);
         let expected_digest = Sha256::digest(expected_raw_snapshot.as_bytes()).to_vec();
         let json = serde_json::to_string(value)
             .map_err(|error| format!("encoding reset Assistant history: {error}"))?;
@@ -314,7 +314,7 @@ impl StorageManager {
         if !self.is_configured() {
             return Ok(StoredStudioPreferences::default());
         }
-        let relation = sql::relation(self.repository.namespace(), Table::StudioSettings);
+        let relation = Table::StudioSettings.qualified_name(self.repository.namespace());
         self.repository.run_blocking(move |connection| {
             if !table_exists(connection, &relation)? {
                 return Ok(StoredStudioPreferences::default());
@@ -347,7 +347,7 @@ impl StorageManager {
         preferences: &StoredStudioPreferences,
     ) -> Result<(), String> {
         let namespace = self.repository.namespace().to_owned();
-        let relation = sql::relation(&namespace, Table::StudioSettings);
+        let relation = Table::StudioSettings.qualified_name(&namespace);
         let json = serde_json::to_string(preferences)
             .map_err(|error| format!("encoding Studio preferences: {error}"))?;
         self.repository.run_blocking(move |connection| {
@@ -379,8 +379,9 @@ impl StorageManager {
 
     pub(crate) fn export_project_bundle(&self) -> Result<Vec<u8>, String> {
         let namespace = self.repository.namespace().to_owned();
-        self.repository
-            .run_exclusive_blocking(move |connection| bundle::export(connection, &namespace))
+        self.repository.run_exclusive_blocking(move |connection| {
+            bundle::ProjectBundle.export(connection, &namespace)
+        })
     }
 
     pub(crate) fn import_project_bundle(
@@ -388,15 +389,16 @@ impl StorageManager {
         bytes: &[u8],
     ) -> Result<spiral_robotics_contracts::api::ProjectImportSummary, String> {
         let namespace = self.repository.namespace().to_owned();
-        self.repository
-            .run_exclusive_blocking(move |connection| bundle::import(connection, &namespace, bytes))
+        self.repository.run_exclusive_blocking(move |connection| {
+            bundle::ProjectBundle.import(connection, &namespace, bytes)
+        })
     }
 
     pub(crate) fn export_episode_bundle(&self, dataset_id: &str) -> Result<Vec<u8>, String> {
         let namespace = self.repository.namespace().to_owned();
         let dataset_id = dataset_id.to_owned();
         self.repository.run_exclusive_blocking(move |connection| {
-            bundle::export_episodes(connection, &namespace, &dataset_id)
+            bundle::EpisodeBundle.export(connection, &namespace, &dataset_id)
         })
     }
 
@@ -408,7 +410,7 @@ impl StorageManager {
         let namespace = self.repository.namespace().to_owned();
         let dataset_id = dataset_id.to_owned();
         self.repository.run_exclusive_blocking(move |connection| {
-            bundle::import_episodes(connection, &namespace, &dataset_id, bytes)
+            bundle::EpisodeBundle.import(connection, &namespace, &dataset_id, bytes)
         })
     }
 
@@ -416,7 +418,7 @@ impl StorageManager {
     where
         T: DeserializeOwned + Default,
     {
-        let relation = sql::relation(self.repository.namespace(), table);
+        let relation = table.qualified_name(self.repository.namespace());
         let key = sql::string_literal(key);
         self.repository.run_blocking(move |connection| {
             if !table_exists(connection, &relation)? {
@@ -450,7 +452,7 @@ impl StorageManager {
         table: Table,
         key: &str,
     ) -> Result<Option<String>, String> {
-        let relation = sql::relation(self.repository.namespace(), table);
+        let relation = table.qualified_name(self.repository.namespace());
         let key = key.to_owned();
         self.repository.run_blocking(move |connection| {
             load_json_document_raw_optional_on_connection(connection, &relation, &key)
@@ -468,7 +470,7 @@ impl StorageManager {
     where
         T: DeserializeOwned + Default + Serialize,
     {
-        let relation = sql::relation(self.repository.namespace(), table);
+        let relation = table.qualified_name(self.repository.namespace());
         let key = key.to_owned();
         self.repository.run_exclusive_blocking(move |connection| {
             if !table_exists(connection, &relation)? {
@@ -530,7 +532,7 @@ impl StorageManager {
         value: &T,
     ) -> Result<(), String> {
         let namespace = self.repository.namespace().to_owned();
-        let relation = sql::relation(&namespace, table);
+        let relation = table.qualified_name(&namespace);
         let key = key.to_owned();
         let json = serde_json::to_string(value)
             .map_err(|error| format!("encoding {table} snapshot: {error}"))?;
@@ -551,7 +553,7 @@ impl StorageManager {
             };
         }
         let catalog_project = project.clone();
-        let table_filter = sql::relation(self.repository.namespace(), Table::Episodes);
+        let table_filter = Table::Episodes.qualified_name(self.repository.namespace());
         if let Err(error) = self
             .repository
             .run(move |connection| {
@@ -593,7 +595,7 @@ impl StorageManager {
     }
 
     pub(crate) async fn datasets(&self) -> Result<Vec<DatasetSummary>, String> {
-        let relation = sql::relation(self.repository.namespace(), Table::Datasets);
+        let relation = Table::Datasets.qualified_name(self.repository.namespace());
         self.repository
             .run(move |connection| {
                 if !table_exists(connection, &relation)? {
@@ -841,7 +843,7 @@ impl StorageManager {
     }
 
     async fn delete_checkpoint_artifacts(&self, run_id: String) -> Result<(), String> {
-        let target = sql::relation(self.repository.namespace(), Table::TrainingCheckpoints);
+        let target = Table::TrainingCheckpoints.qualified_name(self.repository.namespace());
         self.repository
             .run(move |connection| {
                 if !table_exists(connection, &target)? {
@@ -1127,7 +1129,7 @@ pub(crate) fn replace_episode_blocking(
     // children before writing, so a retry after a process or network failure
     // can finish without duplicating already-landed rows.
     clear_episode_rows_only(connection, namespace, &episode.start.id)?;
-    let datasets = sql::relation(namespace, Table::Datasets);
+    let datasets = Table::Datasets.qualified_name(namespace);
     if !table_has_dataset(connection, &datasets, &episode.start.dataset_id)? {
         ingest_batch(
             connection,
@@ -1137,7 +1139,7 @@ pub(crate) fn replace_episode_blocking(
     }
     ingest_batch(
         connection,
-        &sql::relation(namespace, Table::EpisodeStreams),
+        &Table::EpisodeStreams.qualified_name(namespace),
         episode_streams_batch(&episode.start).map_err(|error| error.to_string())?,
     )?;
     if !videos.is_empty() {
@@ -1161,7 +1163,7 @@ pub(crate) fn replace_episode_blocking(
             .collect::<Vec<_>>();
         ingest_batch(
             connection,
-            &sql::relation(namespace, Table::EpisodeStreams),
+            &Table::EpisodeStreams.qualified_name(namespace),
             video_streams_batch(&streams).map_err(|error| error.to_string())?,
         )?;
     }
@@ -1174,7 +1176,7 @@ pub(crate) fn replace_episode_blocking(
             let batch = joint_samples_batch(&rows).map_err(|error| error.to_string())?;
             ingest_batch(
                 connection,
-                &sql::relation(namespace, Table::JointSamples),
+                &Table::JointSamples.qualified_name(namespace),
                 batch,
             )?;
             rows.clear();
@@ -1184,7 +1186,7 @@ pub(crate) fn replace_episode_blocking(
         let batch = joint_samples_batch(&rows).map_err(|error| error.to_string())?;
         ingest_batch(
             connection,
-            &sql::relation(namespace, Table::JointSamples),
+            &Table::JointSamples.qualified_name(namespace),
             batch,
         )?;
     }
@@ -1193,7 +1195,7 @@ pub(crate) fn replace_episode_blocking(
         let batch = video_assets_batch(&episode.start.id, videos, &media_relation)?;
         ingest_batch(
             connection,
-            &sql::relation(namespace, Table::VideoAssets),
+            &Table::VideoAssets.qualified_name(namespace),
             batch,
         )?;
     }
@@ -1208,7 +1210,7 @@ pub(crate) fn replace_episode_blocking(
     // partially arrived.
     ingest_batch(
         connection,
-        &sql::relation(namespace, Table::Episodes),
+        &Table::Episodes.qualified_name(namespace),
         episode_completion_batch(&episode.start, &episode.completion, encoder.frames())
             .map_err(|error| error.to_string())?,
     )?;
@@ -1230,7 +1232,7 @@ pub(crate) fn rebuild_video_dataset(
     // output preserves episode and stream IDs, so consumers select individual
     // media without multiplying catalog resources by episode count.
     let sources = sql::video_sources_relation(namespace);
-    let assets = sql::relation(namespace, Table::VideoAssets);
+    let assets = Table::VideoAssets.qualified_name(namespace);
     let dataset = sql::video_dataset_relation(namespace);
     execute_update_sql(connection, &sql::create_video_sources(&sources, &assets))
         .map_err(|error| format!("creating Spiral video source view: {error}"))?;
@@ -1339,7 +1341,7 @@ fn clear_episode_rows_only(
     episode_id: &str,
 ) -> Result<(), String> {
     for table in Table::EPISODE_RELATIONS {
-        let target = sql::relation(namespace, table);
+        let target = table.qualified_name(namespace);
         if !table_exists(connection, &target)? {
             continue;
         }
@@ -1355,7 +1357,7 @@ pub(crate) fn stored_video_episode_ids(
 ) -> Result<BTreeSet<String>, String> {
     const MAX_VIDEO_EPISODES: usize = 100_000;
 
-    let assets = sql::relation(namespace, Table::VideoAssets);
+    let assets = Table::VideoAssets.qualified_name(namespace);
     if !table_exists(connection, &assets)? {
         return Ok(BTreeSet::new());
     }
@@ -1389,7 +1391,7 @@ fn episode_has_video_assets(
     namespace: &str,
     episode_id: &str,
 ) -> Result<bool, String> {
-    let assets = sql::relation(namespace, Table::VideoAssets);
+    let assets = Table::VideoAssets.qualified_name(namespace);
     if !table_exists(connection, &assets)? {
         return Ok(false);
     }
@@ -1409,7 +1411,7 @@ pub(crate) fn retarget_stored_video_media_relations(
     connection: &mut RepositoryConnection,
     namespace: &str,
 ) -> Result<(), String> {
-    let assets = sql::relation(namespace, Table::VideoAssets);
+    let assets = Table::VideoAssets.qualified_name(namespace);
     let output = sql::video_dataset_output(namespace);
     execute_update_sql(
         connection,
@@ -1777,7 +1779,7 @@ pub(crate) fn ensure_video_assets_blob_relation(
     connection: &mut RepositoryConnection,
     namespace: &str,
 ) -> Result<(), String> {
-    let assets = sql::relation(namespace, Table::VideoAssets);
+    let assets = Table::VideoAssets.qualified_name(namespace);
     let Some(schema) = connection.table_schema(&assets)? else {
         return Ok(());
     };
@@ -1847,7 +1849,7 @@ fn is_user_project_relation(relation: &str, namespace: &str) -> bool {
         Table::WorkflowRuns,
     ]
     .into_iter()
-    .any(|table| relation == spiral::relation(namespace, table))
+    .any(|table| relation == table.qualified_name(namespace))
 }
 
 fn run_query_with_byte_limit(
@@ -2372,7 +2374,7 @@ mod tests {
             Table::WorkflowRuns,
         ] {
             assert!(!is_user_project_relation(
-                &spiral::relation(namespace, table),
+                &table.qualified_name(namespace),
                 namespace
             ));
         }

@@ -11,7 +11,9 @@ use spiral_robotics_ui::{Action, ActionPurpose, ActionVariant, RefreshIcon};
 
 use crate::frontend::api::http as api;
 use crate::frontend::screens::data::state::data_controller;
-use crate::frontend::screens::data::workbench::{QueryState, QueryViewModel, render_query_result};
+use crate::frontend::screens::data::workbench::{
+    QueryExecutionPresentation, QueryState, render_query_result,
+};
 
 const PREVIEW_ROWS: usize = 5;
 
@@ -323,11 +325,11 @@ fn render_preview(
             div { class: "data-relation-preview-state", "Select a table to preview its rows." }
         },
         Some(Ok(Some(response))) => {
-            let model = QueryViewModel {
-                sql: preview_sql(relation),
-                max_rows: PREVIEW_ROWS,
-                state: QueryState::Ready(response.clone()),
-            };
+            let model = QueryExecutionPresentation::new(
+                preview_sql(relation),
+                PREVIEW_ROWS,
+                QueryState::Ready(response.clone()),
+            );
             render_query_result(&model)
         }
     }

@@ -68,19 +68,19 @@ fn cache_key_declaration_may_be_nullable(name: &str) -> bool {
 }
 
 pub(crate) struct ModelRunRequest {
-    pub candidate_sql: String,
-    pub feature_cache_relation: String,
-    pub features: Vec<WorkflowFeatureDefinition>,
+    pub(crate) candidate_sql: String,
+    pub(crate) feature_cache_relation: String,
+    pub(crate) features: Vec<WorkflowFeatureDefinition>,
 }
 
 pub(crate) struct ModelRunResult {
-    pub rows: usize,
-    pub requested_feature_cells: u64,
-    pub computed_feature_cells: u64,
-    pub reused_feature_cells: u64,
-    pub quarantine: WorkflowQuarantineSummary,
-    pub metadata: WorkflowModelRunMetadata,
-    pub warnings: Vec<String>,
+    pub(crate) rows: usize,
+    pub(crate) requested_feature_cells: u64,
+    pub(crate) computed_feature_cells: u64,
+    pub(crate) reused_feature_cells: u64,
+    pub(crate) quarantine: WorkflowQuarantineSummary,
+    pub(crate) metadata: WorkflowModelRunMetadata,
+    pub(crate) warnings: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]

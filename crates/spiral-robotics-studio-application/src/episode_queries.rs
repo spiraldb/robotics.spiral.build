@@ -8,26 +8,26 @@ const MAX_TRACE_BUCKETS: usize = 2_048;
 const MAX_TIMELINE_BUCKETS: usize = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EpisodeArmView {
+pub struct EpisodeArmRecord {
     pub id: String,
     pub robot_type: Option<String>,
     pub joints: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RecordingGapView {
+pub struct RecordingGapRecord {
     pub after_seconds: f64,
     pub duration_seconds: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct EpisodeView {
+pub struct EpisodeRecord {
     pub id: String,
     pub dataset_id: String,
-    pub arms: Vec<EpisodeArmView>,
+    pub arms: Vec<EpisodeArmRecord>,
     pub frames: u64,
     pub duration_seconds: f64,
-    pub recording_gaps: Vec<RecordingGapView>,
+    pub recording_gaps: Vec<RecordingGapRecord>,
     pub sample_hz: f64,
     pub started_ms: i64,
     pub source: String,
@@ -43,14 +43,14 @@ pub struct EpisodeTraceQuery {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TimelineMetadataView {
+pub struct TimelineMetadataRecord {
     pub samples: u64,
     pub first_seconds: Option<f64>,
     pub last_seconds: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct VideoAssetView {
+pub struct VideoAssetRecord {
     pub stream_id: String,
     pub camera_id: String,
     pub width: u32,
@@ -63,40 +63,40 @@ pub struct VideoAssetView {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct EpisodeInspectionView {
-    pub episode: EpisodeView,
+pub struct EpisodeInspectionRecord {
+    pub episode: EpisodeRecord,
     pub sample_times_seconds: Vec<f64>,
     pub follow_error_degrees: Vec<Option<f64>>,
-    pub arms: Vec<EpisodeInspectionArmView>,
-    pub videos: Vec<VideoAssetView>,
+    pub arms: Vec<EpisodeInspectionArmRecord>,
+    pub videos: Vec<VideoAssetRecord>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct EpisodeInspectionArmView {
+pub struct EpisodeInspectionArmRecord {
     pub arm: String,
     pub joints: Vec<String>,
     pub normalized: Vec<Option<f64>>,
     pub raw: Vec<i64>,
-    pub velocity: OptionalFrameMatrixView,
-    pub effort: OptionalFrameMatrixView,
-    pub action: OptionalFrameMatrixView,
+    pub velocity: OptionalFrameMatrixRecord,
+    pub effort: OptionalFrameMatrixRecord,
+    pub action: OptionalFrameMatrixRecord,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct OptionalFrameMatrixView {
+pub struct OptionalFrameMatrixRecord {
     pub present: Vec<bool>,
     pub values: Vec<Option<f64>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct EpisodeTimelineView {
-    pub episode: EpisodeView,
-    pub samples: TimelineMetadataView,
-    pub videos: Vec<VideoAssetView>,
+pub struct EpisodeTimelineRecord {
+    pub episode: EpisodeRecord,
+    pub samples: TimelineMetadataRecord,
+    pub videos: Vec<VideoAssetRecord>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TimelineArmSampleView {
+pub struct TimelineArmSampleRecord {
     pub arm: String,
     pub normalized: BTreeMap<String, Option<f64>>,
     pub raw: BTreeMap<String, i64>,
@@ -106,43 +106,43 @@ pub struct TimelineArmSampleView {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TimelineSampleView {
+pub struct TimelineSampleRecord {
     pub frame: u64,
     pub seconds: f64,
     pub follow_error_degrees: Option<f64>,
-    pub arms: Vec<TimelineArmSampleView>,
+    pub arms: Vec<TimelineArmSampleRecord>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TimelineTracesView {
+pub struct TimelineTraceCollection {
     pub episode: String,
     pub samples: u64,
     pub buckets: usize,
     pub start_seconds: Option<f64>,
     pub end_seconds: Option<f64>,
-    pub lanes: Vec<TimelineTraceLaneView>,
+    pub lanes: Vec<TimelineTraceLaneRecord>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TimelineTraceLaneView {
+pub struct TimelineTraceLaneRecord {
     pub joint: String,
-    pub series: Vec<TimelineTraceSeriesView>,
+    pub series: Vec<TimelineTraceSeriesRecord>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TimelineTraceSeriesView {
+pub struct TimelineTraceSeriesRecord {
     pub arm: String,
-    pub points: Vec<TimelineTracePointView>,
+    pub points: Vec<TimelineTracePointRecord>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct TimelineTracePointView {
+pub struct TimelineTracePointRecord {
     pub seconds: f64,
     pub value: Option<f64>,
 }
 
 pub trait EpisodeQueryPort: Send + Sync {
-    fn episodes(&self) -> Vec<EpisodeView>;
+    fn episodes(&self) -> Vec<EpisodeRecord>;
     fn ensure_episode_exists(&self, episode: &str) -> Result<(), ApplicationError>;
     fn follow_error_trace(
         &self,
@@ -151,72 +151,73 @@ pub trait EpisodeQueryPort: Send + Sync {
     fn timeline_traces(
         &self,
         query: EpisodeTraceQuery,
-    ) -> Result<TimelineTracesView, ApplicationError>;
-    fn timeline(&self, episode: String) -> Result<EpisodeTimelineView, ApplicationError>;
-    fn inspection(&self, episode: String) -> Result<EpisodeInspectionView, ApplicationError>;
+    ) -> Result<TimelineTraceCollection, ApplicationError>;
+    fn timeline(&self, episode: String) -> Result<EpisodeTimelineRecord, ApplicationError>;
+    fn inspection(&self, episode: String) -> Result<EpisodeInspectionRecord, ApplicationError>;
     fn timeline_sample(
         &self,
         episode: String,
         seconds: f64,
-    ) -> Result<TimelineSampleView, ApplicationError>;
+    ) -> Result<TimelineSampleRecord, ApplicationError>;
 }
 
-pub fn authorize_asset<P: EpisodeQueryPort + ?Sized>(
-    port: &P,
-    episode: String,
-) -> Result<(), ApplicationError> {
-    let episode = validate_episode_id(episode)?;
-    port.ensure_episode_exists(&episode)
+pub struct EpisodeQueries<'a, P: ?Sized> {
+    port: &'a P,
 }
 
-pub fn list<P: EpisodeQueryPort + ?Sized>(port: &P) -> Vec<EpisodeView> {
-    port.episodes()
-}
-
-pub fn follow_error_trace<P: EpisodeQueryPort + ?Sized>(
-    port: &P,
-    mut query: EpisodeTraceQuery,
-) -> Result<Vec<Option<f64>>, ApplicationError> {
-    query.episode = validate_episode_id(query.episode)?;
-    query.buckets = query.buckets.clamp(1, MAX_TRACE_BUCKETS);
-    port.follow_error_trace(query)
-}
-
-pub fn timeline_traces<P: EpisodeQueryPort + ?Sized>(
-    port: &P,
-    mut query: EpisodeTraceQuery,
-) -> Result<TimelineTracesView, ApplicationError> {
-    query.episode = validate_episode_id(query.episode)?;
-    query.buckets = query.buckets.clamp(1, MAX_TIMELINE_BUCKETS);
-    port.timeline_traces(query)
-}
-
-pub fn timeline<P: EpisodeQueryPort + ?Sized>(
-    port: &P,
-    episode: String,
-) -> Result<EpisodeTimelineView, ApplicationError> {
-    port.timeline(validate_episode_id(episode)?)
-}
-
-pub fn inspection<P: EpisodeQueryPort + ?Sized>(
-    port: &P,
-    episode: String,
-) -> Result<EpisodeInspectionView, ApplicationError> {
-    port.inspection(validate_episode_id(episode)?)
-}
-
-pub fn timeline_sample<P: EpisodeQueryPort + ?Sized>(
-    port: &P,
-    episode: String,
-    seconds: f64,
-) -> Result<TimelineSampleView, ApplicationError> {
-    let episode = validate_episode_id(episode)?;
-    if !seconds.is_finite() || seconds < 0.0 {
-        return Err(ApplicationError::InvalidInput(
-            "timeline time must be a finite non-negative number".to_owned(),
-        ));
+impl<'a, P: EpisodeQueryPort + ?Sized> EpisodeQueries<'a, P> {
+    pub fn new(port: &'a P) -> Self {
+        Self { port }
     }
-    port.timeline_sample(episode, seconds)
+
+    pub fn authorize_asset(&self, episode: String) -> Result<(), ApplicationError> {
+        let episode = validate_episode_id(episode)?;
+        self.port.ensure_episode_exists(&episode)
+    }
+
+    pub fn list(&self) -> Vec<EpisodeRecord> {
+        self.port.episodes()
+    }
+
+    pub fn follow_error_trace(
+        &self,
+        mut query: EpisodeTraceQuery,
+    ) -> Result<Vec<Option<f64>>, ApplicationError> {
+        query.episode = validate_episode_id(query.episode)?;
+        query.buckets = query.buckets.clamp(1, MAX_TRACE_BUCKETS);
+        self.port.follow_error_trace(query)
+    }
+
+    pub fn timeline_traces(
+        &self,
+        mut query: EpisodeTraceQuery,
+    ) -> Result<TimelineTraceCollection, ApplicationError> {
+        query.episode = validate_episode_id(query.episode)?;
+        query.buckets = query.buckets.clamp(1, MAX_TIMELINE_BUCKETS);
+        self.port.timeline_traces(query)
+    }
+
+    pub fn timeline(&self, episode: String) -> Result<EpisodeTimelineRecord, ApplicationError> {
+        self.port.timeline(validate_episode_id(episode)?)
+    }
+
+    pub fn inspection(&self, episode: String) -> Result<EpisodeInspectionRecord, ApplicationError> {
+        self.port.inspection(validate_episode_id(episode)?)
+    }
+
+    pub fn timeline_sample(
+        &self,
+        episode: String,
+        seconds: f64,
+    ) -> Result<TimelineSampleRecord, ApplicationError> {
+        let episode = validate_episode_id(episode)?;
+        if !seconds.is_finite() || seconds < 0.0 {
+            return Err(ApplicationError::InvalidInput(
+                "timeline time must be a finite non-negative number".to_owned(),
+            ));
+        }
+        self.port.timeline_sample(episode, seconds)
+    }
 }
 
 fn validate_episode_id(episode: String) -> Result<String, ApplicationError> {
@@ -245,7 +246,7 @@ mod tests {
     }
 
     impl EpisodeQueryPort for Queries {
-        fn episodes(&self) -> Vec<EpisodeView> {
+        fn episodes(&self) -> Vec<EpisodeRecord> {
             self.calls.lock().unwrap().push("list".to_owned());
             Vec::new()
         }
@@ -269,12 +270,12 @@ mod tests {
         fn timeline_traces(
             &self,
             query: EpisodeTraceQuery,
-        ) -> Result<TimelineTracesView, ApplicationError> {
+        ) -> Result<TimelineTraceCollection, ApplicationError> {
             self.calls
                 .lock()
                 .unwrap()
                 .push(format!("traces:{}:{}", query.episode, query.buckets));
-            Ok(TimelineTracesView {
+            Ok(TimelineTraceCollection {
                 episode: query.episode,
                 samples: 0,
                 buckets: query.buckets,
@@ -284,7 +285,7 @@ mod tests {
             })
         }
 
-        fn timeline(&self, episode: String) -> Result<EpisodeTimelineView, ApplicationError> {
+        fn timeline(&self, episode: String) -> Result<EpisodeTimelineRecord, ApplicationError> {
             self.calls
                 .lock()
                 .unwrap()
@@ -292,7 +293,7 @@ mod tests {
             Err(ApplicationError::NotFound(episode))
         }
 
-        fn inspection(&self, episode: String) -> Result<EpisodeInspectionView, ApplicationError> {
+        fn inspection(&self, episode: String) -> Result<EpisodeInspectionRecord, ApplicationError> {
             self.calls
                 .lock()
                 .unwrap()
@@ -304,12 +305,12 @@ mod tests {
             &self,
             episode: String,
             seconds: f64,
-        ) -> Result<TimelineSampleView, ApplicationError> {
+        ) -> Result<TimelineSampleRecord, ApplicationError> {
             self.calls
                 .lock()
                 .unwrap()
                 .push(format!("sample:{episode}:{seconds}"));
-            Ok(TimelineSampleView {
+            Ok(TimelineSampleRecord {
                 frame: 0,
                 seconds,
                 follow_error_degrees: None,
@@ -321,25 +322,44 @@ mod tests {
     #[test]
     fn read_queries_validate_and_bound_selection_before_exactly_one_port_call() {
         let queries = Queries::default();
+        let episode_queries = EpisodeQueries::new(&queries);
         assert_eq!(
-            follow_error_trace(
-                &queries,
-                EpisodeTraceQuery {
+            episode_queries
+                .follow_error_trace(EpisodeTraceQuery {
                     episode: "episode_000001".to_owned(),
                     buckets: usize::MAX,
-                },
-            )
-            .unwrap(),
+                },)
+                .unwrap(),
             vec![Some(0.25)]
         );
-        let sample = timeline_sample(&queries, "episode_000001".to_owned(), 0.5).unwrap();
+        let sample = episode_queries
+            .timeline_sample("episode_000001".to_owned(), 0.5)
+            .unwrap();
         assert_eq!(sample.seconds, 0.5);
-        assert!(timeline_sample(&queries, "episode_000001".to_owned(), f64::NAN).is_err());
-        assert!(inspection(&queries, "episode_000001".to_owned()).is_err());
-        assert!(inspection(&queries, "../episode".to_owned()).is_err());
-        authorize_asset(&queries, "episode_000001".to_owned()).unwrap();
-        assert!(authorize_asset(&queries, "../episode".to_owned()).is_err());
-        assert!(authorize_asset(&queries, " episode".to_owned()).is_err());
+        assert!(
+            episode_queries
+                .timeline_sample("episode_000001".to_owned(), f64::NAN)
+                .is_err()
+        );
+        assert!(
+            episode_queries
+                .inspection("episode_000001".to_owned())
+                .is_err()
+        );
+        assert!(episode_queries.inspection("../episode".to_owned()).is_err());
+        episode_queries
+            .authorize_asset("episode_000001".to_owned())
+            .unwrap();
+        assert!(
+            episode_queries
+                .authorize_asset("../episode".to_owned())
+                .is_err()
+        );
+        assert!(
+            episode_queries
+                .authorize_asset(" episode".to_owned())
+                .is_err()
+        );
         assert_eq!(
             queries.calls.lock().unwrap().as_slice(),
             [

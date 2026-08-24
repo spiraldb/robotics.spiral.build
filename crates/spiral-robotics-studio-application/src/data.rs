@@ -33,7 +33,7 @@ pub struct UpdateDataSettingsCommand {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DataSettingsView {
+pub struct DataSettingsSnapshot {
     pub spiral: SpiralDestinationSettings,
     pub training_endpoint: String,
     pub video_enabled: bool,
@@ -101,11 +101,11 @@ pub struct VideoAssetQuery {
 
 /// Data-catalog consequences expressed only in application-owned models.
 pub trait DataCatalogPort: Send + Sync {
-    fn settings(&self) -> DataSettingsView;
+    fn settings(&self) -> DataSettingsSnapshot;
     fn update_settings(
         &self,
         command: UpdateDataSettingsCommand,
-    ) -> Result<DataSettingsView, ApplicationError>;
+    ) -> Result<DataSettingsSnapshot, ApplicationError>;
     async fn refresh_training_readiness(&self);
 
     async fn test_connection(&self) -> ConnectionCheck;
@@ -118,13 +118,15 @@ pub trait DataCatalogPort: Send + Sync {
     async fn video_asset(&self, query: VideoAssetQuery) -> Result<Vec<u8>, ApplicationError>;
 }
 
-pub async fn video_asset<P: DataCatalogPort + ?Sized>(
-    port: &P,
-    query: VideoAssetQuery,
-) -> Result<Vec<u8>, ApplicationError> {
-    validate_identifier("episode", &query.episode)?;
-    validate_identifier("stream", &query.stream)?;
-    port.video_asset(query).await
+impl VideoAssetQuery {
+    pub async fn load<P: DataCatalogPort + ?Sized>(
+        self,
+        port: &P,
+    ) -> Result<Vec<u8>, ApplicationError> {
+        validate_identifier("episode", &self.episode)?;
+        validate_identifier("stream", &self.stream)?;
+        port.video_asset(self).await
+    }
 }
 
 /// Control consequence for a trajectory already admitted and loaded by the
@@ -137,51 +139,45 @@ pub trait SpiralReplayPort: Send + Sync {
     ) -> Result<(), ApplicationError>;
 }
 
-pub fn get_settings<P: DataCatalogPort + ?Sized>(port: &P) -> DataSettingsView {
-    port.settings()
+impl UpdateDataSettingsCommand {
+    pub async fn apply<P: DataCatalogPort + ?Sized>(
+        self,
+        port: &P,
+    ) -> Result<DataSettingsSnapshot, ApplicationError> {
+        let command = validate_settings(self)?;
+        let settings = port.update_settings(command)?;
+        // Training readiness depends on the selected runtime endpoint, so publish
+        // preferences before rebuilding it.
+        port.refresh_training_readiness().await;
+        Ok(settings)
+    }
 }
 
-pub async fn update_settings<P: DataCatalogPort + ?Sized>(
-    port: &P,
-    command: UpdateDataSettingsCommand,
-) -> Result<DataSettingsView, ApplicationError> {
-    let command = validate_settings(command)?;
-    let settings = port.update_settings(command)?;
-    // Training readiness depends on the selected runtime endpoint, so publish
-    // preferences before rebuilding it.
-    port.refresh_training_readiness().await;
-    Ok(settings)
+impl QueryCommand {
+    pub async fn execute<P: DataCatalogPort + ?Sized>(
+        mut self,
+        port: &P,
+    ) -> Result<QueryResult, ApplicationError> {
+        ensure_read_only(&self.statement, ReadOnlyMode::Preview)
+            .map_err(|error| ApplicationError::InvalidInput(error.to_string()))?;
+        self.max_rows = self.max_rows.clamp(1, MAX_QUERY_ROWS);
+        port.query(self).await
+    }
 }
 
-pub async fn test_connection<P: DataCatalogPort + ?Sized>(port: &P) -> ConnectionCheck {
-    port.test_connection().await
-}
-
-pub async fn query<P: DataCatalogPort + ?Sized>(
-    port: &P,
-    mut command: QueryCommand,
-) -> Result<QueryResult, ApplicationError> {
-    ensure_read_only(&command.statement, ReadOnlyMode::Preview)
-        .map_err(|error| ApplicationError::InvalidInput(error.to_string()))?;
-    command.max_rows = command.max_rows.clamp(1, MAX_QUERY_ROWS);
-    port.query(command).await
-}
-
-pub async fn start_spiral_replay<D, R>(
-    data: &D,
-    replay: &R,
-    command: StartSpiralReplayCommand,
-) -> Result<(), ApplicationError>
-where
-    D: DataCatalogPort + ?Sized,
-    R: SpiralReplayPort + ?Sized,
-{
-    validate_replay_command(&command)?;
-    let trajectory = data
-        .load_replay_trajectory(&command.episode, &command.stream)
-        .await?;
-    validate_replay_trajectory(&trajectory)?;
-    replay.start_spiral_replay(command, trajectory).await
+impl StartSpiralReplayCommand {
+    pub async fn start<D, R>(self, data: &D, replay: &R) -> Result<(), ApplicationError>
+    where
+        D: DataCatalogPort + ?Sized,
+        R: SpiralReplayPort + ?Sized,
+    {
+        validate_replay_command(&self)?;
+        let trajectory = data
+            .load_replay_trajectory(&self.episode, &self.stream)
+            .await?;
+        validate_replay_trajectory(&trajectory)?;
+        replay.start_spiral_replay(self, trajectory).await
+    }
 }
 
 fn validate_replay_command(command: &StartSpiralReplayCommand) -> Result<(), ApplicationError> {
@@ -326,14 +322,14 @@ mod tests {
     }
 
     impl DataCatalogPort for FakeData {
-        fn settings(&self) -> DataSettingsView {
+        fn settings(&self) -> DataSettingsSnapshot {
             settings_view("settings")
         }
 
         fn update_settings(
             &self,
             command: UpdateDataSettingsCommand,
-        ) -> Result<DataSettingsView, ApplicationError> {
+        ) -> Result<DataSettingsSnapshot, ApplicationError> {
             self.events.lock().unwrap().push(format!(
                 "update:{}:{}:{}:{}:{}",
                 command.spiral_endpoint,
@@ -404,14 +400,12 @@ mod tests {
     async fn video_query_validates_identity_before_delegating_once() {
         let data = FakeData::new();
         assert_eq!(
-            video_asset(
-                &data,
-                VideoAssetQuery {
-                    episode: "episode_000001".to_owned(),
-                    stream: "wrist".to_owned(),
-                    segment: Some(2),
-                },
-            )
+            VideoAssetQuery {
+                episode: "episode_000001".to_owned(),
+                stream: "wrist".to_owned(),
+                segment: Some(2),
+            }
+            .load(&data)
             .await
             .unwrap(),
             vec![1, 2, 3]
@@ -421,22 +415,20 @@ mod tests {
             ["video:episode_000001:wrist:Some(2)"]
         );
 
-        let error = video_asset(
-            &data,
-            VideoAssetQuery {
-                episode: " episode_000001".to_owned(),
-                stream: "wrist".to_owned(),
-                segment: None,
-            },
-        )
+        let error = VideoAssetQuery {
+            episode: " episode_000001".to_owned(),
+            stream: "wrist".to_owned(),
+            segment: None,
+        }
+        .load(&data)
         .await
         .unwrap_err();
         assert!(matches!(error, ApplicationError::InvalidInput(_)));
         assert_eq!(data.events.lock().unwrap().len(), 1);
     }
 
-    fn settings_view(project: &str) -> DataSettingsView {
-        DataSettingsView {
+    fn settings_view(project: &str) -> DataSettingsSnapshot {
+        DataSettingsSnapshot {
             spiral: SpiralDestinationSettings {
                 endpoint: "https://api.spiraldb.dev".to_owned(),
                 spfs_endpoint: "https://spfs.spiraldb.dev".to_owned(),
@@ -496,10 +488,7 @@ mod tests {
     #[tokio::test]
     async fn settings_are_validated_normalized_saved_then_readiness_is_refreshed() {
         let data = FakeData::new();
-        assert_eq!(
-            update_settings(&data, settings()).await,
-            Ok(settings_view("saved"))
-        );
+        assert_eq!(settings().apply(&data).await, Ok(settings_view("saved")));
         assert_eq!(
             *data.events.lock().unwrap(),
             [
@@ -515,7 +504,7 @@ mod tests {
         let mut invalid = settings();
         invalid.project_id = "not/a/project".to_owned();
         assert!(matches!(
-            update_settings(&data, invalid).await,
+            invalid.apply(&data).await,
             Err(ApplicationError::InvalidInput(_))
         ));
         assert!(data.events.lock().unwrap().is_empty());
@@ -523,7 +512,7 @@ mod tests {
         let mut invalid = settings();
         invalid.spiral_endpoint = "file:///tmp/spiral".to_owned();
         assert!(matches!(
-            update_settings(&data, invalid).await,
+            invalid.apply(&data).await,
             Err(ApplicationError::InvalidInput(_))
         ));
         assert!(data.events.lock().unwrap().is_empty());
@@ -531,7 +520,7 @@ mod tests {
         let mut invalid = settings();
         invalid.spiral_spfs_endpoint = "file:///tmp/spfs".to_owned();
         assert!(matches!(
-            update_settings(&data, invalid).await,
+            invalid.apply(&data).await,
             Err(ApplicationError::InvalidInput(_))
         ));
         assert!(data.events.lock().unwrap().is_empty());
@@ -539,7 +528,7 @@ mod tests {
         let mut invalid = settings();
         invalid.training_endpoint = "ftp://runtime.example".to_owned();
         assert!(matches!(
-            update_settings(&data, invalid).await,
+            invalid.apply(&data).await,
             Err(ApplicationError::InvalidInput(_))
         ));
         assert!(data.events.lock().unwrap().is_empty());
@@ -547,7 +536,7 @@ mod tests {
         let mut data = FakeData::new();
         data.update_error = Some(ApplicationError::Internal("Spiral unavailable".to_owned()));
         assert_eq!(
-            update_settings(&data, settings()).await,
+            settings().apply(&data).await,
             Err(ApplicationError::Internal("Spiral unavailable".to_owned()))
         );
         assert_eq!(data.events.lock().unwrap().len(), 1);
@@ -556,13 +545,11 @@ mod tests {
     #[tokio::test]
     async fn query_row_limits_are_owned_by_the_application_action() {
         let data = FakeData::new();
-        query(
-            &data,
-            QueryCommand {
-                statement: "SELECT * FROM episodes".to_owned(),
-                max_rows: usize::MAX,
-            },
-        )
+        QueryCommand {
+            statement: "SELECT * FROM episodes".to_owned(),
+            max_rows: usize::MAX,
+        }
+        .execute(&data)
         .await
         .unwrap();
         assert_eq!(
@@ -575,13 +562,11 @@ mod tests {
     async fn unauthorized_query_is_rejected_before_the_adapter() {
         let data = FakeData::new();
         assert!(matches!(
-            query(
-                &data,
-                QueryCommand {
-                    statement: "DELETE FROM episodes".to_owned(),
-                    max_rows: 100,
-                },
-            )
+            QueryCommand {
+                statement: "DELETE FROM episodes".to_owned(),
+                max_rows: 100,
+            }
+            .execute(&data)
             .await,
             Err(ApplicationError::InvalidInput(_))
         ));
@@ -597,7 +582,7 @@ mod tests {
             error: None,
         };
         assert_eq!(
-            start_spiral_replay(&data, &control, replay()).await,
+            replay().start(&data, &control).await,
             Err(ApplicationError::External("catalog offline".to_owned()))
         );
         assert_eq!(*data.events.lock().unwrap(), ["load:episode-1:leader"]);
@@ -612,7 +597,7 @@ mod tests {
             error: Some(ApplicationError::Conflict("robot busy".to_owned())),
         };
         assert_eq!(
-            start_spiral_replay(&data, &control, replay()).await,
+            replay().start(&data, &control).await,
             Err(ApplicationError::Conflict("robot busy".to_owned()))
         );
         assert_eq!(*data.events.lock().unwrap(), ["load:episode-1:leader"]);
@@ -632,7 +617,7 @@ mod tests {
         let mut command = replay();
         command.robot = "  ".to_owned();
         assert!(matches!(
-            start_spiral_replay(&data, &control, command).await,
+            command.start(&data, &control).await,
             Err(ApplicationError::InvalidInput(_))
         ));
         assert!(data.events.lock().unwrap().is_empty());
@@ -640,7 +625,7 @@ mod tests {
         let mut data = FakeData::new();
         data.trajectory.sample_hz = f64::NAN;
         assert!(matches!(
-            start_spiral_replay(&data, &control, replay()).await,
+            replay().start(&data, &control).await,
             Err(ApplicationError::External(_))
         ));
         assert_eq!(*data.events.lock().unwrap(), ["load:episode-1:leader"]);
@@ -649,7 +634,7 @@ mod tests {
         let mut data = FakeData::new();
         data.trajectory.frames[0].insert("joint".to_owned(), 1.01);
         assert!(matches!(
-            start_spiral_replay(&data, &control, replay()).await,
+            replay().start(&data, &control).await,
             Err(ApplicationError::External(_))
         ));
         assert!(control.events.lock().unwrap().is_empty());

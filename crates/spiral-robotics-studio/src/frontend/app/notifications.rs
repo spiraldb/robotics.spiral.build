@@ -81,16 +81,16 @@ impl MessageAction {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StudioMessage {
-    pub id: u64,
-    pub text: String,
-    pub severity: MessageSeverity,
-    pub source: MessageSource,
-    pub raised_ms: f64,
+    pub(crate) id: u64,
+    pub(crate) text: String,
+    pub(crate) severity: MessageSeverity,
+    pub(crate) source: MessageSource,
+    pub(crate) raised_ms: f64,
     /// How long this message receives space in the status bar. It remains in
     /// history after this deadline until the operator dismisses it.
-    pub prominent_until_ms: f64,
-    pub read: bool,
-    pub action: Option<MessageAction>,
+    pub(crate) prominent_until_ms: f64,
+    pub(crate) read: bool,
+    pub(crate) action: Option<MessageAction>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

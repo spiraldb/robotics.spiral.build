@@ -16,6 +16,6 @@ pub use artifact::{
 };
 pub use error::{Error, Result};
 pub use interface::{
-    ActionChunk, ImageFormat, ImageInputSpecification, ImageView, InferenceInput, InferenceStats,
+    ActionChunk, ImageFormat, ImageFrame, ImageInputSpecification, InferenceInput, InferenceStats,
     Policy, PolicyKind, PolicyLoader, PolicySpecification,
 };

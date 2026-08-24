@@ -7,7 +7,7 @@ pub trait SerialPortInventory: Send + Sync {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SerialPortView {
+pub struct SerialPortDescriptor {
     pub path: String,
     pub kind: String,
     pub description: Option<String>,
@@ -15,13 +15,7 @@ pub struct SerialPortView {
 }
 
 pub trait SerialPortQueryPort: Send + Sync {
-    async fn serial_ports(&self) -> Result<Vec<SerialPortView>, ApplicationError>;
-}
-
-pub async fn list_serial_ports<P: SerialPortQueryPort + ?Sized>(
-    query: &P,
-) -> Result<Vec<SerialPortView>, ApplicationError> {
-    query.serial_ports().await
+    async fn serial_ports(&self) -> Result<Vec<SerialPortDescriptor>, ApplicationError>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -36,42 +30,44 @@ pub struct SerialPortIdentification {
     pub guidance: String,
 }
 
-pub async fn identify_serial_port<P: SerialPortInventory + ?Sized>(
-    inventory: &P,
-    command: IdentifySerialPortCommand,
-) -> Result<SerialPortIdentification, ApplicationError> {
-    let after = inventory.available_port_paths().await?;
-    let mut removed = command
-        .before
-        .into_iter()
-        .filter(|port| !after.contains(port))
-        .collect::<Vec<_>>();
-    removed.sort();
-    removed.dedup();
+impl IdentifySerialPortCommand {
+    pub async fn execute<P: SerialPortInventory + ?Sized>(
+        self,
+        inventory: &P,
+    ) -> Result<SerialPortIdentification, ApplicationError> {
+        let after = inventory.available_port_paths().await?;
+        let mut removed = self
+            .before
+            .into_iter()
+            .filter(|port| !after.contains(port))
+            .collect::<Vec<_>>();
+        removed.sort();
+        removed.dedup();
 
-    let (port, guidance) = match removed.as_slice() {
-        [port] => (
-            Some(port.clone()),
-            format!("Found the motor bus on {port}. Plug the cable back in."),
-        ),
-        [] => (
-            None,
-            "No port disappeared. Make sure you unplugged the arm, then try again.".to_owned(),
-        ),
-        ports => (
-            None,
-            format!(
-                "{} ports disappeared ({}). Unplug only the arm you are setting up.",
-                ports.len(),
-                ports.join(", ")
+        let (port, guidance) = match removed.as_slice() {
+            [port] => (
+                Some(port.clone()),
+                format!("Found the motor bus on {port}. Plug the cable back in."),
             ),
-        ),
-    };
-    Ok(SerialPortIdentification {
-        port,
-        removed,
-        guidance,
-    })
+            [] => (
+                None,
+                "No port disappeared. Make sure you unplugged the arm, then try again.".to_owned(),
+            ),
+            ports => (
+                None,
+                format!(
+                    "{} ports disappeared ({}). Unplug only the arm you are setting up.",
+                    ports.len(),
+                    ports.join(", ")
+                ),
+            ),
+        };
+        Ok(SerialPortIdentification {
+            port,
+            removed,
+            guidance,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -89,16 +85,6 @@ pub struct DiscoveredCamera {
 pub trait CameraDiscoveryPort: Send + Sync {
     fn cameras(&self) -> Vec<DiscoveredCamera>;
     async fn refresh_cameras(&self) -> Result<Vec<DiscoveredCamera>, ApplicationError>;
-}
-
-pub fn list_cameras<P: CameraDiscoveryPort + ?Sized>(discovery: &P) -> Vec<DiscoveredCamera> {
-    discovery.cameras()
-}
-
-pub async fn refresh_cameras<P: CameraDiscoveryPort + ?Sized>(
-    discovery: &P,
-) -> Result<Vec<DiscoveredCamera>, ApplicationError> {
-    discovery.refresh_cameras().await
 }
 
 #[cfg(test)]
@@ -154,12 +140,10 @@ mod tests {
 
         for (before, after, port, removed, guidance) in cases {
             let inventory = inventory(&after);
-            let result = identify_serial_port(
-                &inventory,
-                IdentifySerialPortCommand {
-                    before: before.into_iter().map(str::to_owned).collect(),
-                },
-            )
+            let result = IdentifySerialPortCommand {
+                before: before.into_iter().map(str::to_owned).collect(),
+            }
+            .execute(&inventory)
             .await
             .unwrap();
             assert_eq!(result.port.as_deref(), port);
@@ -176,12 +160,10 @@ mod tests {
             result: Err(ApplicationError::Internal("serial scan failed".to_owned())),
         };
         assert_eq!(
-            identify_serial_port(
-                &inventory,
-                IdentifySerialPortCommand {
-                    before: vec!["/dev/a".to_owned()],
-                },
-            )
+            IdentifySerialPortCommand {
+                before: vec!["/dev/a".to_owned()],
+            }
+            .execute(&inventory)
             .await,
             Err(ApplicationError::Internal("serial scan failed".to_owned()))
         );
@@ -206,11 +188,11 @@ mod tests {
 
     struct Ports {
         calls: Mutex<usize>,
-        result: Result<Vec<SerialPortView>, ApplicationError>,
+        result: Result<Vec<SerialPortDescriptor>, ApplicationError>,
     }
 
     impl SerialPortQueryPort for Ports {
-        async fn serial_ports(&self) -> Result<Vec<SerialPortView>, ApplicationError> {
+        async fn serial_ports(&self) -> Result<Vec<SerialPortDescriptor>, ApplicationError> {
             *self.calls.lock().unwrap() += 1;
             self.result.clone()
         }
@@ -218,7 +200,7 @@ mod tests {
 
     #[tokio::test]
     async fn serial_port_query_delegates_once_and_preserves_plain_projection() {
-        let expected = vec![SerialPortView {
+        let expected = vec![SerialPortDescriptor {
             path: "/dev/tty.robot".to_owned(),
             kind: "usb".to_owned(),
             description: Some("arm".to_owned()),
@@ -229,7 +211,7 @@ mod tests {
             result: Ok(expected.clone()),
         };
 
-        assert_eq!(list_serial_ports(&ports).await.unwrap(), expected);
+        assert_eq!(ports.serial_ports().await.unwrap(), expected);
         assert_eq!(*ports.calls.lock().unwrap(), 1);
     }
 
@@ -248,7 +230,7 @@ mod tests {
                 error: None,
             }]),
         };
-        assert_eq!(refresh_cameras(&cameras).await.unwrap()[0].id, "wrist");
+        assert_eq!(cameras.refresh_cameras().await.unwrap()[0].id, "wrist");
         assert_eq!(*cameras.calls.lock().unwrap(), 1);
 
         let cameras = Cameras {
@@ -258,7 +240,7 @@ mod tests {
             )),
         };
         assert_eq!(
-            refresh_cameras(&cameras).await,
+            cameras.refresh_cameras().await,
             Err(ApplicationError::Internal(
                 "refresh task stopped".to_owned()
             ))

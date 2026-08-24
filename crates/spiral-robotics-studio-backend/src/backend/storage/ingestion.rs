@@ -220,7 +220,7 @@ impl StorageManager {
                 }
                 ingest_batch(
                     connection,
-                    &sql::relation(&namespace, Table::Datasets),
+                    &Table::Datasets.qualified_name(&namespace),
                     imported_dataset_batch(&inspection)?,
                 )?;
                 commit_catalog_transaction(connection)
@@ -554,7 +554,7 @@ fn refuse_collision(
     dataset_id: &str,
     relations: &ImportRelations,
 ) -> Result<(), String> {
-    let datasets = sql::relation(namespace, Table::Datasets);
+    let datasets = Table::Datasets.qualified_name(namespace);
     if table_exists(connection, &datasets)?
         && !run_query(connection, &sql::dataset_exists(&datasets, dataset_id), 1)?
             .rows

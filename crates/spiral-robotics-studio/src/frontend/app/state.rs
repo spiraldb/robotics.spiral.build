@@ -126,42 +126,42 @@ struct EpisodeCatalogState {
 /// episode catalog is an explicit HTTP resource owned by the browser session.
 #[derive(Clone, Copy)]
 pub(crate) struct Studio {
-    pub snapshot: Signal<StudioSnapshot>,
-    pub telemetry: Signal<TelemetryFrame>,
+    pub(crate) snapshot: Signal<StudioSnapshot>,
+    pub(crate) telemetry: Signal<TelemetryFrame>,
     /// Backend-owned lifecycle and metric history for remote policy training.
-    pub training: Signal<TrainingSnapshot>,
+    pub(crate) training: Signal<TrainingSnapshot>,
     /// Backend-owned remote inference and motor-control lifecycle.
-    pub rollout: Signal<RolloutSnapshot>,
+    pub(crate) rollout: Signal<RolloutSnapshot>,
     /// Backend-owned lifecycle and terminal payload for relation Workflows.
-    pub workflow_state: Signal<Option<WorkflowStateResponse>>,
+    pub(crate) workflow_state: Signal<Option<WorkflowStateResponse>>,
     /// Backend-owned Workflow Assistant readiness and durable conversation.
-    pub workflow_agent_state: Signal<Option<WorkflowAgentStateResponse>>,
+    pub(crate) workflow_agent_state: Signal<Option<WorkflowAgentStateResponse>>,
     /// True while the event stream is connected.
-    pub live: Signal<bool>,
+    pub(crate) live: Signal<bool>,
     /// Wall-clock time of the last valid event and a periodically updated clock.
-    pub last_event_ms: Signal<f64>,
-    pub clock_ms: Signal<f64>,
+    pub(crate) last_event_ms: Signal<f64>,
+    pub(crate) clock_ms: Signal<f64>,
     /// Session-level command outcomes and recoverable failures. Panels keep
     /// durable domain state; this queue owns cross-route operator messages.
-    pub notifications: Signal<NotificationCenterState>,
+    pub(crate) notifications: Signal<NotificationCenterState>,
     /// The entity every view is currently showing and editing.
-    pub selected: Signal<Option<Selection>>,
+    pub(crate) selected: Signal<Option<Selection>>,
     /// What the pointer is over, wherever it is.
     ///
     /// Separate from `selected` because pointing is not choosing: hovering a
     /// joint row lights that motor on the bench and hovering the motor lights
     /// the row, without either disturbing what the operator actually picked.
     /// One object, seen twice.
-    pub pointed: Signal<Option<Selection>>,
+    pub(crate) pointed: Signal<Option<Selection>>,
     /// The take the timeline is showing in detail.
     ///
     /// Deliberately not part of [`Selection`]: choosing a take must not point
     /// the joint inspector somewhere else, because judging a take and watching
     /// the arm that produced it are the same gesture.
-    pub selected_episode: Signal<Option<String>>,
+    pub(crate) selected_episode: Signal<Option<String>>,
     /// Dataset row used by capture, import, Data filtering, and new Training
     /// runs. This is distinct from the configured Spiral namespace.
-    pub selected_dataset: Signal<String>,
+    pub(crate) selected_dataset: Signal<String>,
     episode_catalog: Signal<EpisodeCatalogState>,
     /// Joint angles for the take being recorded, or the last one recorded.
     ///
@@ -169,7 +169,7 @@ pub(crate) struct Studio {
     /// a take captured with the Signals region collapsed is still a take, and
     /// arriving to find it empty would be the interface deciding what was
     /// measured. See [`crate::frontend::panels::timeline::signals`].
-    pub recording_signals: Signal<SignalStore>,
+    pub(crate) recording_signals: Signal<SignalStore>,
 }
 
 impl Studio {

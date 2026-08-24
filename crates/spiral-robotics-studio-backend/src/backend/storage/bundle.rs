@@ -50,7 +50,7 @@ const MAX_FEATURE_REGISTRY_ROWS: usize = 4_096;
 const MAX_FEATURE_CACHE_ROWS: usize = 1_000_000;
 const MAX_FEATURE_CACHE_COLUMNS: usize = 256;
 const MAX_ARROW_MESSAGE_METADATA_BYTES: usize = MAX_MANIFEST_BYTES;
-const MAX_ARROW_DECODED_BYTES: usize = MAX_PROJECT_BUNDLE_BYTES;
+const MAX_ARROW_DECODED_BYTES: usize = ProjectBundle::MAX_BYTES;
 const MAX_ARROW_RECORD_BATCH_ROWS: usize = MAX_FEATURE_CACHE_ROWS;
 const MAX_ARROW_DECODED_ROWS: usize = MAX_FEATURE_CACHE_ROWS;
 const MAX_ARROW_SCHEMA_FIELDS: usize = MAX_FEATURE_CACHE_COLUMNS + CACHE_KEY_FIELDS.len();
@@ -189,8 +189,17 @@ struct BundleProviderFunctionCall {
 /// Browser transfers are memory-backed at the Axum/storage boundary. Keep the
 /// cap low enough that one import and its decoded Arrow batch cannot exhaust a
 /// typical Studio workstation.
-pub(crate) const MAX_PROJECT_BUNDLE_BYTES: usize = 256 * 1024 * 1024;
-pub(crate) const MAX_EPISODE_BUNDLE_BYTES: usize = MAX_PROJECT_BUNDLE_BYTES;
+pub(crate) struct ProjectBundle;
+
+impl ProjectBundle {
+    pub(crate) const MAX_BYTES: usize = 256 * 1024 * 1024;
+}
+
+pub(crate) struct EpisodeBundle;
+
+impl EpisodeBundle {
+    pub(crate) const MAX_BYTES: usize = ProjectBundle::MAX_BYTES;
+}
 
 const EPISODE_TABLES: [Table; 5] = [
     Table::Datasets,
@@ -214,7 +223,7 @@ const PROJECT_SPEC: BundleSpec = BundleSpec {
     format: PROJECT_FORMAT,
     label: "project",
     tables: &Table::ALL,
-    max_bytes: MAX_PROJECT_BUNDLE_BYTES,
+    max_bytes: ProjectBundle::MAX_BYTES,
 };
 
 const EPISODES_SPEC: BundleSpec = BundleSpec {
@@ -222,7 +231,7 @@ const EPISODES_SPEC: BundleSpec = BundleSpec {
     format: EPISODES_FORMAT,
     label: "episode bundle",
     tables: &EPISODE_TABLES,
-    max_bytes: MAX_EPISODE_BUNDLE_BYTES,
+    max_bytes: EpisodeBundle::MAX_BYTES,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -263,7 +272,7 @@ impl ProjectRelation {
 
     fn target(&self, namespace: &str) -> String {
         match self {
-            Self::Managed(table) => sql::relation(namespace, *table),
+            Self::Managed(table) => table.qualified_name(namespace),
             Self::WorkflowFeatureRegistry => WORKFLOW_FEATURE_REGISTRY_RELATION.to_owned(),
             Self::WorkflowFeatureCache(relation) => relation.clone(),
         }
@@ -340,177 +349,189 @@ fn current_workflow_registry(
     validate_workflow_registry(&batches).map(Some)
 }
 
-pub(crate) fn export(
-    connection: &mut RepositoryConnection,
-    namespace: &str,
-) -> Result<Vec<u8>, String> {
-    let mut queries = Vec::new();
-    for table in Table::ALL {
-        let relation = sql::relation(namespace, table);
-        if !table_exists(connection, &relation)? {
-            continue;
-        }
-        let query = if table == Table::VideoAssets {
-            portable_video_assets_query(&relation, None)
-        } else {
-            format!("SELECT * FROM {relation}")
-        };
-        queries.push((table.name().to_owned(), query));
-    }
-    if let Some(registry) = current_workflow_registry(connection)? {
-        queries.push((
-            WORKFLOW_FEATURE_REGISTRY_RELATION.to_owned(),
-            format!("SELECT * FROM {WORKFLOW_FEATURE_REGISTRY_RELATION}"),
-        ));
-        for relation in registry.cache_relations() {
+impl ProjectBundle {
+    pub(crate) fn export(
+        &self,
+        connection: &mut RepositoryConnection,
+        namespace: &str,
+    ) -> Result<Vec<u8>, String> {
+        let mut queries = Vec::new();
+        for table in Table::ALL {
+            let relation = table.qualified_name(namespace);
             if !table_exists(connection, &relation)? {
+                continue;
+            }
+            let query = if table == Table::VideoAssets {
+                portable_video_assets_query(&relation, None)
+            } else {
+                format!("SELECT * FROM {relation}")
+            };
+            queries.push((table.name().to_owned(), query));
+        }
+        if let Some(registry) = current_workflow_registry(connection)? {
+            queries.push((
+                WORKFLOW_FEATURE_REGISTRY_RELATION.to_owned(),
+                format!("SELECT * FROM {WORKFLOW_FEATURE_REGISTRY_RELATION}"),
+            ));
+            for relation in registry.cache_relations() {
+                if !table_exists(connection, &relation)? {
+                    return Err(format!(
+                        "Workflow feature registry declares missing cache relation {relation:?}"
+                    ));
+                }
+                queries.push((relation.clone(), format!("SELECT * FROM {relation}")));
+            }
+        }
+        PROJECT_SPEC
+            .export_named_queries(connection, queries)
+            .map(|export| export.bytes)
+    }
+}
+
+impl EpisodeBundle {
+    pub(crate) fn export(
+        &self,
+        connection: &mut RepositoryConnection,
+        namespace: &str,
+        dataset_id: &str,
+    ) -> Result<Vec<u8>, String> {
+        validate_dataset_id(dataset_id)?;
+        let datasets = Table::Datasets.qualified_name(namespace);
+        let episodes = Table::Episodes.qualified_name(namespace);
+        if !table_exists(connection, &datasets)? || !table_exists(connection, &episodes)? {
+            return Err(format!("dataset {dataset_id:?} has no episodes to export"));
+        }
+        let dataset = sql::string_literal(dataset_id);
+        let episode_ids = format!(
+            "SELECT {episode_id} FROM {episodes} WHERE {dataset_id_column} = {dataset}",
+            episode_id = column::EPISODE_ID,
+            dataset_id_column = column::DATASET_ID,
+        );
+        let mut queries = Vec::new();
+        for table in EPISODE_TABLES {
+            let relation = table.qualified_name(namespace);
+            if !table_exists(connection, &relation)? {
+                continue;
+            }
+            let query = match table {
+                Table::Datasets | Table::Episodes => format!(
+                    "SELECT * FROM {relation} WHERE {} = {dataset}",
+                    column::DATASET_ID
+                ),
+                Table::EpisodeStreams | Table::JointSamples => format!(
+                    "SELECT * FROM {relation} WHERE {} IN ({episode_ids})",
+                    column::EPISODE_ID
+                ),
+                Table::VideoAssets => portable_video_assets_query(
+                    &relation,
+                    Some(&format!("{} IN ({episode_ids})", column::EPISODE_ID)),
+                ),
+                _ => unreachable!("episode bundle table set is closed"),
+            };
+            queries.push((table, query));
+        }
+        let export = EPISODES_SPEC.export_queries(connection, queries)?;
+        if export
+            .row_counts
+            .iter()
+            .find_map(|(table, rows)| (*table == Table::Episodes).then_some(*rows))
+            .unwrap_or(0)
+            == 0
+        {
+            return Err(format!("dataset {dataset_id:?} has no episodes to export"));
+        }
+        Ok(export.bytes)
+    }
+}
+
+impl BundleSpec {
+    fn export_queries(
+        &self,
+        connection: &mut RepositoryConnection,
+        queries: Vec<(Table, String)>,
+    ) -> Result<ExportedBundle, String> {
+        let export = self.export_named_queries(
+            connection,
+            queries
+                .into_iter()
+                .map(|(table, query)| (table.name().to_owned(), query))
+                .collect(),
+        )?;
+        let row_counts = export
+            .row_counts
+            .into_iter()
+            .map(|(name, rows)| {
+                self.table_named(&name)
+                    .map(|table| (table, rows))
+                    .ok_or_else(|| {
+                        format!("{} export contains unknown relation {name:?}", self.label)
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ExportedBundle {
+            bytes: export.bytes,
+            row_counts,
+        })
+    }
+
+    fn export_named_queries(
+        &self,
+        connection: &mut RepositoryConnection,
+        queries: Vec<(String, String)>,
+    ) -> Result<NamedExportedBundle, String> {
+        let mut entries = Vec::<(String, Vec<u8>)>::new();
+        let mut row_counts = Vec::new();
+        for (relation, query) in queries {
+            let mut statement = connection.new_statement().map_err(|error| {
+                format!("opening {} export for {relation}: {error}", self.label)
+            })?;
+            statement.set_sql_query(query).map_err(|error| {
+                format!("binding {} export for {relation}: {error}", self.label)
+            })?;
+            let reader = statement
+                .execute()
+                .map_err(|error| format!("reading {} relation {relation}: {error}", self.label))?;
+            let occupied = encoded_entries_size(&entries)
+                .saturating_add(self.magic.len() + 4 + MAX_MANIFEST_BYTES + 2);
+            let payload_limit = self
+                .max_bytes
+                .saturating_sub(occupied)
+                .saturating_sub(2 + relation.len() + 8);
+            let mut payload = LimitedPayload::new(payload_limit, self.label);
+            let mut rows = 0_u64;
+            {
+                let mut writer = StreamWriter::try_new(&mut payload, reader.schema().as_ref())
+                    .map_err(|error| format!("opening Arrow stream for {relation}: {error}"))?;
+                for batch in reader {
+                    let batch = batch.map_err(|error| {
+                        format!("reading {} relation {relation}: {error}", self.label)
+                    })?;
+                    rows = rows.saturating_add(batch.num_rows() as u64);
+                    writer
+                        .write(&batch)
+                        .map_err(|error| format!("writing Arrow stream for {relation}: {error}"))?;
+                }
+                writer
+                    .finish()
+                    .map_err(|error| format!("finishing Arrow stream for {relation}: {error}"))?;
+            }
+            let payload = payload.into_inner();
+            let projected_size = encoded_entries_size(&entries)
+                .saturating_add(2 + relation.len() + 8 + payload.len())
+                .saturating_add(self.magic.len() + 4 + MAX_MANIFEST_BYTES);
+            if projected_size > self.max_bytes {
                 return Err(format!(
-                    "Workflow feature registry declares missing cache relation {relation:?}"
+                    "{} export exceeds the {} MiB portable-file limit",
+                    self.label,
+                    self.max_bytes / (1024 * 1024),
                 ));
             }
-            queries.push((relation.clone(), format!("SELECT * FROM {relation}")));
+            row_counts.push((relation.clone(), rows));
+            entries.push((relation, payload));
         }
+        self.build(entries)
+            .map(|bytes| NamedExportedBundle { bytes, row_counts })
     }
-    export_named_queries(connection, queries, PROJECT_SPEC).map(|export| export.bytes)
-}
-
-pub(crate) fn export_episodes(
-    connection: &mut RepositoryConnection,
-    namespace: &str,
-    dataset_id: &str,
-) -> Result<Vec<u8>, String> {
-    validate_dataset_id(dataset_id)?;
-    let datasets = sql::relation(namespace, Table::Datasets);
-    let episodes = sql::relation(namespace, Table::Episodes);
-    if !table_exists(connection, &datasets)? || !table_exists(connection, &episodes)? {
-        return Err(format!("dataset {dataset_id:?} has no episodes to export"));
-    }
-    let dataset = sql::string_literal(dataset_id);
-    let episode_ids = format!(
-        "SELECT {episode_id} FROM {episodes} WHERE {dataset_id_column} = {dataset}",
-        episode_id = column::EPISODE_ID,
-        dataset_id_column = column::DATASET_ID,
-    );
-    let mut queries = Vec::new();
-    for table in EPISODE_TABLES {
-        let relation = sql::relation(namespace, table);
-        if !table_exists(connection, &relation)? {
-            continue;
-        }
-        let query = match table {
-            Table::Datasets | Table::Episodes => format!(
-                "SELECT * FROM {relation} WHERE {} = {dataset}",
-                column::DATASET_ID
-            ),
-            Table::EpisodeStreams | Table::JointSamples => format!(
-                "SELECT * FROM {relation} WHERE {} IN ({episode_ids})",
-                column::EPISODE_ID
-            ),
-            Table::VideoAssets => portable_video_assets_query(
-                &relation,
-                Some(&format!("{} IN ({episode_ids})", column::EPISODE_ID)),
-            ),
-            _ => unreachable!("episode bundle table set is closed"),
-        };
-        queries.push((table, query));
-    }
-    let export = export_queries(connection, queries, EPISODES_SPEC)?;
-    if export
-        .row_counts
-        .iter()
-        .find_map(|(table, rows)| (*table == Table::Episodes).then_some(*rows))
-        .unwrap_or(0)
-        == 0
-    {
-        return Err(format!("dataset {dataset_id:?} has no episodes to export"));
-    }
-    Ok(export.bytes)
-}
-
-fn export_queries(
-    connection: &mut RepositoryConnection,
-    queries: Vec<(Table, String)>,
-    spec: BundleSpec,
-) -> Result<ExportedBundle, String> {
-    let export = export_named_queries(
-        connection,
-        queries
-            .into_iter()
-            .map(|(table, query)| (table.name().to_owned(), query))
-            .collect(),
-        spec,
-    )?;
-    let row_counts = export
-        .row_counts
-        .into_iter()
-        .map(|(name, rows)| {
-            table_named_in(&name, spec.tables)
-                .map(|table| (table, rows))
-                .ok_or_else(|| format!("{} export contains unknown relation {name:?}", spec.label))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(ExportedBundle {
-        bytes: export.bytes,
-        row_counts,
-    })
-}
-
-fn export_named_queries(
-    connection: &mut RepositoryConnection,
-    queries: Vec<(String, String)>,
-    spec: BundleSpec,
-) -> Result<NamedExportedBundle, String> {
-    let mut entries = Vec::<(String, Vec<u8>)>::new();
-    let mut row_counts = Vec::new();
-    for (relation, query) in queries {
-        let mut statement = connection
-            .new_statement()
-            .map_err(|error| format!("opening {} export for {relation}: {error}", spec.label))?;
-        statement
-            .set_sql_query(query)
-            .map_err(|error| format!("binding {} export for {relation}: {error}", spec.label))?;
-        let reader = statement
-            .execute()
-            .map_err(|error| format!("reading {} relation {relation}: {error}", spec.label))?;
-        let occupied = encoded_entries_size(&entries)
-            .saturating_add(spec.magic.len() + 4 + MAX_MANIFEST_BYTES + 2);
-        let payload_limit = spec
-            .max_bytes
-            .saturating_sub(occupied)
-            .saturating_sub(2 + relation.len() + 8);
-        let mut payload = LimitedPayload::new(payload_limit, spec.label);
-        let mut rows = 0_u64;
-        {
-            let mut writer = StreamWriter::try_new(&mut payload, reader.schema().as_ref())
-                .map_err(|error| format!("opening Arrow stream for {relation}: {error}"))?;
-            for batch in reader {
-                let batch = batch.map_err(|error| {
-                    format!("reading {} relation {relation}: {error}", spec.label)
-                })?;
-                rows = rows.saturating_add(batch.num_rows() as u64);
-                writer
-                    .write(&batch)
-                    .map_err(|error| format!("writing Arrow stream for {relation}: {error}"))?;
-            }
-            writer
-                .finish()
-                .map_err(|error| format!("finishing Arrow stream for {relation}: {error}"))?;
-        }
-        let payload = payload.into_inner();
-        let projected_size = encoded_entries_size(&entries)
-            .saturating_add(2 + relation.len() + 8 + payload.len())
-            .saturating_add(spec.magic.len() + 4 + MAX_MANIFEST_BYTES);
-        if projected_size > spec.max_bytes {
-            return Err(format!(
-                "{} export exceeds the {} MiB portable-file limit",
-                spec.label,
-                spec.max_bytes / (1024 * 1024),
-            ));
-        }
-        row_counts.push((relation.clone(), rows));
-        entries.push((relation, payload));
-    }
-    build_bundle(entries, spec).map(|bytes| NamedExportedBundle { bytes, row_counts })
 }
 
 fn portable_video_assets_query(relation: &str, predicate: Option<&str>) -> String {
@@ -543,239 +564,248 @@ fn encoded_entries_size(entries: &[(String, Vec<u8>)]) -> usize {
         .sum()
 }
 
-fn build_bundle(entries: Vec<(String, Vec<u8>)>, spec: BundleSpec) -> Result<Vec<u8>, String> {
-    if let Some((name, _)) = entries
-        .iter()
-        .find(|(name, _)| name.len() > MAX_ENTRY_NAME_BYTES)
-    {
-        return Err(format!("{} relation name {name:?} is too long", spec.label));
+impl BundleSpec {
+    fn build(&self, entries: Vec<(String, Vec<u8>)>) -> Result<Vec<u8>, String> {
+        if let Some((name, _)) = entries
+            .iter()
+            .find(|(name, _)| name.len() > MAX_ENTRY_NAME_BYTES)
+        {
+            return Err(format!("{} relation name {name:?} is too long", self.label));
+        }
+        let manifest = Manifest {
+            format: self.format.to_owned(),
+            format_version: FORMAT_VERSION,
+            schema_version: spiral::SCHEMA_VERSION,
+            exported_ms: unix_millis(),
+            relations: entries.iter().map(|(name, _)| name.clone()).collect(),
+        };
+        let manifest = serde_json::to_vec(&manifest)
+            .map_err(|error| format!("encoding {} manifest: {error}", self.label))?;
+        let mut bundle = Vec::new();
+        bundle.extend_from_slice(self.magic);
+        write_u32(&mut bundle, manifest.len())?;
+        bundle.extend_from_slice(&manifest);
+        for (name, payload) in entries {
+            write_u16(&mut bundle, name.len())?;
+            bundle.extend_from_slice(name.as_bytes());
+            write_u64(&mut bundle, payload.len())?;
+            bundle.extend_from_slice(&payload);
+        }
+        bundle.extend_from_slice(&0_u16.to_le_bytes());
+        if bundle.len() > self.max_bytes {
+            return Err(format!(
+                "{} export exceeds the {} MiB portable-file limit",
+                self.label,
+                self.max_bytes / (1024 * 1024),
+            ));
+        }
+        Ok(bundle)
     }
-    let manifest = Manifest {
-        format: spec.format.to_owned(),
-        format_version: FORMAT_VERSION,
-        schema_version: spiral::SCHEMA_VERSION,
-        exported_ms: unix_millis(),
-        relations: entries.iter().map(|(name, _)| name.clone()).collect(),
-    };
-    let manifest = serde_json::to_vec(&manifest)
-        .map_err(|error| format!("encoding {} manifest: {error}", spec.label))?;
-    let mut bundle = Vec::new();
-    bundle.extend_from_slice(spec.magic);
-    write_u32(&mut bundle, manifest.len())?;
-    bundle.extend_from_slice(&manifest);
-    for (name, payload) in entries {
-        write_u16(&mut bundle, name.len())?;
-        bundle.extend_from_slice(name.as_bytes());
-        write_u64(&mut bundle, payload.len())?;
-        bundle.extend_from_slice(&payload);
-    }
-    bundle.extend_from_slice(&0_u16.to_le_bytes());
-    if bundle.len() > spec.max_bytes {
-        return Err(format!(
-            "{} export exceeds the {} MiB portable-file limit",
-            spec.label,
-            spec.max_bytes / (1024 * 1024),
-        ));
-    }
-    Ok(bundle)
 }
 
-pub(crate) fn import(
-    connection: &mut RepositoryConnection,
-    namespace: &str,
-    bundle: &[u8],
-) -> Result<ProjectImportSummary, String> {
-    let decoded = decode_project_entries(parse_raw_bundle(bundle, PROJECT_SPEC)?)?;
-    let fixed_relations = decoded
-        .iter()
-        .filter_map(|entry| match &entry.relation {
-            ProjectRelation::Managed(table) => Some((*table, entry.batches.clone())),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let imported_video_episodes = video_episode_ids(&fixed_relations)?;
-    let current_caches = current_workflow_registry(connection)?
-        .map(|registry| registry.cache_relations())
-        .unwrap_or_default();
-    let incoming_caches = decoded
-        .iter()
-        .filter_map(|entry| match &entry.relation {
-            ProjectRelation::WorkflowFeatureCache(relation) => Some(relation.clone()),
-            _ => None,
-        })
-        .collect::<BTreeSet<_>>();
-    let incoming_registry = decoded
-        .iter()
-        .any(|entry| entry.relation == ProjectRelation::WorkflowFeatureRegistry);
-    let workflow_plan = workflow_restore_plan(
-        &current_caches,
-        incoming_registry.then_some(&incoming_caches),
-    );
+impl ProjectBundle {
+    pub(crate) fn import(
+        &self,
+        connection: &mut RepositoryConnection,
+        namespace: &str,
+        bundle: &[u8],
+    ) -> Result<ProjectImportSummary, String> {
+        let decoded = decode_project_entries(PROJECT_SPEC.parse_raw(bundle)?)?;
+        let fixed_relations = decoded
+            .iter()
+            .filter_map(|entry| match &entry.relation {
+                ProjectRelation::Managed(table) => Some((*table, entry.batches.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let imported_video_episodes = video_episode_ids(&fixed_relations)?;
+        let current_caches = current_workflow_registry(connection)?
+            .map(|registry| registry.cache_relations())
+            .unwrap_or_default();
+        let incoming_caches = decoded
+            .iter()
+            .filter_map(|entry| match &entry.relation {
+                ProjectRelation::WorkflowFeatureCache(relation) => Some(relation.clone()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let incoming_registry = decoded
+            .iter()
+            .any(|entry| entry.relation == ProjectRelation::WorkflowFeatureRegistry);
+        let workflow_plan = workflow_restore_plan(
+            &current_caches,
+            incoming_registry.then_some(&incoming_caches),
+        );
 
-    let (mut summary, transaction_warning) =
-        run_project_import_transaction(connection, "project import", |connection| {
-            // Retire only relations absent from the incoming project. Relations in
-            // the bundle are atomically replaced below through hosted Arbor. All
-            // namespace swaps remain staged in this one project transaction, so a
-            // reader observes either the old project or the complete replacement.
-            for table in Table::ALL.into_iter().rev() {
-                if decoded
-                    .iter()
-                    .any(|entry| entry.relation == ProjectRelation::Managed(table))
+        let (mut summary, transaction_warning) =
+            run_project_import_transaction(connection, "project import", |connection| {
+                // Retire only relations absent from the incoming project. Relations in
+                // the bundle are atomically replaced below through hosted Arbor. All
+                // namespace swaps remain staged in this one project transaction, so a
+                // reader observes either the old project or the complete replacement.
+                for table in Table::ALL.into_iter().rev() {
+                    if decoded
+                        .iter()
+                        .any(|entry| entry.relation == ProjectRelation::Managed(table))
+                    {
+                        continue;
+                    }
+                    let relation = table.qualified_name(namespace);
+                    if table_exists(connection, &relation)? {
+                        execute_update_sql(connection, &format!("DROP TABLE {relation}")).map_err(
+                            |error| format!("clearing project relation {relation}: {error}"),
+                        )?;
+                    }
+                }
+                for relation in &workflow_plan.retire_caches {
+                    if table_exists(connection, relation)? {
+                        execute_update_sql(connection, &format!("DROP TABLE {relation}")).map_err(
+                            |error| format!("clearing Workflow cache {relation}: {error}"),
+                        )?;
+                    }
+                }
+                if workflow_plan.clear_registry
+                    && table_exists(connection, WORKFLOW_FEATURE_REGISTRY_RELATION)?
                 {
+                    execute_update_sql(
+                        connection,
+                        &format!("DROP TABLE {WORKFLOW_FEATURE_REGISTRY_RELATION}"),
+                    )
+                    .map_err(|error| format!("clearing Workflow feature registry: {error}"))?;
+                }
+
+                let mut summary = ProjectImportSummary::default();
+                for entry in decoded {
+                    let relation = entry.relation.target(namespace);
+                    summary.relations += 1;
+                    let batches = entry
+                        .batches
+                        .into_iter()
+                        .map(|batch| {
+                            if entry.relation == ProjectRelation::Managed(Table::VideoAssets) {
+                                prepare_video_asset_import(batch, namespace)
+                            } else {
+                                Ok(batch)
+                            }
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    summary.rows = summary.rows.saturating_add(
+                        batches.iter().map(RecordBatch::num_rows).sum::<usize>() as u64,
+                    );
+                    replace_batches(connection, &relation, batches)?;
+                }
+                Ok(summary)
+            })?;
+        let can_reconcile = transaction_warning.is_none();
+        if let Some(warning) = transaction_warning {
+            summary.warnings.push(warning);
+        }
+        // ADBC ingest can create a relation inside the import transaction, but
+        // Spiral's SQL binder cannot resolve that new relation until the commit is
+        // published. Keep the repository's exclusive checkout while reconciling
+        // the derived MP4 resources immediately after the durable rows commit.
+        if can_reconcile {
+            if let Err(error) =
+                reconcile_project_video_dataset(connection, namespace, &imported_video_episodes)
+            {
+                summary.warnings.push(format!(
+                    "project rows committed, but the derived video dataset needs repair: {error}"
+                ));
+            }
+        } else {
+            summary.warnings.push(
+            "project rows committed, but derived video reconciliation was skipped because the transaction connection could not be reused"
+                .to_owned(),
+        );
+        }
+        Ok(summary)
+    }
+}
+
+impl EpisodeBundle {
+    pub(crate) fn import(
+        &self,
+        connection: &mut RepositoryConnection,
+        namespace: &str,
+        dataset_id: &str,
+        bundle: &[u8],
+    ) -> Result<EpisodeImportSummary, String> {
+        validate_dataset_id(dataset_id)?;
+        let mut decoded = EPISODES_SPEC.decode_entries(EPISODES_SPEC.parse(bundle)?)?;
+        sort_relations(&mut decoded, &EPISODE_TABLES);
+        let episode_ids = validate_episode_relations(&decoded)?;
+        let video_episode_ids = video_episode_ids(&decoded)?;
+        let existing_video_episodes = stored_video_episode_ids(connection, namespace)?;
+        reject_existing_episodes(connection, namespace, &episode_ids)?;
+        ensure_dataset_namespace(connection, namespace)?;
+        if !video_episode_ids.is_empty() {
+            ensure_video_assets_blob_relation(connection, namespace)?;
+        }
+        if !existing_video_episodes.is_empty() && !video_dataset_exists(connection, namespace)? {
+            retarget_stored_video_media_relations(connection, namespace)?;
+        }
+
+        connection
+            .set_autocommit(false)
+            .map_err(|error| format!("starting episode import transaction: {error}"))?;
+        let outcome = (|| {
+            let datasets = Table::Datasets.qualified_name(namespace);
+            let dataset_exists = table_exists(connection, &datasets)?
+                && !run_query(connection, &sql::dataset_exists(&datasets, dataset_id), 1)?
+                    .rows
+                    .is_empty();
+            let mut summary = EpisodeImportSummary {
+                dataset_id: dataset_id.to_owned(),
+                episodes: episode_ids.len() as u64,
+                rows: 0,
+                first_episode: episode_ids.first().cloned(),
+                warnings: Vec::new(),
+            };
+            for (table, batches) in decoded {
+                if table == Table::Datasets && dataset_exists {
                     continue;
                 }
-                let relation = sql::relation(namespace, table);
-                if table_exists(connection, &relation)? {
-                    execute_update_sql(connection, &format!("DROP TABLE {relation}")).map_err(
-                        |error| format!("clearing project relation {relation}: {error}"),
-                    )?;
-                }
-            }
-            for relation in &workflow_plan.retire_caches {
-                if table_exists(connection, relation)? {
-                    execute_update_sql(connection, &format!("DROP TABLE {relation}"))
-                        .map_err(|error| format!("clearing Workflow cache {relation}: {error}"))?;
-                }
-            }
-            if workflow_plan.clear_registry
-                && table_exists(connection, WORKFLOW_FEATURE_REGISTRY_RELATION)?
-            {
-                execute_update_sql(
-                    connection,
-                    &format!("DROP TABLE {WORKFLOW_FEATURE_REGISTRY_RELATION}"),
-                )
-                .map_err(|error| format!("clearing Workflow feature registry: {error}"))?;
-            }
-
-            let mut summary = ProjectImportSummary::default();
-            for entry in decoded {
-                let relation = entry.relation.target(namespace);
-                summary.relations += 1;
-                let batches = entry
-                    .batches
+                let relation = table.qualified_name(namespace);
+                let batches = batches
                     .into_iter()
-                    .map(|batch| {
-                        if entry.relation == ProjectRelation::Managed(Table::VideoAssets) {
-                            prepare_video_asset_import(batch, namespace)
-                        } else {
-                            Ok(batch)
+                    .map(|batch| match table {
+                        Table::Datasets | Table::Episodes => {
+                            replace_utf8_column(batch, column::DATASET_ID, dataset_id)
                         }
+                        Table::VideoAssets => prepare_video_asset_import(batch, namespace),
+                        _ => Ok(batch),
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 summary.rows =
                     summary.rows.saturating_add(
                         batches.iter().map(RecordBatch::num_rows).sum::<usize>() as u64,
                     );
-                replace_batches(connection, &relation, batches)?;
+                ingest_batches(connection, &relation, batches)?;
             }
             Ok(summary)
-        })?;
-    let can_reconcile = transaction_warning.is_none();
-    if let Some(warning) = transaction_warning {
-        summary.warnings.push(warning);
-    }
-    // ADBC ingest can create a relation inside the import transaction, but
-    // Spiral's SQL binder cannot resolve that new relation until the commit is
-    // published. Keep the repository's exclusive checkout while reconciling
-    // the derived MP4 resources immediately after the durable rows commit.
-    if can_reconcile {
-        if let Err(error) =
-            reconcile_project_video_dataset(connection, namespace, &imported_video_episodes)
-        {
-            summary.warnings.push(format!(
-                "project rows committed, but the derived video dataset needs repair: {error}"
-            ));
+        })();
+        let (mut summary, transaction_warning) =
+            finish_transaction(connection, outcome, "episode import")?;
+        let can_reconcile = transaction_warning.is_none();
+        if let Some(warning) = transaction_warning {
+            summary.warnings.push(warning);
         }
-    } else {
-        summary.warnings.push(
-            "project rows committed, but derived video reconciliation was skipped because the transaction connection could not be reused"
-                .to_owned(),
-        );
-    }
-    Ok(summary)
-}
-
-pub(crate) fn import_episodes(
-    connection: &mut RepositoryConnection,
-    namespace: &str,
-    dataset_id: &str,
-    bundle: &[u8],
-) -> Result<EpisodeImportSummary, String> {
-    validate_dataset_id(dataset_id)?;
-    let mut decoded = decode_entries(parse_bundle(bundle, EPISODES_SPEC)?, EPISODES_SPEC)?;
-    sort_relations(&mut decoded, &EPISODE_TABLES);
-    let episode_ids = validate_episode_relations(&decoded)?;
-    let video_episode_ids = video_episode_ids(&decoded)?;
-    let existing_video_episodes = stored_video_episode_ids(connection, namespace)?;
-    reject_existing_episodes(connection, namespace, &episode_ids)?;
-    ensure_dataset_namespace(connection, namespace)?;
-    if !video_episode_ids.is_empty() {
-        ensure_video_assets_blob_relation(connection, namespace)?;
-    }
-    if !existing_video_episodes.is_empty() && !video_dataset_exists(connection, namespace)? {
-        retarget_stored_video_media_relations(connection, namespace)?;
-    }
-
-    connection
-        .set_autocommit(false)
-        .map_err(|error| format!("starting episode import transaction: {error}"))?;
-    let outcome = (|| {
-        let datasets = sql::relation(namespace, Table::Datasets);
-        let dataset_exists = table_exists(connection, &datasets)?
-            && !run_query(connection, &sql::dataset_exists(&datasets, dataset_id), 1)?
-                .rows
-                .is_empty();
-        let mut summary = EpisodeImportSummary {
-            dataset_id: dataset_id.to_owned(),
-            episodes: episode_ids.len() as u64,
-            rows: 0,
-            first_episode: episode_ids.first().cloned(),
-            warnings: Vec::new(),
-        };
-        for (table, batches) in decoded {
-            if table == Table::Datasets && dataset_exists {
-                continue;
+        if can_reconcile {
+            if !video_episode_ids.is_empty()
+                && let Err(error) = reconcile_appended_video_dataset(connection, namespace)
+            {
+                summary.warnings.push(format!(
+                    "episode rows committed, but the derived video dataset needs repair: {error}"
+                ));
             }
-            let relation = sql::relation(namespace, table);
-            let batches = batches
-                .into_iter()
-                .map(|batch| match table {
-                    Table::Datasets | Table::Episodes => {
-                        replace_utf8_column(batch, column::DATASET_ID, dataset_id)
-                    }
-                    Table::VideoAssets => prepare_video_asset_import(batch, namespace),
-                    _ => Ok(batch),
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            summary.rows = summary
-                .rows
-                .saturating_add(batches.iter().map(RecordBatch::num_rows).sum::<usize>() as u64);
-            ingest_batches(connection, &relation, batches)?;
-        }
-        Ok(summary)
-    })();
-    let (mut summary, transaction_warning) =
-        finish_transaction(connection, outcome, "episode import")?;
-    let can_reconcile = transaction_warning.is_none();
-    if let Some(warning) = transaction_warning {
-        summary.warnings.push(warning);
-    }
-    if can_reconcile {
-        if !video_episode_ids.is_empty()
-            && let Err(error) = reconcile_appended_video_dataset(connection, namespace)
-        {
-            summary.warnings.push(format!(
-                "episode rows committed, but the derived video dataset needs repair: {error}"
-            ));
-        }
-    } else if !video_episode_ids.is_empty() {
-        summary.warnings.push(
+        } else if !video_episode_ids.is_empty() {
+            summary.warnings.push(
             "episode rows committed, but derived video reconciliation was skipped because the transaction connection could not be reused"
                 .to_owned(),
         );
+        }
+        Ok(summary)
     }
-    Ok(summary)
 }
 
 #[derive(Clone, Copy)]
@@ -800,119 +830,107 @@ const ARROW_DECODE_LIMITS: ArrowDecodeLimits = ArrowDecodeLimits {
 #[derive(Default)]
 struct ArrowDecodeBudget {
     claimed_decoded_bytes: usize,
-    decoded_memory_bytes: usize,
     rows: usize,
 }
 
-fn decode_arrow_payload(
-    relation: &str,
-    payload: Vec<u8>,
-    label: &str,
-    budget: &mut ArrowDecodeBudget,
-) -> Result<Vec<RecordBatch>, String> {
-    decode_arrow_payload_with_limits(relation, payload, label, budget, ARROW_DECODE_LIMITS)
-}
-
-fn decode_arrow_payload_with_row_limit(
-    relation: &str,
-    payload: Vec<u8>,
-    label: &str,
-    budget: &mut ArrowDecodeBudget,
-    relation_rows: usize,
-) -> Result<Vec<RecordBatch>, String> {
-    decode_arrow_payload_with_limits(
-        relation,
-        payload,
-        label,
-        budget,
-        ArrowDecodeLimits {
-            relation_rows,
-            ..ARROW_DECODE_LIMITS
-        },
-    )
-}
-
-fn decode_arrow_payload_with_limits(
-    relation: &str,
-    payload: Vec<u8>,
-    label: &str,
-    budget: &mut ArrowDecodeBudget,
-    limits: ArrowDecodeLimits,
-) -> Result<Vec<RecordBatch>, String> {
-    preflight_arrow_payload(relation, &payload, label, budget, limits)?;
-    let reader = StreamReader::try_new(Cursor::new(payload), None)
-        .map_err(|error| format!("opening Arrow stream for {relation}: {error}"))?;
-    let schema = reader.schema();
-    let mut batches = Vec::new();
-    for batch in reader {
-        let batch =
-            batch.map_err(|error| format!("reading Arrow stream for {relation}: {error}"))?;
-        let batch_memory = batch
-            .get_array_memory_size()
-            .checked_add(std::mem::size_of::<RecordBatch>().saturating_mul(2))
-            .ok_or_else(|| {
-                format!("{label} Arrow memory size overflows while reading relation {relation}")
-            })?;
-        budget.decoded_memory_bytes = budget
-            .decoded_memory_bytes
-            .checked_add(batch_memory)
-            .filter(|bytes| *bytes <= limits.decoded_bytes)
-            .ok_or_else(|| {
-                format!(
-                    "{label} Arrow data exceeds the {} MiB decoded-memory limit while reading relation {relation}",
-                    limits.decoded_bytes / (1024 * 1024),
-                )
-            })?;
-        batches.push(batch);
+impl ArrowDecodeBudget {
+    fn decode(
+        &mut self,
+        relation: &str,
+        payload: Vec<u8>,
+        label: &str,
+    ) -> Result<Vec<RecordBatch>, String> {
+        self.decode_with_limits(relation, payload, label, ARROW_DECODE_LIMITS)
     }
-    if batches.is_empty() {
-        batches.push(RecordBatch::new_empty(schema));
-    }
-    if batches
-        .iter()
-        .any(|batch| batch.schema() != batches[0].schema())
-    {
-        return Err(format!(
-            "{label} relation {relation} changes schema between Arrow batches"
-        ));
-    }
-    Ok(batches)
-}
 
-fn preflight_arrow_payload(
-    relation: &str,
-    payload: &[u8],
-    label: &str,
-    budget: &mut ArrowDecodeBudget,
-    limits: ArrowDecodeLimits,
-) -> Result<(), String> {
-    let mut position = 0_usize;
-    let mut claimed_decoded_bytes = 0_usize;
-    let mut rows = 0_usize;
-    while position < payload.len() {
-        let first = read_arrow_u32(payload, &mut position, relation)?;
-        let metadata_len = if first == u32::MAX {
-            read_arrow_u32(payload, &mut position, relation)?
-        } else {
-            first
-        };
-        if metadata_len == 0 {
-            if position != payload.len() {
-                return Err(format!(
-                    "{label} Arrow stream for {relation} has bytes after its end marker"
-                ));
-            }
-            break;
+    fn decode_with_row_limit(
+        &mut self,
+        relation: &str,
+        payload: Vec<u8>,
+        label: &str,
+        relation_rows: usize,
+    ) -> Result<Vec<RecordBatch>, String> {
+        self.decode_with_limits(
+            relation,
+            payload,
+            label,
+            ArrowDecodeLimits {
+                relation_rows,
+                ..ARROW_DECODE_LIMITS
+            },
+        )
+    }
+
+    fn decode_with_limits(
+        &mut self,
+        relation: &str,
+        payload: Vec<u8>,
+        label: &str,
+        limits: ArrowDecodeLimits,
+    ) -> Result<Vec<RecordBatch>, String> {
+        self.preflight(relation, &payload, label, limits)?;
+        // The preflight above bounds every IPC buffer by its declared decoded
+        // length before Arrow can allocate or decompress it. Do not use
+        // `RecordBatch::get_array_memory_size` for this bound: the stream reader
+        // exposes column buffers as slices of one shared message-body allocation,
+        // and that estimate counts the shared capacity once for every slice.
+        let reader = StreamReader::try_new(Cursor::new(payload), None)
+            .map_err(|error| format!("opening Arrow stream for {relation}: {error}"))?;
+        let schema = reader.schema();
+        let mut batches = Vec::new();
+        for batch in reader {
+            let batch =
+                batch.map_err(|error| format!("reading Arrow stream for {relation}: {error}"))?;
+            batches.push(batch);
         }
-        let metadata_len = usize::try_from(metadata_len)
-            .expect("Arrow metadata length always fits usize on supported targets");
-        if metadata_len > limits.message_metadata_bytes {
+        if batches.is_empty() {
+            batches.push(RecordBatch::new_empty(schema));
+        }
+        if batches
+            .iter()
+            .any(|batch| batch.schema() != batches[0].schema())
+        {
             return Err(format!(
-                "{label} Arrow metadata for {relation} exceeds the {} MiB message limit",
-                limits.message_metadata_bytes / (1024 * 1024),
+                "{label} relation {relation} changes schema between Arrow batches"
             ));
         }
-        claimed_decoded_bytes = claimed_decoded_bytes
+        Ok(batches)
+    }
+
+    fn preflight(
+        &mut self,
+        relation: &str,
+        payload: &[u8],
+        label: &str,
+        limits: ArrowDecodeLimits,
+    ) -> Result<(), String> {
+        let mut position = 0_usize;
+        let mut claimed_decoded_bytes = 0_usize;
+        let mut rows = 0_usize;
+        while position < payload.len() {
+            let first = read_arrow_u32(payload, &mut position, relation)?;
+            let metadata_len = if first == u32::MAX {
+                read_arrow_u32(payload, &mut position, relation)?
+            } else {
+                first
+            };
+            if metadata_len == 0 {
+                if position != payload.len() {
+                    return Err(format!(
+                        "{label} Arrow stream for {relation} has bytes after its end marker"
+                    ));
+                }
+                break;
+            }
+            let metadata_len = usize::try_from(metadata_len)
+                .expect("Arrow metadata length always fits usize on supported targets");
+            if metadata_len > limits.message_metadata_bytes {
+                return Err(format!(
+                    "{label} Arrow metadata for {relation} exceeds the {} MiB message limit",
+                    limits.message_metadata_bytes / (1024 * 1024),
+                ));
+            }
+            claimed_decoded_bytes = claimed_decoded_bytes
             .checked_add(metadata_len)
             .filter(|bytes| *bytes <= limits.decoded_bytes)
             .ok_or_else(|| {
@@ -921,79 +939,79 @@ fn preflight_arrow_payload(
                     limits.decoded_bytes / (1024 * 1024),
                 )
             })?;
-        let metadata_end = position
-            .checked_add(metadata_len)
-            .filter(|end| *end <= payload.len())
-            .ok_or_else(|| format!("{label} Arrow metadata for {relation} is truncated"))?;
-        let message = arrow_ipc::root_as_message(&payload[position..metadata_end])
-            .map_err(|error| format!("opening Arrow metadata for {relation}: {error}"))?;
-        position = metadata_end;
+            let metadata_end = position
+                .checked_add(metadata_len)
+                .filter(|end| *end <= payload.len())
+                .ok_or_else(|| format!("{label} Arrow metadata for {relation} is truncated"))?;
+            let message = arrow_ipc::root_as_message(&payload[position..metadata_end])
+                .map_err(|error| format!("opening Arrow metadata for {relation}: {error}"))?;
+            position = metadata_end;
 
-        let body_len = usize::try_from(message.bodyLength()).map_err(|_| {
-            format!("{label} Arrow message for {relation} has an invalid body length")
-        })?;
-        if body_len > limits.decoded_bytes {
+            let body_len = usize::try_from(message.bodyLength()).map_err(|_| {
+                format!("{label} Arrow message for {relation} has an invalid body length")
+            })?;
+            if body_len > limits.decoded_bytes {
+                return Err(format!(
+                    "{label} Arrow message body for {relation} exceeds the {} MiB decoded-memory limit",
+                    limits.decoded_bytes / (1024 * 1024),
+                ));
+            }
+            let body_end = position
+                .checked_add(body_len)
+                .filter(|end| *end <= payload.len())
+                .ok_or_else(|| format!("{label} Arrow message body for {relation} is truncated"))?;
+            let body = &payload[position..body_end];
+
+            match message.header_type() {
+                arrow_ipc::MessageHeader::Schema => {
+                    let schema = message.header_as_schema().ok_or_else(|| {
+                        format!("{label} Arrow schema metadata for {relation} is invalid")
+                    })?;
+                    validate_arrow_schema_bound(relation, schema, label, limits.schema_fields)?;
+                }
+                arrow_ipc::MessageHeader::RecordBatch => {
+                    let batch = message.header_as_record_batch().ok_or_else(|| {
+                        format!("{label} Arrow record metadata for {relation} is invalid")
+                    })?;
+                    preflight_arrow_record_batch(
+                        relation,
+                        batch,
+                        body,
+                        label,
+                        limits,
+                        &mut claimed_decoded_bytes,
+                        &mut rows,
+                    )?;
+                }
+                arrow_ipc::MessageHeader::DictionaryBatch => {
+                    let dictionary = message.header_as_dictionary_batch().ok_or_else(|| {
+                        format!("{label} Arrow dictionary metadata for {relation} is invalid")
+                    })?;
+                    let batch = dictionary.data().ok_or_else(|| {
+                        format!("{label} Arrow dictionary for {relation} has no record metadata")
+                    })?;
+                    preflight_arrow_record_batch(
+                        relation,
+                        batch,
+                        body,
+                        label,
+                        limits,
+                        &mut claimed_decoded_bytes,
+                        &mut rows,
+                    )?;
+                }
+                _ => {}
+            }
+            position = body_end;
+        }
+
+        if rows > limits.relation_rows {
             return Err(format!(
-                "{label} Arrow message body for {relation} exceeds the {} MiB decoded-memory limit",
-                limits.decoded_bytes / (1024 * 1024),
+                "{label} Arrow relation {relation} exceeds the {}-row relation limit",
+                limits.relation_rows,
             ));
         }
-        let body_end = position
-            .checked_add(body_len)
-            .filter(|end| *end <= payload.len())
-            .ok_or_else(|| format!("{label} Arrow message body for {relation} is truncated"))?;
-        let body = &payload[position..body_end];
-
-        match message.header_type() {
-            arrow_ipc::MessageHeader::Schema => {
-                let schema = message.header_as_schema().ok_or_else(|| {
-                    format!("{label} Arrow schema metadata for {relation} is invalid")
-                })?;
-                validate_arrow_schema_bound(relation, schema, label, limits.schema_fields)?;
-            }
-            arrow_ipc::MessageHeader::RecordBatch => {
-                let batch = message.header_as_record_batch().ok_or_else(|| {
-                    format!("{label} Arrow record metadata for {relation} is invalid")
-                })?;
-                preflight_arrow_record_batch(
-                    relation,
-                    batch,
-                    body,
-                    label,
-                    limits,
-                    &mut claimed_decoded_bytes,
-                    &mut rows,
-                )?;
-            }
-            arrow_ipc::MessageHeader::DictionaryBatch => {
-                let dictionary = message.header_as_dictionary_batch().ok_or_else(|| {
-                    format!("{label} Arrow dictionary metadata for {relation} is invalid")
-                })?;
-                let batch = dictionary.data().ok_or_else(|| {
-                    format!("{label} Arrow dictionary for {relation} has no record metadata")
-                })?;
-                preflight_arrow_record_batch(
-                    relation,
-                    batch,
-                    body,
-                    label,
-                    limits,
-                    &mut claimed_decoded_bytes,
-                    &mut rows,
-                )?;
-            }
-            _ => {}
-        }
-        position = body_end;
-    }
-
-    if rows > limits.relation_rows {
-        return Err(format!(
-            "{label} Arrow relation {relation} exceeds the {}-row relation limit",
-            limits.relation_rows,
-        ));
-    }
-    budget.claimed_decoded_bytes = budget
+        self.claimed_decoded_bytes = self
         .claimed_decoded_bytes
         .checked_add(claimed_decoded_bytes)
         .filter(|bytes| *bytes <= limits.decoded_bytes)
@@ -1003,17 +1021,18 @@ fn preflight_arrow_payload(
                 limits.decoded_bytes / (1024 * 1024),
             )
         })?;
-    budget.rows = budget
-        .rows
-        .checked_add(rows)
-        .filter(|rows| *rows <= limits.decoded_rows)
-        .ok_or_else(|| {
-            format!(
-                "{label} Arrow data exceeds the {}-row decoded limit at relation {relation}",
-                limits.decoded_rows,
-            )
-        })?;
-    Ok(())
+        self.rows = self
+            .rows
+            .checked_add(rows)
+            .filter(|rows| *rows <= limits.decoded_rows)
+            .ok_or_else(|| {
+                format!(
+                    "{label} Arrow data exceeds the {}-row decoded limit at relation {relation}",
+                    limits.decoded_rows,
+                )
+            })?;
+        Ok(())
+    }
 }
 
 fn read_arrow_u32(payload: &[u8], position: &mut usize, relation: &str) -> Result<u32, String> {
@@ -1136,194 +1155,231 @@ fn preflight_arrow_record_batch(
     Ok(())
 }
 
-fn decode_entries(
-    entries: Vec<(Table, Vec<u8>)>,
-    spec: BundleSpec,
-) -> Result<Vec<(Table, Vec<RecordBatch>)>, String> {
-    let mut budget = ArrowDecodeBudget::default();
-    decode_entries_with_budget(entries, spec, &mut budget)
+impl BundleSpec {
+    fn decode_entries(
+        &self,
+        entries: Vec<(Table, Vec<u8>)>,
+    ) -> Result<Vec<(Table, Vec<RecordBatch>)>, String> {
+        let mut budget = ArrowDecodeBudget::default();
+        self.decode_entries_with_budget(entries, &mut budget)
+    }
+
+    fn decode_entries_with_budget(
+        &self,
+        entries: Vec<(Table, Vec<u8>)>,
+        budget: &mut ArrowDecodeBudget,
+    ) -> Result<Vec<(Table, Vec<RecordBatch>)>, String> {
+        let mut decoded = Vec::new();
+        for (table, payload) in entries {
+            let batches = budget.decode(table.name(), payload, self.label)?;
+            let schema = batches[0].schema();
+            table.validate_managed_relation_schema(schema.as_ref(), self.label)?;
+            decoded.push((table, batches));
+        }
+        Ok(decoded)
+    }
 }
 
-fn decode_entries_with_budget(
-    entries: Vec<(Table, Vec<u8>)>,
-    spec: BundleSpec,
-    budget: &mut ArrowDecodeBudget,
-) -> Result<Vec<(Table, Vec<RecordBatch>)>, String> {
-    let mut decoded = Vec::new();
-    for (table, payload) in entries {
-        let batches = decode_arrow_payload(table.name(), payload, spec.label, budget)?;
-        let schema = batches[0].schema();
-        validate_managed_relation_schema(table, schema.as_ref(), spec.label)?;
-        decoded.push((table, batches));
-    }
-    Ok(decoded)
+trait ManagedRelationSchema {
+    fn managed_relation_schema(self) -> Schema;
+
+    fn validate_managed_relation_schema(self, schema: &Schema, label: &str) -> Result<(), String>;
+
+    fn managed_relation_field_matches(self, actual: &Field, expected: &Field) -> bool;
 }
 
-fn validate_managed_relation_schema(
-    table: Table,
-    schema: &Schema,
-    label: &str,
-) -> Result<(), String> {
-    let expected = managed_relation_schema(table);
-    if !schema.metadata().is_empty() {
-        return Err(format!(
-            "{label} relation {table} has unsupported schema metadata"
-        ));
-    }
-    if schema.fields().len() != expected.fields().len() {
-        return Err(format!(
-            "{label} relation {table} has {} columns; expected {}",
-            schema.fields().len(),
-            expected.fields().len(),
-        ));
-    }
-    for (actual, expected) in schema.fields().iter().zip(expected.fields()) {
-        if !managed_field_matches(actual, expected) {
+impl ManagedRelationSchema for Table {
+    fn validate_managed_relation_schema(self, schema: &Schema, label: &str) -> Result<(), String> {
+        let expected = self.managed_relation_schema();
+        if !schema.metadata().is_empty() {
             return Err(format!(
-                "{label} relation {table} field {:?} has type {} (nullable {}); expected semantic type {} (nullable {})",
-                actual.name(),
-                actual.data_type(),
-                actual.is_nullable(),
-                expected.data_type(),
-                expected.is_nullable(),
+                "{label} relation {self} has unsupported schema metadata"
             ));
         }
-    }
-    Ok(())
-}
-
-fn managed_field_matches(actual: &Field, expected: &Field) -> bool {
-    actual.name() == expected.name()
-        && actual.is_nullable() == expected.is_nullable()
-        && actual.metadata() == expected.metadata()
-        && managed_data_type_matches(actual.data_type(), expected.data_type())
-}
-
-fn managed_data_type_matches(actual: &DataType, expected: &DataType) -> bool {
-    match expected {
-        DataType::Utf8 => matches!(
-            actual,
-            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-        ),
-        DataType::Binary | DataType::LargeBinary => matches!(
-            actual,
-            DataType::Binary | DataType::LargeBinary | DataType::BinaryView
-        ),
-        DataType::List(expected_child) => {
-            let DataType::List(actual_child) = actual else {
-                return false;
-            };
-            managed_field_matches(actual_child, expected_child)
+        if schema.fields().len() != expected.fields().len() {
+            return Err(format!(
+                "{label} relation {self} has {} columns; expected {}",
+                schema.fields().len(),
+                expected.fields().len(),
+            ));
         }
-        _ => actual == expected,
+        for (actual, expected) in schema.fields().iter().zip(expected.fields()) {
+            if !self.managed_relation_field_matches(actual, expected) {
+                return Err(format!(
+                    "{label} relation {self} field {:?} has type {} (nullable {}); expected semantic type {} (nullable {})",
+                    actual.name(),
+                    actual.data_type(),
+                    actual.is_nullable(),
+                    expected.data_type(),
+                    expected.is_nullable(),
+                ));
+            }
+        }
+        Ok(())
     }
-}
 
-fn managed_relation_schema(table: Table) -> Schema {
-    let text = |name, nullable| Field::new(name, DataType::Utf8, nullable);
-    let timestamp = |name| Field::new(name, DataType::Int64, false);
-    let snapshot = || {
-        vec![
-            text(column::RUN_ID, false),
-            text(column::SNAPSHOT_JSON, false),
-            timestamp(column::UPDATED_MS),
-        ]
-    };
-    let fields = match table {
-        Table::Datasets => vec![
-            text(column::DATASET_ID, false),
-            text(column::NAME, false),
-            timestamp(column::CREATED_MS),
-            text(column::DESCRIPTION, true),
-        ],
-        Table::Episodes => vec![
-            text(column::EPISODE_ID, false),
-            text(column::DATASET_ID, false),
-            Field::new(column::SCHEMA_VERSION, DataType::UInt32, false),
-            timestamp(column::STARTED_MS),
-            Field::new(column::SAMPLE_HZ, DataType::Float64, false),
-            text(column::SOURCE, false),
-            text(column::NOTE, true),
-            Field::new(column::FRAMES, DataType::UInt64, false),
-            Field::new(column::DURATION_NS, DataType::UInt64, false),
-            Field::new(column::MAX_FOLLOW_ERROR_DEGREES, DataType::Float64, true),
-            Field::new(column::DISCARDED, DataType::Boolean, false),
-            text(column::METADATA_JSON, false),
-        ],
-        Table::EpisodeStreams => vec![
-            text(column::EPISODE_ID, false),
-            text(column::STREAM_ID, false),
-            text(column::MODALITY, false),
-            text(column::ROBOT_TYPE, true),
-            Field::new(
-                column::JOINT_NAMES,
-                DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
-                true,
-            ),
-            text(column::CAMERA_ID, true),
-            Field::new(column::WIDTH, DataType::UInt32, true),
-            Field::new(column::HEIGHT, DataType::UInt32, true),
-            Field::new(column::FPS, DataType::UInt32, true),
-        ],
-        Table::JointSamples => {
-            let float_list =
-                || DataType::List(Arc::new(Field::new("item", DataType::Float64, true)));
+    fn managed_relation_field_matches(self, actual: &Field, expected: &Field) -> bool {
+        let portable_video_payload_is_required = self == Table::VideoAssets
+            && actual.name() == column::PAYLOAD
+            && expected.name() == column::PAYLOAD
+            && !actual.is_nullable()
+            && expected.is_nullable();
+        (portable_video_payload_is_required || actual.is_nullable() == expected.is_nullable())
+            && actual.name() == expected.name()
+            && actual.metadata() == expected.metadata()
+            && actual
+                .data_type()
+                .matches_managed_data_type(expected.data_type())
+    }
+
+    fn managed_relation_schema(self) -> Schema {
+        let table = self;
+        let text = |name, nullable| Field::new(name, DataType::Utf8, nullable);
+        let timestamp = |name| Field::new(name, DataType::Int64, false);
+        let snapshot = || {
             vec![
+                text(column::RUN_ID, false),
+                text(column::SNAPSHOT_JSON, false),
+                timestamp(column::UPDATED_MS),
+            ]
+        };
+        let fields = match table {
+            Table::Datasets => vec![
+                text(column::DATASET_ID, false),
+                text(column::NAME, false),
+                timestamp(column::CREATED_MS),
+                text(column::DESCRIPTION, true),
+            ],
+            Table::Episodes => vec![
+                text(column::EPISODE_ID, false),
+                text(column::DATASET_ID, false),
+                Field::new(column::SCHEMA_VERSION, DataType::UInt32, false),
+                timestamp(column::STARTED_MS),
+                Field::new(column::SAMPLE_HZ, DataType::Float64, false),
+                text(column::SOURCE, false),
+                text(column::NOTE, true),
+                Field::new(column::FRAMES, DataType::UInt64, false),
+                Field::new(column::DURATION_NS, DataType::UInt64, false),
+                Field::new(column::MAX_FOLLOW_ERROR_DEGREES, DataType::Float64, true),
+                Field::new(column::DISCARDED, DataType::Boolean, false),
+                text(column::METADATA_JSON, false),
+            ],
+            Table::EpisodeStreams => vec![
                 text(column::EPISODE_ID, false),
                 text(column::STREAM_ID, false),
-                Field::new(column::SAMPLE_INDEX, DataType::UInt64, false),
-                Field::new(column::EPISODE_TIME_NS, DataType::UInt64, false),
-                Field::new(column::STATE_VALID, DataType::Boolean, false),
-                Field::new(column::ACTION_VALID, DataType::Boolean, false),
-                Field::new(column::STATE_POSITION, float_list(), false),
-                Field::new(column::ACTION_POSITION, float_list(), true),
+                text(column::MODALITY, false),
+                text(column::ROBOT_TYPE, true),
                 Field::new(
-                    column::RAW_POSITION,
-                    DataType::List(Arc::new(Field::new("item", DataType::Int64, false))),
-                    false,
+                    column::JOINT_NAMES,
+                    DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
+                    true,
                 ),
-                Field::new(column::VELOCITY, float_list(), true),
-                Field::new(column::EFFORT, float_list(), true),
-                Field::new(column::FOLLOW_ERROR_DEGREES, DataType::Float64, true),
-            ]
+                text(column::CAMERA_ID, true),
+                Field::new(column::WIDTH, DataType::UInt32, true),
+                Field::new(column::HEIGHT, DataType::UInt32, true),
+                Field::new(column::FPS, DataType::UInt32, true),
+            ],
+            Table::JointSamples => {
+                let float_list =
+                    || DataType::List(Arc::new(Field::new("item", DataType::Float64, true)));
+                vec![
+                    text(column::EPISODE_ID, false),
+                    text(column::STREAM_ID, false),
+                    Field::new(column::SAMPLE_INDEX, DataType::UInt64, false),
+                    Field::new(column::EPISODE_TIME_NS, DataType::UInt64, false),
+                    Field::new(column::STATE_VALID, DataType::Boolean, false),
+                    Field::new(column::ACTION_VALID, DataType::Boolean, false),
+                    Field::new(column::STATE_POSITION, float_list(), false),
+                    Field::new(column::ACTION_POSITION, float_list(), true),
+                    Field::new(
+                        column::RAW_POSITION,
+                        DataType::List(Arc::new(Field::new("item", DataType::Int64, false))),
+                        false,
+                    ),
+                    Field::new(column::VELOCITY, float_list(), true),
+                    Field::new(column::EFFORT, float_list(), true),
+                    Field::new(column::FOLLOW_ERROR_DEGREES, DataType::Float64, true),
+                ]
+            }
+            Table::VideoAssets => vec![
+                text(column::EPISODE_ID, false),
+                text(column::STREAM_ID, false),
+                Field::new(column::SEGMENT_INDEX, DataType::UInt32, false),
+                Field::new(column::TIMELINE_OFFSET_NS, DataType::UInt64, true),
+                text(column::CAMERA_ID, false),
+                Field::new(column::PAYLOAD, DataType::Binary, true),
+                Field::new(column::BYTE_SIZE, DataType::UInt64, false),
+                Field::new(column::WIDTH, DataType::UInt32, false),
+                Field::new(column::HEIGHT, DataType::UInt32, false),
+                Field::new(column::FPS, DataType::UInt32, false),
+                Field::new(column::FRAMES, DataType::UInt64, false),
+                text(column::MEDIA_RELATION, false),
+            ],
+            Table::TrainingCheckpoints => vec![
+                text(column::RUN_ID, false),
+                text(column::RUN_NAME, false),
+                text(column::POLICY, false),
+                Field::new(column::STEP, DataType::UInt64, false),
+                timestamp(column::CREATED_MS),
+                Field::new(column::VALIDATION_LOSS, DataType::Float64, true),
+                text(column::CONFIG_JSON, false),
+                Field::new(column::CHECKPOINT, DataType::LargeBinary, false),
+            ],
+            Table::Robots => vec![
+                text(column::ROBOT_ID, false),
+                text(column::CONFIG_JSON, false),
+                timestamp(column::UPDATED_MS),
+            ],
+            Table::StudioSettings => vec![
+                text(column::KEY, false),
+                text(column::VALUE_JSON, false),
+                timestamp(column::UPDATED_MS),
+            ],
+            Table::TrainingRuns | Table::RolloutRuns | Table::WorkflowRuns => snapshot(),
+        };
+        Schema::new(fields)
+    }
+}
+
+trait ManagedFieldCompatibility {
+    fn matches_managed_field(&self, expected: &Field) -> bool;
+}
+
+impl ManagedFieldCompatibility for Field {
+    fn matches_managed_field(&self, expected: &Field) -> bool {
+        self.name() == expected.name()
+            && self.is_nullable() == expected.is_nullable()
+            && self.metadata() == expected.metadata()
+            && self
+                .data_type()
+                .matches_managed_data_type(expected.data_type())
+    }
+}
+
+trait ManagedDataTypeCompatibility {
+    fn matches_managed_data_type(&self, expected: &DataType) -> bool;
+}
+
+impl ManagedDataTypeCompatibility for DataType {
+    fn matches_managed_data_type(&self, expected: &DataType) -> bool {
+        match expected {
+            DataType::Utf8 => matches!(
+                self,
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+            ),
+            DataType::Binary | DataType::LargeBinary => matches!(
+                self,
+                DataType::Binary | DataType::LargeBinary | DataType::BinaryView
+            ),
+            DataType::List(expected_child) => {
+                let DataType::List(actual_child) = self else {
+                    return false;
+                };
+                actual_child.matches_managed_field(expected_child)
+            }
+            _ => self == expected,
         }
-        Table::VideoAssets => vec![
-            text(column::EPISODE_ID, false),
-            text(column::STREAM_ID, false),
-            Field::new(column::SEGMENT_INDEX, DataType::UInt32, false),
-            Field::new(column::TIMELINE_OFFSET_NS, DataType::UInt64, true),
-            text(column::CAMERA_ID, false),
-            Field::new(column::PAYLOAD, DataType::Binary, true),
-            Field::new(column::BYTE_SIZE, DataType::UInt64, false),
-            Field::new(column::WIDTH, DataType::UInt32, false),
-            Field::new(column::HEIGHT, DataType::UInt32, false),
-            Field::new(column::FPS, DataType::UInt32, false),
-            Field::new(column::FRAMES, DataType::UInt64, false),
-            text(column::MEDIA_RELATION, false),
-        ],
-        Table::TrainingCheckpoints => vec![
-            text(column::RUN_ID, false),
-            text(column::RUN_NAME, false),
-            text(column::POLICY, false),
-            Field::new(column::STEP, DataType::UInt64, false),
-            timestamp(column::CREATED_MS),
-            Field::new(column::VALIDATION_LOSS, DataType::Float64, true),
-            text(column::CONFIG_JSON, false),
-            Field::new(column::CHECKPOINT, DataType::LargeBinary, false),
-        ],
-        Table::Robots => vec![
-            text(column::ROBOT_ID, false),
-            text(column::CONFIG_JSON, false),
-            timestamp(column::UPDATED_MS),
-        ],
-        Table::StudioSettings => vec![
-            text(column::KEY, false),
-            text(column::VALUE_JSON, false),
-            timestamp(column::UPDATED_MS),
-        ],
-        Table::TrainingRuns | Table::RolloutRuns | Table::WorkflowRuns => snapshot(),
-    };
-    Schema::new(fields)
+    }
 }
 
 fn decode_project_entries(
@@ -1334,11 +1390,10 @@ fn decode_project_entries(
     let registry_batches = payloads
         .remove(WORKFLOW_FEATURE_REGISTRY_RELATION)
         .map(|payload| {
-            decode_arrow_payload_with_row_limit(
+            budget.decode_with_row_limit(
                 WORKFLOW_FEATURE_REGISTRY_RELATION,
                 payload,
                 PROJECT_SPEC.label,
-                &mut budget,
                 MAX_FEATURE_REGISTRY_ROWS,
             )
         })
@@ -1351,7 +1406,7 @@ fn decode_project_entries(
     let declared_caches = registry.cache_relations();
     let dynamic_names = payloads
         .keys()
-        .filter(|name| table_named_in(name, &Table::ALL).is_none())
+        .filter(|name| PROJECT_SPEC.table_named(name).is_none())
         .cloned()
         .collect::<BTreeSet<_>>();
     if let Some(name) = dynamic_names.difference(&declared_caches).next() {
@@ -1369,7 +1424,7 @@ fn decode_project_entries(
     for table in Table::ALL {
         if let Some(payload) = payloads.remove(table.name()) {
             let mut relation =
-                decode_entries_with_budget(vec![(table, payload)], PROJECT_SPEC, &mut budget)?;
+                PROJECT_SPEC.decode_entries_with_budget(vec![(table, payload)], &mut budget)?;
             if table == Table::WorkflowRuns {
                 validate_workflow_agent_bundle_rows(&relation[0].1)?;
             }
@@ -1383,11 +1438,10 @@ fn decode_project_entries(
         let payload = payloads
             .remove(&relation)
             .expect("declared project cache presence was checked");
-        let batches = decode_arrow_payload_with_row_limit(
+        let batches = budget.decode_with_row_limit(
             &relation,
             payload,
             PROJECT_SPEC.label,
-            &mut budget,
             MAX_FEATURE_CACHE_ROWS,
         )?;
         validate_workflow_cache(&relation, &batches, &registry)?;
@@ -2408,7 +2462,7 @@ fn reject_existing_episodes(
     namespace: &str,
     episode_ids: &[String],
 ) -> Result<(), String> {
-    let episodes = sql::relation(namespace, Table::Episodes);
+    let episodes = Table::Episodes.qualified_name(namespace);
     if !table_exists(connection, &episodes)? {
         return Ok(());
     }
@@ -2458,135 +2512,135 @@ fn validate_episode_id(episode_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
-fn parse(bundle: &[u8]) -> Result<Vec<(Table, Vec<u8>)>, String> {
-    parse_bundle(bundle, PROJECT_SPEC)
-}
-
-fn parse_bundle(bundle: &[u8], spec: BundleSpec) -> Result<Vec<(Table, Vec<u8>)>, String> {
-    parse_raw_bundle(bundle, spec)?
-        .into_iter()
-        .map(|(name, payload)| {
-            table_named_in(&name, spec.tables)
-                .map(|table| (table, payload))
-                .ok_or_else(|| format!("{} contains unknown relation {name:?}", spec.label))
-        })
-        .collect()
-}
-
-fn parse_raw_bundle(bundle: &[u8], spec: BundleSpec) -> Result<Vec<(String, Vec<u8>)>, String> {
-    if bundle.len() > spec.max_bytes {
-        return Err(format!(
-            "{} file exceeds the {} MiB import limit",
-            spec.label,
-            spec.max_bytes / (1024 * 1024),
-        ));
-    }
-    let mut source = Cursor::new(bundle);
-    let mut magic = [0_u8; 8];
-    source
-        .read_exact(&mut magic)
-        .map_err(|_| format!("{} file is truncated", spec.label))?;
-    if &magic != spec.magic {
-        return Err(format!("file is not a Spiral Robotics {}", spec.label));
-    }
-    let manifest_len = read_u32(&mut source)? as usize;
-    if manifest_len == 0 || manifest_len > MAX_MANIFEST_BYTES {
-        return Err(format!("{} manifest has an invalid size", spec.label));
-    }
-    let mut manifest = vec![0_u8; manifest_len];
-    source
-        .read_exact(&mut manifest)
-        .map_err(|_| format!("{} manifest is truncated", spec.label))?;
-    let manifest: Manifest = serde_json::from_slice(&manifest)
-        .map_err(|error| format!("{} manifest is invalid: {error}", spec.label))?;
-    if manifest.format != spec.format || manifest.format_version != FORMAT_VERSION {
-        return Err(format!(
-            "{} file uses an unsupported format version",
-            spec.label
-        ));
-    }
-    if manifest.schema_version != spiral::SCHEMA_VERSION {
-        return Err(format!(
-            "{} schema {} cannot be imported by schema {}",
-            spec.label,
-            manifest.schema_version,
-            spiral::SCHEMA_VERSION
-        ));
+impl BundleSpec {
+    fn parse(&self, bundle: &[u8]) -> Result<Vec<(Table, Vec<u8>)>, String> {
+        self.parse_raw(bundle)?
+            .into_iter()
+            .map(|(name, payload)| {
+                self.table_named(&name)
+                    .map(|table| (table, payload))
+                    .ok_or_else(|| format!("{} contains unknown relation {name:?}", self.label))
+            })
+            .collect()
     }
 
-    let relation_count = manifest.relations.len();
-    let mut expected = manifest.relations.into_iter().collect::<BTreeSet<_>>();
-    if expected.len() != relation_count {
-        return Err(format!(
-            "{} manifest contains duplicate relations",
-            spec.label
-        ));
-    }
-    if spec.format != PROJECT_FORMAT
-        && let Some(name) = expected
-            .iter()
-            .find(|name| table_named_in(name, spec.tables).is_none())
-    {
-        return Err(format!(
-            "{} manifest contains unknown relation {name:?}",
-            spec.label
-        ));
-    }
-    let mut seen = BTreeSet::new();
-    let mut entries = BTreeMap::new();
-    loop {
-        let name_len = read_u16(&mut source)? as usize;
-        if name_len == 0 {
-            break;
-        }
-        if name_len > MAX_ENTRY_NAME_BYTES {
-            return Err(format!("{} relation name is too long", spec.label));
-        }
-        let mut name = vec![0_u8; name_len];
-        source
-            .read_exact(&mut name)
-            .map_err(|_| format!("{} relation name is truncated", spec.label))?;
-        let name = String::from_utf8(name)
-            .map_err(|_| format!("{} relation name is not UTF-8", spec.label))?;
-        if !expected.remove(&name) || !seen.insert(name.clone()) {
+    fn parse_raw(&self, bundle: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
+        if bundle.len() > self.max_bytes {
             return Err(format!(
-                "{} contains unexpected or duplicate relation {name:?}",
-                spec.label
+                "{} file exceeds the {} MiB import limit",
+                self.label,
+                self.max_bytes / (1024 * 1024),
             ));
         }
-        let payload_len = read_u64(&mut source)?;
-        let payload_len = usize::try_from(payload_len).map_err(|_| {
-            format!(
-                "{} relation {name:?} is too large for this machine",
-                spec.label
-            )
-        })?;
-        let remaining = bundle.len().saturating_sub(source.position() as usize);
-        if payload_len > remaining {
-            return Err(format!("{} relation {name:?} is truncated", spec.label));
-        }
-        let mut payload = vec![0_u8; payload_len];
+        let mut source = Cursor::new(bundle);
+        let mut magic = [0_u8; 8];
         source
-            .read_exact(&mut payload)
-            .map_err(|_| format!("{} relation {name:?} is truncated", spec.label))?;
-        entries.insert(name, payload);
-    }
-    if !expected.is_empty() {
-        return Err(format!(
-            "{} is missing relations: {}",
-            spec.label,
-            expected.into_iter().collect::<Vec<_>>().join(", ")
-        ));
-    }
-    if source.position() != bundle.len() as u64 {
-        return Err(format!("{} file has trailing bytes", spec.label));
-    }
-    Ok(entries.into_iter().collect())
-}
+            .read_exact(&mut magic)
+            .map_err(|_| format!("{} file is truncated", self.label))?;
+        if &magic != self.magic {
+            return Err(format!("file is not a Spiral Robotics {}", self.label));
+        }
+        let manifest_len = read_u32(&mut source)? as usize;
+        if manifest_len == 0 || manifest_len > MAX_MANIFEST_BYTES {
+            return Err(format!("{} manifest has an invalid size", self.label));
+        }
+        let mut manifest = vec![0_u8; manifest_len];
+        source
+            .read_exact(&mut manifest)
+            .map_err(|_| format!("{} manifest is truncated", self.label))?;
+        let manifest: Manifest = serde_json::from_slice(&manifest)
+            .map_err(|error| format!("{} manifest is invalid: {error}", self.label))?;
+        if manifest.format != self.format || manifest.format_version != FORMAT_VERSION {
+            return Err(format!(
+                "{} file uses an unsupported format version",
+                self.label
+            ));
+        }
+        if manifest.schema_version != spiral::SCHEMA_VERSION {
+            return Err(format!(
+                "{} schema {} cannot be imported by schema {}",
+                self.label,
+                manifest.schema_version,
+                spiral::SCHEMA_VERSION
+            ));
+        }
 
-fn table_named_in(name: &str, tables: &[Table]) -> Option<Table> {
-    tables.iter().copied().find(|table| table.name() == name)
+        let relation_count = manifest.relations.len();
+        let mut expected = manifest.relations.into_iter().collect::<BTreeSet<_>>();
+        if expected.len() != relation_count {
+            return Err(format!(
+                "{} manifest contains duplicate relations",
+                self.label
+            ));
+        }
+        if self.format != PROJECT_FORMAT
+            && let Some(name) = expected
+                .iter()
+                .find(|name| self.table_named(name).is_none())
+        {
+            return Err(format!(
+                "{} manifest contains unknown relation {name:?}",
+                self.label
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        let mut entries = BTreeMap::new();
+        loop {
+            let name_len = read_u16(&mut source)? as usize;
+            if name_len == 0 {
+                break;
+            }
+            if name_len > MAX_ENTRY_NAME_BYTES {
+                return Err(format!("{} relation name is too long", self.label));
+            }
+            let mut name = vec![0_u8; name_len];
+            source
+                .read_exact(&mut name)
+                .map_err(|_| format!("{} relation name is truncated", self.label))?;
+            let name = String::from_utf8(name)
+                .map_err(|_| format!("{} relation name is not UTF-8", self.label))?;
+            if !expected.remove(&name) || !seen.insert(name.clone()) {
+                return Err(format!(
+                    "{} contains unexpected or duplicate relation {name:?}",
+                    self.label
+                ));
+            }
+            let payload_len = read_u64(&mut source)?;
+            let payload_len = usize::try_from(payload_len).map_err(|_| {
+                format!(
+                    "{} relation {name:?} is too large for this machine",
+                    self.label
+                )
+            })?;
+            let remaining = bundle.len().saturating_sub(source.position() as usize);
+            if payload_len > remaining {
+                return Err(format!("{} relation {name:?} is truncated", self.label));
+            }
+            let mut payload = vec![0_u8; payload_len];
+            source
+                .read_exact(&mut payload)
+                .map_err(|_| format!("{} relation {name:?} is truncated", self.label))?;
+            entries.insert(name, payload);
+        }
+        if !expected.is_empty() {
+            return Err(format!(
+                "{} is missing relations: {}",
+                self.label,
+                expected.into_iter().collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if source.position() != bundle.len() as u64 {
+            return Err(format!("{} file has trailing bytes", self.label));
+        }
+        Ok(entries.into_iter().collect())
+    }
+
+    fn table_named(&self, name: &str) -> Option<Table> {
+        self.tables
+            .iter()
+            .copied()
+            .find(|table| table.name() == name)
+    }
 }
 
 struct LimitedPayload {
@@ -2791,17 +2845,17 @@ mod tests {
         let payload = compressed_arrow_payload(&batch);
         assert!(payload.len() < 64 * 1_024);
 
-        let error = decode_arrow_payload_with_limits(
-            "compressed_bomb",
-            payload,
-            "project",
-            &mut ArrowDecodeBudget::default(),
-            ArrowDecodeLimits {
-                decoded_bytes: 64 * 1_024,
-                ..ARROW_DECODE_LIMITS
-            },
-        )
-        .unwrap_err();
+        let error = ArrowDecodeBudget::default()
+            .decode_with_limits(
+                "compressed_bomb",
+                payload,
+                "project",
+                ArrowDecodeLimits {
+                    decoded_bytes: 64 * 1_024,
+                    ..ARROW_DECODE_LIMITS
+                },
+            )
+            .unwrap_err();
 
         assert!(error.contains("decoded-buffer limit"), "{error}");
     }
@@ -2821,25 +2875,44 @@ mod tests {
             ..ARROW_DECODE_LIMITS
         };
         let mut budget = ArrowDecodeBudget::default();
-        decode_arrow_payload_with_limits(
-            "first_relation",
-            payload.clone(),
-            "project",
-            &mut budget,
-            limits,
-        )
-        .unwrap();
+        budget
+            .decode_with_limits("first_relation", payload.clone(), "project", limits)
+            .unwrap();
 
-        let error = decode_arrow_payload_with_limits(
-            "second_relation",
-            payload,
-            "project",
-            &mut budget,
-            limits,
-        )
-        .unwrap_err();
+        let error = budget
+            .decode_with_limits("second_relation", payload, "project", limits)
+            .unwrap_err();
 
         assert!(error.contains("decoded-buffer limit"), "{error}");
+    }
+
+    #[test]
+    fn arrow_decode_accepts_uncompressed_shared_batch_buffers_within_the_declared_limit() {
+        let mut fields = vec![Field::new("payload", DataType::Binary, false)];
+        let payload_value = vec![7_u8; 256 * 1_024];
+        let mut columns =
+            vec![Arc::new(BinaryArray::from(vec![Some(payload_value.as_slice())])) as ArrayRef];
+        for index in 0..16 {
+            fields.push(Field::new(
+                format!("value_{index}"),
+                DataType::UInt64,
+                false,
+            ));
+            columns.push(Arc::new(UInt64Array::from(vec![index])) as ArrayRef);
+        }
+        let payload = arrow_payload(&record_batch(fields, columns));
+
+        ArrowDecodeBudget::default()
+            .decode_with_limits(
+                "video_assets",
+                payload.clone(),
+                "project",
+                ArrowDecodeLimits {
+                    decoded_bytes: payload.len(),
+                    ..ARROW_DECODE_LIMITS
+                },
+            )
+            .expect("declared Arrow buffers fit inside the decode limit");
     }
 
     #[test]
@@ -2848,17 +2921,17 @@ mod tests {
             vec![Field::new("value", DataType::Null, true)],
             vec![Arc::new(NullArray::new(1_001))],
         );
-        let error = decode_arrow_payload_with_limits(
-            "too_many_rows",
-            arrow_payload(&batch),
-            "project",
-            &mut ArrowDecodeBudget::default(),
-            ArrowDecodeLimits {
-                record_batch_rows: 1_000,
-                ..ARROW_DECODE_LIMITS
-            },
-        )
-        .unwrap_err();
+        let error = ArrowDecodeBudget::default()
+            .decode_with_limits(
+                "too_many_rows",
+                arrow_payload(&batch),
+                "project",
+                ArrowDecodeLimits {
+                    record_batch_rows: 1_000,
+                    ..ARROW_DECODE_LIMITS
+                },
+            )
+            .unwrap_err();
 
         assert!(error.contains("1000-row batch limit"), "{error}");
     }
@@ -2869,18 +2942,18 @@ mod tests {
             vec![Field::new("value", DataType::Null, true)],
             vec![Arc::new(NullArray::new(600))],
         );
-        let error = decode_arrow_payload_with_limits(
-            "too_many_relation_rows",
-            arrow_payload_batches(&[batch.clone(), batch]),
-            "project",
-            &mut ArrowDecodeBudget::default(),
-            ArrowDecodeLimits {
-                relation_rows: 1_000,
-                record_batch_rows: 1_000,
-                ..ARROW_DECODE_LIMITS
-            },
-        )
-        .unwrap_err();
+        let error = ArrowDecodeBudget::default()
+            .decode_with_limits(
+                "too_many_relation_rows",
+                arrow_payload_batches(&[batch.clone(), batch]),
+                "project",
+                ArrowDecodeLimits {
+                    relation_rows: 1_000,
+                    record_batch_rows: 1_000,
+                    ..ARROW_DECODE_LIMITS
+                },
+            )
+            .unwrap_err();
 
         assert!(error.contains("1000-row relation limit"), "{error}");
     }
@@ -2903,12 +2976,34 @@ mod tests {
         let payload = arrow_payload_batches(&[batch.clone(), batch.clone(), batch.clone(), batch]);
         assert!(payload.len() < 16 * 1_024);
 
-        let error = decode_entries(vec![(Table::Datasets, payload)], PROJECT_SPEC).unwrap_err();
+        let error = PROJECT_SPEC
+            .decode_entries(vec![(Table::Datasets, payload)])
+            .unwrap_err();
 
         assert!(
             error.contains("1000000-row") && error.contains("limit"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn managed_schema_accepts_required_binary_view_for_portable_video_payload() {
+        let mut fields = Table::VideoAssets
+            .managed_relation_schema()
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        let payload = Table::VideoAssets
+            .columns()
+            .iter()
+            .position(|name| *name == column::PAYLOAD)
+            .expect("video assets contain a payload field");
+        fields[payload] = Field::new(column::PAYLOAD, DataType::BinaryView, false);
+
+        Table::VideoAssets
+            .validate_managed_relation_schema(&Schema::new(fields), PROJECT_SPEC.label)
+            .expect("a required portable payload safely satisfies the nullable binary contract");
     }
 
     #[test]
@@ -2926,7 +3021,8 @@ mod tests {
                 .collect(),
         );
 
-        let error = decode_entries(vec![(Table::Datasets, arrow_payload(&batch))], PROJECT_SPEC)
+        let error = PROJECT_SPEC
+            .decode_entries(vec![(Table::Datasets, arrow_payload(&batch))])
             .unwrap_err();
 
         assert!(error.contains("semantic type"), "{error}");
@@ -2944,17 +3040,17 @@ mod tests {
                 Arc::new(UInt64Array::from(Vec::<u64>::new())),
             ],
         );
-        let error = decode_arrow_payload_with_limits(
-            "too_many_columns",
-            arrow_payload(&batch),
-            "project",
-            &mut ArrowDecodeBudget::default(),
-            ArrowDecodeLimits {
-                schema_fields: 1,
-                ..ARROW_DECODE_LIMITS
-            },
-        )
-        .unwrap_err();
+        let error = ArrowDecodeBudget::default()
+            .decode_with_limits(
+                "too_many_columns",
+                arrow_payload(&batch),
+                "project",
+                ArrowDecodeLimits {
+                    schema_fields: 1,
+                    ..ARROW_DECODE_LIMITS
+                },
+            )
+            .unwrap_err();
 
         assert!(error.contains("1-column limit"), "{error}");
     }
@@ -3297,9 +3393,9 @@ mod tests {
     #[test]
     fn empty_project_envelope_is_valid() {
         let bundle = envelope(manifest(Vec::new()), &[]);
-        assert_eq!(parse(&bundle).unwrap(), Vec::new());
+        assert_eq!(PROJECT_SPEC.parse(&bundle).unwrap(), Vec::new());
         assert!(
-            decode_project_entries(parse_raw_bundle(&bundle, PROJECT_SPEC).unwrap())
+            decode_project_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
                 .unwrap()
                 .is_empty()
         );
@@ -3309,11 +3405,17 @@ mod tests {
     fn manifest_and_payload_relations_must_match_exactly() {
         let name = Table::Datasets.name().to_owned();
         let missing = envelope(manifest(vec![name.clone()]), &[]);
-        assert!(parse(&missing).unwrap_err().contains("missing relations"));
+        assert!(
+            PROJECT_SPEC
+                .parse(&missing)
+                .unwrap_err()
+                .contains("missing relations")
+        );
 
         let unexpected = envelope(manifest(Vec::new()), &[(name.as_str(), b"arrow")]);
         assert!(
-            parse(&unexpected)
+            PROJECT_SPEC
+                .parse(&unexpected)
                 .unwrap_err()
                 .contains("unexpected or duplicate")
         );
@@ -3323,14 +3425,20 @@ mod tests {
     fn duplicate_manifest_relations_are_rejected() {
         let name = Table::Datasets.name().to_owned();
         let bundle = envelope(manifest(vec![name.clone(), name]), &[]);
-        assert!(parse(&bundle).unwrap_err().contains("duplicate relations"));
+        assert!(
+            PROJECT_SPEC
+                .parse(&bundle)
+                .unwrap_err()
+                .contains("duplicate relations")
+        );
     }
 
     #[test]
     fn project_and_episode_bundle_formats_are_not_interchangeable() {
         let project = envelope(manifest(Vec::new()), &[]);
         assert!(
-            parse_bundle(&project, EPISODES_SPEC)
+            EPISODES_SPEC
+                .parse(&project)
                 .unwrap_err()
                 .contains("not a Spiral Robotics episode bundle")
         );
@@ -3341,7 +3449,8 @@ mod tests {
             &[],
         );
         assert!(
-            parse(&episodes)
+            PROJECT_SPEC
+                .parse(&episodes)
                 .unwrap_err()
                 .contains("not a Spiral Robotics project")
         );
@@ -3356,7 +3465,8 @@ mod tests {
             &[],
         );
         assert!(
-            parse_bundle(&bundle, EPISODES_SPEC)
+            EPISODES_SPEC
+                .parse(&bundle)
                 .unwrap_err()
                 .contains("unknown relation")
         );
@@ -3446,7 +3556,7 @@ mod tests {
         let mut bundle = envelope(manifest(vec![name.clone()]), &[(name.as_str(), b"")]);
         let length_offset = bundle.len() - 2 - 8;
         bundle[length_offset..length_offset + 8].copy_from_slice(&u64::MAX.to_le_bytes());
-        let error = parse(&bundle).unwrap_err();
+        let error = PROJECT_SPEC.parse(&bundle).unwrap_err();
         assert!(error.contains("too large for this machine") || error.contains("truncated"));
     }
 
@@ -3471,7 +3581,7 @@ mod tests {
         let registry = canonical_registry_batch(std::slice::from_ref(&definition));
         let cache_batch = canonical_cache_batch(std::slice::from_ref(&definition), &[1]);
         let valid = workflow_project_bundle(&registry, &[(cache.as_str(), cache_batch.clone())]);
-        let decoded = decode_project_entries(parse_raw_bundle(&valid, PROJECT_SPEC).unwrap())
+        let decoded = decode_project_entries(PROJECT_SPEC.parse_raw(&valid).unwrap())
             .expect("a registry and its exact declared cache must decode");
         assert_eq!(
             decoded
@@ -3487,7 +3597,7 @@ mod tests {
             &[(WORKFLOW_FEATURE_REGISTRY_RELATION, &registry_payload)],
         );
         assert!(
-            decode_project_entries(parse_raw_bundle(&missing, PROJECT_SPEC).unwrap())
+            decode_project_entries(PROJECT_SPEC.parse_raw(&missing).unwrap())
                 .unwrap_err()
                 .contains("missing declared Workflow cache")
         );
@@ -3507,7 +3617,7 @@ mod tests {
             ],
         );
         assert!(
-            decode_project_entries(parse_raw_bundle(&undeclared, PROJECT_SPEC).unwrap())
+            decode_project_entries(PROJECT_SPEC.parse_raw(&undeclared).unwrap())
                 .unwrap_err()
                 .contains("undeclared Workflow relation")
         );
@@ -3527,7 +3637,7 @@ mod tests {
             &[(WORKFLOW_FEATURE_REGISTRY_RELATION, &payload)],
         );
         assert!(
-            decode_project_entries(parse_raw_bundle(&bundle, PROJECT_SPEC).unwrap())
+            decode_project_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
                 .unwrap_err()
                 .contains("does not match server-derived identity")
         );
@@ -3541,7 +3651,7 @@ mod tests {
         ]);
         let bundle = workflow_project_bundle(&permissive_old_shape, &[]);
         assert!(
-            decode_project_entries(parse_raw_bundle(&bundle, PROJECT_SPEC).unwrap())
+            decode_project_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
                 .unwrap_err()
                 .contains("canonical 14-field schema")
         );
@@ -3554,7 +3664,7 @@ mod tests {
         );
         let bundle = workflow_project_bundle(&forged, &[]);
         assert!(
-            decode_project_entries(parse_raw_bundle(&bundle, PROJECT_SPEC).unwrap())
+            decode_project_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
                 .unwrap_err()
                 .contains("incompatible producer provenance")
         );
@@ -3587,7 +3697,7 @@ mod tests {
             &[(relation.as_str(), missing_feature.clone())],
         );
         assert!(
-            decode_project_entries(parse_raw_bundle(&bundle, PROJECT_SPEC).unwrap())
+            decode_project_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
                 .unwrap_err()
                 .contains("do not exactly match")
         );
@@ -3879,12 +3989,12 @@ mod tests {
                 ensure_dataset_namespace(connection, repository.namespace())?;
                 ingest_batch(
                     connection,
-                    &sql::relation(repository.namespace(), Table::StudioSettings),
+                    &Table::StudioSettings.qualified_name(repository.namespace()),
                     settings_batch("exported-setting", r#"{"source":"export"}"#, 10),
                 )?;
                 ingest_batch(
                     connection,
-                    &sql::relation(repository.namespace(), Table::TrainingCheckpoints),
+                    &Table::TrainingCheckpoints.qualified_name(repository.namespace()),
                     checkpoint_batch(),
                 )
             })
@@ -3907,12 +4017,12 @@ mod tests {
                 drop_studio_relations(connection, repository.namespace())?;
                 ingest_batch(
                     connection,
-                    &sql::relation(repository.namespace(), Table::StudioSettings),
+                    &Table::StudioSettings.qualified_name(repository.namespace()),
                     settings_batch("replacement-setting", r#"{"source":"replacement"}"#, 20),
                 )?;
                 ingest_batch(
                     connection,
-                    &sql::relation(repository.namespace(), Table::RolloutRuns),
+                    &Table::RolloutRuns.qualified_name(repository.namespace()),
                     snapshot_batch("replacement-run"),
                 )
             })
@@ -3937,7 +4047,7 @@ mod tests {
             .run_blocking(|connection| {
                 assert!(!table_exists(
                     connection,
-                    &sql::relation(repository.namespace(), Table::RolloutRuns)
+                    &Table::RolloutRuns.qualified_name(repository.namespace())
                 )?);
                 Ok(())
             })
@@ -3989,7 +4099,8 @@ mod tests {
         let exported = storage
             .export_episode_bundle("source")
             .expect("exporting source episodes must succeed");
-        let exported_relations = parse_bundle(&exported, EPISODES_SPEC)
+        let exported_relations = EPISODES_SPEC
+            .parse(&exported)
             .expect("the exported episode bundle must parse")
             .into_iter()
             .map(|(table, _)| table)
@@ -4018,7 +4129,7 @@ mod tests {
 
         repository
             .run_blocking(|connection| {
-                let episodes = sql::relation(repository.namespace(), Table::Episodes);
+                let episodes = Table::Episodes.qualified_name(repository.namespace());
                 let result = run_query(
                     connection,
                     &format!(
@@ -4109,18 +4220,18 @@ mod tests {
                 ensure_dataset_namespace(connection, repository.namespace())?;
                 ingest_batch(
                     connection,
-                    &sql::relation(repository.namespace(), Table::Datasets),
+                    &Table::Datasets.qualified_name(repository.namespace()),
                     dataset_batch(&start).map_err(|error| error.to_string())?,
                 )?;
                 ingest_batch(
                     connection,
-                    &sql::relation(repository.namespace(), Table::Episodes),
+                    &Table::Episodes.qualified_name(repository.namespace()),
                     episode_completion_batch(&start, &completion, 0)
                         .map_err(|error| error.to_string())?,
                 )?;
                 ingest_batch(
                     connection,
-                    &sql::relation(repository.namespace(), Table::VideoAssets),
+                    &Table::VideoAssets.qualified_name(repository.namespace()),
                     video_asset_batch(episode_id, &mp4),
                 )?;
                 ensure_video_assets_blob_relation(connection, repository.namespace())
@@ -4154,7 +4265,7 @@ mod tests {
 
         repository
             .run_blocking(|connection| {
-                let assets = sql::relation(repository.namespace(), Table::VideoAssets);
+                let assets = Table::VideoAssets.qualified_name(repository.namespace());
                 let schema = connection
                     .table_schema(&assets)?
                     .ok_or_else(|| "imported video asset relation is missing".to_owned())?;
@@ -4355,11 +4466,13 @@ mod tests {
         let bundle_path = std::env::var("SPIRAL_PROJECT_BUNDLE")
             .expect("SPIRAL_PROJECT_BUNDLE must name the project archive to profile");
         let bytes = fs::read(&bundle_path).expect("the profiling archive must be readable");
-        let mut decoded = decode_entries(
-            parse(&bytes).expect("the profiling archive must parse"),
-            PROJECT_SPEC,
-        )
-        .expect("the profiling archive must decode");
+        let mut decoded = PROJECT_SPEC
+            .decode_entries(
+                PROJECT_SPEC
+                    .parse(&bytes)
+                    .expect("the profiling archive must parse"),
+            )
+            .expect("the profiling archive must decode");
         sort_relations(&mut decoded, &Table::ALL);
 
         let project = required_project();
@@ -4589,14 +4702,14 @@ mod tests {
         bundle: &[u8],
     ) -> Result<ProjectImportSummary, String> {
         let parse_start = Instant::now();
-        let entries = parse(bundle)?;
+        let entries = PROJECT_SPEC.parse(bundle)?;
         profile_event("studio.bundle_parse", parse_start, 0, bundle.len());
 
         let mut decoded = Vec::new();
         for (table, payload) in entries {
             let payload_bytes = payload.len();
             let decode_start = Instant::now();
-            let mut relation = decode_entries(vec![(table, payload)], PROJECT_SPEC)?;
+            let mut relation = PROJECT_SPEC.decode_entries(vec![(table, payload)])?;
             let rows = relation
                 .iter()
                 .flat_map(|(_, batches)| batches)
@@ -4634,7 +4747,7 @@ mod tests {
                 if decoded.iter().any(|(incoming, _)| *incoming == table) {
                     continue;
                 }
-                let relation = sql::relation(namespace, table);
+                let relation = table.qualified_name(namespace);
                 let exists_start = Instant::now();
                 let exists = table_exists(connection, &relation)?;
                 profile_event(
@@ -4658,7 +4771,7 @@ mod tests {
             let video_chunk_rows = profile_usize("SPIRAL_PROFILE_VIDEO_CHUNK_ROWS");
             let mut summary = ProjectImportSummary::default();
             for (table, batches) in decoded {
-                let relation = sql::relation(namespace, table);
+                let relation = table.qualified_name(namespace);
                 summary.relations += 1;
                 let relation_ingest_start = Instant::now();
                 let mut relation_rows = 0usize;
@@ -4777,7 +4890,7 @@ mod tests {
         profile_event("spiral.reconcile_video_exists", exists_start, 1, 0);
 
         let sources = sql::video_sources_relation(namespace);
-        let assets = sql::relation(namespace, Table::VideoAssets);
+        let assets = Table::VideoAssets.qualified_name(namespace);
         let dataset = sql::video_dataset_relation(namespace);
         let view_start = Instant::now();
         execute_update_sql(connection, &sql::create_video_sources(&sources, &assets))
@@ -4862,7 +4975,8 @@ mod tests {
     }
 
     fn relation_payloads(bundle: &[u8]) -> BTreeMap<String, Vec<u8>> {
-        parse_raw_bundle(bundle, PROJECT_SPEC)
+        PROJECT_SPEC
+            .parse_raw(bundle)
             .expect("the exported project must parse")
             .into_iter()
             .collect()
@@ -4951,12 +5065,12 @@ mod tests {
         };
         ingest_batch(
             connection,
-            &sql::relation(namespace, Table::Datasets),
+            &Table::Datasets.qualified_name(namespace),
             dataset_batch(&start).map_err(|error| error.to_string())?,
         )?;
         ingest_batch(
             connection,
-            &sql::relation(namespace, Table::Episodes),
+            &Table::Episodes.qualified_name(namespace),
             episode_completion_batch(&start, &completion, 0).map_err(|error| error.to_string())?,
         )
     }
@@ -5038,7 +5152,7 @@ mod tests {
     ) -> Result<(), String> {
         drop_video_dataset(connection, namespace)?;
         for table in Table::ALL.into_iter().rev() {
-            let relation = sql::relation(namespace, table);
+            let relation = table.qualified_name(namespace);
             if table_exists(connection, &relation)? {
                 execute_update_sql(connection, &format!("DROP TABLE {relation}"))?;
             }

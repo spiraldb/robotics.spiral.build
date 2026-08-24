@@ -5,6 +5,9 @@ edition.workspace = true
 description = "Rust HTTP and Arrow IPC client for Spiral Robotics policy compute runtimes"
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 spiral-robotics-inference.workspace = true
 spiral-robotics-training.workspace = true

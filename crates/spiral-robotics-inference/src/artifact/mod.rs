@@ -6,10 +6,10 @@ use sha2::{Digest, Sha256};
 use crate::error::IoResultExt;
 use crate::{Error, Result};
 
-pub const CONFIG_FILE: &str = "config.json";
-pub const WEIGHTS_FILE: &str = "model.safetensors";
-pub const MAX_MODEL_CONFIG_BYTES: usize = 1024 * 1024;
-pub const MAX_MODEL_WEIGHTS_BYTES: usize = 512 * 1024 * 1024;
+const CONFIG_FILE: &str = "config.json";
+const WEIGHTS_FILE: &str = "model.safetensors";
+const MAX_MODEL_CONFIG_BYTES: usize = 1024 * 1024;
+const MAX_MODEL_WEIGHTS_BYTES: usize = 512 * 1024 * 1024;
 
 /// Content-addressed identity of the exact bytes admitted to the runtime.
 #[derive(Clone, Debug, Eq, PartialEq)]

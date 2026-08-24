@@ -59,53 +59,53 @@ pub(crate) struct StudioTimelineState {
 /// missing sample with a line the hardware never reported.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TimelineSignalPoint {
-    pub seconds: f64,
-    pub value: Option<f64>,
+    pub(crate) seconds: f64,
+    pub(crate) value: Option<f64>,
 }
 
 /// One arm's trace within a joint lane.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct TimelineSignalSeries {
-    pub arm: String,
-    pub points: Vec<TimelineSignalPoint>,
+    pub(crate) arm: String,
+    pub(crate) points: Vec<TimelineSignalPoint>,
 }
 
 /// One of the six fixed SO-101 joint lanes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct TimelineSignalLane {
-    pub joint: String,
-    pub label: String,
-    pub color: String,
-    pub series: Vec<TimelineSignalSeries>,
+    pub(crate) joint: String,
+    pub(crate) label: String,
+    pub(crate) color: String,
+    pub(crate) series: Vec<TimelineSignalSeries>,
 }
 
 /// Wire response from the bounded historical trace endpoint.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub(crate) struct RecordedTimelineTraces {
-    pub episode: String,
-    pub samples: u64,
-    pub buckets: usize,
-    pub start_seconds: Option<f64>,
-    pub end_seconds: Option<f64>,
-    pub lanes: Vec<RecordedTimelineTraceLane>,
+    pub(crate) episode: String,
+    pub(crate) samples: u64,
+    pub(crate) buckets: usize,
+    pub(crate) start_seconds: Option<f64>,
+    pub(crate) end_seconds: Option<f64>,
+    pub(crate) lanes: Vec<RecordedTimelineTraceLane>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub(crate) struct RecordedTimelineTraceLane {
-    pub joint: String,
-    pub series: Vec<RecordedTimelineTraceSeries>,
+    pub(crate) joint: String,
+    pub(crate) series: Vec<RecordedTimelineTraceSeries>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub(crate) struct RecordedTimelineTraceSeries {
-    pub arm: String,
-    pub points: Vec<RecordedTimelineTracePoint>,
+    pub(crate) arm: String,
+    pub(crate) points: Vec<RecordedTimelineTracePoint>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
 pub(crate) struct RecordedTimelineTracePoint {
-    pub seconds: f64,
-    pub value: Option<f64>,
+    pub(crate) seconds: f64,
+    pub(crate) value: Option<f64>,
 }
 
 impl RecordedTimelineTraces {

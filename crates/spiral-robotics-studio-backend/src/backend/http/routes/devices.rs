@@ -62,7 +62,7 @@ struct SerialPortQueryAdapter<'a> {
 }
 
 impl SerialPortQueryPort for SerialPortQueryAdapter<'_> {
-    async fn serial_ports(&self) -> Result<Vec<SerialPortView>, ApplicationError> {
+    async fn serial_ports(&self) -> Result<Vec<SerialPortDescriptor>, ApplicationError> {
         let ports = tokio::task::spawn_blocking(available_ports)
             .await
             .map_err(|error| ApplicationError::Internal(error.to_string()))?
@@ -85,7 +85,7 @@ impl SerialPortQueryPort for SerialPortQueryAdapter<'_> {
             .collect::<std::collections::BTreeMap<_, _>>();
         Ok(ports
             .into_iter()
-            .map(|port| SerialPortView {
+            .map(|port| SerialPortDescriptor {
                 kind: port_kind(&port.port_type).to_owned(),
                 description: port_description(&port.port_type),
                 used_by: in_use.get(&port.port_name).cloned(),
@@ -436,10 +436,8 @@ impl CalibrationHistoryPort for CalibrationHistoryHttpAdapter<'_> {
         let motors = record.motors().map_err(workspace_application_error)?;
         let calibration = record.calibration().map_err(workspace_application_error)?;
         if let Some(calibration) = &calibration {
-            spiral_robotics_core::calibration::validate_calibration_for_motors(
-                &motors,
-                calibration,
-            )
+            calibration
+                .validate_for_motor_specs(&motors)
             .map_err(|error| {
                 ApplicationError::InvalidInput(format!(
                     "robot {robot:?} has calibration that does not match its configured motors: {error}"
@@ -504,7 +502,8 @@ async fn list_ports(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<SerialPortSummary>>, Failure> {
     Ok(Json(
-        device_discovery::list_serial_ports(&SerialPortQueryAdapter { state: &state })
+        SerialPortQueryAdapter { state: &state }
+            .serial_ports()
             .await?
             .into_iter()
             .map(|port| SerialPortSummary {
@@ -520,12 +519,10 @@ async fn list_ports(
 async fn identify_port(
     Json(request): Json<IdentifyPortRequest>,
 ) -> Result<Json<IdentifyPortResponse>, Failure> {
-    let result = device_discovery::identify_serial_port(
-        &SystemSerialPortInventory,
-        IdentifySerialPortCommand {
-            before: request.before,
-        },
-    )
+    let result = IdentifySerialPortCommand {
+        before: request.before,
+    }
+    .execute(&SystemSerialPortInventory)
     .await?;
     Ok(Json(IdentifyPortResponse {
         port: result.port,
@@ -536,7 +533,8 @@ async fn identify_port(
 
 async fn list_cameras(State(state): State<AppState>) -> Json<Vec<CameraStatus>> {
     Json(
-        device_discovery::list_cameras(&CameraDiscoveryAdapter(state.cameras.clone()))
+        CameraDiscoveryAdapter(state.cameras.clone())
+            .cameras()
             .into_iter()
             .map(|camera| CameraStatus {
                 id: camera.id,
@@ -556,7 +554,8 @@ async fn refresh_cameras(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<CameraStatus>>, Failure> {
     Ok(Json(
-        device_discovery::refresh_cameras(&CameraDiscoveryAdapter(state.cameras.clone()))
+        CameraDiscoveryAdapter(state.cameras.clone())
+            .refresh_cameras()
             .await?
             .into_iter()
             .map(|camera| CameraStatus {

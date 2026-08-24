@@ -35,7 +35,6 @@ use crate::frontend::screens::data::relations::RelationsPanel;
 use crate::frontend::screens::data::workbench::{
     EpisodesPanel, QueryPanel, QueryResultView, short_id,
 };
-use crate::frontend::screens::live::actions::dispatch_live_action;
 use crate::frontend::screens::live::workbench::LiveWorkbench;
 use crate::frontend::screens::rollout::state::rollout_controller;
 use crate::frontend::screens::rollout::workspace::{
@@ -150,7 +149,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             sampled_replay_slot.set(None);
             return;
         };
-        let subject_episode = visible_timeline_episode(studio, activity);
+        let subject_episode = studio.visible_timeline_episode(activity);
         if !replay_matches_timeline_subject(subject_episode.as_deref(), &replay) {
             sampled_replay_slot.set(None);
             return;
@@ -183,7 +182,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                 timeline.stop_preview();
             }
         } else if let Some(replay) = studio.replay().filter(replay_owns_timeline_transport) {
-            let subject_episode = visible_timeline_episode(studio, activity);
+            let subject_episode = studio.visible_timeline_episode(activity);
             if replay_matches_timeline_subject(subject_episode.as_deref(), &replay) {
                 playhead.set(replay.elapsed_seconds);
                 timeline.stop_preview();
@@ -310,7 +309,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
         .cloned();
     let history_active = review_episode.is_some();
     let signal_lanes = match historical.as_ref() {
-        Some(preview) => Arc::clone(&preview.signal_lanes),
+        Some(preview) => Arc::clone(preview.signal_lanes()),
         None if history_active => Arc::new(RecordedTimelineTraces::default().signal_lanes()),
         None => live_signal_lanes,
     };
@@ -336,8 +335,8 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
     // is armed until there is a target to arm it against.
     let requested_robot_sync =
         timeline_target.is_some() && robot_sync_target.read().as_ref() == timeline_target.as_ref();
-    let capabilities = timeline_capabilities(studio, projection.activity, &subject);
-    let seek_context = timeline_seek_context(studio, &subject);
+    let capabilities = studio.timeline_capabilities(projection.activity, &subject);
+    let seek_context = studio.timeline_seek_context(&subject);
     let playback = studio
         .replay()
         .filter(replay_owns_timeline_transport)
@@ -372,7 +371,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             if let Some(replay) = studio.replay()
                 && armed_episode == Some(replay.episode.as_str())
             {
-                commands::stop_replay(studio, &replay.episode);
+                studio.stop_replay(&replay.episode);
             }
         },
     ));
@@ -608,7 +607,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                 rsx! {
                     aside { class: "studio-v2-workbench",
                         LiveWorkbench {
-                            on_action: move |action| dispatch_live_action(studio, action),
+                            on_action: move |action| studio.dispatch_live_action(action),
                         }
                     }
                 },
@@ -703,8 +702,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                     Key::Character(pressed) if pressed.eq_ignore_ascii_case("r") => {
                         event.prevent_default();
                         match recording {
-                            Some(recording) => commands::stop_recording(
-                                studio,
+                            Some(recording) => studio.stop_recording(
                                 &recording.episode,
                                 true,
                                 EventHandler::new(move |_: spiral_robotics_contracts::api::EpisodeSummary| {
@@ -715,7 +713,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                                     interactive_preview_target.set(None);
                                 }),
                             ),
-                            None if activity == Activity::Live => commands::start_recording(studio),
+                            None if activity == Activity::Live => studio.start_recording(),
                             None => studio.report("Switch to Live to start recording."),
                         }
                     }
@@ -735,8 +733,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                     {
                         event.prevent_default();
                         if let Some(recording) = recording {
-                            commands::stop_recording(
-                                studio,
+                            studio.stop_recording(
                                 &recording.episode,
                                 false,
                                 EventHandler::new(move |_| {
@@ -792,11 +789,14 @@ fn replay_matches_timeline_subject(
     subject_episode == Some(replay.episode.as_str())
 }
 
-fn visible_timeline_episode(studio: Studio, activity: Activity) -> Option<String> {
-    match activity {
-        Activity::Live => studio.recording().map(|recording| recording.episode),
-        Activity::Data => studio.selected_episode.peek().clone(),
-        Activity::Workflow | Activity::Training | Activity::Rollout => None,
+impl Studio {
+    fn visible_timeline_episode(self, activity: Activity) -> Option<String> {
+        let studio = self;
+        match activity {
+            Activity::Live => studio.recording().map(|recording| recording.episode),
+            Activity::Data => studio.selected_episode.peek().clone(),
+            Activity::Workflow | Activity::Training | Activity::Rollout => None,
+        }
     }
 }
 
@@ -865,87 +865,96 @@ fn recorded_camera_element_id(panel_id: &str) -> String {
     format!("recorded-{safe}")
 }
 
-fn timeline_capabilities(
-    studio: Studio,
-    activity: Activity,
-    subject: &TimelineSubject,
-) -> TimelineCapabilities {
-    let record = if activity != Activity::Live {
-        TimelineGate::blocked("Switch to Live to start recording.")
-    } else if let Some(reason) = commands::recording_blocker(studio) {
-        TimelineGate::blocked(reason)
-    } else {
-        TimelineGate::allowed()
-    };
-    let preview = if subject.recorded_episode().is_none() {
-        TimelineGate::blocked("Select a completed episode or pause the current recording first.")
-    } else if !subject.available() {
-        TimelineGate::blocked(
-            subject
-                .problem()
-                .unwrap_or("This Timeline subject is unavailable."),
-        )
-    } else {
-        TimelineGate::allowed()
-    };
-    let seek = preview.clone();
-    let synced_playback = match subject.episode() {
-        Some(episode) => commands::replay_blocker(studio, episode)
-            .map(TimelineGate::blocked)
-            .unwrap_or_else(TimelineGate::allowed),
-        None => TimelineGate::blocked("Select a completed episode to play it with robot sync."),
-    };
-    let robot_sync = if !subject.is_paused_recording() && subject.episode().is_none() {
-        TimelineGate::blocked("Pause or select a completed episode before synchronizing a robot.")
-    } else if !studio.controls_available() {
-        TimelineGate::blocked("Reconnect telemetry before synchronizing a robot.")
-    } else if studio.mode_active() && !matches!(studio.mode(), ModeSelection::Replay { .. }) {
-        TimelineGate::blocked("Stop the active control mode before synchronizing a robot.")
-    } else if timeline_seek_context(studio, subject).is_none() {
-        TimelineGate::blocked("Connect and calibrate a compatible follower to synchronize it.")
-    } else {
-        TimelineGate::allowed()
-    };
-    TimelineCapabilities {
-        record,
-        preview,
-        seek,
-        synced_playback,
-        robot_sync,
-    }
-}
-
-fn timeline_seek_context(
-    studio: Studio,
-    subject: &TimelineSubject,
-) -> Option<(String, String, Option<String>)> {
-    let follower = studio.connected_robots().into_iter().find(|robot| {
-        robot.calibrated
-            && robot
-                .robot_type
-                .as_deref()
-                .is_some_and(|kind| kind.to_ascii_lowercase().contains("follower"))
-    })?;
-    let (episode, arms) = match subject {
-        TimelineSubject::Recording(recording) if recording.paused => {
-            (recording.episode.clone(), recording.arms.clone())
+impl Studio {
+    fn timeline_capabilities(
+        self,
+        activity: Activity,
+        subject: &TimelineSubject,
+    ) -> TimelineCapabilities {
+        let studio = self;
+        let record = if activity != Activity::Live {
+            TimelineGate::blocked("Switch to Live to start recording.")
+        } else if let Some(reason) = studio.recording_blocker() {
+            TimelineGate::blocked(reason)
+        } else {
+            TimelineGate::allowed()
+        };
+        let preview = if subject.recorded_episode().is_none() {
+            TimelineGate::blocked(
+                "Select a completed episode or pause the current recording first.",
+            )
+        } else if !subject.available() {
+            TimelineGate::blocked(
+                subject
+                    .problem()
+                    .unwrap_or("This Timeline subject is unavailable."),
+            )
+        } else {
+            TimelineGate::allowed()
+        };
+        let seek = preview.clone();
+        let synced_playback = match subject.episode() {
+            Some(episode) => studio
+                .replay_blocker(episode)
+                .map(TimelineGate::blocked)
+                .unwrap_or_else(TimelineGate::allowed),
+            None => TimelineGate::blocked("Select a completed episode to play it with robot sync."),
+        };
+        let robot_sync = if !subject.is_paused_recording() && subject.episode().is_none() {
+            TimelineGate::blocked(
+                "Pause or select a completed episode before synchronizing a robot.",
+            )
+        } else if !studio.controls_available() {
+            TimelineGate::blocked("Reconnect telemetry before synchronizing a robot.")
+        } else if studio.mode_active() && !matches!(studio.mode(), ModeSelection::Replay { .. }) {
+            TimelineGate::blocked("Stop the active control mode before synchronizing a robot.")
+        } else if studio.timeline_seek_context(subject).is_none() {
+            TimelineGate::blocked("Connect and calibrate a compatible follower to synchronize it.")
+        } else {
+            TimelineGate::allowed()
+        };
+        TimelineCapabilities {
+            record,
+            preview,
+            seek,
+            synced_playback,
+            robot_sync,
         }
-        TimelineSubject::Episode { episode, .. } => (
-            episode.id.clone(),
-            episode.arms.iter().map(|arm| arm.id.clone()).collect(),
-        ),
-        TimelineSubject::Empty { .. } | TimelineSubject::Recording(_) => return None,
-    };
-    let source_arm = arms
-        .iter()
-        .find(|arm| **arm == follower.id)
-        .or_else(|| {
-            arms.iter()
-                .find(|arm| arm.to_ascii_lowercase().contains("follower"))
-        })
-        .or_else(|| arms.first())
-        .cloned();
-    Some((episode, follower.id, source_arm))
+    }
+
+    fn timeline_seek_context(
+        self,
+        subject: &TimelineSubject,
+    ) -> Option<(String, String, Option<String>)> {
+        let studio = self;
+        let follower = studio.connected_robots().into_iter().find(|robot| {
+            robot.calibrated
+                && robot
+                    .robot_type
+                    .as_deref()
+                    .is_some_and(|kind| kind.to_ascii_lowercase().contains("follower"))
+        })?;
+        let (episode, arms) = match subject {
+            TimelineSubject::Recording(recording) if recording.paused => {
+                (recording.episode.clone(), recording.arms.clone())
+            }
+            TimelineSubject::Episode { episode, .. } => (
+                episode.id.clone(),
+                episode.arms.iter().map(|arm| arm.id.clone()).collect(),
+            ),
+            TimelineSubject::Empty { .. } | TimelineSubject::Recording(_) => return None,
+        };
+        let source_arm = arms
+            .iter()
+            .find(|arm| **arm == follower.id)
+            .or_else(|| {
+                arms.iter()
+                    .find(|arm| arm.to_ascii_lowercase().contains("follower"))
+            })
+            .or_else(|| arms.first())
+            .cloned();
+        Some((episode, follower.id, source_arm))
+    }
 }
 
 #[cfg(test)]
@@ -957,9 +966,9 @@ mod tests {
     use spiral_robotics_contracts::api::EpisodeSummary;
 
     fn preview(at: f64, videos: Vec<VideoAssetMetadata>) -> HistoricalPreview {
-        HistoricalPreview {
-            episode: "take-1".to_owned(),
-            timeline: Arc::new(EpisodeTimelineResponse {
+        HistoricalPreview::new(
+            "take-1".to_owned(),
+            Arc::new(EpisodeTimelineResponse {
                 episode: EpisodeSummary {
                     dataset_id: "default".to_owned(),
                     id: "take-1".to_owned(),
@@ -977,12 +986,12 @@ mod tests {
                 samples: TimelineMetadata::default(),
                 videos,
             }),
-            sample: TimelineSample {
+            TimelineSample {
                 seconds: at,
                 ..TimelineSample::default()
             },
-            signal_lanes: Arc::new(RecordedTimelineTraces::default().signal_lanes()),
-        }
+            Arc::new(RecordedTimelineTraces::default().signal_lanes()),
+        )
     }
 
     fn video(segment_index: u32, offset: Option<f64>, duration_seconds: f64) -> VideoAssetMetadata {
@@ -1199,7 +1208,7 @@ mod tests {
 
     #[test]
     fn a_missing_recorded_scene_source_never_falls_back_to_live() {
-        let episode = preview(0.0, Vec::new()).timeline.episode.clone();
+        let episode = preview(0.0, Vec::new()).timeline().episode.clone();
         let subject = TimelineSubject::Episode {
             activity: Activity::Data,
             episode,

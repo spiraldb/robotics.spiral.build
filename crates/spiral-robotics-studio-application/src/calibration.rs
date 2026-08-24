@@ -2,9 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use spiral_robotics_core::calibration::{
-    Calibration, CalibrationInput, MotorSpec, build_calibration,
-};
+use spiral_robotics_core::calibration::{Calibration, CalibrationInput, MotorSpec};
 
 use super::catalog_lease::CatalogLeaseToken;
 use super::error::ApplicationError;
@@ -129,7 +127,8 @@ where
 {
     let motors = repository.motor_specs(robot)?;
     let input = control.calibration_input(robot).await?;
-    let calibration = build_calibration(&motors, &input)
+    let calibration = input
+        .build(&motors)
         .map_err(|error| ApplicationError::InvalidInput(error.to_string()))?;
     repository.save_calibration(robot, &motors, &calibration)?;
 
@@ -402,12 +401,10 @@ mod tests {
 
     #[test]
     fn calibration_error_remains_a_domain_error_until_the_use_case_boundary() {
-        let error = build_calibration(
-            &motors(),
-            &CalibrationInput::Direct {
-                motors: BTreeMap::new(),
-            },
-        )
+        let error = CalibrationInput::Direct {
+            motors: BTreeMap::new(),
+        }
+        .build(&motors())
         .unwrap_err();
         assert!(matches!(error, CalibrationError::KeyMismatch { .. }));
     }
@@ -451,7 +448,7 @@ mod tests {
     }
 
     fn history() -> History {
-        let calibration = build_calibration(&motors(), &input()).unwrap();
+        let calibration = input().build(&motors()).unwrap();
         History {
             lease: CatalogMutationLease::default(),
             activity: CalibrationHistoryActivity::default(),

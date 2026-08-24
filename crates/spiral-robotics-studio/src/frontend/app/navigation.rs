@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ShellState {
-    pub settings_open: bool,
+    pub(crate) settings_open: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

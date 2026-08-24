@@ -34,19 +34,63 @@ const ENCODED_MEDIA_EXTENSION_NAME: &str = "spql.media.EncodedMedia";
 
 /// A complete, renderable snapshot of the Query tool.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct QueryViewModel {
-    pub sql: String,
-    pub max_rows: usize,
-    pub state: QueryState,
+pub(crate) struct QueryExecutionPresentation {
+    sql: String,
+    max_rows: usize,
+    state: QueryState,
+}
+
+impl QueryExecutionPresentation {
+    pub(crate) fn new(sql: String, max_rows: usize, state: QueryState) -> Self {
+        Self {
+            sql,
+            max_rows,
+            state,
+        }
+    }
+
+    pub(crate) fn sql(&self) -> &str {
+        &self.sql
+    }
+
+    pub(crate) const fn max_rows(&self) -> usize {
+        self.max_rows
+    }
+
+    pub(crate) const fn state(&self) -> &QueryState {
+        &self.state
+    }
 }
 
 /// One immutable query execution. Editing the SQL draft or running another
 /// statement never mutates an earlier tab.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct QueryTab {
-    pub id: u64,
-    pub title: String,
-    pub model: QueryViewModel,
+    id: u64,
+    title: String,
+    model: QueryExecutionPresentation,
+}
+
+impl QueryTab {
+    pub(crate) fn new(id: u64, title: String, model: QueryExecutionPresentation) -> Self {
+        Self { id, title, model }
+    }
+
+    pub(crate) const fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub(crate) const fn presentation(&self) -> &QueryExecutionPresentation {
+        &self.model
+    }
+
+    pub(crate) fn replace_presentation(&mut self, model: QueryExecutionPresentation) {
+        self.model = model;
+    }
+
+    pub(crate) fn mark_cancelled(&mut self) {
+        self.model.state = QueryState::Failed("Cancelled by operator.".to_owned());
+    }
 }
 
 /// Query execution state carried to the visualization region.
@@ -911,7 +955,7 @@ pub(crate) fn QueryResultView() -> Element {
                                         }
                                     }
                                 },
-                                span { class: query_tab_state_class(&tab.model.state), "aria-hidden": "true" }
+                                span { class: query_tab_state_class(tab.presentation().state()), "aria-hidden": "true" }
                                 span { class: "query-result-tab-label", "{tab.title}" }
                             }
                             Action {
@@ -946,20 +990,20 @@ pub(crate) fn QueryResultView() -> Element {
                     tabindex: "0",
                     "aria-labelledby": "query-tab-{tab.id}",
                     header { class: "query-result-meta",
-                        if let QueryState::Ready(result) = &tab.model.state {
+                        if let QueryState::Ready(result) = tab.presentation().state() {
                             span { class: "query-result-count", role: "status",
                                 strong { "{result.rows.len()} rows" }
                                 span { "{result.elapsed_ms} ms" }
                             }
                             if result.truncated { span { class: "chip chip-caution", "Truncated" } }
                         }
-                        span { class: "query-result-limit", "Limit · {tab.model.max_rows} rows" }
+                        span { class: "query-result-limit", "Limit · {tab.presentation().max_rows()} rows" }
                         details {
                             summary { "SQL" }
-                            code { "{tab.model.sql}" }
+                            code { "{tab.presentation().sql()}" }
                         }
                     }
-                    {render_query_result(&tab.model)}
+                    {render_query_result(tab.presentation())}
                 }
             } else {
                 div { class: "flex flex-1 items-center justify-center p-6 text-center",
@@ -998,14 +1042,14 @@ fn focus_query_tab(id: u64) {
     focus_after_render(format!("query-tab-{id}"));
 }
 
-pub(crate) fn render_query_result(model: &QueryViewModel) -> Element {
+pub(crate) fn render_query_result(model: &QueryExecutionPresentation) -> Element {
     rsx! { QueryResultContent { model: model.clone() } }
 }
 
 #[component]
-fn QueryResultContent(model: QueryViewModel) -> Element {
+fn QueryResultContent(model: QueryExecutionPresentation) -> Element {
     rsx! {
-        match &model.state {
+        match model.state() {
                 QueryState::Running => rsx! {
                     div { class: "flex flex-1 items-center justify-center p-6 text-[11px] text-ink-soft", role: "status",
                         span { class: "mr-2 h-1.5 w-1.5 rounded-full bg-accent" }
@@ -1078,7 +1122,7 @@ fn query_tab_state_class(state: &QueryState) -> &'static str {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct SchemaRelationView {
+struct SchemaRelationSummary {
     name: String,
     label: String,
     description: String,
@@ -1090,12 +1134,12 @@ fn schema_relation_views(
     namespace: &str,
     dataset_id: &str,
     response: Option<&WorkflowRelationsResponse>,
-) -> Vec<SchemaRelationView> {
+) -> Vec<SchemaRelationSummary> {
     let Some(response) = response else {
         return Table::ALL
             .into_iter()
-            .map(|table| SchemaRelationView {
-                name: spiral_robotics_contracts::spiral::relation(namespace, table),
+            .map(|table| SchemaRelationSummary {
+                name: table.qualified_name(namespace),
                 label: table.name().to_owned(),
                 description: table_description(table).to_owned(),
                 columns: table.columns().join(", "),
@@ -1107,9 +1151,9 @@ fn schema_relation_views(
         .relations
         .iter()
         .map(|relation| {
-            let managed = Table::ALL.into_iter().find(|table| {
-                relation.name == spiral_robotics_contracts::spiral::relation(namespace, *table)
-            });
+            let managed = Table::ALL
+                .into_iter()
+                .find(|table| relation.name == table.qualified_name(namespace));
             let label = managed
                 .map(|table| table.name().to_owned())
                 .unwrap_or_else(|| {
@@ -1119,7 +1163,7 @@ fn schema_relation_views(
                         .unwrap_or(&relation.name)
                         .to_owned()
                 });
-            SchemaRelationView {
+            SchemaRelationSummary {
                 name: relation.name.clone(),
                 label,
                 description: managed
@@ -1142,8 +1186,8 @@ fn schema_relation_views(
 
 fn preset_sql(namespace: &str, dataset_id: &str, preset: QueryPreset) -> String {
     let dataset_id = dataset_id.replace('\'', "''");
-    let episodes = spiral_robotics_contracts::spiral::relation(namespace, Table::Episodes);
-    let relation = spiral_robotics_contracts::spiral::relation(namespace, preset.table());
+    let episodes = Table::Episodes.qualified_name(namespace);
+    let relation = preset.table().qualified_name(namespace);
     match preset {
         QueryPreset::Datasets => preset.sql(namespace),
         QueryPreset::Episodes => format!(

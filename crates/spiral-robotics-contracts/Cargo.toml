@@ -5,6 +5,9 @@ edition.workspace = true
 description = "Delivery and persistence contracts shared by Spiral Robotics adapters"
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 spiral-robotics-core.workspace = true
 serde.workspace = true

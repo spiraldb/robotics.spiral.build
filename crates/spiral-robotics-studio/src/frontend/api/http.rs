@@ -72,36 +72,36 @@ pub(crate) async fn post(path: &str) -> Result<(), String> {
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub(crate) struct TimelineMetadata {
-    pub samples: u64,
-    pub first_seconds: Option<f64>,
-    pub last_seconds: Option<f64>,
+    pub(crate) samples: u64,
+    pub(crate) first_seconds: Option<f64>,
+    pub(crate) last_seconds: Option<f64>,
 }
 
 /// Episode detail used to align timeline samples and recorded media.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub(crate) struct EpisodeTimelineResponse {
-    pub episode: EpisodeSummary,
-    pub samples: TimelineMetadata,
-    pub videos: Vec<VideoAssetMetadata>,
+    pub(crate) episode: EpisodeSummary,
+    pub(crate) samples: TimelineMetadata,
+    pub(crate) videos: Vec<VideoAssetMetadata>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub(crate) struct TimelineArmSample {
-    pub arm: String,
-    pub normalized: BTreeMap<String, Option<f64>>,
-    pub raw: BTreeMap<String, i64>,
-    pub velocity: Option<BTreeMap<String, Option<f64>>>,
-    pub effort: Option<BTreeMap<String, Option<f64>>>,
-    pub action: Option<BTreeMap<String, Option<f64>>>,
+    pub(crate) arm: String,
+    pub(crate) normalized: BTreeMap<String, Option<f64>>,
+    pub(crate) raw: BTreeMap<String, i64>,
+    pub(crate) velocity: Option<BTreeMap<String, Option<f64>>>,
+    pub(crate) effort: Option<BTreeMap<String, Option<f64>>>,
+    pub(crate) action: Option<BTreeMap<String, Option<f64>>>,
 }
 
 /// The nearest stored sample to a committed historical playhead position.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub(crate) struct TimelineSample {
-    pub frame: u64,
-    pub seconds: f64,
-    pub follow_error_degrees: Option<f64>,
-    pub arms: Vec<TimelineArmSample>,
+    pub(crate) frame: u64,
+    pub(crate) seconds: f64,
+    pub(crate) follow_error_degrees: Option<f64>,
+    pub(crate) arms: Vec<TimelineArmSample>,
 }
 
 /// Upload one file and decode the server's JSON response.

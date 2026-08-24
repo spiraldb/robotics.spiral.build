@@ -36,10 +36,47 @@ pub(crate) fn historical_replay_slot(seconds: f64) -> u64 {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct HistoricalPreview {
-    pub episode: String,
-    pub timeline: Arc<api::EpisodeTimelineResponse>,
-    pub sample: api::TimelineSample,
-    pub signal_lanes: Arc<[TimelineSignalLane; 6]>,
+    episode: String,
+    timeline: Arc<api::EpisodeTimelineResponse>,
+    sample: api::TimelineSample,
+    signal_lanes: Arc<[TimelineSignalLane; 6]>,
+}
+
+impl HistoricalPreview {
+    pub(crate) fn new(
+        episode: String,
+        timeline: Arc<api::EpisodeTimelineResponse>,
+        sample: api::TimelineSample,
+        signal_lanes: Arc<[TimelineSignalLane; 6]>,
+    ) -> Self {
+        Self {
+            episode,
+            timeline,
+            sample,
+            signal_lanes,
+        }
+    }
+
+    pub(crate) fn episode(&self) -> &str {
+        &self.episode
+    }
+
+    pub(crate) fn timeline(&self) -> &api::EpisodeTimelineResponse {
+        &self.timeline
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn sample(&self) -> &api::TimelineSample {
+        &self.sample
+    }
+
+    pub(crate) fn signal_lanes(&self) -> &Arc<[TimelineSignalLane; 6]> {
+        &self.signal_lanes
+    }
+
+    pub(crate) fn into_sample(self) -> api::TimelineSample {
+        self.sample
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -71,12 +108,12 @@ impl CachedInspection {
 
     fn preview_at(&self, seconds: f64) -> Result<HistoricalPreview, String> {
         let sample = sample_at(&self.snapshot, seconds)?;
-        Ok(HistoricalPreview {
-            episode: self.snapshot.episode.id.clone(),
-            timeline: Arc::clone(&self.timeline),
+        Ok(HistoricalPreview::new(
+            self.snapshot.episode.id.clone(),
+            Arc::clone(&self.timeline),
             sample,
-            signal_lanes: Arc::clone(&self.signal_lanes),
-        })
+            Arc::clone(&self.signal_lanes),
+        ))
     }
 }
 
@@ -593,8 +630,8 @@ mod tests {
         let cached = cache.get("take-1", Some(3)).expect("cached episode");
         let preview = cached.preview_at(0.6).expect("preview");
 
-        assert_eq!(preview.sample.frame, 1);
-        assert_eq!(preview.sample.seconds, 1.0);
+        assert_eq!(preview.sample().frame, 1);
+        assert_eq!(preview.sample().seconds, 1.0);
         let follower = preview
             .sample
             .arms
@@ -602,7 +639,7 @@ mod tests {
             .find(|arm| arm.arm == "follower")
             .expect("follower sample");
         assert_eq!(follower.raw["shoulder_pan"], 5);
-        assert_eq!(preview.signal_lanes[0].series[0].points.len(), 3);
+        assert_eq!(preview.signal_lanes()[0].series[0].points.len(), 3);
     }
 
     #[test]

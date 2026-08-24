@@ -12,8 +12,7 @@ use spiral_robotics_contracts::workflow::{
     CancelWorkflowRequest, RunWorkflowRequest, SaveWorkflowRequest, WorkflowCapabilities,
     WorkflowDocument, WorkflowNodeConfig, WorkflowNodePhase, WorkflowNodeSnapshot,
     WorkflowQuarantineSummary, WorkflowRunPhase, WorkflowRunSnapshot, WorkflowSpec,
-    WorkflowStateResponse, WorkflowUpdate, derived_feature_cache_relation, topological_order,
-    validate_workflow_spec,
+    WorkflowStateResponse, WorkflowUpdate, derived_feature_cache_relation,
 };
 use spiral_robotics_core::workflow::{scan_node_placeholders, validate_qualified_relation};
 use spiral_robotics_studio_application::error::ApplicationError;
@@ -182,7 +181,7 @@ impl WorkflowManager {
         }
         workflow.revision = current.workflow.revision;
         derive_model_outputs(&mut workflow);
-        let report = validate_workflow_spec(&workflow);
+        let report = workflow.validate();
         Ok((workflow, report))
     }
 
@@ -214,7 +213,7 @@ impl WorkflowManager {
         let mut workflow = request.workflow;
         workflow.revision = next_revision;
         derive_model_outputs(&mut workflow);
-        let validation = validate_workflow_spec(&workflow);
+        let validation = workflow.validate();
         let empty_draft = workflow.nodes.is_empty() && workflow.edges.is_empty();
         if !workflow_save_allowed(&workflow, validation.valid()) {
             let issue = validation
@@ -261,7 +260,7 @@ impl WorkflowManager {
         // the document. Cancel and terminal publication use the same order.
         let mut active = lock(&self.inner.active);
         let mut document = lock(&self.inner.document);
-        let validation = validate_workflow_spec(&document.workflow);
+        let validation = document.workflow.validate();
         admit_run(
             request.revision,
             document.workflow.revision,
@@ -383,7 +382,7 @@ impl WorkflowManager {
         publication_gate: Arc<Mutex<()>>,
     ) {
         let workflow = lock(&self.inner.document).workflow.clone();
-        let order = match topological_order(&workflow) {
+        let order = match workflow.topological_order() {
             Ok(order) => order,
             Err(error) => {
                 self.finish_failed(&run_id, None, error);
@@ -1042,7 +1041,7 @@ fn state_response(document: &WorkflowDocument) -> WorkflowStateResponse {
     WorkflowStateResponse {
         scope_id: String::new(),
         workflow: document.workflow.clone(),
-        validation: validate_workflow_spec(&document.workflow),
+        validation: document.workflow.validate(),
         snapshot: document.snapshot.clone(),
     }
 }
@@ -1299,7 +1298,7 @@ mod tests {
         let mut workflow = WorkflowSpec::default();
         workflow.nodes.clear();
         workflow.edges.clear();
-        let validation = validate_workflow_spec(&workflow);
+        let validation = workflow.validate();
 
         assert!(!validation.valid());
         assert!(workflow_save_allowed(&workflow, validation.valid()));
@@ -1311,7 +1310,7 @@ mod tests {
                 relation: "robotics.frames".to_owned(),
             },
         });
-        let invalid = validate_workflow_spec(&workflow);
+        let invalid = workflow.validate();
         assert!(!workflow_save_allowed(&workflow, invalid.valid()));
     }
 

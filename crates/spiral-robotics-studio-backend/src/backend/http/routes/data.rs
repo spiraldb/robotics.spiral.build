@@ -43,14 +43,14 @@ pub(super) fn catalog_router() -> Router<AppState> {
         .route(
             "/project/import",
             post(import_project).layer(DefaultBodyLimit::max(
-                crate::backend::storage::bundle::MAX_PROJECT_BUNDLE_BYTES,
+                crate::backend::storage::bundle::ProjectBundle::MAX_BYTES,
             )),
         )
         .route("/episodes/export", get(export_episodes))
         .route(
             "/episodes/import",
             post(import_episodes).layer(DefaultBodyLimit::max(
-                crate::backend::storage::bundle::MAX_EPISODE_BUNDLE_BYTES,
+                crate::backend::storage::bundle::EpisodeBundle::MAX_BYTES,
             )),
         )
 }
@@ -356,7 +356,7 @@ pub(super) struct DataHttpAdapter<'a> {
 }
 
 impl DataCatalogPort for DataHttpAdapter<'_> {
-    fn settings(&self) -> DataSettingsView {
+    fn settings(&self) -> DataSettingsSnapshot {
         let configured_endpoint = self.state.backend_state.spiral_endpoint();
         let configured_spfs_endpoint = self.state.backend_state.spiral_spfs_endpoint();
         let configured_project = self.state.backend_state.project_id();
@@ -377,7 +377,7 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
     fn update_settings(
         &self,
         command: UpdateDataSettingsCommand,
-    ) -> Result<DataSettingsView, ApplicationError> {
+    ) -> Result<DataSettingsSnapshot, ApplicationError> {
         let catalog_was_available = self.state.bootstrap.current().catalog_available;
         let endpoint_changed = self.state.storage.spiral_endpoint() != command.spiral_endpoint
             || self.state.storage.spiral_spfs_endpoint() != command.spiral_spfs_endpoint;
@@ -521,7 +521,7 @@ pub(super) fn application_data_settings(
     configured_project: Option<&str>,
     configured_client_id: Option<&str>,
     credentials_configured: bool,
-) -> DataSettingsView {
+) -> DataSettingsSnapshot {
     if let Some(configured_endpoint) = configured_endpoint {
         settings.spiral.endpoint = configured_endpoint.to_owned();
     }
@@ -536,7 +536,7 @@ pub(super) fn application_data_settings(
         settings.spiral.client_id = configured_client_id.to_owned();
     }
     settings.spiral.client_secret_configured = credentials_configured;
-    DataSettingsView {
+    DataSettingsSnapshot {
         spiral: SpiralDestinationSettings {
             endpoint: settings.spiral.endpoint,
             spfs_endpoint: settings.spiral.spfs_endpoint,
@@ -551,7 +551,7 @@ pub(super) fn application_data_settings(
     }
 }
 
-pub(super) fn contract_data_settings(settings: DataSettingsView) -> DataSettings {
+pub(super) fn contract_data_settings(settings: DataSettingsSnapshot) -> DataSettings {
     DataSettings {
         spiral: ContractSpiralSettings {
             endpoint: settings.spiral.endpoint,
@@ -696,9 +696,9 @@ fn spiral_replay_command(request: StartSpiralReplayRequest) -> StartSpiralReplay
 }
 
 async fn get_data_settings(State(state): State<AppState>) -> Json<DataSettings> {
-    Json(contract_data_settings(data_application::get_settings(
-        &DataHttpAdapter { state: &state },
-    )))
+    Json(contract_data_settings(
+        DataHttpAdapter { state: &state }.settings(),
+    ))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -846,11 +846,9 @@ async fn update_data_settings(
     } else {
         None
     };
-    let settings = data_application::update_settings(
-        &DataHttpAdapter { state: &state },
-        data_settings_command(request),
-    )
-    .await?;
+    let settings = data_settings_command(request)
+        .apply(&DataHttpAdapter { state: &state })
+        .await?;
     if !endpoint_changed {
         state.bootstrap.ready();
         tokio::spawn(super::auto_connect_saved_robots(state.clone()));
@@ -859,7 +857,7 @@ async fn update_data_settings(
 }
 
 async fn test_spiral(State(state): State<AppState>) -> Json<ConnectionTestResponse> {
-    let result = data_application::test_connection(&DataHttpAdapter { state: &state }).await;
+    let result = DataHttpAdapter { state: &state }.test_connection().await;
     Json(ConnectionTestResponse {
         ok: result.ok,
         message: result.message,
@@ -874,13 +872,11 @@ async fn spiral_query(
     State(state): State<AppState>,
     Json(request): Json<SpiralQueryRequest>,
 ) -> Result<Json<SpiralQueryResponse>, Failure> {
-    let result = data_application::query(
-        &DataHttpAdapter { state: &state },
-        QueryCommand {
-            statement: request.sql,
-            max_rows: request.max_rows,
-        },
-    )
+    let result = QueryCommand {
+        statement: request.sql,
+        max_rows: request.max_rows,
+    }
+    .execute(&DataHttpAdapter { state: &state })
     .await?;
     Ok(Json(contract_query_result(result)))
 }
@@ -889,12 +885,9 @@ async fn start_spiral_replay(
     State(state): State<AppState>,
     Json(request): Json<StartSpiralReplayRequest>,
 ) -> Result<StatusCode, Failure> {
-    data_application::start_spiral_replay(
-        &DataHttpAdapter { state: &state },
-        state.hardware.as_ref(),
-        spiral_replay_command(request),
-    )
-    .await?;
+    spiral_replay_command(request)
+        .start(&DataHttpAdapter { state: &state }, state.hardware.as_ref())
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -909,14 +902,12 @@ async fn spiral_video(
     State(state): State<AppState>,
     Query(query): Query<SpiralVideoQuery>,
 ) -> Result<Response, Failure> {
-    let bytes = data_application::video_asset(
-        &DataHttpAdapter { state: &state },
-        VideoAssetQuery {
-            episode: query.episode,
-            stream: query.stream,
-            segment: query.segment,
-        },
-    )
+    let bytes = VideoAssetQuery {
+        episode: query.episode,
+        stream: query.stream,
+        segment: query.segment,
+    }
+    .load(&DataHttpAdapter { state: &state })
     .await
     .map_err(Failure::from)?;
     let mut response = Body::from(bytes).into_response();

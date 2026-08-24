@@ -5,6 +5,9 @@ edition.workspace = true
 description = "Shared interaction language for Spiral Robotics interfaces"
 publish = false
 
+[lints]
+workspace = true
+
 [features]
 default = []
 web = ["dep:wasm-bindgen", "dep:web-sys"]

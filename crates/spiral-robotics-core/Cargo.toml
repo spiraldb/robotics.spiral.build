@@ -5,4 +5,7 @@ edition.workspace = true
 description = "Framework-free domain types and policy for Spiral Robotics"
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]

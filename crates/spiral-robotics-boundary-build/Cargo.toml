@@ -5,5 +5,8 @@ edition.workspace = true
 description = "Build-time generation for shared Spiral Robotics boundary versions"
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 serde_json.workspace = true

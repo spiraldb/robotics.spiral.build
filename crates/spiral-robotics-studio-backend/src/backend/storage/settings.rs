@@ -33,8 +33,8 @@ struct BackendState {
 
 #[derive(Clone, Default, Eq, PartialEq)]
 pub(crate) struct SpiralCredentials {
-    pub client_id: String,
-    pub client_secret: String,
+    pub(crate) client_id: String,
+    pub(crate) client_secret: String,
 }
 
 /// Private backend-local bootstrap state. Future auth/session metadata may
@@ -182,9 +182,9 @@ pub(crate) fn environment_spiral_spfs_endpoint() -> String {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(crate) struct StoredStudioPreferences {
     #[serde(default)]
-    pub training: TrainingRuntimeSettings,
+    pub(crate) training: TrainingRuntimeSettings,
     #[serde(default)]
-    pub video: VideoSettings,
+    pub(crate) video: VideoSettings,
 }
 
 pub(crate) struct StudioPreferencesStore {

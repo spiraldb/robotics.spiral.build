@@ -42,29 +42,29 @@ pub(crate) fn dataset_batch(start: &EpisodeStart) -> Result<RecordBatch, Episode
 /// One row destined for [`spiral_robotics_contracts::spiral::Table::JointSamples`].
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct JointSampleRow {
-    pub episode_id: String,
-    pub stream_id: String,
-    pub sample_index: u64,
-    pub episode_time_ns: u64,
-    pub state_valid: bool,
-    pub action_valid: bool,
-    pub state_position: Vec<Option<f64>>,
-    pub action_position: Option<Vec<Option<f64>>>,
-    pub raw_position: Vec<i64>,
-    pub velocity: Option<Vec<Option<f64>>>,
-    pub effort: Option<Vec<Option<f64>>>,
-    pub follow_error_degrees: Option<f64>,
+    pub(crate) episode_id: String,
+    pub(crate) stream_id: String,
+    pub(crate) sample_index: u64,
+    pub(crate) episode_time_ns: u64,
+    pub(crate) state_valid: bool,
+    pub(crate) action_valid: bool,
+    pub(crate) state_position: Vec<Option<f64>>,
+    pub(crate) action_position: Option<Vec<Option<f64>>>,
+    pub(crate) raw_position: Vec<i64>,
+    pub(crate) velocity: Option<Vec<Option<f64>>>,
+    pub(crate) effort: Option<Vec<Option<f64>>>,
+    pub(crate) follow_error_degrees: Option<f64>,
 }
 
 /// Camera stream metadata stored beside joint stream descriptions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct VideoStreamRow {
-    pub episode_id: String,
-    pub stream_id: String,
-    pub camera_id: String,
-    pub width: u32,
-    pub height: u32,
-    pub fps: u32,
+    pub(crate) episode_id: String,
+    pub(crate) stream_id: String,
+    pub(crate) camera_id: String,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) fps: u32,
 }
 
 /// Stateful conversion from control-loop frames to relational stream rows.

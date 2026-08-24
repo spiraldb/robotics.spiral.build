@@ -29,9 +29,9 @@ const STREAM_SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 /// One encoded frame, ready to be written to an HTTP response.
 #[derive(Clone, Debug)]
 pub(crate) struct Frame {
-    pub bytes: Bytes,
-    pub sequence: u64,
-    pub captured_at: Instant,
+    pub(crate) bytes: Bytes,
+    pub(crate) sequence: u64,
+    pub(crate) captured_at: Instant,
 }
 
 #[derive(Debug, Default)]

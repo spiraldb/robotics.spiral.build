@@ -17,9 +17,7 @@ use spiral_robotics_contracts::api::{
 };
 use spiral_robotics_contracts::spiral::{Table, column as db};
 use spiral_robotics_core::arm;
-use spiral_robotics_core::calibration::{
-    Calibration, MotorSpec, validate_calibration_for_motors, validate_motor_specs,
-};
+use spiral_robotics_core::calibration::{Calibration, MotorSpec, validate_motor_specs};
 
 use crate::backend::storage::manager::{
     ensure_dataset_namespace, execute_delete_sql, execute_update_sql, ingest_batch, table_exists,
@@ -66,8 +64,8 @@ impl From<ConfigError> for WorkspaceError {
 
 #[derive(Clone, Debug)]
 pub(crate) struct RobotRecord {
-    pub id: String,
-    pub config: RobotConfig,
+    pub(crate) id: String,
+    pub(crate) config: RobotConfig,
 }
 
 impl RobotRecord {
@@ -161,7 +159,7 @@ impl RobotRecord {
         let calibration = calibration_result.ok().flatten();
         if problem.is_none()
             && let Some(calibration) = &calibration
-            && let Err(error) = validate_calibration_for_motors(&motors, calibration)
+            && let Err(error) = calibration.validate_for_motor_specs(&motors)
         {
             problem = Some(format!(
                 "robot {:?} has calibration that does not match its configured motors: {error}",
@@ -327,7 +325,7 @@ impl RobotWorkspace {
         motors: &BTreeMap<String, MotorSpec>,
         calibration: &Calibration,
     ) -> Result<RobotRecord, WorkspaceError> {
-        validate_calibration_for_motors(motors, calibration).map_err(|source| {
+        calibration.validate_for_motor_specs(motors).map_err(|source| {
             WorkspaceError::Invalid(format!(
                 "robot {id:?} has calibration that does not match its configured motors: {source}"
             ))
@@ -347,7 +345,7 @@ impl RobotWorkspace {
 
     pub(crate) fn delete(&self, id: &str) -> Result<(), WorkspaceError> {
         self.get(id)?;
-        let relation = sql::relation(self.repository.namespace(), Table::Robots);
+        let relation = Table::Robots.qualified_name(self.repository.namespace());
         let id = sql::string_literal(id);
         self.repository
             .run_invalidating_blocking(move |connection| {
@@ -363,7 +361,7 @@ impl RobotWorkspace {
     }
 
     pub(crate) fn try_list(&self) -> Result<Vec<RobotRecord>, WorkspaceError> {
-        let relation = sql::relation(self.repository.namespace(), Table::Robots);
+        let relation = Table::Robots.qualified_name(self.repository.namespace());
         self.repository
             .run_blocking(move |connection| {
                 if !table_exists(connection, &relation)? {
@@ -405,7 +403,7 @@ impl RobotWorkspace {
 
     fn persist(&self, id: &str, config: RobotConfig) -> Result<RobotRecord, WorkspaceError> {
         let namespace = self.repository.namespace().to_owned();
-        let relation = sql::relation(&namespace, Table::Robots);
+        let relation = Table::Robots.qualified_name(&namespace);
         let config_json = config.to_pretty_json()?;
         let id_owned = id.to_owned();
         let id_sql = sql::string_literal(id);

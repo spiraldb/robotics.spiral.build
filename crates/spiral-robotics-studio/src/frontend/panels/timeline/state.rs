@@ -2,7 +2,6 @@
 
 use dioxus::prelude::*;
 
-use crate::frontend::api::commands;
 use crate::frontend::api::historical::{
     EpisodeInspectionCache, HistoricalPreview, historical_replay_slot, request_historical_preview,
 };
@@ -41,12 +40,12 @@ impl PreviewTransport {
 
 #[derive(Clone, Copy)]
 pub(crate) struct TimelineController {
-    pub playhead: Signal<f64>,
-    pub preview: Signal<PreviewTransport>,
-    pub follow_live: Signal<bool>,
-    pub robot_sync_target: Signal<Option<TimelineTarget>>,
+    pub(crate) playhead: Signal<f64>,
+    pub(crate) preview: Signal<PreviewTransport>,
+    pub(crate) follow_live: Signal<bool>,
+    pub(crate) robot_sync_target: Signal<Option<TimelineTarget>>,
     #[cfg(feature = "web")]
-    pub preview_tick_seconds: Signal<Option<f64>>,
+    pub(crate) preview_tick_seconds: Signal<Option<f64>>,
 }
 
 pub(crate) fn use_timeline_controller() -> TimelineController {
@@ -90,16 +89,16 @@ impl TimelineController {
 }
 
 pub(crate) struct TimelineActionContext {
-    pub studio: Studio,
-    pub controller: TimelineController,
-    pub subject: TimelineSubject,
-    pub review_episode: Option<String>,
-    pub seek_context: Option<(String, String, Option<String>)>,
-    pub historical_state: Signal<Option<RecordedSource<HistoricalPreview>>>,
-    pub historical_revision: Signal<u64>,
-    pub historical_cache: Signal<EpisodeInspectionCache>,
-    pub automatic_preview_target: Signal<Option<(String, u64)>>,
-    pub interactive_preview_target: Signal<Option<(String, u64)>>,
+    pub(crate) studio: Studio,
+    pub(crate) controller: TimelineController,
+    pub(crate) subject: TimelineSubject,
+    pub(crate) review_episode: Option<String>,
+    pub(crate) seek_context: Option<(String, String, Option<String>)>,
+    pub(crate) historical_state: Signal<Option<RecordedSource<HistoricalPreview>>>,
+    pub(crate) historical_revision: Signal<u64>,
+    pub(crate) historical_cache: Signal<EpisodeInspectionCache>,
+    pub(crate) automatic_preview_target: Signal<Option<(String, u64)>>,
+    pub(crate) interactive_preview_target: Signal<Option<(String, u64)>>,
 }
 
 /// Apply a typed Timeline action after validating that it still names the
@@ -125,12 +124,12 @@ pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: T
     match action {
         TimelineAction::Capture { episode, action } => match action {
             TimelineCaptureAction::Start if subject.activity() == Activity::Live => {
-                commands::start_recording(studio);
+                studio.start_recording();
             }
             TimelineCaptureAction::Pause | TimelineCaptureAction::Resume => {
                 if let Some(episode) = episode {
                     let paused = action == TimelineCaptureAction::Pause;
-                    commands::set_recording_paused(studio, &episode, paused);
+                    studio.set_recording_paused(&episode, paused);
                     follow_live.set(!paused);
                     if !paused {
                         historical_cache.write().invalidate(&episode);
@@ -142,8 +141,7 @@ pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: T
                 if let Some(episode) = episode {
                     let keep = action == TimelineCaptureAction::Stop;
                     let finished_episode = episode.clone();
-                    commands::stop_recording(
-                        studio,
+                    studio.stop_recording(
                         &episode,
                         keep,
                         EventHandler::new(
@@ -182,15 +180,11 @@ pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: T
                     controller.stop_preview();
                     follow_live.set(false);
                     if let Some(summary) = subject.episode() {
-                        commands::start_replay(studio, summary, playhead());
+                        studio.start_replay(summary, playhead());
                     }
                 }
-                TimelineRobotSyncAction::Pause => {
-                    commands::set_replay_paused(studio, &episode, true)
-                }
-                TimelineRobotSyncAction::Resume => {
-                    commands::set_replay_paused(studio, &episode, false)
-                }
+                TimelineRobotSyncAction::Pause => studio.set_replay_paused(&episode, true),
+                TimelineRobotSyncAction::Resume => studio.set_replay_paused(&episode, false),
             }
         }
         TimelineAction::Seek(request) if subject.target().as_ref() == Some(&request.target) => {
@@ -216,7 +210,7 @@ pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: T
                 && request.move_robot
                 && let Some((episode, robot, source_arm)) = seek_context
             {
-                commands::physical_seek(studio, episode, robot, source_arm, request.seconds);
+                studio.physical_seek(episode, robot, source_arm, request.seconds);
             }
         }
         TimelineAction::SetFollowLive(next) => {
@@ -239,7 +233,7 @@ pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: T
                 if let Some(replay) = studio.replay()
                     && subject.episode_id() == Some(replay.episode.as_str())
                 {
-                    commands::stop_replay(studio, &replay.episode);
+                    studio.stop_replay(&replay.episode);
                 }
             }
         }

@@ -20,7 +20,6 @@ use spiral_robotics_contracts::workflow::{
     WorkflowNodePhase, WorkflowNodeProgress, WorkflowNodeSnapshot, WorkflowQuarantineSummary,
     WorkflowRelation, WorkflowRelationsResponse, WorkflowRunPhase, WorkflowRunSnapshot,
     WorkflowSpec, WorkflowStateResponse, WorkflowValidationReport, derived_feature_cache_relation,
-    topological_order, validate_workflow_spec, workflow_has_model,
 };
 
 use crate::frontend::api::http as api;
@@ -34,21 +33,21 @@ pub(crate) const RESULTS_PANEL_ID: &str = "workflow-results";
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct WorkflowNodeData {
-    pub kind: WorkflowNodeKind,
-    pub fields: Vec<String>,
-    pub relation: Option<String>,
-    pub feature_cache_relation: Option<String>,
-    pub sql: Option<String>,
-    pub description: String,
-    pub phase: WorkflowNodePhase,
-    pub detail: String,
-    pub error: Option<String>,
-    pub model_id: Option<String>,
-    pub features: Vec<WorkflowFeatureDefinition>,
-    pub progress: Option<WorkflowNodeProgress>,
-    pub quarantine: WorkflowQuarantineSummary,
-    pub model: Option<WorkflowModelRunMetadata>,
-    pub warnings: Vec<String>,
+    pub(crate) kind: WorkflowNodeKind,
+    pub(crate) fields: Vec<String>,
+    pub(crate) relation: Option<String>,
+    pub(crate) feature_cache_relation: Option<String>,
+    pub(crate) sql: Option<String>,
+    pub(crate) description: String,
+    pub(crate) phase: WorkflowNodePhase,
+    pub(crate) detail: String,
+    pub(crate) error: Option<String>,
+    pub(crate) model_id: Option<String>,
+    pub(crate) features: Vec<WorkflowFeatureDefinition>,
+    pub(crate) progress: Option<WorkflowNodeProgress>,
+    pub(crate) quarantine: WorkflowQuarantineSummary,
+    pub(crate) model: Option<WorkflowModelRunMetadata>,
+    pub(crate) warnings: Vec<String>,
 }
 
 impl WorkflowNodeData {
@@ -106,8 +105,8 @@ impl WorkflowNodeData {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct WorkflowUiState {
-    pub selected_node: Option<String>,
-    pub active_panel: Option<String>,
+    pub(crate) selected_node: Option<String>,
+    pub(crate) active_panel: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -270,7 +269,7 @@ impl WorkflowController {
     }
 
     pub(crate) fn has_model(&self) -> bool {
-        workflow_has_model(&self.draft.read())
+        self.draft.read().has_model()
     }
 
     pub(crate) fn topology_signature(&self) -> String {
@@ -291,7 +290,7 @@ impl WorkflowController {
     }
 
     pub(crate) fn validation(&self) -> WorkflowValidationReport {
-        validate_workflow_spec(&self.draft.read())
+        self.draft.read().validate()
     }
 
     pub(crate) fn loaded(&self) -> bool {
@@ -1266,7 +1265,7 @@ fn initial_state() -> WorkflowStateResponse {
     let workflow = WorkflowSpec::default();
     WorkflowStateResponse {
         scope_id: String::new(),
-        validation: validate_workflow_spec(&workflow),
+        validation: workflow.validate(),
         snapshot: WorkflowRunSnapshot::idle_for(&workflow),
         workflow,
     }
@@ -1691,7 +1690,7 @@ fn fallback_node_ranks(workflow: &WorkflowSpec) -> BTreeMap<&str, usize> {
         .iter()
         .map(|node| (node.id.as_str(), 0_usize))
         .collect::<BTreeMap<_, _>>();
-    let order = topological_order(workflow).unwrap_or_else(|_| {
+    let order = workflow.topological_order().unwrap_or_else(|_| {
         // Invalid drafts are not runnable, but still need deterministic finite
         // fallback geometry while validation explains the graph error.
         workflow.nodes.iter().map(|node| node.id.clone()).collect()
@@ -1913,7 +1912,7 @@ mod tests {
                 WorkflowNodeKind::Result
             ]
         );
-        assert!(!workflow_has_model(&state.workflow));
+        assert!(!state.workflow.has_model());
     }
 
     #[test]
@@ -1945,7 +1944,7 @@ mod tests {
         assert_eq!(empty.name, "Untitled workflow");
         assert!(empty.nodes.is_empty());
         assert!(empty.edges.is_empty());
-        assert!(!validate_workflow_spec(&empty).valid());
+        assert!(!empty.validate().valid());
         assert!(graph_nodes(&empty, &WorkflowRunSnapshot::idle_for(&empty), &[]).is_empty());
         assert!(graph_edges(&empty.edges, &WorkflowRunSnapshot::idle_for(&empty)).is_empty());
     }
@@ -2104,7 +2103,7 @@ mod tests {
     fn configured_source_and_feature_make_the_manual_model_draft_applicable() {
         let mut workflow = WorkflowSpec::default();
         let model_id = insert_siglip_model(&mut workflow).unwrap();
-        let blank_report = validate_workflow_spec(&workflow);
+        let blank_report = workflow.validate();
         assert_eq!(
             blank_report
                 .errors
@@ -2137,7 +2136,7 @@ mod tests {
         refresh_generated_feature_query(&mut workflow, &model_id, &features);
         normalize_draft_model_sources(&mut workflow);
 
-        assert!(validate_workflow_spec(&workflow).valid());
+        assert!(workflow.validate().valid());
         let WorkflowNodeConfig::Model {
             features,
             feature_cache_relation,

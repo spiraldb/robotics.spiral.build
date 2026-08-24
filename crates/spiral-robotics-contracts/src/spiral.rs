@@ -67,6 +67,11 @@ impl Table {
         }
     }
 
+    /// Qualify this owned table inside a configured dataset.
+    pub fn qualified_name(self, dataset: &str) -> String {
+        format!("{dataset}.{}", self.name())
+    }
+
     /// Ordered persisted columns for schema-drift checks.
     pub const fn columns(self) -> &'static [&'static str] {
         match self {
@@ -276,7 +281,7 @@ impl QueryPreset {
     }
 
     pub fn sql(self, dataset: &str) -> String {
-        let relation = relation(dataset, self.table());
+        let relation = self.table().qualified_name(dataset);
         match self {
             Self::Datasets => format!(
                 "SELECT * FROM {relation} ORDER BY {} DESC LIMIT 100",
@@ -338,11 +343,6 @@ impl QueryPreset {
     }
 }
 
-/// Qualify one owned table inside a configured dataset.
-pub fn relation(dataset: &str, table: Table) -> String {
-    format!("{dataset}.{}", table.name())
-}
-
 /// Default typed sample projection used by ACT training.
 pub fn default_training_sql(namespace: &str) -> String {
     default_training_sql_for_dataset(namespace, "default")
@@ -350,10 +350,10 @@ pub fn default_training_sql(namespace: &str) -> String {
 
 /// Default typed sample projection for one relational dataset row.
 pub fn default_training_sql_for_dataset(namespace: &str, dataset_id: &str) -> String {
-    let datasets = relation(namespace, Table::Datasets);
-    let samples = relation(namespace, Table::JointSamples);
-    let episodes = relation(namespace, Table::Episodes);
-    let streams = relation(namespace, Table::EpisodeStreams);
+    let datasets = Table::Datasets.qualified_name(namespace);
+    let samples = Table::JointSamples.qualified_name(namespace);
+    let episodes = Table::Episodes.qualified_name(namespace);
+    let streams = Table::EpisodeStreams.qualified_name(namespace);
     let dataset_id = dataset_id.replace('\'', "''");
     format!(
         "SELECT j.{episode_id}, j.{stream_id}, j.{sample_index}, j.{episode_time_ns},\n       e.{sample_hz}, e.{frames} AS episode_frames, s.{robot_type}, s.{joint_names},\n       j.{state_position} AS {state},\n       j.{action_position} AS {action}\nFROM {samples} AS j\nJOIN {episodes} AS e ON e.{episode_id} = j.{episode_id}\nJOIN {datasets} AS d ON d.{dataset_id} = e.{dataset_id}\nJOIN {streams} AS s ON s.{episode_id} = j.{episode_id} AND s.{stream_id} = j.{stream_id}\nWHERE e.{schema_version} = {current_schema}\n  AND d.{dataset_id} = '{dataset_value}'\n  AND NOT e.{discarded}\n  AND s.{modality} = 'joint'\n  AND (\n      LOWER(s.{robot_type}) LIKE '%follower%'\n      OR (s.{robot_type} IS NULL AND s.{stream_id} = 'follower')\n  )\n  AND j.{state_valid}\n  AND j.{action_valid}",
@@ -431,11 +431,11 @@ mod tests {
         let sql = default_training_sql_for_dataset("robotics", "pick-place");
         assert!(sql.contains(&format!(
             "FROM {}",
-            relation("robotics", Table::JointSamples)
+            Table::JointSamples.qualified_name("robotics")
         )));
         assert!(sql.contains(&format!(
             "JOIN {} AS d",
-            relation("robotics", Table::Datasets)
+            Table::Datasets.qualified_name("robotics")
         )));
         assert!(sql.contains("d.dataset_id = 'pick-place'"));
         assert!(sql.contains(&format!("{} AS {}", column::STATE_POSITION, column::STATE)));

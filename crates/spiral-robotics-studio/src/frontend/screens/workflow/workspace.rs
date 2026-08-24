@@ -20,7 +20,9 @@ use crate::frontend::app::state::studio;
 use crate::frontend::components::icons::{
     FitViewIcon, ModelNodeIcon, QueryNodeIcon, ResultNodeIcon, TableNodeIcon, WorkflowIcon,
 };
-use crate::frontend::screens::data::workbench::{QueryState, QueryViewModel, render_query_result};
+use crate::frontend::screens::data::workbench::{
+    QueryExecutionPresentation, QueryState, render_query_result,
+};
 use crate::frontend::screens::workflow::state::{
     ASSISTANT_PANEL_ID, AcceptedAgentDraft, AgentDraftKey, CANVAS_PANEL_ID, NODE_PANEL_ID,
     RESULTS_PANEL_ID, WorkflowAgentCommand, WorkflowCommand, WorkflowNodeData, workflow_controller,
@@ -1491,25 +1493,25 @@ fn WorkflowResults() -> Element {
         Some((sql, max_rows))
     });
     let (sql, max_rows) = query.unwrap_or_else(|| ("Read-only Workflow query".to_owned(), 100));
-    let result_model = snapshot.result.clone().map(|result| QueryViewModel {
-        sql: sql.clone(),
-        max_rows,
-        state: QueryState::Ready(result),
+    let result_model = snapshot.result.clone().map(|result| {
+        QueryExecutionPresentation::new(sql.clone(), max_rows, QueryState::Ready(result))
     });
     let transient_model = if result_model.is_none() {
         match snapshot.phase {
             WorkflowRunPhase::Validating
             | WorkflowRunPhase::Running
-            | WorkflowRunPhase::Cancelling => Some(QueryViewModel {
-                sql: sql.clone(),
+            | WorkflowRunPhase::Cancelling => Some(QueryExecutionPresentation::new(
+                sql.clone(),
                 max_rows,
-                state: QueryState::Running,
-            }),
+                QueryState::Running,
+            )),
             WorkflowRunPhase::Failed | WorkflowRunPhase::Interrupted => {
-                snapshot.error.clone().map(|error| QueryViewModel {
-                    sql: sql.clone(),
-                    max_rows,
-                    state: QueryState::Failed(error),
+                snapshot.error.clone().map(|error| {
+                    QueryExecutionPresentation::new(
+                        sql.clone(),
+                        max_rows,
+                        QueryState::Failed(error),
+                    )
                 })
             }
             _ => None,

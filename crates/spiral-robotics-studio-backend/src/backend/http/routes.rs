@@ -68,20 +68,21 @@ use spiral_robotics_studio_application::catalog_lease::{
     CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease,
 };
 use spiral_robotics_studio_application::data::{
-    self as data_application, ConnectionCheck, DataCatalogPort, DataSettingsView,
-    QueryColumn as ApplicationQueryColumn, QueryCommand, QueryResult as ApplicationQueryResult,
-    QueryValue, ReplayTrajectory as SpiralReplayTrajectory, SpiralDestinationSettings,
+    ConnectionCheck, DataCatalogPort, DataSettingsSnapshot, QueryColumn as ApplicationQueryColumn,
+    QueryCommand, QueryResult as ApplicationQueryResult, QueryValue,
+    ReplayTrajectory as SpiralReplayTrajectory, SpiralDestinationSettings,
     StartSpiralReplayCommand, UpdateDataSettingsCommand, VideoAssetQuery,
 };
 use spiral_robotics_studio_application::device_discovery::{
-    self as device_discovery, CameraDiscoveryPort, DiscoveredCamera, IdentifySerialPortCommand,
-    SerialPortInventory, SerialPortQueryPort, SerialPortView,
+    CameraDiscoveryPort, DiscoveredCamera, IdentifySerialPortCommand, SerialPortDescriptor,
+    SerialPortInventory, SerialPortQueryPort,
 };
 use spiral_robotics_studio_application::episode_queries::{
-    self, EpisodeArmView, EpisodeInspectionArmView, EpisodeInspectionView, EpisodeQueryPort,
-    EpisodeTimelineView, EpisodeTraceQuery, EpisodeView, OptionalFrameMatrixView, RecordingGapView,
-    TimelineArmSampleView, TimelineMetadataView, TimelineSampleView, TimelineTraceLaneView,
-    TimelineTracePointView, TimelineTraceSeriesView, TimelineTracesView, VideoAssetView,
+    EpisodeArmRecord, EpisodeInspectionArmRecord, EpisodeInspectionRecord, EpisodeQueries,
+    EpisodeQueryPort, EpisodeRecord, EpisodeTimelineRecord, EpisodeTraceQuery,
+    OptionalFrameMatrixRecord, RecordingGapRecord, TimelineArmSampleRecord, TimelineMetadataRecord,
+    TimelineSampleRecord, TimelineTraceCollection, TimelineTraceLaneRecord,
+    TimelineTracePointRecord, TimelineTraceSeriesRecord, VideoAssetRecord,
 };
 use spiral_robotics_studio_application::episode_seek::{
     self, ActiveRecording, HistoricalSample, HistoricalSeekState, PhysicalSeekPlan,
@@ -138,21 +139,21 @@ const VIDEO_RECORDING_STOP_TICKS: u8 = 5;
 /// Everything a request handler can reach.
 #[derive(Clone)]
 pub(crate) struct AppState {
-    pub workspace: Arc<RobotWorkspace>,
-    pub episodes: Arc<EpisodeStore>,
-    pub hardware: Arc<HardwareHandle>,
-    pub cameras: Arc<CameraManager>,
-    pub backend_state: Arc<BackendStateStore>,
-    pub preferences: Arc<StudioPreferencesStore>,
-    pub storage: Arc<StorageManager>,
-    pub training: Arc<TrainingManager>,
-    pub workflow: Arc<WorkflowManager>,
-    pub workflow_agent: Arc<WorkflowAgentManager>,
-    pub rollout: Arc<RolloutManager>,
-    pub bootstrap: BootstrapState,
-    pub catalog_lease: Arc<CatalogMutationLease>,
-    pub recording_video: Arc<tokio::sync::Mutex<Option<VideoCapture>>>,
-    pub video_encoder: VideoEncoderSettings,
+    pub(crate) workspace: Arc<RobotWorkspace>,
+    pub(crate) episodes: Arc<EpisodeStore>,
+    pub(crate) hardware: Arc<HardwareHandle>,
+    pub(crate) cameras: Arc<CameraManager>,
+    pub(crate) backend_state: Arc<BackendStateStore>,
+    pub(crate) preferences: Arc<StudioPreferencesStore>,
+    pub(crate) storage: Arc<StorageManager>,
+    pub(crate) training: Arc<TrainingManager>,
+    pub(crate) workflow: Arc<WorkflowManager>,
+    pub(crate) workflow_agent: Arc<WorkflowAgentManager>,
+    pub(crate) rollout: Arc<RolloutManager>,
+    pub(crate) bootstrap: BootstrapState,
+    pub(crate) catalog_lease: Arc<CatalogMutationLease>,
+    pub(crate) recording_video: Arc<tokio::sync::Mutex<Option<VideoCapture>>>,
+    pub(crate) video_encoder: VideoEncoderSettings,
 }
 
 /// Shared application lifecycle published to the browser and consulted by
@@ -503,21 +504,20 @@ pub(crate) fn build_snapshot(state: &AppState) -> StudioSnapshot {
         readiness,
         storage: "SpiralDB".to_owned(),
         robots,
-        cameras: device_discovery::list_cameras(&devices::CameraDiscoveryAdapter(
-            state.cameras.clone(),
-        ))
-        .into_iter()
-        .map(|camera| CameraStatus {
-            id: camera.id,
-            name: camera.name,
-            width: camera.width,
-            height: camera.height,
-            fps: camera.fps,
-            streaming: camera.streaming,
-            frames: camera.frames,
-            error: camera.error,
-        })
-        .collect(),
+        cameras: devices::CameraDiscoveryAdapter(state.cameras.clone())
+            .cameras()
+            .into_iter()
+            .map(|camera| CameraStatus {
+                id: camera.id,
+                name: camera.name,
+                width: camera.width,
+                height: camera.height,
+                fps: camera.fps,
+                streaming: camera.streaming,
+                frames: camera.frames,
+                error: camera.error,
+            })
+            .collect(),
         mode: hardware.mode,
         issues,
     }
