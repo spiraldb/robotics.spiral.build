@@ -69,8 +69,6 @@
               [
                 rustToolchain
                 pkgs.actionlint
-                pkgs.ffmpeg
-                pkgs.openssl
                 pkgs.pkg-config
                 pkgs.python312
                 pkgs.uv
@@ -89,6 +87,7 @@
               ++ [
                 pkgs.cargo-fuzz
                 pkgs.cargo-binutils
+                pkgs.ffmpeg
               ]
               ++ webBuildInputs;
             # Make `dx` use pinned tools rather than downloading its own copies

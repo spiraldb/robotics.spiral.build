@@ -364,11 +364,11 @@ today, and nothing below may be presented as existing behavior:
   trusted network.
 - **The Spiral ADBC driver is trusted native backend code.** During active
   co-development, Studio links the Rust driver crate from SpiralDB's `develop`
-  branch at the revision pinned by `Cargo.lock`. CI compiles and exercises the
-  service-free boundary but does not connect to a live SpiralDB project. The
-  browser cannot choose or load native code. Python training workers continue
-  to use the driver's shared library through their language-neutral ADBC
-  manager.
+  branch at the revision pinned by `Cargo.lock`. Standard CI excludes the
+  native backend until a separate SpiralDB integration lane exists; it does not
+  fetch the private driver or connect to a live project. The browser cannot
+  choose or load native code. Python training workers continue to use the
+  driver's shared library through their language-neutral ADBC manager.
 
 **Terminology:** *robot instance* (one arm), *leader* / *follower*, *joint*,
 *calibration*, *travel*, *torque*, *Hold* / *Release* / *Teleop*, *Studio*
