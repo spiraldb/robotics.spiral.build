@@ -348,6 +348,11 @@ today, and nothing below may be presented as existing behavior:
   fields empty, and the product never asks an operator to configure them.
 - **Nix flake** provides the development environment and web toolchain (`dx`,
   Tailwind CLI, `wasm-bindgen`, and `wasm-opt`).
+- **Standard CI is service- and compute-free.** It tests and lints the Rust
+  packages that do not require the native SpiralDB backend, and it lints and
+  packages the Python worker without syncing its CUDA stack or running worker
+  integration tests. Native-backend, live-SpiralDB, and compute-runtime tests
+  belong in separate integration lanes.
 - **Safety is enforced by the server.** Enabling torque first copies measured
   position into the goal so an arm cannot snap to stale state. Uncalibrated
   arms cannot accept normalized position commands. Manual, teleoperation,

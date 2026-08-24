@@ -71,6 +71,7 @@
                 pkgs.actionlint
                 pkgs.pkg-config
                 pkgs.python312
+                pkgs.ruff
                 tailwind
                 pkgs.uv
                 llvmPackages.llvm

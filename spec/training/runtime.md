@@ -107,6 +107,11 @@ flowchart LR
 - **RUNTIME-021** The main Rust workspace must not link PyTorch or LibTorch.
 - **RUNTIME-022** The Python runtime must remain outside the Rust workspace and
   use the locked `uv` environment.
+- **RUNTIME-033** Standard CI must lint the Python worker and verify its wheel's
+  packaged boundary descriptor without syncing the production CUDA environment
+  or running worker tests. Compute-runtime and live-SpiralDB coverage must wait
+  for a separate integration lane; deployment and local runtime environments
+  must continue to use the locked `uv` definition.
 - **RUNTIME-023** Missing GPU telemetry must be reported as unavailable and
   must never fail an otherwise successful step.
 - **RUNTIME-024** The runtime must bind to loopback by default. SSH local
