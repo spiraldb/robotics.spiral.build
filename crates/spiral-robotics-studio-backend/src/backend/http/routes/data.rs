@@ -22,13 +22,22 @@ pub(super) fn bootstrap_router() -> Router<AppState> {
         )
         .route("/settings/data/test/spiral", post(test_spiral))
         .route("/settings/data/test/training", post(test_training_runtime))
+        .route(
+            "/datasets/huggingface/inspect",
+            post(inspect_huggingface_dataset),
+        )
 }
 
 pub(super) fn catalog_router() -> Router<AppState> {
     Router::new()
         .route("/spiral/query", post(spiral_query))
+        .route("/spiral/relations", get(spiral_relations))
         .route("/spiral/replay", post(start_spiral_replay))
         .route("/spiral/video.mp4", get(spiral_video))
+        .route(
+            "/datasets/huggingface/import",
+            post(import_huggingface_dataset),
+        )
         .route("/project/export", get(export_project))
         .route(
             "/project/import",
@@ -43,6 +52,72 @@ pub(super) fn catalog_router() -> Router<AppState> {
                 crate::backend::storage::bundle::MAX_EPISODE_BUNDLE_BYTES,
             )),
         )
+}
+
+async fn spiral_relations(
+    State(state): State<AppState>,
+) -> Result<Json<spiral_robotics_contracts::workflow::WorkflowRelationsResponse>, Failure> {
+    state
+        .storage
+        .workflow_relations()
+        .await
+        .map(Json)
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))
+}
+
+async fn inspect_huggingface_dataset(
+    State(state): State<AppState>,
+    Json(request): Json<spiral_robotics_contracts::api::HuggingFaceDatasetRequest>,
+) -> Result<Json<spiral_robotics_contracts::api::HuggingFaceDatasetInspection>, Failure> {
+    crate::backend::storage::ingestion::inspect_huggingface_dataset(
+        request,
+        state.storage.workflow_model_repository().namespace(),
+    )
+    .await
+    .map(Json)
+    .map_err(hugging_face_inspection_failure)
+}
+
+async fn import_huggingface_dataset(
+    State(state): State<AppState>,
+    Json(request): Json<spiral_robotics_contracts::api::HuggingFaceDatasetRequest>,
+) -> Result<Json<spiral_robotics_contracts::api::HuggingFaceDatasetImportSummary>, Failure> {
+    let inspection = crate::backend::storage::ingestion::inspect_huggingface_dataset(
+        request,
+        state.storage.workflow_model_repository().namespace(),
+    )
+    .await
+    .map_err(hugging_face_inspection_failure)?;
+    let token = state
+        .catalog_lease
+        .try_acquire(CatalogLeaseOwner::DatasetImport)
+        .ok_or_else(|| {
+            Failure::conflict(
+                "Wait for the current recording or catalog change before importing a dataset",
+            )
+        })?;
+    let _reservation = CatalogReservation {
+        lease: state.catalog_lease.clone(),
+        token,
+    };
+    require_import_idle(&state, "a dataset")?;
+    let storage = state.storage.clone();
+    tokio::task::spawn_blocking(move || storage.import_huggingface_dataset(inspection))
+        .await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+        .map(Json)
+        .map_err(Failure::import)
+}
+
+fn hugging_face_inspection_failure(error: String) -> Failure {
+    let remote = error.starts_with("contacting Hugging Face")
+        || error.starts_with("listing Hugging Face")
+        || error.starts_with("decoding Hugging Face");
+    if remote {
+        Failure(StatusCode::BAD_GATEWAY, error)
+    } else {
+        Failure::bad_request(error)
+    }
 }
 
 #[derive(Debug, Deserialize)]

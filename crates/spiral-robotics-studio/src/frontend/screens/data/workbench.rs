@@ -9,9 +9,12 @@ use std::collections::BTreeSet;
 use dioxus::prelude::*;
 use gloo_net::http::Method;
 use spiral_robotics_contracts::api::{
-    EpisodeImportSummary, EpisodeSummary, QueryColumn, SpiralQueryResponse,
+    EpisodeImportSummary, EpisodeSummary, HuggingFaceDatasetFormat,
+    HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection, HuggingFaceDatasetRequest,
+    QueryColumn, SpiralQueryResponse,
 };
 use spiral_robotics_contracts::spiral::{QueryPreset, Table};
+use spiral_robotics_contracts::workflow::WorkflowRelationsResponse;
 use spiral_robotics_ui::{
     Action, ActionLink, ActionPurpose, ActionVariant, CloseIcon, FileAction, InlineConfirmation,
     RefreshIcon, focus_after_render,
@@ -59,6 +62,7 @@ pub(crate) enum QueryState {
 pub(crate) fn EpisodesPanel(namespace: String) -> Element {
     let mut studio = studio();
     let importing = use_signal(|| false);
+    let mut adding_data = use_signal(|| false);
     let mut confirming_delete = use_signal(|| None::<String>);
     let mut deleting_episode = use_signal(|| None::<String>);
 
@@ -87,6 +91,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
     let dataset_ids = all_episodes
         .iter()
         .map(|episode| episode.dataset_id.clone())
+        .chain(studio.datasets().into_iter().map(|dataset| dataset.id))
         .chain(std::iter::once(dataset_id.clone()))
         .collect::<BTreeSet<_>>();
     let episodes = all_episodes
@@ -158,6 +163,15 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                 // "Sele…".
                 div { class: "flex min-h-9 flex-wrap items-center gap-x-2 gap-y-0.5 border-t border-line px-2 py-1",
                     span { class: "order-last w-full text-[10px] text-ink-faint", "Selected dataset only" }
+                    Action {
+                        purpose: ActionPurpose::Create,
+                        variant: if adding_data() { ActionVariant::Solid } else { ActionVariant::Outline },
+                        aria_pressed: adding_data(),
+                        title: "Import a public Hugging Face dataset into native Spiral relations",
+                        disabled: !dataset_valid,
+                        onclick: move |_| adding_data.toggle(),
+                        if adding_data() { "Adding data" } else { "Add data" }
+                    }
                     FileAction {
                         purpose: ActionPurpose::Import,
                         variant: ActionVariant::Outline,
@@ -201,7 +215,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                                 }
                             });
                         },
-                        if importing() { "Importing…" } else { "Import episodes" }
+                        if importing() { "Importing…" } else { "Import bundle" }
                     }
                     if dataset_valid && !episodes.is_empty() {
                         ActionLink {
@@ -222,6 +236,14 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                             "Export episodes"
                         }
                     }
+                }
+            }
+
+            if adding_data() && dataset_valid {
+                HuggingFaceImport {
+                    key: "{dataset_id}",
+                    dataset_id: dataset_id.clone(),
+                    on_close: move |_| adding_data.set(false),
                 }
             }
 
@@ -253,7 +275,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                     div { class: "px-3 py-8 text-center",
                         strong { class: "block text-[12px] font-medium text-ink", "No episodes yet" }
                         p { class: "mt-1 text-[11px] text-ink-faint",
-                            "Record in Live mode or import an episode bundle."
+                            "Record in Live, add a Hugging Face dataset, or import an episode bundle."
                         }
                     }
                 } else {
@@ -312,12 +334,317 @@ fn import_warning_suffix(warnings: &[String]) -> String {
     }
 }
 
+/// Inspect-then-import flow for immutable Hugging Face snapshots. The panel is
+/// inline because it belongs to the selected dataset and should not obscure
+/// either the episode catalog or Query while an import is being prepared.
+#[component]
+fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element {
+    let studio = studio();
+    let controller = data_controller();
+    let mut format = use_signal(|| HuggingFaceDatasetFormat::LeRobot);
+    let mut repository = use_signal(String::new);
+    let mut revision = use_signal(|| "main".to_owned());
+    let inspecting = use_signal(|| false);
+    let importing = use_signal(|| false);
+    let mut inspection = use_signal(|| None::<HuggingFaceDatasetInspection>);
+    let mut imported = use_signal(|| None::<HuggingFaceDatasetImportSummary>);
+    let mut error = use_signal(|| None::<String>);
+
+    let request = HuggingFaceDatasetRequest {
+        dataset_id: dataset_id.clone(),
+        repository: repository().trim().to_owned(),
+        revision: revision().trim().to_owned(),
+        format: format(),
+    };
+    let can_inspect = !request.repository.is_empty()
+        && !request.revision.is_empty()
+        && !inspecting()
+        && !importing();
+    let panel_pending = inspecting() || importing();
+
+    rsx! {
+        section { class: "data-import-workspace", "aria-labelledby": "data-import-title",
+            header { class: "data-import-heading",
+                div {
+                    h3 { id: "data-import-title", "Add data from Hugging Face" }
+                    p { "A public snapshot becomes native Spiral relations under the new Dataset ID above." }
+                }
+                Action {
+                    purpose: ActionPurpose::Close,
+                    variant: ActionVariant::Icon,
+                    aria_label: "Close dataset import",
+                    title: "Close dataset import",
+                    disabled: panel_pending,
+                    onclick: move |_| on_close.call(()),
+                    CloseIcon {}
+                }
+            }
+
+            div { class: "data-import-form",
+                div { class: "data-import-format", role: "group", "aria-label": "Dataset format",
+                    for option in [HuggingFaceDatasetFormat::LeRobot, HuggingFaceDatasetFormat::Mcap] {
+                        Action {
+                            key: "{option.label()}",
+                            purpose: ActionPurpose::Select,
+                            variant: ActionVariant::Segment,
+                            aria_pressed: format() == option,
+                            disabled: panel_pending,
+                            onclick: move |_| {
+                                format.set(option);
+                                inspection.set(None);
+                                imported.set(None);
+                                error.set(None);
+                            },
+                            "{option.label()}"
+                        }
+                    }
+                }
+                label { class: "data-import-repository",
+                    span { class: "label", "Dataset repository" }
+                    input {
+                        class: "field",
+                        value: repository(),
+                        placeholder: "lerobot/pusht",
+                        spellcheck: "false",
+                        autocomplete: "off",
+                        disabled: panel_pending,
+                        oninput: move |event| {
+                            repository.set(event.value());
+                            inspection.set(None);
+                            imported.set(None);
+                            error.set(None);
+                        }
+                    }
+                }
+                label { class: "data-import-revision",
+                    span { class: "label", "Revision" }
+                    input {
+                        class: "field font-mono",
+                        value: revision(),
+                        placeholder: "main",
+                        spellcheck: "false",
+                        autocomplete: "off",
+                        disabled: panel_pending,
+                        oninput: move |event| {
+                            revision.set(event.value());
+                            inspection.set(None);
+                            imported.set(None);
+                            error.set(None);
+                        }
+                    }
+                }
+                Action {
+                    purpose: ActionPurpose::Apply,
+                    variant: ActionVariant::Outline,
+                    disabled: !can_inspect,
+                    aria_busy: inspecting(),
+                    onclick: {
+                        let request = request.clone();
+                        move |_| {
+                            let request = request.clone();
+                            error.set(None);
+                            inspection.set(None);
+                            imported.set(None);
+                            studio.run_utility("", async move {
+                                let Some(outcome) = single_flight(
+                                    inspecting,
+                                    api::send_json::<_, HuggingFaceDatasetInspection>(
+                                        Method::POST,
+                                        "/api/datasets/huggingface/inspect",
+                                        Some(&request),
+                                    ),
+                                )
+                                .await else {
+                                    return Ok(());
+                                };
+                                match outcome {
+                                    Ok(result) => {
+                                        inspection.set(Some(result));
+                                        Ok(())
+                                    }
+                                    Err(problem) => {
+                                        error.set(Some(problem.clone()));
+                                        Err(format!("Could not inspect the Hugging Face dataset: {problem}"))
+                                    }
+                                }
+                            });
+                        }
+                    },
+                    if inspecting() { "Inspecting…" } else { "Inspect source" }
+                }
+            }
+
+            if let Some(problem) = error() {
+                div { class: "data-import-error", role: "alert",
+                    strong { "Could not continue" }
+                    span { "{problem}" }
+                }
+            }
+            if let Some(summary) = imported() {
+                div { class: "data-import-complete", role: "status",
+                    div {
+                        strong { "Dataset ready in Query" }
+                        p {
+                            "Imported {summary.files} files into {summary.relations.len()} Spiral relations at "
+                            code { "{short_revision(&summary.resolved_revision)}" }
+                            "."
+                        }
+                    }
+                    Action {
+                        purpose: ActionPurpose::Close,
+                        variant: ActionVariant::Outline,
+                        onclick: move |_| on_close.call(()),
+                        "Done"
+                    }
+                }
+            } else if let Some(source) = inspection() {
+                div { class: "data-import-inspection",
+                    div { class: "data-import-inspection-scroll",
+                        dl { class: "data-import-facts",
+                            div { dt { "Snapshot" } dd { code { "{short_revision(&source.resolved_revision)}" } } }
+                            div { dt { "Files" } dd { "{source.files.len()}" } }
+                            div { dt { "Size" } dd { "{format_bytes(source.total_bytes)}" } }
+                            div { dt { "Target" } dd { code { "{source.dataset_id}" } } }
+                        }
+                        div { class: "data-import-plan",
+                            strong { "Spiral relations" }
+                            ul {
+                                for relation in source.planned_relations.iter() {
+                                    li { code { "{relation}" } }
+                                }
+                            }
+                        }
+                        if !source.warnings.is_empty() {
+                            div { class: "data-import-warnings", role: "note",
+                                strong { "Before importing" }
+                                ul {
+                                    for warning in source.warnings.iter() { li { "{warning}" } }
+                                }
+                            }
+                        }
+                    }
+                    div { class: "data-import-confirm",
+                        p { "The resolved commit is immutable. Existing datasets and relations are never replaced." }
+                        Action {
+                            purpose: ActionPurpose::Import,
+                            variant: ActionVariant::Solid,
+                            disabled: importing(),
+                            aria_busy: importing(),
+                            onclick: {
+                                let source = source.clone();
+                                move |_| {
+                                    let import_request = HuggingFaceDatasetRequest {
+                                        dataset_id: source.dataset_id.clone(),
+                                        repository: source.repository.clone(),
+                                        revision: source.resolved_revision.clone(),
+                                        format: source.format,
+                                    };
+                                    error.set(None);
+                                    studio.run_utility("", async move {
+                                        let Some(outcome) = single_flight(
+                                            importing,
+                                            api::send_json::<_, HuggingFaceDatasetImportSummary>(
+                                                Method::POST,
+                                                "/api/datasets/huggingface/import",
+                                                Some(&import_request),
+                                            ),
+                                        )
+                                        .await else {
+                                            return Ok(());
+                                        };
+                                        match outcome {
+                                            Ok(summary) => {
+                                                controller.refresh_relations();
+                                                controller.set_sql(summary.suggested_sql.clone());
+                                                studio.report_success_from(
+                                                    crate::frontend::app::notifications::MessageSource::Data,
+                                                    format!(
+                                                        "Imported {} {} files from {} at {} into {} Spiral relations.",
+                                                        summary.files,
+                                                        summary.format.label(),
+                                                        summary.repository,
+                                                        short_revision(&summary.resolved_revision),
+                                                        summary.relations.len(),
+                                                    ),
+                                                );
+                                                imported.set(Some(summary.clone()));
+                                                studio.refresh_episode_catalog().await.map_err(|problem| {
+                                                    format!(
+                                                        "Dataset imported successfully, but Studio could not refresh the catalog: {problem}"
+                                                    )
+                                                })?;
+                                                Ok(())
+                                            }
+                                            Err(problem) => {
+                                                error.set(Some(problem.clone()));
+                                                Err(format!("Could not import the Hugging Face dataset: {problem}"))
+                                            }
+                                        }
+                                    });
+                                }
+                            },
+                            if importing() { "Importing with Spiral…" } else { "Import dataset" }
+                        }
+                    }
+                }
+            } else {
+                p { class: "data-import-guidance",
+                    "Use a repository ID or its huggingface.co dataset URL. Studio discovers files; Spiral performs the durable remote reads and format parsing."
+                }
+            }
+        }
+    }
+}
+
+fn short_revision(revision: &str) -> &str {
+    revision.get(..10).unwrap_or(revision)
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let bytes = bytes as f64;
+    if bytes >= GIB {
+        format!("{:.2} GiB", bytes / GIB)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes / MIB)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes / KIB)
+    } else {
+        format!("{bytes:.0} B")
+    }
+}
+
 /// Read-only SQL controls. Results render in their own sibling panel and stay
 /// available while this panel is moved, tabbed, or obscured.
 #[component]
 pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available: bool) -> Element {
     let studio = studio();
     let controller = data_controller();
+    let mut relation_catalog = use_resource(move || {
+        let _generation = controller.relation_generation();
+        async move {
+            if query_available {
+                api::get::<WorkflowRelationsResponse>("/api/spiral/relations").await
+            } else {
+                Ok(WorkflowRelationsResponse::default())
+            }
+        }
+    });
+    let relation_result = relation_catalog.read_unchecked().clone();
+    let relation_error = relation_result
+        .as_ref()
+        .and_then(|result| result.as_ref().err())
+        .cloned();
+    let relation_response = relation_result
+        .as_ref()
+        .and_then(|result| result.as_ref().ok());
+    let schema_relations = schema_relation_views(
+        &namespace,
+        &dataset_id,
+        query_available.then_some(relation_response).flatten(),
+    );
     let dataset_valid = spiral_robotics_contracts::spiral::is_dataset_id(&dataset_id);
     let can_query = query_available && dataset_valid;
     let query_running = controller.query_running();
@@ -336,39 +663,42 @@ pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available:
                     span { "Open Settings and configure a Spiral catalog, project, and namespace." }
                 }
             }
-            // The row of "Examples" links that used to sit here wrote exactly the
-            // same SQL as the schema browser below it: `table_preset` is an
-            // identity map from all ten relations onto all ten presets, so every
-            // link had a twin one row down that also named the table, described
-            // it, and listed its columns. Eleven wrapped links cost four lines of
-            // a 270px column and left the SQL editor 37px to live in, which is
-            // how the editor came to overflow its own panel.
             details { class: "query-schema-browser",
                 summary {
-                    span { "Database tables" }
-                    small { "{Table::ALL.len()} relations · {namespace}" }
+                    span { "Database relations" }
+                    small {
+                        if relation_result.is_none() && query_available {
+                            "Discovering…"
+                        } else {
+                            "{schema_relations.len()} relations · {namespace}"
+                        }
+                    }
                 }
                 div { class: "query-schema-list",
-                    for table in Table::ALL {
+                    if let Some(problem) = relation_error {
+                        div { class: "query-schema-error", role: "alert",
+                            span { "Catalog discovery failed" }
+                            button {
+                                r#type: "button",
+                                onclick: move |_| relation_catalog.restart(),
+                                "Retry"
+                            }
+                            small { "{problem}" }
+                        }
+                    }
+                    for relation in schema_relations.iter().cloned() {
                         Action {
-                            key: "{table.name()}",
+                            key: "{relation.name}",
                             purpose: ActionPurpose::Apply,
                             variant: ActionVariant::Row,
                             class: "query-schema-row",
-                            onclick: {
-                                let namespace = namespace.clone();
-                                let dataset_id = dataset_id.clone();
-                                move |_| controller.set_sql(preset_sql(
-                                    &namespace,
-                                    &dataset_id,
-                                    table_preset(table),
-                                ))
-                            },
+                            title: "Query {relation.name}",
+                            onclick: move |_| controller.set_sql(relation.sql.clone()),
                             span {
-                                strong { "{table.name()}" }
-                                small { "{table_description(table)}" }
+                                strong { "{relation.label}" }
+                                small { "{relation.description}" }
                             }
-                            code { {table.columns().join(", ")} }
+                            code { "{relation.columns}" }
                         }
                     }
                 }
@@ -744,6 +1074,69 @@ fn query_tab_state_class(state: &QueryState) -> &'static str {
         QueryState::Ready(_) => "query-tab-state query-tab-ready",
         QueryState::Failed(_) => "query-tab-state query-tab-failed",
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SchemaRelationView {
+    name: String,
+    label: String,
+    description: String,
+    columns: String,
+    sql: String,
+}
+
+fn schema_relation_views(
+    namespace: &str,
+    dataset_id: &str,
+    response: Option<&WorkflowRelationsResponse>,
+) -> Vec<SchemaRelationView> {
+    let Some(response) = response else {
+        return Table::ALL
+            .into_iter()
+            .map(|table| SchemaRelationView {
+                name: spiral_robotics_contracts::spiral::relation(namespace, table),
+                label: table.name().to_owned(),
+                description: table_description(table).to_owned(),
+                columns: table.columns().join(", "),
+                sql: preset_sql(namespace, dataset_id, table_preset(table)),
+            })
+            .collect();
+    };
+    response
+        .relations
+        .iter()
+        .map(|relation| {
+            let managed = Table::ALL.into_iter().find(|table| {
+                relation.name == spiral_robotics_contracts::spiral::relation(namespace, *table)
+            });
+            let label = managed
+                .map(|table| table.name().to_owned())
+                .unwrap_or_else(|| {
+                    relation
+                        .name
+                        .strip_prefix(&format!("{namespace}."))
+                        .unwrap_or(&relation.name)
+                        .to_owned()
+                });
+            SchemaRelationView {
+                name: relation.name.clone(),
+                label,
+                description: managed
+                    .map(table_description)
+                    .unwrap_or(&relation.relation_type)
+                    .to_owned(),
+                columns: relation
+                    .columns
+                    .iter()
+                    .map(|column| column.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                sql: managed
+                    .map(|table| preset_sql(namespace, dataset_id, table_preset(table)))
+                    .unwrap_or_else(|| format!("SELECT * FROM {} LIMIT 100", relation.name)),
+            }
+        })
+        .collect()
 }
 
 fn preset_sql(namespace: &str, dataset_id: &str, preset: QueryPreset) -> String {

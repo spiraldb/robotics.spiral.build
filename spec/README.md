@@ -46,9 +46,8 @@ flowchart LR
   discard, episode completion, and direct SpiralDB persistence.
 - [Data](data/README.md) — datasets, episode catalog, Timeline, replay, SQL,
   import/export, and SpiralDB persistence.
-- [Ingestion](data/ingestion.md) — bringing external episodes (LeRobot
-  datasets, MCAP files) into the project as a peer producer. Confirmed
-  direction; not implemented yet.
+- [Ingestion](data/ingestion.md) — importing public Hugging Face LeRobot and
+  MCAP snapshots into native Spiral relations as a peer producer.
 - [Training](training/README.md) — dataset selection, ACT training, metrics,
   run history, and checkpoints.
 - [Policy runtime](training/runtime.md) — the replaceable remote compute

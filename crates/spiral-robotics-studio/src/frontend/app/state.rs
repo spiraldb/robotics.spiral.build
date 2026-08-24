@@ -5,8 +5,8 @@ use std::rc::Rc;
 
 use dioxus::prelude::*;
 use spiral_robotics_contracts::api::{
-    EpisodeCatalogResponse, EpisodeSummary, ModeSelection, RecordingProgress, ReplayProgress,
-    RobotSummary, RobotTelemetry, RolloutSnapshot, StudioSnapshot, TelemetryFrame,
+    DatasetSummary, EpisodeCatalogResponse, EpisodeSummary, ModeSelection, RecordingProgress,
+    ReplayProgress, RobotSummary, RobotTelemetry, RolloutSnapshot, StudioSnapshot, TelemetryFrame,
     TrainingSnapshot,
 };
 use spiral_robotics_contracts::workflow::{WorkflowAgentStateResponse, WorkflowStateResponse};
@@ -114,6 +114,7 @@ fn default_joint_selection(
 
 #[derive(Clone, Debug, Default)]
 struct EpisodeCatalogState {
+    datasets: Vec<DatasetSummary>,
     episodes: Vec<EpisodeSummary>,
     issues: Vec<String>,
     loading: bool,
@@ -405,6 +406,10 @@ impl Studio {
         self.episode_catalog.read().episodes.clone()
     }
 
+    pub(crate) fn datasets(&self) -> Vec<DatasetSummary> {
+        self.episode_catalog.read().datasets.clone()
+    }
+
     pub(crate) fn episodes_loading(&self) -> bool {
         self.episode_catalog.read().loading
     }
@@ -431,6 +436,7 @@ impl Studio {
         match api::get::<EpisodeCatalogResponse>("/api/episodes").await {
             Ok(response) => {
                 let mut catalog = self.episode_catalog.write();
+                catalog.datasets = response.datasets;
                 catalog.episodes = response.episodes;
                 catalog.issues = response.issues;
                 catalog.loading = false;

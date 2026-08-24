@@ -21,3 +21,4 @@ node_modules/
 
 # Developer-local provider credentials. Never commit this file.
 /.env.local
+.codex

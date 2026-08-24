@@ -42,6 +42,7 @@ pub(crate) struct DataController {
     active_query: Signal<Option<u64>>,
     active_request: Signal<Option<ActiveQuery>>,
     next_query_id: Signal<u64>,
+    relation_generation: Signal<u64>,
 }
 
 /// Create the Data controller once at the shell boundary and publish it to the
@@ -57,6 +58,7 @@ pub(crate) fn use_data_controller(namespace: &str, dataset_id: &str) -> DataCont
         active_query: use_signal(|| None),
         active_request: use_signal(|| None),
         next_query_id: use_signal(|| 1),
+        relation_generation: use_signal(|| 0),
     };
     let namespace_dependency = namespace.to_owned();
     let dataset_dependency = dataset_id.to_owned();
@@ -103,6 +105,15 @@ impl DataController {
 
     pub(crate) fn query_running(&self) -> bool {
         self.active_request.read().is_some()
+    }
+
+    pub(crate) fn relation_generation(&self) -> u64 {
+        *self.relation_generation.read()
+    }
+
+    pub(crate) fn refresh_relations(mut self) {
+        let next = self.relation_generation.peek().wrapping_add(1);
+        self.relation_generation.set(next);
     }
 
     pub(crate) fn select_query(mut self, id: u64) {

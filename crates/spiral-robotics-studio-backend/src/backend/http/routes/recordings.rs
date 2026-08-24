@@ -1019,9 +1019,18 @@ async fn list_episodes(State(state): State<AppState>) -> Json<EpisodeCatalogResp
         .filter(|episode| Some(&episode.id) != recording.as_ref())
         .map(contract_episode)
         .collect();
+    let mut issues = state.episodes.issues();
+    let datasets = match state.storage.datasets().await {
+        Ok(datasets) => datasets,
+        Err(error) => {
+            issues.push(format!("dataset catalog: {error}"));
+            Vec::new()
+        }
+    };
     Json(EpisodeCatalogResponse {
+        datasets,
         episodes,
-        issues: state.episodes.issues(),
+        issues,
     })
 }
 

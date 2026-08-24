@@ -1453,6 +1453,17 @@ pub struct EpisodeSummary {
     pub problem: Option<String>,
 }
 
+/// One logical dataset known to Studio, including datasets whose native
+/// imported relations do not project into Studio's recorded-episode schema.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DatasetSummary {
+    pub id: String,
+    pub name: String,
+    pub created_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 impl EpisodeSummary {
     /// True when the take is complete enough to replay or export.
     pub fn usable(&self) -> bool {
@@ -1520,6 +1531,9 @@ pub struct EpisodeVideoAssetMetadata {
 /// Browser-owned episode catalog loaded on startup or explicit refresh.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct EpisodeCatalogResponse {
+    /// Every logical dataset, oldest first.
+    #[serde(default)]
+    pub datasets: Vec<DatasetSummary>,
     /// Every stored episode, oldest first.
     pub episodes: Vec<EpisodeSummary>,
     /// Catalog rows that could not be decoded.
@@ -1724,6 +1738,77 @@ pub struct EpisodeImportSummary {
     pub first_episode: Option<String>,
     /// Non-transactional derived resources that still need repair after the
     /// durable episode rows committed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// Dataset layouts that Studio can materialize from a Hugging Face dataset
+/// repository using Spiral's native readers and Dataset producers.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HuggingFaceDatasetFormat {
+    #[serde(rename = "lerobot")]
+    LeRobot,
+    Mcap,
+}
+
+impl HuggingFaceDatasetFormat {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::LeRobot => "LeRobot",
+            Self::Mcap => "MCAP",
+        }
+    }
+}
+
+/// Source and destination shared by inspection and the eventual import.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HuggingFaceDatasetRequest {
+    pub dataset_id: String,
+    pub repository: String,
+    #[serde(default = "default_huggingface_revision")]
+    pub revision: String,
+    pub format: HuggingFaceDatasetFormat,
+}
+
+fn default_huggingface_revision() -> String {
+    "main".to_owned()
+}
+
+/// One immutable repository file selected for import.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HuggingFaceDatasetFile {
+    pub path: String,
+    #[serde(default)]
+    pub bytes: u64,
+}
+
+/// Read-only source inspection shown before Studio changes the Spiral catalog.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HuggingFaceDatasetInspection {
+    pub dataset_id: String,
+    pub repository: String,
+    pub requested_revision: String,
+    pub resolved_revision: String,
+    pub format: HuggingFaceDatasetFormat,
+    pub files: Vec<HuggingFaceDatasetFile>,
+    pub total_bytes: u64,
+    pub planned_relations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// Durable result of materializing one inspected Hugging Face snapshot.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HuggingFaceDatasetImportSummary {
+    pub dataset_id: String,
+    pub repository: String,
+    pub resolved_revision: String,
+    pub format: HuggingFaceDatasetFormat,
+    pub files: u64,
+    pub total_bytes: u64,
+    pub relations: Vec<String>,
+    pub suggested_sql: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }

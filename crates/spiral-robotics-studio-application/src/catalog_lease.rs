@@ -13,6 +13,7 @@ pub enum CatalogLeaseOwner {
     Recording,
     CalibrationReapply,
     EpisodeImport,
+    DatasetImport,
     ProjectImport,
     ProjectSwitch,
     WorkflowStart,

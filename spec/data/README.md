@@ -12,8 +12,7 @@ consumers draw from it: query, curation, [training](../training/README.md),
 ## Feature map
 
 - Episode catalog and dataset operations are defined here.
-- [Ingestion](ingestion.md) — external producers (confirmed direction, not
-  implemented)
+- [Ingestion](ingestion.md) — public Hugging Face LeRobot and MCAP producers
 - [Timeline and replay](timeline-and-replay.md)
 - [SQL query](query.md)
 - [SpiralDB persistence and schema](persistence.md)
@@ -26,6 +25,8 @@ consumers draw from it: query, curation, [training](../training/README.md),
 4. The user may switch to Query without changing the route layout.
 5. The user may import or export the selected dataset's episodes as one
    portable episode file. Whole-project backup and restore live in Settings.
+6. The user may inspect and import a public Hugging Face LeRobot or MCAP
+   snapshot as native Spiral relations, then query those relations in place.
 
 ## Datasets and episodes
 
@@ -67,6 +68,10 @@ consumers draw from it: query, curation, [training](../training/README.md),
 - **DATA-016** Episode import must merge into the selected target dataset,
   retarget the imported episode rows to it, and refuse any episode-ID collision
   instead of overwriting an existing episode.
+- **DATA-017** The Dataset field must accept a new dataset ID as well as list
+  catalog datasets, including imported datasets with no Studio episode rows.
+- **DATA-018** Add data must open the Hugging Face inspect-and-confirm workflow
+  inline in Episodes and must not obscure Query with a modal.
 
 ## Curation direction
 
@@ -78,8 +83,8 @@ external scripts. Requirements will be added when this feature is designed.
 ## Feature relationships
 
 - [Recording](../recording/README.md) creates episodes with connected arms.
-- [Ingestion](ingestion.md) creates episodes from external sources
-  (confirmed direction, not implemented).
+- [Ingestion](ingestion.md) creates native Spiral relations from public
+  Hugging Face sources. It does not imply Studio episode normalization.
 - [Training](../training/README.md) consumes a dataset and creates runs and
   checkpoints.
 - [Rollout](../rollout/README.md) consumes a checkpoint and records rollout

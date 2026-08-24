@@ -22,7 +22,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha2::{Digest as _, Sha256};
 use spiral_robotics_contracts::api::{
-    ConnectionTestResponse, DataSettings, QueryColumn, SpiralQueryResponse, SpiralSettings,
+    ConnectionTestResponse, DataSettings, DatasetSummary, QueryColumn, SpiralQueryResponse,
+    SpiralSettings,
 };
 use spiral_robotics_contracts::spiral::{self, Table, column as db};
 use spiral_robotics_contracts::workflow::{
@@ -58,7 +59,7 @@ const IMAGE_EXTENSION_NAME: &str = "spql.image.Image";
 const VARIABLE_TENSOR_EXTENSION_NAME: &str = "arrow.variable_shape_tensor";
 
 pub(crate) struct StorageManager {
-    repository: Arc<SpiralRepository>,
+    pub(super) repository: Arc<SpiralRepository>,
 }
 
 impl StorageManager {
@@ -587,6 +588,56 @@ impl StorageManager {
                     max_rows.clamp(1, MAX_QUERY_ROWS),
                     MAX_QUERY_RESPONSE_BYTES,
                 )
+            })
+            .await
+    }
+
+    pub(crate) async fn datasets(&self) -> Result<Vec<DatasetSummary>, String> {
+        let relation = sql::relation(self.repository.namespace(), Table::Datasets);
+        self.repository
+            .run(move |connection| {
+                if !table_exists(connection, &relation)? {
+                    return Ok(Vec::new());
+                }
+                let result = run_query(
+                    connection,
+                    &format!(
+                        "SELECT {id}, {name}, {created}, {description} FROM {relation} ORDER BY {created}, {id}",
+                        id = db::DATASET_ID,
+                        name = db::NAME,
+                        created = db::CREATED_MS,
+                        description = db::DESCRIPTION,
+                    ),
+                    100_000,
+                )?;
+                if result.truncated {
+                    return Err("Spiral dataset catalog exceeds 100,000 rows".to_owned());
+                }
+                result
+                    .rows
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, row)| {
+                        let text = |column| {
+                            row.get(column).and_then(JsonValue::as_str).map(str::to_owned)
+                        };
+                        Ok(DatasetSummary {
+                            id: text(db::DATASET_ID).ok_or_else(|| {
+                                format!("dataset catalog row {index} has no dataset ID")
+                            })?,
+                            name: text(db::NAME).ok_or_else(|| {
+                                format!("dataset catalog row {index} has no name")
+                            })?,
+                            created_ms: row
+                                .get(db::CREATED_MS)
+                                .and_then(JsonValue::as_i64)
+                                .ok_or_else(|| {
+                                    format!("dataset catalog row {index} has no creation time")
+                                })?,
+                            description: text(db::DESCRIPTION),
+                        })
+                    })
+                    .collect()
             })
             .await
     }
