@@ -149,10 +149,11 @@ flowchart TD
 - **PERSIST-037** The synchronous ADBC API must remain private to the shared
   Spiral repository adapter. During active co-development, the Studio backend
   must link the native `adbc-driver-spiraldb` Rust crate from SpiralDB's
-  `develop` branch through Cargo's Git source, and CI must refresh that floating
-  dependency before its checks so upstream incompatibilities fail immediately.
-  Studio must construct the native driver directly; it must not accept a
-  driver-library path, use an ADBC driver manager, or load the Spiral driver
+  `develop` branch through Cargo's Git source at the revision pinned by
+  `Cargo.lock`. CI must compile and test the service-free adapter boundary
+  without connecting to SpiralDB, SpFS, or a disposable hosted project. Studio
+  must construct the native driver directly; it must not accept a driver-library
+  path, use an ADBC driver manager, or load the Spiral driver
   dynamically. For each active project, the adapter must own one native
   database/engine runtime, expose only repository-owned connection and
   statement operations, run asynchronous calls on bounded blocking workers,

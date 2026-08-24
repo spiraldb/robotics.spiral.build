@@ -363,11 +363,12 @@ today, and nothing below may be presented as existing behavior:
   explicit allowed origins are required before exposing the backend beyond a
   trusted network.
 - **The Spiral ADBC driver is trusted native backend code.** During active
-  co-development, Studio links the Rust driver crate from SpiralDB's floating
-  `develop` branch and CI refreshes it before checks so upstream breakage is
-  immediate. The browser cannot choose or load native code. Python training
-  workers continue to use the driver's shared library through their
-  language-neutral ADBC manager.
+  co-development, Studio links the Rust driver crate from SpiralDB's `develop`
+  branch at the revision pinned by `Cargo.lock`. CI compiles and exercises the
+  service-free boundary but does not connect to a live SpiralDB project. The
+  browser cannot choose or load native code. Python training workers continue
+  to use the driver's shared library through their language-neutral ADBC
+  manager.
 
 **Terminology:** *robot instance* (one arm), *leader* / *follower*, *joint*,
 *calibration*, *travel*, *torque*, *Hold* / *Release* / *Teleop*, *Studio*

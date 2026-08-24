@@ -19,6 +19,8 @@ jobs:
     name: Nix / Rust / Python
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
     steps:
       - name: Checkout
@@ -32,9 +34,8 @@ jobs:
       - name: Cache Nix store
         uses: DeterminateSystems/magic-nix-cache-action@v14
 
-      - name: Refresh floating Spiral driver
+      - name: Configure locked Spiral driver source
         env:
-          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
           GH_TOKEN: ${{ github.token }}
           SPIRALDB_DEPLOY_KEY: ${{ secrets.SPIRALDB_DEPLOY_KEY }}
         run: |
@@ -45,8 +46,8 @@ jobs:
           gh api meta --jq '.ssh_keys[] | "github.com \(.)"' > "$key_dir/known_hosts"
           git config --global url."git@github.com:spiraldb/spiraldb.git".insteadOf \
             "https://github.com/spiraldb/spiraldb.git"
-          export GIT_SSH_COMMAND="ssh -i $key_dir/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=$key_dir/known_hosts"
-          nix develop .#ci --command cargo update -p adbc-driver-spiraldb
+          git config --global core.sshCommand \
+            "ssh -i $key_dir/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=$key_dir/known_hosts"
 
       - name: Lint workflow
         run: nix develop .#ci --command actionlint
@@ -62,7 +63,10 @@ jobs:
           nix develop .#ci --command cargo clippy --workspace --all-targets -- -D warnings -A clippy::suspicious-else-formatting
           nix develop .#ci --command cargo clippy -p spiral-robotics-studio --all-targets --features server -- -D warnings -A clippy::suspicious-else-formatting
 
-      - name: Test
+      # Tests that require SpiralDB, SpFS, downloadable model artifacts, or
+      # disposable hosted projects are explicitly #[ignore] in Rust. CI runs
+      # all remaining deterministic tests without any external service.
+      - name: Test without external services
         run: |
           nix develop .#ci --command cargo test --workspace --no-fail-fast
           nix develop .#ci --command cargo test -p spiral-robotics-studio --features server --no-fail-fast
