@@ -48,6 +48,13 @@ jobs:
       - name: Validate flake
         run: nix flake check --all-systems --show-trace
 
+      - name: Build Studio stylesheet
+        run: |
+          mkdir -p crates/spiral-robotics-studio/assets
+          nix develop .#ci --command tailwindcss \
+            -i crates/spiral-robotics-studio/tailwind.css \
+            -o crates/spiral-robotics-studio/assets/tailwind.css
+
       - name: Check formatting
         run: nix develop .#ci --command cargo fmt --all -- --check
 
