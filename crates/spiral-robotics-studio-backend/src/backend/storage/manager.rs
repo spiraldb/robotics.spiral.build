@@ -22,8 +22,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha2::{Digest as _, Sha256};
 use spiral_robotics_contracts::api::{
-    ConnectionTestResponse, DataSettings, DatasetSummary, QueryColumn, SpiralQueryResponse,
-    SpiralSettings,
+    ConnectionTestResponse, DataSettings, DatasetSummary, ProjectDataRelation,
+    ProjectDataRelationsResponse, QueryColumn, SpiralQueryResponse, SpiralSettings,
 };
 use spiral_robotics_contracts::spiral::{self, Table, column as db};
 use spiral_robotics_contracts::workflow::{
@@ -722,6 +722,105 @@ impl StorageManager {
                     scope_id: String::new(),
                     relations,
                     complete: skipped == 0,
+                    limitation,
+                })
+            })
+            .await
+    }
+
+    /// Describe the active project's user-facing data and add exact row
+    /// counts through ordinary read-only SQL. Counts live outside the Workflow
+    /// catalog so opening Workflow remains a schema-only operation.
+    pub(crate) async fn project_data_relations(
+        &self,
+    ) -> Result<ProjectDataRelationsResponse, String> {
+        let project = self.repository.project_id();
+        let namespace = self.repository.namespace().to_owned();
+        if project.is_empty() {
+            return Ok(ProjectDataRelationsResponse {
+                relations: Vec::new(),
+                complete: false,
+                limitation: Some(
+                    "Choose a Spiral project in Settings to discover project data.".to_owned(),
+                ),
+            });
+        }
+        self.repository
+            .run(move |connection| {
+                let catalog = connection.list_catalog_relations(&project)?;
+                let mut relations = Vec::with_capacity(catalog.len());
+                let mut skipped = 0_usize;
+                let mut uncounted = 0_usize;
+                for entry in catalog {
+                    if !is_user_project_relation(&entry.name, &namespace) {
+                        continue;
+                    }
+                    if validate_qualified_relation(&entry.name).is_err() {
+                        skipped += 1;
+                        continue;
+                    }
+                    let schema = match connection.table_schema(&entry.name) {
+                        Ok(Some(schema)) => schema,
+                        Ok(None) => {
+                            skipped += 1;
+                            continue;
+                        }
+                        Err(error)
+                            if error.contains(
+                                "extension type cannot be converted to Arrow without a plugin",
+                            ) =>
+                        {
+                            skipped += 1;
+                            continue;
+                        }
+                        Err(error) => {
+                            return Err(format!(
+                                "describing Spiral relation {:?}: {error}",
+                                entry.name
+                            ));
+                        }
+                    };
+                    let row_count = relation_row_count(connection, &entry.name).map_or_else(
+                        |_| {
+                            uncounted += 1;
+                            None
+                        },
+                        Some,
+                    );
+                    relations.push(ProjectDataRelation {
+                        name: entry.name,
+                        relation_type: entry.relation_type,
+                        columns: schema
+                            .fields()
+                            .iter()
+                            .map(|field| QueryColumn {
+                                name: field.name().clone(),
+                                data_type: field.data_type().to_string(),
+                                nullable: field.is_nullable(),
+                                semantic_type: field
+                                    .metadata()
+                                    .get(EXTENSION_TYPE_NAME_KEY)
+                                    .cloned(),
+                            })
+                            .collect(),
+                        row_count,
+                    });
+                }
+                let limitation = match (skipped, uncounted) {
+                    (0, 0) => None,
+                    (skipped, 0) => Some(format!(
+                        "{skipped} project relations without a qualified name or readable Arrow schema were omitted."
+                    )),
+                    (0, uncounted) => Some(format!(
+                        "Exact row counts were unavailable for {uncounted} project relations."
+                    )),
+                    (skipped, uncounted) => Some(format!(
+                        "{skipped} project relations were omitted and exact row counts were unavailable for {uncounted} others."
+                    )),
+                };
+                Ok(ProjectDataRelationsResponse {
+                    relations,
+                    complete: skipped == 0 && uncounted == 0,
                     limitation,
                 })
             })
@@ -1714,6 +1813,43 @@ pub(crate) fn run_query(
     run_query_with_byte_limit(connection, sql, max_rows, MAX_INTERNAL_QUERY_RESPONSE_BYTES)
 }
 
+fn relation_row_count(
+    connection: &mut RepositoryConnection,
+    relation: &str,
+) -> Result<u64, String> {
+    let result = run_query(connection, &sql::count_rows(relation), 1)?;
+    let value = result
+        .rows
+        .first()
+        .and_then(|row| row.get("rows"))
+        .ok_or_else(|| format!("Spiral returned no row count for {relation}"))?;
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|count| count.try_into().ok()))
+        .ok_or_else(|| format!("Spiral returned a non-integer row count for {relation}"))
+}
+
+fn is_user_project_relation(relation: &str, namespace: &str) -> bool {
+    if relation == namespace
+        || relation == sql::video_sources_relation(namespace)
+        || relation == sql::video_dataset_relation(namespace)
+        || relation == sql::video_dataset_output(namespace)
+        || relation.starts_with("workflow.")
+    {
+        return false;
+    }
+    ![
+        Table::Robots,
+        Table::StudioSettings,
+        Table::TrainingCheckpoints,
+        Table::TrainingRuns,
+        Table::RolloutRuns,
+        Table::WorkflowRuns,
+    ]
+    .into_iter()
+    .any(|table| relation == spiral::relation(namespace, table))
+}
+
 fn run_query_with_byte_limit(
     connection: &mut RepositoryConnection,
     sql: &str,
@@ -2222,6 +2358,34 @@ mod tests {
     #[derive(Debug, Default, PartialEq, serde::Deserialize)]
     struct CurrentPrototypeDocument {
         features: Vec<String>,
+    }
+
+    #[test]
+    fn project_data_catalog_hides_studio_plumbing_but_keeps_external_relations() {
+        let namespace = "robotics";
+        for table in [
+            Table::Robots,
+            Table::StudioSettings,
+            Table::TrainingCheckpoints,
+            Table::TrainingRuns,
+            Table::RolloutRuns,
+            Table::WorkflowRuns,
+        ] {
+            assert!(!is_user_project_relation(
+                &spiral::relation(namespace, table),
+                namespace
+            ));
+        }
+        assert!(!is_user_project_relation(
+            "workflow.feature_registry",
+            namespace
+        ));
+        assert!(!is_user_project_relation(
+            "robotics.video.assets",
+            namespace
+        ));
+        assert!(is_user_project_relation("robotics.episodes", namespace));
+        assert!(is_user_project_relation("customer.annotations", namespace));
     }
 
     #[test]

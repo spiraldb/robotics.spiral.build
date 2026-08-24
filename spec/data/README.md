@@ -14,6 +14,7 @@ consumers draw from it: query, curation, [training](../training/README.md),
 - Episode catalog and dataset operations are defined here.
 - [Ingestion](ingestion.md) — public Hugging Face LeRobot and MCAP producers
 - [Timeline and replay](timeline-and-replay.md)
+- [Project data relations](relations.md)
 - [SQL query](query.md)
 - [SpiralDB persistence and schema](persistence.md)
 
@@ -22,10 +23,12 @@ consumers draw from it: query, curation, [training](../training/README.md),
 1. The user opens Data and selects a dataset.
 2. Studio lists its episodes in episode order.
 3. The user selects an episode to inspect or replay.
-4. The user may switch to Query without changing the route layout.
-5. The user may import or export the selected dataset's episodes as one
+4. The user may switch to Relations to see the project's user-facing tables,
+   exact row counts, shared identity fields, schemas, and bounded row previews.
+5. The user may switch to Query without changing the route layout.
+6. The user may import or export the selected dataset's episodes as one
    portable episode file. Whole-project backup and restore live in Settings.
-6. The user may inspect and import a public Hugging Face LeRobot or MCAP
+7. The user may inspect and import a public Hugging Face LeRobot or MCAP
    snapshot as native Spiral relations, then query those relations in place.
 
 ## Datasets and episodes
@@ -72,6 +75,9 @@ consumers draw from it: query, curation, [training](../training/README.md),
   catalog datasets, including imported datasets with no Studio episode rows.
 - **DATA-018** Add data must open the Hugging Face inspect-and-confirm workflow
   inline in Episodes and must not obscure Query with a modal.
+- **DATA-019** Relations must expose the active project's user-facing table
+  structure, counts, likely shared-key joins, schemas, and bounded previews
+  without exposing Studio persistence plumbing as project data.
 
 ## Curation direction
 

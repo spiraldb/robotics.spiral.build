@@ -678,8 +678,9 @@ pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available:
                     if let Some(problem) = relation_error {
                         div { class: "query-schema-error", role: "alert",
                             span { "Catalog discovery failed" }
-                            button {
-                                r#type: "button",
+                            Action {
+                                purpose: ActionPurpose::Retry,
+                                variant: ActionVariant::Link,
                                 onclick: move |_| relation_catalog.restart(),
                                 "Retry"
                             }

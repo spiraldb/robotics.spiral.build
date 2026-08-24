@@ -68,9 +68,9 @@ uv run spiral-training-runtime --host 127.0.0.1 --port 50051
 
 The worker imports the `spiraldb` Python package and opens its ADBC driver with
 per-database `username`, `password`, `spiral.api_url`, and `spiral.spfs_url`
-options. Until a wheel containing that scoped-option driver is published, set
-`SPIRALDB_ADBC_DRIVER` on the worker to the current
-`libadbc_driver_spiraldb` shared library. The packaged driver is the fallback.
+options. The pinned `spiraldb` wheel includes the scoped-option driver.
+`SPIRALDB_ADBC_DRIVER` remains an explicit development override for testing a
+locally built `libadbc_driver_spiraldb` shared library.
 
 ## Stable protocol
 

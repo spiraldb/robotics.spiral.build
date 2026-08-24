@@ -104,4 +104,4 @@ durable checkpoints through a worker that reads and writes SpiralDB directly.
 - Training UI:
   [`frontend/screens/training`](../../crates/spiral-robotics-studio/src/frontend/screens/training/)
 - Framework-neutral contracts:
-  [`training/contracts`](../../training/contracts/)
+  [`spiral-robotics-training`](../../crates/spiral-robotics-training/)

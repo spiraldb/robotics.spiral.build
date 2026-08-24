@@ -7,12 +7,14 @@ use dioxus_workbench::{LayoutNode, Panel, PanelLayout, SplitAxis};
 use crate::frontend::app::activity::PanelRole;
 use crate::frontend::app::workspace::ScreenWorkspaceDefinition;
 
-/// Episodes and Query are independent top-level panels. The initial layout
-/// keeps both visible while preserving episode evidence and the shared clock.
+/// Episodes and Query are independent top-level panels. Relations shares the
+/// primary evidence tile as a tab so the user can move between an episode and
+/// the whole project's table structure without losing either context.
 pub(crate) fn compose(
     episodes: Panel,
     query: Panel,
     query_result: Panel,
+    relations: Panel,
     mut evidence: Vec<(Panel, PanelRole)>,
     timeline: Panel,
 ) -> ScreenWorkspaceDefinition {
@@ -20,6 +22,7 @@ pub(crate) fn compose(
         (episodes, PanelRole::Workbench),
         (query, PanelRole::Workbench),
         (query_result, PanelRole::PrimaryVisualization),
+        (relations, PanelRole::PrimaryVisualization),
     ];
     panels.append(&mut evidence);
     panels.push((timeline, PanelRole::Timeline));
@@ -55,7 +58,7 @@ pub(crate) fn compose(
         "data-evidence-top",
         SplitAxis::Horizontal,
         0.68,
-        LayoutNode::tile("primary", [primary_id.to_owned()]),
+        LayoutNode::tile("primary", [primary_id.to_owned(), "relations".to_owned()]),
         LayoutNode::tile("cameras", [camera_id]),
     );
     let evidence_bottom = LayoutNode::split(
@@ -94,6 +97,7 @@ mod tests {
             Panel::new("episodes", "Episodes", "episodes", rsx! { div {} }),
             Panel::new("query", "Query", "query", rsx! { div {} }),
             Panel::new("query-result", "Results", "query-result", rsx! { div {} }),
+            Panel::new("relations", "Relations", "primary", rsx! { div {} }),
             vec![
                 (
                     Panel::new("episodes-empty", "Scene", "primary", rsx! { div {} }),
@@ -116,5 +120,6 @@ mod tests {
         assert_eq!(tile("episodes").as_deref(), Some("episodes"));
         assert_eq!(tile("query").as_deref(), Some("query"));
         assert_eq!(tile("query-result").as_deref(), Some("query-result"));
+        assert_eq!(tile("relations").as_deref(), Some("primary"));
     }
 }

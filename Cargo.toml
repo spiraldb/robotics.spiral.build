@@ -1,5 +1,8 @@
 [workspace]
+resolver = "3"
 members = [
+    "crates/spiral-robotics",
+    "crates/spiral-robotics-boundary-build",
     "crates/spiral-robotics-contracts",
     "crates/spiral-robotics-core",
     "crates/spiral-robotics-inference",
@@ -8,11 +11,10 @@ members = [
     "crates/spiral-robotics-studio-application",
     "crates/spiral-robotics-studio-backend",
     "crates/spiral-robotics-studio-hardware",
-    "training/contracts",
-    "training/http-client",
+    "crates/spiral-robotics-training",
+    "crates/spiral-robotics-training-http",
     "crates/spiral-robotics-viewport",
 ]
-exclude = ["patches/block"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,12 +22,13 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
-adbc-driver-spiraldb = { path = "../spiraldb/engine/adbc-driver-spiraldb", default-features = false }
+adbc-driver-spiraldb = { git = "https://github.com/spiraldb/spiraldb.git", branch = "develop", default-features = false }
 base64 = "0.22"
 candle-core = "=0.11.0"
 candle-nn = "=0.11.0"
 candle-transformers = "=0.11.0"
-spiral-robotics = { path = "." }
+spiral-robotics = { path = "crates/spiral-robotics" }
+spiral-robotics-boundary-build = { path = "crates/spiral-robotics-boundary-build" }
 spiral-robotics-contracts = { path = "crates/spiral-robotics-contracts" }
 spiral-robotics-core = { path = "crates/spiral-robotics-core" }
 spiral-robotics-inference = { path = "crates/spiral-robotics-inference", default-features = false }
@@ -33,8 +36,8 @@ spiral-robotics-ui = { path = "crates/spiral-robotics-ui" }
 spiral-robotics-studio-backend = { path = "crates/spiral-robotics-studio-backend" }
 spiral-robotics-studio-hardware = { path = "crates/spiral-robotics-studio-hardware" }
 spiral-robotics-studio-application = { path = "crates/spiral-robotics-studio-application" }
-spiral-robotics-training = { path = "training/contracts" }
-spiral-robotics-training-http = { path = "training/http-client" }
+spiral-robotics-training = { path = "crates/spiral-robotics-training" }
+spiral-robotics-training-http = { path = "crates/spiral-robotics-training-http" }
 spiral-robotics-viewport = { path = "crates/spiral-robotics-viewport" }
 clap = { version = "4.5", features = ["derive"] }
 dioxus = { version = "0.7.10", default-features = false }
@@ -50,35 +53,6 @@ serde_json = "1.0"
 serialport = { version = "4.9", default-features = false }
 tempfile = "3.27"
 tokenizers = "=0.22.2"
-
-[package]
-name = "spiral-robotics"
-version.workspace = true
-edition.workspace = true
-description = "Rust-native tools for real-world robotics"
-publish = false
-
-[dependencies]
-spiral-robotics-core.workspace = true
-clap.workspace = true
-image.workspace = true
-nokhwa.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-serialport.workspace = true
-tempfile.workspace = true
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
-[target.'cfg(target_os = "linux")'.dependencies]
-v4l = "0.14"
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
-
-[patch.crates-io]
-block = { path = "patches/block" }
 
 [profile.dev]
 # The Studio's native half is large enough that full DWARF dominates compile,
@@ -113,15 +87,3 @@ inherits = "release"
 # supplies cold-build parallelism, and 256 units only adds link/I/O pressure.
 codegen-units = 16
 incremental = true
-
-[[bin]]
-name = "spiral-robotics-find-port"
-path = "src/bin/find_port.rs"
-
-[[bin]]
-name = "spiral-robotics-find-cameras"
-path = "src/bin/find_cameras.rs"
-
-[[bin]]
-name = "spiral-robotics-calibrate"
-path = "src/bin/calibrate.rs"

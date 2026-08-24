@@ -142,6 +142,9 @@ These rules apply to every feature:
   adapters.
 - Fixed-rate motor control must remain a separate compile-time boundary from
   HTTP, persistence, camera, training, and model-runtime adapters.
+- The Cargo workspace root must remain a virtual manifest. All first-party Rust
+  packages and Rust source must live under `crates/`; do not add root `src/`,
+  root `tests/`, or an in-repository dependency `patches/` tree.
 - Critical invariants must be enforced by core or application policy, not only
   by UI controls.
 - Pure feature tests must run without hardware, HTTP, SpiralDB, or a compute

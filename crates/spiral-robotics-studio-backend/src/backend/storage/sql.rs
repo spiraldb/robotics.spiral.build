@@ -12,7 +12,6 @@ pub(crate) fn relation(dataset: &str, table: Table) -> String {
     spiral::relation(dataset, table)
 }
 
-#[cfg(test)]
 pub(crate) fn count_rows(relation: &str) -> String {
     format!("SELECT COUNT(*) AS rows FROM {relation}")
 }

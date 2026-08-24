@@ -709,7 +709,7 @@ fn parse_assistant_inlines(source: &str) -> Vec<AssistantInline> {
             .flatten()
             .filter(|index| *index > 0)
             .min()
-            .unwrap_or_else(|| remaining.len());
+            .unwrap_or(remaining.len());
         if next == remaining.len() {
             push_assistant_inline(&mut output, AssistantInline::Text(remaining.to_owned()));
             break;
@@ -1400,14 +1400,16 @@ fn WorkflowNodeCard(ctx: NodeViewCtx<WorkflowNodeData>) -> Element {
     } else {
         data.fields.join(" · ")
     };
-    let selected_class = node
-        .selected
-        .then_some("workflow-node-selected")
-        .unwrap_or("");
-    let dragging_class = ctx
-        .dragging
-        .then_some("workflow-node-dragging")
-        .unwrap_or("");
+    let selected_class = if node.selected {
+        "workflow-node-selected"
+    } else {
+        ""
+    };
+    let dragging_class = if ctx.dragging {
+        "workflow-node-dragging"
+    } else {
+        ""
+    };
 
     rsx! {
         article {

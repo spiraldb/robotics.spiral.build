@@ -50,6 +50,10 @@ from spiral_training_runtime.spiral import (
     connect_spiral,
 )
 
+CANONICAL_FIXTURES = (
+    Path(__file__).resolve().parents[2] / "crates" / "spiral-robotics-training" / "fixtures"
+)
+
 
 def training_request() -> dict:
     return {
@@ -131,9 +135,7 @@ def job_request() -> dict:
 def test_canonical_wire_fixtures_round_trip_through_python_models(
     fixture: str, model: type
 ) -> None:
-    source = (Path(__file__).resolve().parents[1] / "contracts" / "fixtures" / fixture).read_text(
-        encoding="utf-8"
-    )
+    source = (CANONICAL_FIXTURES / fixture).read_text(encoding="utf-8")
     expected = json.loads(source)
 
     actual = model.model_validate(expected).model_dump(mode="json")
@@ -142,9 +144,8 @@ def test_canonical_wire_fixtures_round_trip_through_python_models(
 
 
 def test_canonical_fixture_versions_follow_the_boundary_descriptor() -> None:
-    fixtures = Path(__file__).resolve().parents[1] / "contracts" / "fixtures"
-    health = json.loads((fixtures / "health.json").read_text(encoding="utf-8"))
-    request = json.loads((fixtures / "job-request.json").read_text(encoding="utf-8"))
+    health = json.loads((CANONICAL_FIXTURES / "health.json").read_text(encoding="utf-8"))
+    request = json.loads((CANONICAL_FIXTURES / "job-request.json").read_text(encoding="utf-8"))
 
     assert health["api_id"] == BOUNDARIES.training_api.id
     assert health["api_version"] == BOUNDARIES.training_api.major

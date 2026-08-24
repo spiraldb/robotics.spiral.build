@@ -1314,14 +1314,14 @@ impl WorkflowAgentManager {
         // tail so the next Retry always starts from provider-valid history.
         remove_incomplete_provider_tool_exchange(&mut conversation.provider_messages);
         let _ = bump_conversation(&mut candidate, conversation_id);
-        if let Err(persist_error) = self.persist_document(&candidate) {
-            if let Some(conversation) = candidate.conversation_mut(conversation_id) {
-                conversation.session.phase = WorkflowAgentPhase::Failed;
-                conversation.session.error = Some(format!(
-                    "Could not persist Assistant history: {}",
-                    public_tool_error(&persist_error)
-                ));
-            }
+        if let Err(persist_error) = self.persist_document(&candidate)
+            && let Some(conversation) = candidate.conversation_mut(conversation_id)
+        {
+            conversation.session.phase = WorkflowAgentPhase::Failed;
+            conversation.session.error = Some(format!(
+                "Could not persist Assistant history: {}",
+                public_tool_error(&persist_error)
+            ));
         }
         // Even when durable storage is temporarily unavailable, install only
         // the structurally valid candidate. A later Retry can persist it; the
@@ -2974,8 +2974,10 @@ mod tests {
         );
         assert_eq!(fresh.conversations.len(), 1);
 
-        let mut future = AgentDocument::default();
-        future.schema_version = AGENT_DOCUMENT_SCHEMA_VERSION + 1;
+        let mut future = AgentDocument {
+            schema_version: AGENT_DOCUMENT_SCHEMA_VERSION + 1,
+            ..AgentDocument::default()
+        };
         future.conversations.clear();
         future.active_conversation_id.clear();
         assert!(

@@ -174,6 +174,28 @@ pub struct SpiralQueryResponse {
     pub elapsed_ms: u64,
 }
 
+/// User-facing relation catalog for the active Spiral project.
+///
+/// This intentionally excludes Studio's settings, run snapshots, derived
+/// caches, and managed media plumbing. The Data activity uses it to explain
+/// the project's data rather than Studio's persistence implementation.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectDataRelationsResponse {
+    pub relations: Vec<ProjectDataRelation>,
+    pub complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limitation: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectDataRelation {
+    pub name: String,
+    pub relation_type: String,
+    pub columns: Vec<QueryColumn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_count: Option<u64>,
+}
+
 /// The policy family executed by the native training runtime.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

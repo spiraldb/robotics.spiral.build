@@ -147,16 +147,19 @@ flowchart TD
 - **PERSIST-036** `.spiral-project` and `.spiral-episodes` must have distinct
   format identities and must not be accepted by the other's import path.
 - **PERSIST-037** The synchronous ADBC API must remain private to the shared
-  Spiral repository adapter. The Studio backend must link a commit-pinned
-  `adbc-driver-spiraldb` Rust crate and construct its native driver directly; it
-  must not accept a driver-library path, use an ADBC driver manager, or load the
-  Spiral driver dynamically. For each active project, the adapter must own one
-  native database/engine runtime, expose only repository-owned connection and
+  Spiral repository adapter. During active co-development, the Studio backend
+  must link the native `adbc-driver-spiraldb` Rust crate from SpiralDB's
+  `develop` branch through Cargo's Git source, and CI must refresh that floating
+  dependency before its checks so upstream incompatibilities fail immediately.
+  Studio must construct the native driver directly; it must not accept a
+  driver-library path, use an ADBC driver manager, or load the Spiral driver
+  dynamically. For each active project, the adapter must own one native
+  database/engine runtime, expose only repository-owned connection and
   statement operations, run asynchronous calls on bounded blocking workers,
-  and apply the same fixed connection limit to ordinary, long-lived, exclusive,
-  invalidating, and synchronous-worker checkouts. No domain or delivery module
-  may construct an ADBC database or bypass that capacity gate. Non-Rust workers
-  may continue to use the language-neutral ADBC shared library.
+  and apply the same fixed connection limit to ordinary, long-lived,
+  exclusive, invalidating, and synchronous-worker checkouts. No domain or
+  delivery module may construct an ADBC database or bypass that capacity gate.
+  Non-Rust workers may continue to use the language-neutral ADBC shared library.
 - **PERSIST-038** After the HTTP listener binds, Studio must prewarm the active
   project's authenticated catalog through the same shared ADBC pool used by
   ordinary repository work. Only after that succeeds may it hydrate

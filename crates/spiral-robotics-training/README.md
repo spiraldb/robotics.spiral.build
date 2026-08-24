@@ -29,7 +29,7 @@ next cursor, and reports a history gap if a caller asks for evidence older than
 the retained window. Lifecycle and result values are serializable; credentials
 are request-only and excluded from debug output and snapshots.
 
-The sibling `http-client/` crate implements this contract for Studio. The
+The sibling `spiral-robotics-training-http` crate implements this contract for Studio. The
 Python service implements LeRobot ACT and opens the selected SpiralDB project
 itself. Arrow IPC remains only on the rollout observation/inference path,
 because those live observations originate in Studio's hardware process.

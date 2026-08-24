@@ -205,7 +205,7 @@ impl StorageManager {
         );
         let expected_prefix = relations.base.clone();
         let dataset_id = inspection.dataset_id.clone();
-        let result = self.repository.run_invalidating_blocking(move |connection| {
+        self.repository.run_invalidating_blocking(move |connection| {
             ensure_dataset_namespace(connection, &namespace)?;
             connection.set_autocommit(false)?;
             let mutation = (|| {
@@ -273,8 +273,7 @@ impl StorageManager {
                 suggested_sql,
                 warnings: inspection.warnings,
             })
-        });
-        result
+        })
     }
 }
 

@@ -572,7 +572,6 @@ impl FeatureCache {
             .filter(|(request_index, cache_index)| {
                 feature_applies(&definitions[*request_index], key) && values[*cache_index].is_none()
             })
-            .map(|(request_index, cache_index)| (request_index, cache_index))
             .collect()
     }
 
@@ -1197,8 +1196,8 @@ fn backfill_candidate_batch(
         .map(|definition| definition.applicability.media_field.clone())
         .collect::<BTreeSet<_>>();
     validate_candidate_schema(batch.schema().as_ref(), &media_fields)?;
-    let mut groups: BTreeMap<(String, Vec<(usize, usize)>), Vec<(usize, FrameKey)>> =
-        BTreeMap::new();
+    type MissingFeatureGroups = BTreeMap<(String, Vec<(usize, usize)>), Vec<(usize, FrameKey)>>;
+    let mut groups = MissingFeatureGroups::new();
     for row in 0..batch.num_rows() {
         let key = frame_key(batch, row)?;
         if !expected.contains(&key) || !seen.insert(key.clone()) {
@@ -1756,20 +1755,20 @@ impl SiglipEngine {
         {
             match Device::new_metal(0) {
                 Ok(device) => match Self::load(artifacts, concepts, device, "Metal") {
-                    Ok(engine) => return Ok((engine, None)),
+                    Ok(engine) => Ok((engine, None)),
                     Err(error) => {
                         let warning = format!(
                             "Metal SigLIP initialization failed; this run used CPU instead: {error}"
                         );
-                        return Self::load(artifacts, concepts, Device::Cpu, "CPU")
-                            .map(|engine| (engine, Some(warning)));
+                        Self::load(artifacts, concepts, Device::Cpu, "CPU")
+                            .map(|engine| (engine, Some(warning)))
                     }
                 },
                 Err(error) => {
                     let warning =
                         format!("Metal is unavailable; this run used CPU instead: {error}");
-                    return Self::load(artifacts, concepts, Device::Cpu, "CPU")
-                        .map(|engine| (engine, Some(warning)));
+                    Self::load(artifacts, concepts, Device::Cpu, "CPU")
+                        .map(|engine| (engine, Some(warning)))
                 }
             }
         }

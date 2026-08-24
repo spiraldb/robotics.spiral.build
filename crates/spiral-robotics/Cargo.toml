@@ -1,0 +1,24 @@
+[package]
+name = "spiral-robotics"
+version.workspace = true
+edition.workspace = true
+description = "Rust-native hardware adapters for real-world robotics"
+publish = false
+
+[dependencies]
+spiral-robotics-core.workspace = true
+image.workspace = true
+nokhwa.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serialport.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+v4l = "0.14"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

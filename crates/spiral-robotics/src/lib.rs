@@ -1,4 +1,4 @@
-//! Shared building blocks for the Spiral Robotics command-line tools and server.
+//! Hardware adapters shared by the Spiral Robotics Studio backend and control runtime.
 //!
 //! Hardware lives here: protocol-neutral motor-bus contracts, concrete motor
 //! adapters, camera capture, and serial discovery. Policy code targets

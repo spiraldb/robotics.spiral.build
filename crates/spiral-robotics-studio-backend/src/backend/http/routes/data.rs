@@ -32,6 +32,7 @@ pub(super) fn catalog_router() -> Router<AppState> {
     Router::new()
         .route("/spiral/query", post(spiral_query))
         .route("/spiral/relations", get(spiral_relations))
+        .route("/spiral/project-relations", get(project_data_relations))
         .route("/spiral/replay", post(start_spiral_replay))
         .route("/spiral/video.mp4", get(spiral_video))
         .route(
@@ -60,6 +61,17 @@ async fn spiral_relations(
     state
         .storage
         .workflow_relations()
+        .await
+        .map(Json)
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))
+}
+
+async fn project_data_relations(
+    State(state): State<AppState>,
+) -> Result<Json<spiral_robotics_contracts::api::ProjectDataRelationsResponse>, Failure> {
+    state
+        .storage
+        .project_data_relations()
         .await
         .map(Json)
         .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))

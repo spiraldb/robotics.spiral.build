@@ -18,7 +18,7 @@ dependencies = [
     "psutil>=7,<8",
     "pyarrow>=21,<30",
     "safetensors>=0.4.3,<1",
-    "spiraldb==0.16.23",
+    "spiraldb==0.16.26",
     "torch>=2.7,<2.8",
     "torchvision>=0.22,<0.23",
     "triton==3.3.1; sys_platform == 'linux'",

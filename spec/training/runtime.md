@@ -138,8 +138,8 @@ flowchart LR
 
 - Authoritative versions and bump policy:
   [`contracts`](../../contracts/)
-- Versioned contracts: [`training/contracts`](../../training/contracts/)
-- Studio job client: [`training/http-client`](../../training/http-client/)
+- Versioned contracts: [`spiral-robotics-training`](../../crates/spiral-robotics-training/)
+- Studio job client: [`spiral-robotics-training-http`](../../crates/spiral-robotics-training-http/)
 - Worker job lifecycle: [`training/src/spiral_training_runtime/jobs.py`](../../training/src/spiral_training_runtime/jobs.py)
 - Worker Spiral/SPQL loader: [`training/src/spiral_training_runtime/spiral.py`](../../training/src/spiral_training_runtime/spiral.py)
 - Framework-neutral inference contract: [`spiral-robotics-inference`](../../crates/spiral-robotics-inference/)

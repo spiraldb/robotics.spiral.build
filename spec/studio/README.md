@@ -181,7 +181,8 @@ allowing visualization panels to be arranged spatially.
 - Live composes [robot control](../robots/control.md) and
   [recording](../recording/README.md).
 - Data composes the [episode catalog](../data/README.md),
-  [Timeline and replay](../data/timeline-and-replay.md), and
+  [Timeline and replay](../data/timeline-and-replay.md),
+  [project data relations](../data/relations.md), and
   [SQL query](../data/query.md).
 - Workflow composes the relation-first
   [agentic enrichment workbench](../workflow.md).

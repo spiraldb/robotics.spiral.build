@@ -895,17 +895,16 @@ impl WorkflowManager {
             return;
         }
         let mut candidate = document.clone();
-        if let Some(node_id) = node_id {
-            if let Some(node) = candidate
+        if let Some(node_id) = node_id
+            && let Some(node) = candidate
                 .snapshot
                 .nodes
                 .iter_mut()
                 .find(|node| node.node_id == node_id)
-            {
-                node.phase = WorkflowNodePhase::Failed;
-                node.detail = "Failed".to_owned();
-                node.error = Some(error.clone());
-            }
+        {
+            node.phase = WorkflowNodePhase::Failed;
+            node.detail = "Failed".to_owned();
+            node.error = Some(error.clone());
         }
         let finished = now_millis();
         candidate.snapshot.phase = WorkflowRunPhase::Failed;

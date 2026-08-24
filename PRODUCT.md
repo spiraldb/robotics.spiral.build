@@ -191,9 +191,6 @@ never becomes the motor-control runtime.
 
 **Shipped today**
 
-- Three CLIs — `spiral-robotics-find-port`, `spiral-robotics-find-cameras`, and
-  `spiral-robotics-calibrate` — cover the Studio’s hardware setup flow for scripting and
-  machines without a browser.
 - A fullstack Dioxus Studio with five primary operating activities:
   - **Live** owns recording, arm selection, Hold / Release / Teleop, joint
     control, health, and camera status.
@@ -365,10 +362,12 @@ today, and nothing below may be presented as existing behavior:
   contract permits a separately hosted browser, but authentication, TLS, and
   explicit allowed origins are required before exposing the backend beyond a
   trusted network.
-- **The Spiral ADBC driver is trusted native backend code.** Studio links the
-  pinned Rust driver crate into its backend; the browser cannot choose or load
-  native code. Python training workers continue to use the driver's shared
-  library through their language-neutral ADBC manager.
+- **The Spiral ADBC driver is trusted native backend code.** During active
+  co-development, Studio links the Rust driver crate from SpiralDB's floating
+  `develop` branch and CI refreshes it before checks so upstream breakage is
+  immediate. The browser cannot choose or load native code. Python training
+  workers continue to use the driver's shared library through their
+  language-neutral ADBC manager.
 
 **Terminology:** *robot instance* (one arm), *leader* / *follower*, *joint*,
 *calibration*, *travel*, *torque*, *Hold* / *Release* / *Teleop*, *Studio*

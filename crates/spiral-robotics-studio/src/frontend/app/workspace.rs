@@ -31,6 +31,7 @@ use crate::frontend::panels::timeline::panel::{
     TimelineCapabilities, TimelineGate, TimelinePlayback, signal_lanes_from_store,
 };
 use crate::frontend::panels::timeline::state::{TimelineActionContext, dispatch_timeline_action};
+use crate::frontend::screens::data::relations::RelationsPanel;
 use crate::frontend::screens::data::workbench::{
     EpisodesPanel, QueryPanel, QueryResultView, short_id,
 };
@@ -637,10 +638,18 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                 rsx! { QueryResultView {} },
             )
             .with_class("query-editor");
+            let relations = Panel::new(
+                "relations",
+                "Relations",
+                "primary",
+                rsx! { RelationsPanel { namespace: dataset.clone(), query_available: spiral_query_available } },
+            )
+            .with_class("relations-editor");
             crate::frontend::screens::data::screen::compose(
                 episodes,
                 query,
                 query_result,
+                relations,
                 dock_panels,
                 timeline_panel,
             )

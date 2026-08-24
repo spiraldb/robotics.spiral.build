@@ -514,6 +514,11 @@ fn workspace_crate_dependencies_point_toward_policy() {
 
     let crates = [
         (
+            "spiral-robotics-boundary-build",
+            "crates/spiral-robotics-boundary-build/Cargo.toml",
+            &[][..],
+        ),
+        (
             "spiral-robotics-core",
             "crates/spiral-robotics-core/Cargo.toml",
             &[][..],
@@ -521,11 +526,11 @@ fn workspace_crate_dependencies_point_toward_policy() {
         (
             "spiral-robotics-contracts",
             "crates/spiral-robotics-contracts/Cargo.toml",
-            &["spiral-robotics-core"][..],
+            &["spiral-robotics-boundary-build", "spiral-robotics-core"][..],
         ),
         (
             "spiral-robotics",
-            "Cargo.toml",
+            "crates/spiral-robotics/Cargo.toml",
             &["spiral-robotics-core"][..],
         ),
         (
@@ -535,12 +540,12 @@ fn workspace_crate_dependencies_point_toward_policy() {
         ),
         (
             "spiral-robotics-training",
-            "training/contracts/Cargo.toml",
-            &[][..],
+            "crates/spiral-robotics-training/Cargo.toml",
+            &["spiral-robotics-boundary-build"][..],
         ),
         (
             "spiral-robotics-training-http",
-            "training/http-client/Cargo.toml",
+            "crates/spiral-robotics-training-http/Cargo.toml",
             &["spiral-robotics-inference", "spiral-robotics-training"][..],
         ),
         (

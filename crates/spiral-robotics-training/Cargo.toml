@@ -11,7 +11,7 @@ serde.workspace = true
 thiserror = "2"
 
 [build-dependencies]
-serde_json.workspace = true
+spiral-robotics-boundary-build.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

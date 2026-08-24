@@ -1932,9 +1932,11 @@ mod tests {
 
     #[test]
     fn starting_fresh_preserves_server_identity_but_removes_all_topology() {
-        let mut workflow = WorkflowSpec::default();
-        workflow.id = "inspection".to_owned();
-        workflow.revision = 17;
+        let workflow = WorkflowSpec {
+            id: "inspection".to_owned(),
+            revision: 17,
+            ..WorkflowSpec::default()
+        };
 
         let empty = empty_workflow_draft(&workflow);
 
@@ -2319,8 +2321,10 @@ mod tests {
 
     #[test]
     fn slower_bootstrap_response_cannot_regress_newer_sse_state() {
-        let mut current = WorkflowStateResponse::default();
-        current.scope_id = "project-a-scope".to_owned();
+        let mut current = WorkflowStateResponse {
+            scope_id: "project-a-scope".to_owned(),
+            ..WorkflowStateResponse::default()
+        };
         current.workflow.revision = 2;
         current.snapshot.workflow_revision = 2;
         let mut stale_bootstrap = current.clone();
@@ -2333,8 +2337,10 @@ mod tests {
         newer.snapshot.workflow_revision = 3;
         assert!(server_state_is_monotonic(&current, &newer));
 
-        let mut project_b = WorkflowStateResponse::default();
-        project_b.scope_id = "project-b-scope".to_owned();
+        let project_b = WorkflowStateResponse {
+            scope_id: "project-b-scope".to_owned(),
+            ..WorkflowStateResponse::default()
+        };
         assert!(
             server_state_is_monotonic(&current, &project_b),
             "a new project scope owns an independent revision sequence"
@@ -2362,9 +2368,11 @@ mod tests {
 
     #[test]
     fn slower_agent_bootstrap_cannot_regress_streamed_history() {
-        let mut current = WorkflowAgentStateResponse::default();
-        current.scope_id = "project-a-scope".to_owned();
-        current.revision = 8;
+        let current = WorkflowAgentStateResponse {
+            scope_id: "project-a-scope".to_owned(),
+            revision: 8,
+            ..WorkflowAgentStateResponse::default()
+        };
         let mut stale = current.clone();
         stale.revision = 7;
         assert!(!agent_state_is_monotonic(&current, &stale));
@@ -2407,8 +2415,10 @@ mod tests {
 
     #[test]
     fn conversation_switching_is_gated_only_by_authoritative_active_work() {
-        let mut agent = WorkflowAgentStateResponse::default();
-        agent.history_available = true;
+        let mut agent = WorkflowAgentStateResponse {
+            history_available: true,
+            ..WorkflowAgentStateResponse::default()
+        };
         agent.conversations.push(
             spiral_robotics_contracts::workflow::WorkflowAgentConversationSummary {
                 conversation_id: "conversation-a".to_owned(),

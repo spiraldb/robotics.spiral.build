@@ -3578,7 +3578,7 @@ mod tests {
     fn project_cache_uses_atomic_registry_provenance_after_spiral_drops_field_metadata() {
         let definition = workflow_definition("media.frames", "holding_feature");
         let registry_batch = canonical_registry_batch(std::slice::from_ref(&definition));
-        let registry = validate_workflow_registry(&[registry_batch.clone()]).unwrap();
+        let registry = validate_workflow_registry(std::slice::from_ref(&registry_batch)).unwrap();
         let relation = derived_feature_cache_relation("media.frames");
 
         let missing_feature = canonical_cache_batch(&[], &[1]);
@@ -3639,7 +3639,7 @@ mod tests {
         assert!(
             validate_workflow_cache_with_limits(
                 &relation,
-                &[rows.clone()],
+                std::slice::from_ref(&rows),
                 &registry,
                 1,
                 MAX_FEATURE_CACHE_COLUMNS,
@@ -4437,8 +4437,7 @@ mod tests {
                         "ingest_missing",
                         &ingest_target,
                         &batches,
-                        rows,
-                        encoded_bytes,
+                        (rows, encoded_bytes),
                         false,
                     )?;
                     profile_write_operation(
@@ -4447,8 +4446,7 @@ mod tests {
                         "replace_missing",
                         &target,
                         &batches,
-                        rows,
-                        encoded_bytes,
+                        (rows, encoded_bytes),
                         true,
                     )?;
                     profile_write_operation(
@@ -4457,8 +4455,7 @@ mod tests {
                         "existing_cold",
                         &target,
                         &batches,
-                        rows,
-                        encoded_bytes,
+                        (rows, encoded_bytes),
                         true,
                     )?;
 
@@ -4485,8 +4482,7 @@ mod tests {
                         "existing_after_bind",
                         &target,
                         &batches,
-                        rows,
-                        encoded_bytes,
+                        (rows, encoded_bytes),
                         true,
                     )?;
                 }
@@ -4523,10 +4519,10 @@ mod tests {
         phase: &str,
         target: &str,
         batches: &[RecordBatch],
-        rows: usize,
-        bytes: usize,
+        metrics: (usize, usize),
         replace: bool,
     ) -> Result<(), String> {
+        let (rows, bytes) = metrics;
         let begin_start = Instant::now();
         connection.set_autocommit(false)?;
         let begin_seconds = begin_start.elapsed().as_secs_f64();

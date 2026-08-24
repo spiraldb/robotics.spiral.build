@@ -1,0 +1,9 @@
+[package]
+name = "spiral-robotics-boundary-build"
+version.workspace = true
+edition.workspace = true
+description = "Build-time generation for shared Spiral Robotics boundary versions"
+publish = false
+
+[dependencies]
+serde_json.workspace = true

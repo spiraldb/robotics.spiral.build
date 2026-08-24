@@ -1377,19 +1377,21 @@ mod tests {
 
     #[test]
     fn agent_state_and_named_update_are_serde_stable_and_secret_free() {
-        let mut state = WorkflowAgentStateResponse::default();
-        state.readiness = WorkflowAgentReadiness {
-            configured: true,
-            status: WorkflowAgentReadinessStatus::Ready,
-            provider: "provider.example".to_owned(),
-            model: "model-a".to_owned(),
-            detail: "Ready".to_owned(),
+        let mut state = WorkflowAgentStateResponse {
+            readiness: WorkflowAgentReadiness {
+                configured: true,
+                status: WorkflowAgentReadinessStatus::Ready,
+                provider: "provider.example".to_owned(),
+                model: "model-a".to_owned(),
+                detail: "Ready".to_owned(),
+            },
+            scope_id: "agent-scope-1".to_owned(),
+            history_available: true,
+            revision: 3,
+            active_conversation_id: "conversation-1".to_owned(),
+            conversation_limit: MAX_WORKFLOW_AGENT_CONVERSATIONS,
+            ..WorkflowAgentStateResponse::default()
         };
-        state.scope_id = "agent-scope-1".to_owned();
-        state.history_available = true;
-        state.revision = 3;
-        state.active_conversation_id = "conversation-1".to_owned();
-        state.conversation_limit = MAX_WORKFLOW_AGENT_CONVERSATIONS;
         state.conversations.push(WorkflowAgentConversationSummary {
             conversation_id: "conversation-1".to_owned(),
             title: "Inspect the catalog".to_owned(),

@@ -32,6 +32,15 @@ jobs:
       - name: Cache Nix store
         uses: DeterminateSystems/magic-nix-cache-action@v14
 
+      - name: Refresh floating Spiral driver
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+          GH_TOKEN: ${{ secrets.SPIRALDB_READ_TOKEN }}
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: "!gh auth git-credential"
+        run: nix develop .#ci --command cargo update -p adbc-driver-spiraldb
+
       - name: Lint workflow
         run: nix develop .#ci --command actionlint
 
