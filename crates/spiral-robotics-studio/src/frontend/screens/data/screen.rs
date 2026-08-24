@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 use dioxus::prelude::*;
-use spiral_robotics_panels::{LayoutNode, Panel, PanelLayout, SplitAxis};
+use dioxus_workbench::{LayoutNode, Panel, PanelLayout, SplitAxis};
 
 use crate::frontend::app::activity::PanelRole;
 use crate::frontend::app::workspace::ScreenWorkspaceDefinition;
@@ -86,7 +86,7 @@ pub(crate) fn compose(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_panels::PanelId;
+    use dioxus_workbench::PanelId;
 
     #[test]
     fn episodes_query_and_results_have_independent_default_tiles() {

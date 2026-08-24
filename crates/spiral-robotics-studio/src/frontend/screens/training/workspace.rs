@@ -11,11 +11,11 @@ use charming::element::{
 };
 use charming::series::Line;
 use dioxus::prelude::*;
+use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
 use spiral_robotics_contracts::api::{
     TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase,
 };
 use spiral_robotics_contracts::spiral;
-use spiral_robotics_panels::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
 use spiral_robotics_ui::{
     Action, ActionPurpose, ActionSize, ActionVariant, DeleteIcon, InlineConfirmation,
 };

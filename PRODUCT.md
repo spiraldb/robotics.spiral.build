@@ -251,10 +251,10 @@ never becomes the motor-control runtime.
   - **Settings** owns robot setup (ports, camera assignment, calibration,
     add/import/delete), backend data destinations, and complete-project
     backup/restore. Setup is not mixed into the live operating flow.
-- A reusable `spiral-robotics-panels` crate supplies tabbed tiles, horizontal and
-  vertical splits, drag docking with five-zone previews, split resizing,
-  keyboard equivalents, session-state panel reconciliation, and compact shared
-  chrome. Live, Data, Workflow, Training, and Rollout keep independent session
+- The external [`dioxus-workbench`](https://github.com/XiangpengHao/dioxus-workbench) crate supplies
+  tabbed tiles, horizontal and vertical splits, drag docking with five-zone
+  previews, split resizing, keyboard equivalents, session-state panel
+  reconciliation, and compact shared chrome. Live, Data, Workflow, Training, and Rollout keep independent session
   layouts. The default desktop composition is a one-third workbench beside a
   two-thirds visualization, with Scene/Query, camera panels, and Timeline as
   movable panels rather than fixed slots.
@@ -401,8 +401,6 @@ rollout, replay, export), *ingestion*
 Real, in-repo:
 
 - `crates/spiral-robotics-core/assets/so101.urdf` — the shipped robot description.
-- `crates/spiral-robotics-panels/` — the reusable panel, tile, docking, session layout,
-  keyboard, and motion system used by the Studio.
 - `examples/robot.json`, `examples/calibration-input.json` — real configuration
   and calibration input.
 - `robots/leader.json`, `robots/follower.json` — a working two-arm setup.

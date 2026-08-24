@@ -439,8 +439,9 @@ Panel identity is stable and unique. A panel cannot appear in two tiles.
 Camera panels reconcile by named home when cameras are assigned, removed, or
 loaded asynchronously. Content remains keyed by panel ID so moving or tabbing a
 camera does not restart an unrelated feed. Layout mechanics, session state,
-keyboard behavior, previews, and chrome belong to `spiral-robotics-panels`; the Studio
-owns panel titles, content, safety, and domain state.
+keyboard behavior, previews, and chrome belong to the external
+[`dioxus-workbench`](https://github.com/XiangpengHao/dioxus-workbench) crate; the Studio owns
+panel titles, content, safety, and domain state.
 
 The Timeline is always registered in both activities, including empty state.
 Its default lower position gives the system a consistent clock, but the user may
@@ -1322,9 +1323,9 @@ another component only to rename it or copy shared mechanics.
 
 - **Don't** restore the retired fixed Robots / Scene / Properties three-pane
   shell or the full-width dataset rail.
-- **Don't** add fixed one-off panel arrangements in the Studio; extend
-  `spiral-robotics-panels` when the mechanic is generic and register domain content in
-  the Studio.
+- **Don't** add fixed one-off panel arrangements in the Studio; take a generic
+  mechanic upstream to [`dioxus-workbench`](https://github.com/XiangpengHao/dioxus-workbench)
+  and register domain content in the Studio.
 - **Don't** name product components or local CSS classes after native
   presentation such as `Button`; name the action's domain intent or the layout
   responsibility.

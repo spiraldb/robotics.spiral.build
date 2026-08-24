@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use dioxus::prelude::*;
-use spiral_robotics_contracts::api::{ModeSelection, ReplayPhase, ReplayPurpose};
-use spiral_robotics_panels::{DockZone, Panel, PanelId, PanelLayout, PanelWorkspace};
+use dioxus_workbench::{DockZone, Panel, PanelId, PanelLayout, PanelWorkspace};
 #[cfg(test)]
-use spiral_robotics_panels::{LayoutNode, SplitAxis};
+use dioxus_workbench::{LayoutNode, SplitAxis};
+use spiral_robotics_contracts::api::{ModeSelection, ReplayPhase, ReplayPurpose};
 
 use crate::frontend::api::{commands, historical};
 #[cfg(test)]
@@ -1107,10 +1107,10 @@ mod tests {
         ];
         let mut layout = default_panel_layout(&initial);
         layout.reconcile(&[
-            spiral_robotics_panels::PanelPlacement::new("workbench", "workbench"),
-            spiral_robotics_panels::PanelPlacement::new("episode-scene", "primary"),
-            spiral_robotics_panels::PanelPlacement::new("episode-camera:wrist", "cameras"),
-            spiral_robotics_panels::PanelPlacement::new("timeline", "timeline"),
+            dioxus_workbench::PanelPlacement::new("workbench", "workbench"),
+            dioxus_workbench::PanelPlacement::new("episode-scene", "primary"),
+            dioxus_workbench::PanelPlacement::new("episode-camera:wrist", "cameras"),
+            dioxus_workbench::PanelPlacement::new("timeline", "timeline"),
         ]);
 
         assert_eq!(
@@ -1132,11 +1132,11 @@ mod tests {
         ];
         let mut layout = default_panel_layout(&initial);
         layout.reconcile(&[
-            spiral_robotics_panels::PanelPlacement::new("workbench", "workbench"),
-            spiral_robotics_panels::PanelPlacement::new("episode-scene", "primary"),
-            spiral_robotics_panels::PanelPlacement::new("query-result", "primary"),
-            spiral_robotics_panels::PanelPlacement::new("episode-camera:wrist", "cameras"),
-            spiral_robotics_panels::PanelPlacement::new("timeline", "timeline"),
+            dioxus_workbench::PanelPlacement::new("workbench", "workbench"),
+            dioxus_workbench::PanelPlacement::new("episode-scene", "primary"),
+            dioxus_workbench::PanelPlacement::new("query-result", "primary"),
+            dioxus_workbench::PanelPlacement::new("episode-camera:wrist", "cameras"),
+            dioxus_workbench::PanelPlacement::new("timeline", "timeline"),
         ]);
 
         let scene_tile = layout

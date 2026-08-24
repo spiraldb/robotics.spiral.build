@@ -22,11 +22,7 @@ fn files_with_extension(root: &Path, extension: &str) -> Vec<PathBuf> {
 #[test]
 fn product_surfaces_cannot_bypass_the_interaction_language() {
     let studio = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let crates = studio.parent().expect("Studio should live in crates/");
-    let roots = [
-        studio.join("src/frontend"),
-        crates.join("spiral-robotics-panels/src"),
-    ];
+    let roots = [studio.join("src/frontend")];
     let forbidden = [
         ("button {", "raw Dioxus button"),
         ("r#type: \"file\"", "raw file picker"),
@@ -74,11 +70,7 @@ fn product_surfaces_cannot_bypass_the_interaction_language() {
 #[test]
 fn legacy_action_styles_cannot_return() {
     let studio = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let crates = studio.parent().expect("Studio should live in crates/");
-    let styles = [
-        studio.join("tailwind.css"),
-        crates.join("spiral-robotics-panels/assets/panels.css"),
-    ];
+    let styles = [studio.join("tailwind.css")];
     let forbidden = [
         ".studio-button",
         ".icon-button",
@@ -145,11 +137,6 @@ fn studio_is_a_strict_desktop_pointer_application() {
         fs::read_to_string(studio.join("tailwind.css")).expect("Studio styles should be readable");
     let ui_styles = fs::read_to_string(crates.join("spiral-robotics-ui/assets/ui.css"))
         .expect("shared UI styles should be readable");
-    let panel_styles = fs::read_to_string(crates.join("spiral-robotics-panels/assets/panels.css"))
-        .expect("panel styles should be readable");
-    let panel_workspace =
-        fs::read_to_string(crates.join("spiral-robotics-panels/src/workspace.rs"))
-            .expect("panel workspace source should be readable");
     let viewport_gestures =
         fs::read_to_string(crates.join("spiral-robotics-viewport/src/gesture.rs"))
             .expect("viewport gesture source should be readable");
@@ -166,10 +153,6 @@ fn studio_is_a_strict_desktop_pointer_application() {
         (&ui_styles, "pointer: coarse"),
         (&ui_styles, "pointer: fine"),
         (&ui_styles, "target-touch"),
-        (&panel_styles, "@media (max-width:"),
-        (&panel_styles, "touch-action"),
-        (&panel_workspace, "rp-mobile"),
-        (&panel_workspace, "mobile_panel"),
         (&scene, "pointer_type() == \"touch\""),
         (&scene, "Pinch"),
         (&viewport_gestures, "Pinch"),

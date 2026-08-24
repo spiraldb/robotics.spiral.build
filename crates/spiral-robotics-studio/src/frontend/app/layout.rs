@@ -1,10 +1,10 @@
 //! Stable topology for the frontend Studio panel shell.
 //!
 //! Feature registries provide panel identities and preferred homes. This module
-//! alone decides the first-open split tree; `spiral-robotics-panels` owns subsequent
+//! alone decides the first-open split tree; `dioxus-workbench` owns subsequent
 //! reconciliation and persisted operator edits.
 
-use spiral_robotics_panels::{LayoutNode, Panel, PanelId, PanelLayout, SplitAxis};
+use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, SplitAxis};
 
 /// The canonical first-open arrangement. Persistence takes over after this,
 /// while panel `home` ids tell hot-plugged content where it belongs.

@@ -1,6 +1,6 @@
 //! Route-owned Rollout panel registry and follower-focused composition.
 
-use spiral_robotics_panels::{Panel, PanelLayout};
+use dioxus_workbench::{Panel, PanelLayout};
 
 use crate::frontend::app::activity::PanelRole;
 use crate::frontend::app::layout::default_panel_layout_with_workbench;

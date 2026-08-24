@@ -159,6 +159,6 @@ browser confirmation dialogs.
   [`format.rs`](../../crates/spiral-robotics-studio/src/frontend/format.rs) and
   [`tasks.rs`](../../crates/spiral-robotics-studio/src/frontend/tasks.rs)
 - Docking, tab reordering, and panel keyboard behavior:
-  [`spiral-robotics-panels`](../../crates/spiral-robotics-panels/)
+  [`dioxus-workbench`](https://github.com/XiangpengHao/dioxus-workbench) (external crate)
 - Migration guard:
   [`interaction_language.rs`](../../crates/spiral-robotics-studio/tests/interaction_language.rs)

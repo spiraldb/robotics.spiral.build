@@ -196,7 +196,7 @@ allowing visualization panels to be arranged spatially.
 - Scene, camera, and Timeline panels:
   [`frontend/panels`](../../crates/spiral-robotics-studio/src/frontend/panels/)
 - Panel layout model:
-  [`spiral-robotics-panels`](../../crates/spiral-robotics-panels/)
+  [`dioxus-workbench`](https://github.com/XiangpengHao/dioxus-workbench) (external crate)
 - Shared interaction primitives:
   [`spiral-robotics-ui`](../../crates/spiral-robotics-ui/)
 - Framework-neutral application use cases:

@@ -345,14 +345,6 @@ fn studio_has_one_spiral_persistence_boundary() {
             "checkpoints must inherit the selected Spiral destination instead of retaining {retired:?}"
         );
     }
-
-    let crates = backend.parent().expect("workspace crates directory");
-    let panels = fs::read_to_string(crates.join("spiral-robotics-panels/src/workspace.rs"))
-        .expect("panel workspace source");
-    assert!(
-        !panels.contains("local_storage()") && !panels.contains("session_storage()"),
-        "panel layout must remain session state rather than browser persistence"
-    );
 }
 
 #[test]
@@ -542,11 +534,6 @@ fn workspace_crate_dependencies_point_toward_policy() {
             &[][..],
         ),
         (
-            "spiral-robotics-panels",
-            "crates/spiral-robotics-panels/Cargo.toml",
-            &[][..],
-        ),
-        (
             "spiral-robotics-training",
             "training/contracts/Cargo.toml",
             &[][..],
@@ -567,7 +554,6 @@ fn workspace_crate_dependencies_point_toward_policy() {
             &[
                 "spiral-robotics-contracts",
                 "spiral-robotics-core",
-                "spiral-robotics-panels",
                 "spiral-robotics-studio-backend",
                 "spiral-robotics-viewport",
             ][..],

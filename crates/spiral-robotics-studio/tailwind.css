@@ -22,6 +22,9 @@
   --tone-surface: #ffffff;
   --tone-sunken: #f7f7f5;
   --tone-hover: rgb(55 53 47 / 0.06);
+  /* Pressed is hover pushed one step further; the workbench's icon actions
+     are the only surfaces that currently need it. */
+  --tone-pressed: rgb(55 53 47 / 0.11);
   --tone-line: #e8e8e6;
   --tone-line-strong: #cfcfcb;
 
@@ -54,6 +57,39 @@
   --tone-viewport: #f5f5f3;
   --tone-camera: #1f1f1f;
 
+}
+
+/* dioxus-workbench, spoken in this palette ---------------------------------
+   The panel workbench is an external crate with its own `--wb-*` defaults and
+   its own `prefers-color-scheme: dark` block. Studio has exactly one theme, so
+   the tokens are pinned here rather than inherited: without this the tab bars,
+   splitters, and dock previews would turn dark inside a light application on a
+   dark-mode machine. Redeclaring them on `.wb-workspace` also keeps the panel
+   chrome tracking this palette when the crate's own defaults move on.
+
+   The crate declares its defaults at zero specificity (`:where(...)`), so a
+   plain class selector wins in both colour schemes. Unlayered on purpose:
+   `@layer components` would lose to the crate's own unlayered stylesheet. */
+.wb-workspace {
+  --wb-canvas: var(--tone-canvas);
+  --wb-surface: var(--tone-surface);
+  --wb-sunken: var(--tone-sunken);
+  --wb-viewport: var(--tone-viewport);
+  --wb-hover: var(--tone-hover);
+  --wb-pressed: var(--tone-pressed);
+  --wb-line: var(--tone-line);
+  --wb-ink: var(--tone-ink);
+  --wb-ink-soft: var(--tone-ink-soft);
+  --wb-ink-faint: var(--tone-ink-faint);
+  --wb-accent: var(--tone-accent);
+  --wb-selected: var(--tone-selected);
+  --wb-good: var(--tone-good);
+  --wb-caution: var(--tone-caution);
+  --wb-danger: var(--tone-danger);
+  --wb-danger-soft: var(--tone-danger-soft);
+  /* The dock preview's lift, carried over verbatim from the panel stylesheet
+     this crate replaced. Shadows are not part of the named palette. */
+  --wb-shadow: 0 6px 18px rgb(0 0 0 / 0.08);
 }
 
 /* Studio workbench v2 ----------------------------------------------------

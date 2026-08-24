@@ -8,12 +8,12 @@ use dioxus_flow::{
     Background, BackgroundVariant, Flow, FlowHandle, Handle, HandleKind, LayoutDirection,
     LayoutOptions, NodeViewCtx, Point, use_flow_handle,
 };
+use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
 use spiral_robotics_contracts::workflow::{
     WorkflowAgentConversationSummary, WorkflowAgentMessagePhase, WorkflowAgentPhase,
     WorkflowAgentRole, WorkflowAgentToolPhase, WorkflowAgentToolSummary, WorkflowNodeConfig,
     WorkflowNodeKind, WorkflowNodePhase, WorkflowRunPhase,
 };
-use spiral_robotics_panels::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
 use spiral_robotics_ui::{Action, ActionPurpose, ActionVariant};
 
 use crate::frontend::app::state::studio;

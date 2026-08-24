@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use dioxus::prelude::*;
 use dioxus_flow::{Edge, EdgeKind, Node, Side};
+use dioxus_workbench::PanelId;
 use gloo_net::http::Method;
 use spiral_robotics_contracts::workflow::{
     CancelWorkflowRequest, RunWorkflowRequest, SIGLIP_BASE_MODEL_ID, SaveWorkflowRequest,
@@ -21,7 +22,6 @@ use spiral_robotics_contracts::workflow::{
     WorkflowSpec, WorkflowStateResponse, WorkflowValidationReport, derived_feature_cache_relation,
     topological_order, validate_workflow_spec, workflow_has_model,
 };
-use spiral_robotics_panels::PanelId;
 
 use crate::frontend::api::http as api;
 use crate::frontend::app::notifications::MessageSource;
