@@ -34,13 +34,12 @@ the intended source of truth.
 
 - Pure arm, calibration, and operation policy:
   [`spiral-robotics-core`](../../crates/spiral-robotics-core/)
-- Feetech bus, discovery, and robot configuration codec:
-  [`spiral-robotics`](../../crates/spiral-robotics/)
-- SpiralDB robot repository:
+- Motor buses, Feetech adapters, physical device discovery, camera capture, and
+  fixed-rate control:
+  [`spiral-robotics-hardware`](../../crates/spiral-robotics-hardware/)
+- Robot configuration codecs and SpiralDB repository:
   [`backend/robots`](../../crates/spiral-robotics-studio-backend/src/backend/robots/)
-- Fixed-rate motor control:
-  [`spiral-robotics-studio-hardware`](../../crates/spiral-robotics-studio-hardware/)
-- Camera and video adapters:
+- Camera and video runtime orchestration:
   [`backend/robotics`](../../crates/spiral-robotics-studio-backend/src/backend/robotics/)
 - Robot use cases:
   [`spiral-robotics-studio-application`](../../crates/spiral-robotics-studio-application/src/)

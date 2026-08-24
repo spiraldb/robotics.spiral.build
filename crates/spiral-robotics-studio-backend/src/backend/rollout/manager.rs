@@ -24,6 +24,7 @@ use crate::backend::robotics::cameras::{CameraManager, Frame};
 use crate::backend::robots::workspace::RobotWorkspace;
 use crate::backend::storage::manager::StorageManager;
 use crate::backend::storage::settings::StudioPreferencesStore;
+use spiral_robotics_hardware::{HardwareHandle, HardwareState};
 use spiral_robotics_studio_application::checkpoints::{
     CheckpointArtifact, CheckpointKey, CheckpointRepository,
 };
@@ -38,7 +39,6 @@ use spiral_robotics_studio_application::rollout::{
     CompletionReason, ControlDecision, ExecutionOutcome, RolloutCoordinator, RolloutEventPort,
     RolloutMetrics, RolloutPhase, RolloutRequest, RolloutSnapshot,
 };
-use spiral_robotics_studio_hardware::{HardwareHandle, HardwareState};
 
 const INPUT_STALE_AFTER: Duration = Duration::from_millis(350);
 const INITIAL_CAMERA_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1290,6 +1290,7 @@ mod tests {
     };
     use bytes::Bytes;
     use spiral_robotics_contracts::api::{ModeSelection, ModeStatus, StartRolloutRequest};
+    use spiral_robotics_hardware::HardwareState;
     use spiral_robotics_inference::{
         ActionChunk, InferenceInput, InferenceStats, ModelIdentity, Policy, PolicyKind,
         PolicySpecification,
@@ -1301,7 +1302,6 @@ mod tests {
         ACT_ARTIFACT_FORMAT, ACT_TENSOR_NAMESPACE, CameraBindingContract, PolicyDataContract,
         PolicyModelContract, TargetRobotContract, validate_rollout_contract,
     };
-    use spiral_robotics_studio_hardware::HardwareState;
     use std::sync::{Arc, Mutex, mpsc};
     use std::time::{Duration, Instant};
 

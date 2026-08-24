@@ -10,8 +10,6 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema};
 use serde_json::{Map, Value};
-use spiral_robotics::calibration_codec;
-use spiral_robotics::robot_config::{ConfigError, RobotConfig};
 use spiral_robotics_contracts::api::{
     CameraBinding, ConnectionStatus, MotorLimits, MotorSummary, PortSettings, RobotSummary,
 };
@@ -19,6 +17,8 @@ use spiral_robotics_contracts::spiral::{Table, column as db};
 use spiral_robotics_core::arm;
 use spiral_robotics_core::calibration::{Calibration, MotorSpec, validate_motor_specs};
 
+use super::calibration_codec;
+use super::robot_config::{ConfigError, RobotConfig};
 use crate::backend::storage::manager::{
     ensure_dataset_namespace, execute_delete_sql, execute_update_sql, ingest_batch, table_exists,
 };

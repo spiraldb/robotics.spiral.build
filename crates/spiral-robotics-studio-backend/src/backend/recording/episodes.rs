@@ -15,8 +15,8 @@ use spiral_robotics_contracts::spiral::{Table, column as db};
 use spiral_robotics_core::arm::SO101_JOINTS;
 use spiral_robotics_core::calibration::Calibration;
 pub(crate) use spiral_robotics_core::episode::MAX_EPISODE_FRAMES;
-use spiral_robotics_studio_hardware::RecordingWriter;
-pub(crate) use spiral_robotics_studio_hardware::{ArmConditionSummary, EpisodeCheckpoint, Sample};
+use spiral_robotics_hardware::RecordingWriter;
+pub(crate) use spiral_robotics_hardware::{ArmConditionSummary, EpisodeCheckpoint, Sample};
 
 use crate::backend::recording::spiral::{
     SpiralEpisodeEncoder, episode_completion_batch, joint_samples_batch,

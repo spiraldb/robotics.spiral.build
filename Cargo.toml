@@ -1,7 +1,6 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/spiral-robotics",
     "crates/spiral-robotics-boundary-build",
     "crates/spiral-robotics-contracts",
     "crates/spiral-robotics-core",
@@ -10,7 +9,7 @@ members = [
     "crates/spiral-robotics-studio",
     "crates/spiral-robotics-studio-application",
     "crates/spiral-robotics-studio-backend",
-    "crates/spiral-robotics-studio-hardware",
+    "crates/spiral-robotics-hardware",
     "crates/spiral-robotics-training",
     "crates/spiral-robotics-training-http",
     "crates/spiral-robotics-viewport",
@@ -30,14 +29,13 @@ base64 = "0.22"
 candle-core = "=0.11.0"
 candle-nn = "=0.11.0"
 candle-transformers = "=0.11.0"
-spiral-robotics = { path = "crates/spiral-robotics" }
 spiral-robotics-boundary-build = { path = "crates/spiral-robotics-boundary-build" }
 spiral-robotics-contracts = { path = "crates/spiral-robotics-contracts" }
 spiral-robotics-core = { path = "crates/spiral-robotics-core" }
 spiral-robotics-inference = { path = "crates/spiral-robotics-inference", default-features = false }
+spiral-robotics-hardware = { path = "crates/spiral-robotics-hardware" }
 spiral-robotics-ui = { path = "crates/spiral-robotics-ui" }
 spiral-robotics-studio-backend = { path = "crates/spiral-robotics-studio-backend" }
-spiral-robotics-studio-hardware = { path = "crates/spiral-robotics-studio-hardware" }
 spiral-robotics-studio-application = { path = "crates/spiral-robotics-studio-application" }
 spiral-robotics-training = { path = "crates/spiral-robotics-training" }
 spiral-robotics-training-http = { path = "crates/spiral-robotics-training-http" }

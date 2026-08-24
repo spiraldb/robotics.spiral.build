@@ -23,8 +23,8 @@ use crate::backend::training::remote::ConfiguredHttpTrainingBackend;
 use crate::backend::workflow::agent::WorkflowAgentManager;
 use crate::backend::workflow::manager::WorkflowManager;
 use clap::Parser;
-use spiral_robotics::cameras;
-use spiral_robotics_studio_hardware::{
+use spiral_robotics_hardware::cameras;
+use spiral_robotics_hardware::{
     ControlSettings, DEFAULT_MAX_STEP_COUNTS, DEFAULT_TELEOP_MAX_STEP_COUNTS, HardwareHandle,
 };
 use tracing_subscriber::EnvFilter;

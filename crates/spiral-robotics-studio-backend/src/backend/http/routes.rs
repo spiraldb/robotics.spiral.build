@@ -28,7 +28,6 @@ use bytes::{BufMut, Bytes, BytesMut};
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use spiral_robotics::serial_ports::{available_ports, port_description, port_kind};
 use spiral_robotics_contracts::api::{
     ApiError, BackendReadiness, BackendReadinessState, CalibrationReapplyResponse, CameraStatus,
     ConnectionStatus, ConnectionTestResponse, CreateRobotRequest, DataSettings,
@@ -43,6 +42,7 @@ use spiral_robotics_contracts::api::{
     UpdateDataSettingsRequest, UpdateRobotRequest, VideoSettings, default_teleoperation_pair,
 };
 use spiral_robotics_core::calibration::{Calibration, MotorSpec};
+use spiral_robotics_hardware::serial_ports::{available_ports, port_description, port_kind};
 
 use crate::backend::recording::episodes::{
     ArmCondition, EpisodeError, EpisodeInspection, EpisodeStore, EpisodeWriter, TimelineMetadata,
@@ -60,6 +60,7 @@ use crate::backend::storage::settings::StudioPreferencesStore;
 use crate::backend::training::manager::TrainingManager;
 use crate::backend::workflow::agent::WorkflowAgentManager;
 use crate::backend::workflow::manager::WorkflowManager;
+use spiral_robotics_hardware::{HardwareHandle, HardwareState, RobotSpec};
 use spiral_robotics_studio_application::calibration::{
     self, CalibrationHistoryActivity, CalibrationHistoryPort, ReappliedPositions,
     RobotCalibrationRepository,
@@ -120,7 +121,6 @@ use spiral_robotics_studio_application::training::{
     TrainingRunActivity, TrainingRunPhase as ApplicationTrainingRunPhase, TrainingRunStatus,
     TrainingSnapshot as ApplicationTrainingSnapshot, TrainingSource as ApplicationTrainingSource,
 };
-use spiral_robotics_studio_hardware::{HardwareHandle, HardwareState, RobotSpec};
 
 /// Boundary marker separating parts of an MJPEG response.
 const MJPEG_BOUNDARY: &str = "spiral-robotics-frame";

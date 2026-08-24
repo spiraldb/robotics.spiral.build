@@ -72,4 +72,4 @@ follower without making visual scrubbing dangerous.
   and
   [`spiral-robotics-studio-application/src/robot_control.rs`](../../crates/spiral-robotics-studio-application/src/robot_control.rs)
 - Hardware replay:
-  [`spiral-robotics-studio-hardware`](../../crates/spiral-robotics-studio-hardware/)
+  [`spiral-robotics-hardware`](../../crates/spiral-robotics-hardware/)

@@ -22,12 +22,12 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
-use spiral_robotics::bus::SimulatedBus;
-use spiral_robotics::bus::{
+use crate::bus::SimulatedBus;
+use crate::bus::{
     MotorBus, MotorFault as BusMotorFault, MotorFaults as BusMotorFaults,
     MotorLimits as BusMotorLimits, MotorSample,
 };
-use spiral_robotics::feetech::FeetechBus;
+use crate::feetech::FeetechBus;
 
 use spiral_robotics_contracts::api::{
     CAUTION_FOLLOW_ERROR_DEGREES, CalibrationJointProgress, CalibrationProgress, ConnectionStatus,
@@ -2944,7 +2944,7 @@ fn validate_motor_read_keys<T>(
 mod tests {
     use std::sync::Arc;
 
-    use spiral_robotics::bus::BusError;
+    use crate::bus::BusError;
     use spiral_robotics_core::calibration::MotorReading;
 
     use super::*;

@@ -26,7 +26,7 @@ fn all_first_party_rust_code_lives_in_crates() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("spiral-robotics must live under the workspace crates directory");
+        .expect("spiral-robotics-hardware must live under the workspace crates directory");
     let crates = root.join("crates");
     let mut sources = Vec::new();
     collect_rust_sources(root, &mut sources);

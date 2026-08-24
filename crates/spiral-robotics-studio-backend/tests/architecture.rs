@@ -67,16 +67,20 @@ fn application_policy_is_a_separate_compile_time_boundary() {
 }
 
 #[test]
-fn fixed_rate_hardware_is_a_separate_compile_time_boundary() {
+fn physical_io_and_control_share_one_compile_time_boundary() {
     let backend = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let hardware = backend
-        .parent()
-        .expect("workspace crates directory")
-        .join("spiral-robotics-studio-hardware");
+    let crates = backend.parent().expect("workspace crates directory");
+    let hardware = crates.join("spiral-robotics-hardware");
     assert!(hardware.join("src/lib.rs").is_file());
+    for retired in ["spiral-robotics", "spiral-robotics-studio-hardware"] {
+        assert!(
+            !crates.join(retired).exists(),
+            "retired hardware boundary {retired:?} must not return"
+        );
+    }
     assert!(
         !backend.join("src/backend/robotics/hardware.rs").exists(),
-        "fixed-rate motor control must not drift back into the delivery crate"
+        "physical I/O and fixed-rate control must not drift back into the delivery crate"
     );
 
     let manifest = fs::read_to_string(hardware.join("Cargo.toml")).expect("hardware manifest");
@@ -98,10 +102,11 @@ fn fixed_rate_hardware_is_a_separate_compile_time_boundary() {
     let backend_manifest =
         fs::read_to_string(backend.join("Cargo.toml")).expect("backend manifest");
     assert!(
-        declares_local_dependency(&backend_manifest, "spiral-robotics-studio-hardware"),
-        "the backend must compose the hardware crate through Cargo"
+        declares_local_dependency(&backend_manifest, "spiral-robotics-hardware"),
+        "the backend must compose the unified hardware crate through Cargo"
     );
 }
+
 #[test]
 fn read_controllers_delegate_selection_and_admission_to_application_use_cases() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/backend/http");
@@ -529,9 +534,13 @@ fn workspace_crate_dependencies_point_toward_policy() {
             &["spiral-robotics-boundary-build", "spiral-robotics-core"][..],
         ),
         (
-            "spiral-robotics",
-            "crates/spiral-robotics/Cargo.toml",
-            &["spiral-robotics-core"][..],
+            "spiral-robotics-hardware",
+            "crates/spiral-robotics-hardware/Cargo.toml",
+            &[
+                "spiral-robotics-contracts",
+                "spiral-robotics-core",
+                "spiral-robotics-studio-application",
+            ][..],
         ),
         (
             "spiral-robotics-inference",
@@ -572,9 +581,9 @@ fn workspace_crate_dependencies_point_toward_policy() {
             "spiral-robotics-studio-backend",
             "crates/spiral-robotics-studio-backend/Cargo.toml",
             &[
-                "spiral-robotics",
                 "spiral-robotics-contracts",
                 "spiral-robotics-core",
+                "spiral-robotics-hardware",
                 "spiral-robotics-inference",
                 "spiral-robotics-studio-application",
                 "spiral-robotics-training",

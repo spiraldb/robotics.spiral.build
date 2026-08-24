@@ -1,24 +1,25 @@
 [package]
-name = "spiral-robotics"
+name = "spiral-robotics-hardware"
 version.workspace = true
 edition.workspace = true
-description = "Rust-native hardware adapters for real-world robotics"
+description = "Physical I/O and fixed-rate control for Spiral Robotics"
 publish = false
 
 [lints]
 workspace = true
 
 [dependencies]
+spiral-robotics-contracts.workspace = true
 spiral-robotics-core.workspace = true
+spiral-robotics-studio-application.workspace = true
 image.workspace = true
 nokhwa.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serialport.workspace = true
 tempfile.workspace = true
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
+tokio = { version = "1", features = ["rt", "sync"] }
+tracing = "0.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 v4l = "0.14"

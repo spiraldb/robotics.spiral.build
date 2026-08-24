@@ -69,7 +69,7 @@ Recorded inspection is defined by
 - Recording use case:
   [`spiral-robotics-studio-application/src/recording.rs`](../../crates/spiral-robotics-studio-application/src/recording.rs)
 - Hardware capture:
-  [`spiral-robotics-studio-hardware`](../../crates/spiral-robotics-studio-hardware/)
+  [`spiral-robotics-hardware`](../../crates/spiral-robotics-hardware/)
 - Episode and media adapters:
   [`backend/recording`](../../crates/spiral-robotics-studio-backend/src/backend/recording/)
 - Live recording UI:

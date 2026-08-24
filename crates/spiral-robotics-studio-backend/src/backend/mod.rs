@@ -4,7 +4,7 @@ mod adapters;
 mod http;
 mod recording;
 mod robotics;
-mod robots;
+pub mod robots;
 mod rollout;
 mod storage;
 mod training;

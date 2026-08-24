@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use serialport::{ClearBuffer, SerialPort};
 
 use crate::bus::{BusError, MotorBus};
-use crate::calibration::MotorSpec;
+use spiral_robotics_core::calibration::MotorSpec;
 // Keep the original paths available to callers while making the types
 // themselves owned by the protocol-neutral bus boundary.
 pub use crate::bus::{MotorFault, MotorFaults, MotorLimits, MotorSample};
@@ -952,7 +952,7 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
-    use crate::calibration::Direction;
+    use spiral_robotics_core::calibration::Direction;
 
     /// Build a well-formed status packet carrying `parameters` from `id`.
     fn status_packet(id: u8, parameters: &[u8]) -> Vec<u8> {

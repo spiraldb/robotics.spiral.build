@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
-use crate::calibration::MotorSpec;
+use spiral_robotics_core::calibration::MotorSpec;
 
 /// A fault reported by a motor controller.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -418,7 +418,7 @@ impl MotorBus for SimulatedBus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::calibration::Direction;
+    use spiral_robotics_core::calibration::Direction;
 
     fn specs() -> BTreeMap<String, MotorSpec> {
         BTreeMap::from([

@@ -1,8 +1,8 @@
-//! JSON codec for calibration input supplied to the command-line adapter.
+//! JSON codec for calibration values imported and exported by Studio.
 //!
 //! Calibration policy accepts plain [`CalibrationInput`] values. Strict JSON
 //! shape, unknown-field rejection, and duplicate-object-key detection are
-//! delivery concerns kept here at the edge.
+//! delivery concerns kept here at the backend edge.
 
 use std::collections::BTreeMap;
 use std::fmt;

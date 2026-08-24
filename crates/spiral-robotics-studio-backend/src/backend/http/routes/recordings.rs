@@ -141,7 +141,7 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
             sample_hz: if hardware.telemetry.target_hz > 0.0 {
                 (hardware.telemetry.target_hz * 1_000.0).round() / 1_000.0
             } else {
-                spiral_robotics_studio_hardware::CONTROL_HZ as f64
+                spiral_robotics_hardware::CONTROL_HZ as f64
             },
             media_finalizing: self
                 .state

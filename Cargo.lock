@@ -10142,7 +10142,7 @@ dependencies = [
  "spiral-mp4",
  "spiral-parquet",
  "spiral-rabitq",
- "spiral-robotics 0.0.0+dev",
+ "spiral-robotics",
  "spiral-session",
  "spiral-spatial",
  "spiral-str",
@@ -10598,22 +10598,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "spiral-robotics"
-version = "0.1.0"
-dependencies = [
- "image",
- "libc",
- "nokhwa",
- "serde",
- "serde_json",
- "serialport",
- "spiral-robotics-core",
- "tempfile",
- "v4l",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "spiral-robotics-boundary-build"
 version = "0.1.0"
 dependencies = [
@@ -10633,6 +10617,25 @@ dependencies = [
 [[package]]
 name = "spiral-robotics-core"
 version = "0.1.0"
+
+[[package]]
+name = "spiral-robotics-hardware"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "nokhwa",
+ "serde",
+ "serde_json",
+ "serialport",
+ "spiral-robotics-contracts",
+ "spiral-robotics-core",
+ "spiral-robotics-studio-application",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "v4l",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "spiral-robotics-inference"
@@ -10705,17 +10708,17 @@ dependencies = [
  "futures-util",
  "hf-hub",
  "image",
+ "libc",
  "reqwest 0.12.28",
  "safetensors 0.7.0",
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "spiral-robotics 0.1.0",
  "spiral-robotics-contracts",
  "spiral-robotics-core",
+ "spiral-robotics-hardware",
  "spiral-robotics-inference",
  "spiral-robotics-studio-application",
- "spiral-robotics-studio-hardware",
  "spiral-robotics-training",
  "spiral-robotics-training-http",
  "tempfile",
@@ -10726,19 +10729,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
-]
-
-[[package]]
-name = "spiral-robotics-studio-hardware"
-version = "0.1.0"
-dependencies = [
- "serde",
- "spiral-robotics 0.1.0",
- "spiral-robotics-contracts",
- "spiral-robotics-core",
- "spiral-robotics-studio-application",
- "tokio",
- "tracing",
 ]
 
 [[package]]

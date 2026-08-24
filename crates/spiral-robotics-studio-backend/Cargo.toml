@@ -9,11 +9,10 @@ publish = false
 workspace = true
 
 [dependencies]
-spiral-robotics.workspace = true
 spiral-robotics-contracts.workspace = true
 spiral-robotics-core.workspace = true
+spiral-robotics-hardware.workspace = true
 spiral-robotics-studio-application.workspace = true
-spiral-robotics-studio-hardware.workspace = true
 spiral-robotics-training.workspace = true
 spiral-robotics-training-http.workspace = true
 clap.workspace = true
@@ -48,6 +47,7 @@ hf-hub.workspace = true
 spiral-robotics-inference.workspace = true
 dirs = "6"
 tokenizers.workspace = true
+tempfile.workspace = true
 url = "2"
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
@@ -55,5 +55,5 @@ reqwest = { version = "0.12.28", default-features = false, features = ["json", "
 candle-core = { workspace = true, features = ["metal"] }
 candle-nn = { workspace = true, features = ["metal"] }
 
-[dev-dependencies]
-tempfile.workspace = true
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

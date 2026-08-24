@@ -223,7 +223,7 @@ async fn request_with_abort(
 
 /// One message from the studio's event stream.
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
-pub enum StudioEvent {
+pub(crate) enum StudioEvent {
     Snapshot(Box<StudioSnapshot>),
     Telemetry(Box<TelemetryFrame>),
     TrainingSnapshot(Box<TrainingSnapshot>),
@@ -240,7 +240,7 @@ pub enum StudioEvent {
 /// reconnect. The [`EventSource`] is owned by this future, so dropping the
 /// future closes the connection.
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
-pub async fn stream_events<F>(mut on_event: F) -> Result<(), String>
+pub(crate) async fn stream_events<F>(mut on_event: F) -> Result<(), String>
 where
     F: FnMut(StudioEvent),
 {

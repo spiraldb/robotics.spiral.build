@@ -16,8 +16,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use spiral_robotics::cameras::{self, DEFAULT_JPEG_QUALITY, DetectedCamera};
 use spiral_robotics_contracts::api::CameraStatus;
+use spiral_robotics_hardware::cameras::{self, DEFAULT_JPEG_QUALITY, DetectedCamera};
 use tokio::sync::watch;
 
 /// How long a stream runs with nobody watching before it releases the camera.

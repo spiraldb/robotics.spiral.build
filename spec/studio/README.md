@@ -202,8 +202,8 @@ allowing visualization panels to be arranged spatially.
   [`spiral-robotics-ui`](../../crates/spiral-robotics-ui/)
 - Framework-neutral application use cases:
   [`spiral-robotics-studio-application`](../../crates/spiral-robotics-studio-application/)
-- Fixed-rate motor control and its recording port:
-  [`spiral-robotics-studio-hardware`](../../crates/spiral-robotics-studio-hardware/)
+- Physical I/O, fixed-rate motor control, and its recording port:
+  [`spiral-robotics-hardware`](../../crates/spiral-robotics-hardware/)
 - HTTP, camera, persistence, and runtime adapters:
   [`spiral-robotics-studio-backend`](../../crates/spiral-robotics-studio-backend/)
 - URDF and rendering:
