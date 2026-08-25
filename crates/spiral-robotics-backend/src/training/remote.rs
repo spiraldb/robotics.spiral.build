@@ -2,13 +2,13 @@
 
 use std::sync::Arc;
 
+use spiral_robotics_storage::settings::StudioPreferencesStore;
 use spiral_robotics_training::{
     TrainingBackend, TrainingBackendError, TrainingBackendInfo, TrainingJobCursor,
     TrainingJobRequest, TrainingJobSnapshot,
 };
-use spiral_robotics_training_http::HttpTrainingBackend;
 
-use spiral_robotics_storage::settings::StudioPreferencesStore;
+use crate::adapters::compute_runtime::HttpTrainingBackend;
 
 /// Resolve the selected endpoint for every probe and new session. Existing
 /// sessions retain their selected HTTP endpoint when Settings changes.

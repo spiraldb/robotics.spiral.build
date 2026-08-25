@@ -103,5 +103,5 @@ durable checkpoints through a worker that reads and writes SpiralDB directly.
   [`training/src/spiral_training_runtime`](../../training/src/spiral_training_runtime/)
 - Training UI:
   [`frontend/activities/training`](../../crates/spiral-robotics-frontend/src/activities/training/)
-- Framework-neutral contracts:
+- Framework-neutral training protocol:
   [`spiral-robotics-training`](../../crates/spiral-robotics-training/)

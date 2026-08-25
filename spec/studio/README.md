@@ -106,8 +106,11 @@ allowing visualization panels to be arranged spatially.
   wire contract; `storage` owns ADBC, schemas, SQL, ingestion, and transfer;
   and `hardware` owns physical devices and fixed-rate control. The retired
   `spiral-robotics-studio-application`, `spiral-robotics-contracts`,
-  `spiral-robotics-studio-backend`, and `spiral-robotics-ui` crates must not
-  return.
+  `spiral-robotics-studio-backend`, `spiral-robotics-training-http`,
+  `spiral-robotics-boundary-build`, and `spiral-robotics-ui` crates must not
+  return. A generic root `contracts` directory must not combine unrelated
+  compatibility metadata: storage owns its schema version and training owns
+  its runtime protocol version and supported storage-schema range.
 - **STUDIO-055** Dependencies must reflect trust boundaries: frontend depends
   on API but never backend, storage, or hardware; backend composes API, storage,
   and hardware; storage never depends on frontend or backend; and the Studio

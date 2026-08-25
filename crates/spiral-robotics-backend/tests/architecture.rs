@@ -50,14 +50,32 @@ fn product_crates_follow_functional_boundaries() {
         );
     }
     for retired in [
+        "spiral-robotics-boundary-build",
         "spiral-robotics-contracts",
         "spiral-robotics-studio-application",
         "spiral-robotics-studio-backend",
+        "spiral-robotics-training-http",
         "spiral-robotics-ui",
     ] {
         assert!(
             !crates.join(retired).exists(),
             "engineering-convenience crate {retired:?} must stay removed"
+        );
+    }
+    let workspace = crates
+        .parent()
+        .expect("crates directory lives in the workspace");
+    assert!(
+        !workspace.join("contracts").exists(),
+        "generic root contracts directory must stay split between functional owners"
+    );
+    for metadata in [
+        "spiral-robotics-storage/schema/version.json",
+        "spiral-robotics-training/protocol/version.json",
+    ] {
+        assert!(
+            crates.join(metadata).is_file(),
+            "owned compatibility metadata {metadata:?} must exist"
         );
     }
 
@@ -531,11 +549,6 @@ fn workspace_crate_dependencies_point_toward_policy() {
 
     let crates = [
         (
-            "spiral-robotics-boundary-build",
-            "crates/spiral-robotics-boundary-build/Cargo.toml",
-            &[][..],
-        ),
-        (
             "spiral-robotics-core",
             "crates/spiral-robotics-core/Cargo.toml",
             &[][..],
@@ -543,7 +556,7 @@ fn workspace_crate_dependencies_point_toward_policy() {
         (
             "spiral-robotics-api",
             "crates/spiral-robotics-api/Cargo.toml",
-            &["spiral-robotics-boundary-build", "spiral-robotics-core"][..],
+            &["spiral-robotics-core"][..],
         ),
         (
             "spiral-robotics-hardware",
@@ -558,12 +571,7 @@ fn workspace_crate_dependencies_point_toward_policy() {
         (
             "spiral-robotics-training",
             "crates/spiral-robotics-training/Cargo.toml",
-            &["spiral-robotics-boundary-build"][..],
-        ),
-        (
-            "spiral-robotics-training-http",
-            "crates/spiral-robotics-training-http/Cargo.toml",
-            &["spiral-robotics-inference", "spiral-robotics-training"][..],
+            &[][..],
         ),
         (
             "spiral-robotics-viewport",
@@ -589,7 +597,6 @@ fn workspace_crate_dependencies_point_toward_policy() {
             "crates/spiral-robotics-storage/Cargo.toml",
             &[
                 "spiral-robotics-api",
-                "spiral-robotics-boundary-build",
                 "spiral-robotics-core",
                 "spiral-robotics-hardware",
             ][..],
@@ -604,7 +611,6 @@ fn workspace_crate_dependencies_point_toward_policy() {
                 "spiral-robotics-inference",
                 "spiral-robotics-storage",
                 "spiral-robotics-training",
-                "spiral-robotics-training-http",
             ][..],
         ),
     ];

@@ -1,4 +1,4 @@
-# Spiral Robotics training boundary
+# Spiral Robotics training protocol
 
 This crate is the framework-independent job-control seam between Studio and a
 training worker. It contains no PyTorch, device, database, HTTP, or Studio
@@ -10,9 +10,11 @@ worker-job creation, cursored lookup, and stop. The worker itself owns SpiralDB
 reads, sampling, model execution, telemetry, and checkpoint publication.
 Training tensors never pass through Studio.
 
-The authoritative API major/minor and compatible Spiral schema range live in
-[`../../contracts/boundaries.json`](../../contracts/boundaries.json). Rust
-constants are generated from that descriptor; version literals do not belong
+The authoritative API major/minor and compatible storage schema range live in
+[`protocol/version.json`](protocol/version.json). The current relational
+schema lives with its owner in
+[`../spiral-robotics-storage/schema/version.json`](../spiral-robotics-storage/schema/version.json).
+Rust constants are generated from those files; version literals do not belong
 in clients or runtimes. The deliberately small surface is:
 
 - `GET /v1/health`
@@ -29,10 +31,11 @@ next cursor, and reports a history gap if a caller asks for evidence older than
 the retained window. Lifecycle and result values are serializable; credentials
 are request-only and excluded from debug output and snapshots.
 
-The sibling `spiral-robotics-training-http` crate implements this contract for Studio. The
-Python service implements LeRobot ACT and opens the selected SpiralDB project
-itself. Arrow IPC remains only on the rollout observation/inference path,
-because those live observations originate in Studio's hardware process.
+The Studio backend implements this contract in its compute-runtime adapter.
+The Python service implements LeRobot ACT and opens the selected SpiralDB
+project itself. Arrow IPC remains only on the rollout observation/inference
+path because those live observations originate in Studio's hardware process.
 
-See the shared [boundary bump policy](../../contracts/README.md) before changing
-the request, response, persisted-schema, or compatibility contract.
+See the [protocol bump policy](protocol/README.md) before changing a request,
+response, or compatibility rule. Persisted-schema changes follow the
+[storage schema policy](../spiral-robotics-storage/schema/README.md).

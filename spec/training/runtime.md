@@ -82,12 +82,13 @@ flowchart LR
   when the host libraries do not satisfy it. Checkpoint ingestion must keep the
   Spiral namespace in the qualified table path, remain in the configured
   project, and create the checkpoint relation on its first write.
-- **RUNTIME-032** One machine-readable boundary descriptor must own the current
-  Spiral schema, training API major and minor revisions, and the worker's
-  supported Spiral schema range. Rust constants and Python health metadata
-  must derive from that descriptor. A different API major, an older runtime
-  minor, or a current schema outside the advertised range must block job
-  creation with a precise compatibility error. Major revisions are for
+- **RUNTIME-032** Compatibility metadata must follow functional ownership: the
+  storage crate owns one machine-readable current relational schema version,
+  and the training crate owns one machine-readable API major/minor plus the
+  worker's supported storage-schema range. Rust constants and Python health
+  metadata must derive from those files. A different API major, an older
+  runtime minor, or a current schema outside the advertised range must block
+  job creation with a precise compatibility error. Major revisions are for
   breaking wire changes; minor revisions are additive and backward compatible.
 
 ## Rollout protocol
@@ -108,10 +109,11 @@ flowchart LR
 - **RUNTIME-022** The Python runtime must remain outside the Rust workspace and
   use the locked `uv` environment.
 - **RUNTIME-033** Standard CI must lint the Python worker and verify its wheel's
-  packaged boundary descriptor without syncing the production CUDA environment
-  or running worker tests. Compute-runtime and live-SpiralDB coverage must wait
-  for a separate integration lane; deployment and local runtime environments
-  must continue to use the locked `uv` definition.
+  packaged storage-schema and training-protocol version files without syncing
+  the production CUDA environment or running worker tests. Compute-runtime and
+  live-SpiralDB coverage must wait for a separate integration lane; deployment
+  and local runtime environments must continue to use the locked `uv`
+  definition.
 - **RUNTIME-023** Missing GPU telemetry must be reported as unavailable and
   must never fail an otherwise successful step.
 - **RUNTIME-024** The runtime must bind to loopback by default. SSH local
@@ -141,10 +143,14 @@ flowchart LR
 
 ## Implementation ownership
 
-- Authoritative versions and bump policy:
-  [`contracts`](../../contracts/)
-- Versioned contracts: [`spiral-robotics-training`](../../crates/spiral-robotics-training/)
-- Studio job client: [`spiral-robotics-training-http`](../../crates/spiral-robotics-training-http/)
+- Storage schema version and bump policy:
+  [`storage/schema`](../../crates/spiral-robotics-storage/schema/)
+- Training protocol version and bump policy:
+  [`training/protocol`](../../crates/spiral-robotics-training/protocol/)
+- Versioned training protocol:
+  [`spiral-robotics-training`](../../crates/spiral-robotics-training/)
+- Studio compute-runtime adapter:
+  [`backend/adapters/compute_runtime.rs`](../../crates/spiral-robotics-backend/src/adapters/compute_runtime.rs)
 - Worker job lifecycle: [`training/src/spiral_training_runtime/jobs.py`](../../training/src/spiral_training_runtime/jobs.py)
 - Worker Spiral/SPQL loader: [`training/src/spiral_training_runtime/spiral.py`](../../training/src/spiral_training_runtime/spiral.py)
 - Framework-neutral inference contract: [`spiral-robotics-inference`](../../crates/spiral-robotics-inference/)

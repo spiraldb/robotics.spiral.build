@@ -2,8 +2,10 @@
 
 `training/` owns the complete remote training-worker boundary:
 
-- `contracts/` is the framework-neutral Rust interface used by Studio;
-- `http-client/` is Studio's JSON + Arrow IPC client;
+- `../crates/spiral-robotics-training/` is the framework-neutral protocol used
+  by Studio and the worker;
+- `../crates/spiral-robotics-backend/src/adapters/compute_runtime.rs` is
+  Studio's JSON + Arrow IPC client;
 - `src/spiral_training_runtime/` is the Python HTTP service;
 - `uv.lock` is the reproducible local, CI, and Lambda dependency definition.
 
@@ -74,11 +76,15 @@ locally built `libadbc_driver_spiraldb` shared library.
 
 ## Stable protocol
 
-The authoritative training API version and Spiral schema compatibility range
-live in [`../contracts/boundaries.json`](../contracts/boundaries.json). Studio
+The authoritative training API version and storage-schema compatibility range
+live in
+[`../crates/spiral-robotics-training/protocol/version.json`](../crates/spiral-robotics-training/protocol/version.json).
+The current relational schema version lives with
+[`storage`](../crates/spiral-robotics-storage/schema/version.json). Studio
 accepts the same API major at its required minor revision or newer, and rejects
-unsupported Spiral schemas before creating a job. See the
-[bump policy](../contracts/README.md) for the major/minor rules.
+unsupported storage schemas before creating a job. See the
+[protocol bump policy](../crates/spiral-robotics-training/protocol/README.md)
+for the major/minor rules.
 
 Control plane:
 

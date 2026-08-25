@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-include!(concat!(env!("OUT_DIR"), "/spiral_boundary.rs"));
+include!(concat!(env!("OUT_DIR"), "/storage_schema_version.rs"));
 
 /// Marker used to distinguish Spiral Robotics' managed dataset namespace resource.
 pub const DATASET_NAMESPACE_MARKER: &str = "_spiral_robotics_dataset_key_v1";

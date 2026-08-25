@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .protocol import BOUNDARIES
+from .protocol import VERSIONS
 
 
 class RuntimeModel(BaseModel):
@@ -55,8 +55,8 @@ class TrainingJobRequestModel(RuntimeModel):
     state_column: str = Field(min_length=1)
     action_column: str = Field(min_length=1)
     spiral_schema_version: int = Field(
-        ge=BOUNDARIES.training_api.spiral_schema.minimum,
-        le=BOUNDARIES.training_api.spiral_schema.maximum,
+        ge=VERSIONS.training_protocol.storage_schema.minimum,
+        le=VERSIONS.training_protocol.storage_schema.maximum,
     )
     device: str = Field(min_length=1)
     initialization: Literal["random", "pretrained_backbone"]

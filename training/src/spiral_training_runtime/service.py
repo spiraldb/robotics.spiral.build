@@ -14,7 +14,7 @@ from .arrow import decode_inference_input
 from .errors import RuntimeRequestError
 from .jobs import TrainingJob
 from .models import TrainingBackendInfoModel, TrainingJobRequestModel, TrainingJobSnapshotModel
-from .protocol import BOUNDARIES
+from .protocol import VERSIONS
 
 ARROW_STREAM_CONTENT_TYPE = "application/vnd.apache.arrow.stream"
 POLICY_ARTIFACT_CONTENT_TYPE = "application/vnd.spiral.policy-artifact"
@@ -87,7 +87,7 @@ class RuntimeState:
 def create_app(policy_device: str | None = None) -> FastAPI:
     app = FastAPI(
         title="Spiral Robotics PyTorch Runtime",
-        version=BOUNDARIES.training_api.display_version,
+        version=VERSIONS.training_protocol.display_version,
         docs_url="/docs",
         redoc_url=None,
     )

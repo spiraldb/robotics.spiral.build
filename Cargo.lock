@@ -10603,7 +10603,6 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
- "spiral-robotics-boundary-build",
  "spiral-robotics-core",
 ]
 
@@ -10644,7 +10643,6 @@ dependencies = [
  "spiral-robotics-inference",
  "spiral-robotics-storage",
  "spiral-robotics-training",
- "spiral-robotics-training-http",
  "tempfile",
  "tokenizers",
  "tokio",
@@ -10653,13 +10651,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
-]
-
-[[package]]
-name = "spiral-robotics-boundary-build"
-version = "0.1.0"
-dependencies = [
- "serde_json",
 ]
 
 [[package]]
@@ -10738,7 +10729,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "spiral-robotics-api",
- "spiral-robotics-boundary-build",
  "spiral-robotics-core",
  "spiral-robotics-hardware",
  "tempfile",
@@ -10762,21 +10752,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
- "spiral-robotics-boundary-build",
  "thiserror 2.0.19",
-]
-
-[[package]]
-name = "spiral-robotics-training-http"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-ipc",
- "arrow-schema",
- "reqwest 0.12.28",
- "serde",
- "spiral-robotics-inference",
- "spiral-robotics-training",
 ]
 
 [[package]]

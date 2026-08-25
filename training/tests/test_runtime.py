@@ -36,7 +36,7 @@ from spiral_training_runtime.models import (
     TrainingJobRequestModel,
     TrainingJobSnapshotModel,
 )
-from spiral_training_runtime.protocol import BOUNDARIES
+from spiral_training_runtime.protocol import VERSIONS
 from spiral_training_runtime.service import (
     ARROW_STREAM_CONTENT_TYPE,
     POLICY_ARTIFACT_CONTENT_TYPE,
@@ -97,7 +97,7 @@ def job_request() -> dict:
         "sql": "SELECT * FROM spiral_robotics.joint_samples",
         "state_column": "state",
         "action_column": "action",
-        "spiral_schema_version": BOUNDARIES.spiral_schema,
+        "spiral_schema_version": VERSIONS.storage_schema,
         "device": "cpu",
         "initialization": "random",
         "steps": 1,
@@ -147,12 +147,12 @@ def test_canonical_fixture_versions_follow_the_boundary_descriptor() -> None:
     health = json.loads((CANONICAL_FIXTURES / "health.json").read_text(encoding="utf-8"))
     request = json.loads((CANONICAL_FIXTURES / "job-request.json").read_text(encoding="utf-8"))
 
-    assert health["api_id"] == BOUNDARIES.training_api.id
-    assert health["api_version"] == BOUNDARIES.training_api.major
-    assert health["api_revision"] == BOUNDARIES.training_api.minor
-    assert health["spiral_schema_minimum"] == BOUNDARIES.training_api.spiral_schema.minimum
-    assert health["spiral_schema_maximum"] == BOUNDARIES.training_api.spiral_schema.maximum
-    assert request["spiral_schema_version"] == BOUNDARIES.spiral_schema
+    assert health["api_id"] == VERSIONS.training_protocol.id
+    assert health["api_version"] == VERSIONS.training_protocol.major
+    assert health["api_revision"] == VERSIONS.training_protocol.minor
+    assert health["spiral_schema_minimum"] == VERSIONS.training_protocol.storage_schema.minimum
+    assert health["spiral_schema_maximum"] == VERSIONS.training_protocol.storage_schema.maximum
+    assert request["spiral_schema_version"] == VERSIONS.storage_schema
 
 
 def test_spiral_connection_uses_scoped_adbc_options(
@@ -581,7 +581,7 @@ def test_job_api_owns_data_training_and_checkpoint_lifecycle(
 
             incompatible = job_request()
             incompatible["spiral_schema_version"] = (
-                BOUNDARIES.training_api.spiral_schema.maximum + 1
+                VERSIONS.training_protocol.storage_schema.maximum + 1
             )
             rejected = await client.post("/v1/jobs", json=incompatible)
             assert rejected.status_code == 422
@@ -690,16 +690,20 @@ def test_http_surface_reports_pytorch_without_constructing_a_model() -> None:
             response = await client.get("/v1/health")
             assert response.status_code == 200
             health = response.json()
-            assert health["api_id"] == BOUNDARIES.training_api.id
-            assert health["api_version"] == BOUNDARIES.training_api.major
-            assert health["api_revision"] == BOUNDARIES.training_api.minor
-            assert health["spiral_schema_minimum"] == BOUNDARIES.training_api.spiral_schema.minimum
-            assert health["spiral_schema_maximum"] == BOUNDARIES.training_api.spiral_schema.maximum
+            assert health["api_id"] == VERSIONS.training_protocol.id
+            assert health["api_version"] == VERSIONS.training_protocol.major
+            assert health["api_revision"] == VERSIONS.training_protocol.minor
+            assert (
+                health["spiral_schema_minimum"] == VERSIONS.training_protocol.storage_schema.minimum
+            )
+            assert (
+                health["spiral_schema_maximum"] == VERSIONS.training_protocol.storage_schema.maximum
+            )
             assert health["id"] == "pytorch.lerobot"
 
             response = await client.get("/openapi.json")
             assert response.status_code == 200
-            assert response.json()["info"]["version"] == BOUNDARIES.training_api.display_version
+            assert response.json()["info"]["version"] == VERSIONS.training_protocol.display_version
 
             response = await client.post(
                 "/v1/sessions/missing/train?step=1",
@@ -726,10 +730,14 @@ def test_checkpoint_manifest_carries_the_job_schema_version() -> None:
 
     manifest, _model = _checkpoint_manifest(request, dataset, session, 1)
 
-    assert manifest["data_contract"]["spiral_schema_version"] == BOUNDARIES.spiral_schema
-    assert manifest["runtime"]["training_backend"]["api_id"] == BOUNDARIES.training_api.id
-    assert manifest["runtime"]["training_backend"]["api_version"] == BOUNDARIES.training_api.major
-    assert manifest["runtime"]["training_backend"]["api_revision"] == BOUNDARIES.training_api.minor
+    assert manifest["data_contract"]["spiral_schema_version"] == VERSIONS.storage_schema
+    assert manifest["runtime"]["training_backend"]["api_id"] == VERSIONS.training_protocol.id
+    assert (
+        manifest["runtime"]["training_backend"]["api_version"] == VERSIONS.training_protocol.major
+    )
+    assert (
+        manifest["runtime"]["training_backend"]["api_revision"] == VERSIONS.training_protocol.minor
+    )
 
 
 def test_missing_nvml_never_fails_gpu_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -14,7 +14,6 @@ spiral-robotics-core.workspace = true
 spiral-robotics-hardware.workspace = true
 spiral-robotics-storage.workspace = true
 spiral-robotics-training.workspace = true
-spiral-robotics-training-http.workspace = true
 clap.workspace = true
 dioxus = { workspace = true, features = ["cli-config", "server"] }
 serde.workspace = true
@@ -31,7 +30,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-stream = "0.3"
 arrow-array = "58.4.0"
 arrow-schema = "58.4.0"
-arrow-ipc = "58.4.0"
+arrow-ipc = { version = "58.4.0", features = ["zstd"] }
 arrow-json = "58.4.0"
 arrow-select = "58.4.0"
 adbc_core = "0.24.0"
@@ -49,7 +48,7 @@ dirs = "6"
 tokenizers.workspace = true
 tempfile.workspace = true
 url = "2"
-reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 candle-core = { workspace = true, features = ["metal"] }

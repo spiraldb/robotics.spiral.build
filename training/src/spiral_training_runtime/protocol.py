@@ -14,11 +14,11 @@ class VersionRange:
 
 
 @dataclass(frozen=True)
-class TrainingApiBoundary:
+class TrainingProtocolVersion:
     id: str
     major: int
     minor: int
-    spiral_schema: VersionRange
+    storage_schema: VersionRange
 
     @property
     def display_version(self) -> str:
@@ -26,50 +26,66 @@ class TrainingApiBoundary:
 
 
 @dataclass(frozen=True)
-class Boundaries:
-    spiral_schema: int
-    training_api: TrainingApiBoundary
+class RuntimeVersions:
+    storage_schema: int
+    training_protocol: TrainingProtocolVersion
 
 
-def _load_boundaries() -> Boundaries:
-    descriptor = json.loads(_descriptor_text())
-    _require_keys(descriptor, {"format_version", "spiral_schema", "training_api"}, "boundary")
-    if descriptor["format_version"] != 1:
-        raise RuntimeError(f"unsupported boundary descriptor {descriptor['format_version']!r}")
+def _load_versions() -> RuntimeVersions:
+    storage = json.loads(
+        _metadata_text(
+            "storage_schema_version.json",
+            Path("crates/spiral-robotics-storage/schema/version.json"),
+        )
+    )
+    protocol = json.loads(
+        _metadata_text(
+            "training_protocol_version.json",
+            Path("crates/spiral-robotics-training/protocol/version.json"),
+        )
+    )
+    _require_keys(storage, {"format_version", "current"}, "storage schema version")
+    _require_keys(
+        protocol,
+        {"format_version", "id", "major", "minor", "storage_schema"},
+        "training protocol version",
+    )
+    if storage["format_version"] != 1:
+        raise RuntimeError(f"unsupported storage schema descriptor {storage['format_version']!r}")
+    if protocol["format_version"] != 1:
+        raise RuntimeError(
+            f"unsupported training protocol descriptor {protocol['format_version']!r}"
+        )
 
-    spiral = descriptor["spiral_schema"]
-    training = descriptor["training_api"]
-    supported = training["spiral_schema"]
-    _require_keys(spiral, {"current"}, "spiral_schema")
-    _require_keys(training, {"id", "major", "minor", "spiral_schema"}, "training_api")
-    _require_keys(supported, {"minimum", "maximum"}, "training_api.spiral_schema")
+    supported = protocol["storage_schema"]
+    _require_keys(supported, {"minimum", "maximum"}, "training protocol storage_schema")
 
-    current = _positive_int(spiral["current"], "spiral_schema.current")
-    minimum = _positive_int(supported["minimum"], "training_api.spiral_schema.minimum")
-    maximum = _positive_int(supported["maximum"], "training_api.spiral_schema.maximum")
+    current = _positive_int(storage["current"], "storage schema current")
+    minimum = _positive_int(supported["minimum"], "storage_schema.minimum")
+    maximum = _positive_int(supported["maximum"], "storage_schema.maximum")
     if not minimum <= current <= maximum:
-        raise RuntimeError("current Spiral schema is outside the training runtime support range")
-    api_id = training["id"]
+        raise RuntimeError("current storage schema is outside the training runtime support range")
+    api_id = protocol["id"]
     if not isinstance(api_id, str) or not api_id:
-        raise RuntimeError("training_api.id must be a non-empty string")
-    major = _positive_int(training["major"], "training_api.major")
-    minor = _non_negative_int(training["minor"], "training_api.minor")
-    return Boundaries(
-        spiral_schema=current,
-        training_api=TrainingApiBoundary(
+        raise RuntimeError("training protocol id must be a non-empty string")
+    major = _positive_int(protocol["major"], "training protocol major")
+    minor = _non_negative_int(protocol["minor"], "training protocol minor")
+    return RuntimeVersions(
+        storage_schema=current,
+        training_protocol=TrainingProtocolVersion(
             id=api_id,
             major=major,
             minor=minor,
-            spiral_schema=VersionRange(minimum=minimum, maximum=maximum),
+            storage_schema=VersionRange(minimum=minimum, maximum=maximum),
         ),
     )
 
 
-def _descriptor_text() -> str:
-    packaged = files(__package__).joinpath("boundaries.json")
+def _metadata_text(packaged_name: str, source_path: Path) -> str:
+    packaged = files(__package__).joinpath(packaged_name)
     if packaged.is_file():
         return packaged.read_text(encoding="utf-8")
-    source = Path(__file__).resolve().parents[3] / "contracts" / "boundaries.json"
+    source = Path(__file__).resolve().parents[3] / source_path
     return source.read_text(encoding="utf-8")
 
 
@@ -92,4 +108,4 @@ def _non_negative_int(value: Any, label: str) -> int:
     return value
 
 
-BOUNDARIES = _load_boundaries()
+VERSIONS = _load_versions()

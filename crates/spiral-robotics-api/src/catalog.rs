@@ -4,7 +4,7 @@
 //! this module only publishes the managed relation names and query templates
 //! that cross the frontend/backend boundary.
 
-include!(concat!(env!("OUT_DIR"), "/spiral_boundary.rs"));
+include!(concat!(env!("OUT_DIR"), "/storage_schema_version.rs"));
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ManagedTable {

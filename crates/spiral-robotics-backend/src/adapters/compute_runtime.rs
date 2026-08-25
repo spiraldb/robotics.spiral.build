@@ -1,8 +1,8 @@
-//! Studio-side HTTP control plane and Arrow IPC data-plane client.
+//! Backend-owned HTTP control plane and Arrow IPC data-plane client.
 //!
-//! The compute runtime is a separate Python/PyTorch service. This crate owns
-//! only framework-neutral request encoding and response decoding, so linking
-//! Studio can never pull a tensor framework into its process.
+//! The compute runtime is a separate Python/PyTorch service. This adapter owns
+//! only request encoding and response decoding, keeping that tensor framework
+//! outside the Studio process.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,13 +29,13 @@ const SHORT_REQUEST_TIMEOUT: Duration = Duration::from_secs(7);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone, Debug)]
-pub struct HttpTrainingBackend {
+pub(crate) struct HttpTrainingBackend {
     endpoint: String,
     client: reqwest::blocking::Client,
 }
 
 impl HttpTrainingBackend {
-    pub fn new(endpoint: impl Into<String>) -> Self {
+    pub(crate) fn new(endpoint: impl Into<String>) -> Self {
         Self {
             endpoint: endpoint.into(),
             client: reqwest::blocking::Client::builder()
@@ -116,13 +116,13 @@ fn job_path(job_id: &str, suffix: &str, cursor: TrainingJobCursor) -> String {
 
 /// Materializes a policy on the selected remote compute runtime.
 #[derive(Clone, Debug)]
-pub struct HttpPolicyLoader {
+pub(crate) struct HttpPolicyLoader {
     endpoint: String,
     client: reqwest::blocking::Client,
 }
 
 impl HttpPolicyLoader {
-    pub fn new(endpoint: impl Into<String>) -> Self {
+    pub(crate) fn new(endpoint: impl Into<String>) -> Self {
         Self {
             endpoint: endpoint.into(),
             client: reqwest::blocking::Client::builder()

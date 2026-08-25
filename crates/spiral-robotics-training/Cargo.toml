@@ -2,7 +2,7 @@
 name = "spiral-robotics-training"
 version.workspace = true
 edition.workspace = true
-description = "Backend-neutral training contracts for Spiral Robotics"
+description = "Backend-neutral training protocol for Spiral Robotics"
 readme = "README.md"
 publish = false
 
@@ -14,7 +14,7 @@ serde.workspace = true
 thiserror = "2"
 
 [build-dependencies]
-spiral-robotics-boundary-build.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

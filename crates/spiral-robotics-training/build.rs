@@ -1,5 +1,17 @@
-use spiral_robotics_boundary_build::{BoundaryTarget, generate_boundary_constants};
+use std::path::Path;
+
+#[path = "protocol/build.rs"]
+mod protocol_build;
 
 fn main() {
-    generate_boundary_constants(BoundaryTarget::TrainingApi);
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let crates = manifest
+        .parent()
+        .expect("training crate lives in the workspace crates directory");
+    protocol_build::generate_protocol_version(
+        manifest.join("protocol").as_path(),
+        crates
+            .join("spiral-robotics-storage/schema/version.json")
+            .as_path(),
+    );
 }

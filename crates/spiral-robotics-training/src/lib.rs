@@ -9,7 +9,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-include!(concat!(env!("OUT_DIR"), "/training_boundary.rs"));
+include!(concat!(env!("OUT_DIR"), "/training_protocol_version.rs"));
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TrainingBackendInfo {

@@ -14,12 +14,12 @@ use spiral_robotics_api::api::{
     StartRolloutRequest,
 };
 use spiral_robotics_inference::{ActionChunk, ImageFrame, InferenceInput, Policy, PolicyLoader};
-use spiral_robotics_training_http::HttpPolicyLoader;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
 
 use crate::adapters::clock::SystemClock;
+use crate::adapters::compute_runtime::HttpPolicyLoader;
 use crate::clock::{Clock, StableIdSequence};
 use crate::robotics::cameras::{CameraManager, Frame};
 use crate::robots::workspace::RobotWorkspace;

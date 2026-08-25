@@ -173,10 +173,12 @@ flowchart TD
   project-owned preferences and run history, and those independent loads must
   run concurrently on bounded blocking workers rather than delaying listener
   startup or occupying async executor threads.
-- **PERSIST-039** The current relational schema version must be generated from
-  the shared machine-readable boundary descriptor. External workers must
-  receive the selected version through their request boundary and must not
-  maintain a copied schema-version literal.
+- **PERSIST-039** The storage crate must own the current relational schema in a
+  machine-readable version file beside its schema implementation and
+  changelog. Rust consumers must generate their constant from that file.
+  External workers must package the same file, receive the selected version
+  through their request protocol, and must not maintain a copied
+  schema-version literal.
 - **PERSIST-040** `video_assets.payload` must be the `spql.io.Blob` Arrow
   extension, not an Arrow Binary column. Native Spiral table writes must own
   Blob outlining and provider placement, and the shared MP4 source view must

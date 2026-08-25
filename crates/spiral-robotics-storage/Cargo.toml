@@ -16,7 +16,7 @@ adbc_core = "0.24.0"
 adbc-driver-spiraldb.workspace = true
 arrow-array = "58.4.0"
 arrow-schema = "58.4.0"
-arrow-ipc = "58.4.0"
+arrow-ipc = { version = "58.4.0", features = ["zstd"] }
 arrow-json = "58.4.0"
 base64.workspace = true
 dirs = "6"
@@ -34,4 +34,4 @@ url = "2"
 tempfile.workspace = true
 
 [build-dependencies]
-spiral-robotics-boundary-build.workspace = true
+serde_json.workspace = true
