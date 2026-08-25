@@ -603,6 +603,16 @@ impl MotorCalibration {
             MotorDirection::Reversed => -normalized,
         })
     }
+
+    /// Convert a raw reading to degrees from this motor's calibrated center,
+    /// preserving its configured joint direction.
+    pub fn degrees_from_center(&self, raw: i64) -> f64 {
+        let degrees = crate::arm::counts_to_degrees(raw.saturating_sub(self.reading.center));
+        match self.direction {
+            MotorDirection::Normal => degrees,
+            MotorDirection::Reversed => -degrees,
+        }
+    }
 }
 
 /// The travel one motor has shown so far during a live calibration sweep.

@@ -357,25 +357,27 @@ pub(crate) fn recorded_camera_registry_placeholder(
     }
 }
 
-pub(crate) fn recorded_camera_streams(preview: &HistoricalPreview) -> Vec<(String, String)> {
-    let mut streams = Vec::new();
-    for asset in preview.timeline().videos() {
-        if streams
-            .iter()
-            .any(|(stream_id, _)| stream_id == asset.stream_id())
-        {
-            continue;
+impl HistoricalPreview {
+    pub(crate) fn recorded_camera_streams(&self) -> Vec<(String, String)> {
+        let mut streams = Vec::new();
+        for asset in self.timeline().videos() {
+            if streams
+                .iter()
+                .any(|(stream_id, _)| stream_id == asset.stream_id())
+            {
+                continue;
+            }
+            let label = asset
+                .stream_id()
+                .rsplit('.')
+                .next()
+                .filter(|label| !label.is_empty())
+                .unwrap_or("camera")
+                .to_owned();
+            streams.push((asset.stream_id().to_owned(), label));
         }
-        let label = asset
-            .stream_id()
-            .rsplit('.')
-            .next()
-            .filter(|label| !label.is_empty())
-            .unwrap_or("camera")
-            .to_owned();
-        streams.push((asset.stream_id().to_owned(), label));
+        streams
     }
-    streams
 }
 
 struct HistoricalCameraStream<'a> {

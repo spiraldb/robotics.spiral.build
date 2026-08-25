@@ -147,7 +147,7 @@ async fn agent_turn(
     State(state): State<AppState>,
     Json(request): Json<WorkflowAgentTurnRequest>,
 ) -> Result<(StatusCode, Json<WorkflowAgentTurnAccepted>), Failure> {
-    require_agent_history_store(&state)?;
+    state.require_agent_history_store()?;
     state
         .workflow_agent()
         .start_turn(request)
@@ -168,7 +168,7 @@ async fn agent_create_conversation(
             )
         })?;
     let result = (|| {
-        require_agent_history_store(&state)?;
+        state.require_agent_history_store()?;
         state
             .workflow_agent()
             .create_conversation(request)
@@ -196,7 +196,7 @@ async fn agent_activate_conversation(
             )
         })?;
     let result = (|| {
-        require_agent_history_store(&state)?;
+        state.require_agent_history_store()?;
         state
             .workflow_agent()
             .activate_conversation(request)
@@ -223,12 +223,14 @@ async fn agent_cancel(
         .map_err(Into::into)
 }
 
-fn require_agent_history_store(state: &AppState) -> Result<(), Failure> {
-    if state.bootstrap().current().catalog_available() {
-        Ok(())
-    } else {
-        Err(Failure::conflict(
-            "Configure or reconnect Spiral before changing Assistant conversations.",
-        ))
+impl AppState {
+    fn require_agent_history_store(&self) -> Result<(), Failure> {
+        if self.bootstrap().current().catalog_available() {
+            Ok(())
+        } else {
+            Err(Failure::conflict(
+                "Configure or reconnect Spiral before changing Assistant conversations.",
+            ))
+        }
     }
 }

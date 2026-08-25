@@ -201,7 +201,7 @@ impl TrainingController {
         let selected = self.history.selected_run.peek().to_owned();
         let next_selected = {
             let mut opened = self.history.opened_runs.write();
-            selection_after_close(&mut opened, selected.as_deref(), &id)
+            opened.selection_after_close(selected.as_deref(), &id)
         };
         if selected.as_deref() == Some(id.as_str()) {
             self.history.selected_run.set(next_selected);
@@ -286,11 +286,9 @@ impl TrainingController {
             if result.is_ok() {
                 confirming_delete.set(None);
                 let selected = selected_run.peek().to_owned();
-                let next_selected = selection_after_close(
-                    &mut opened_runs.write(),
-                    selected.as_deref(),
-                    &deleted_id,
-                );
+                let next_selected = opened_runs
+                    .write()
+                    .selection_after_close(selected.as_deref(), &deleted_id);
                 if selected.as_deref() == Some(deleted_id.as_str()) {
                     selected_run.set(next_selected);
                 }
@@ -322,27 +320,28 @@ fn next_default_run_name(existing_names: &[String]) -> String {
     }
 }
 
-fn selection_after_close(
-    opened: &mut Vec<String>,
-    selected: Option<&str>,
-    closing: &str,
-) -> Option<String> {
-    let Some(index) = opened.iter().position(|id| id == closing) else {
-        return selected.map(str::to_owned);
-    };
-    opened.remove(index);
-    if selected != Some(closing) {
-        return selected.map(str::to_owned);
+trait OpenedTrainingRuns {
+    fn selection_after_close(&mut self, selected: Option<&str>, closing: &str) -> Option<String>;
+}
+
+impl OpenedTrainingRuns for Vec<String> {
+    fn selection_after_close(&mut self, selected: Option<&str>, closing: &str) -> Option<String> {
+        let Some(index) = self.iter().position(|id| id == closing) else {
+            return selected.map(str::to_owned);
+        };
+        self.remove(index);
+        if selected != Some(closing) {
+            return selected.map(str::to_owned);
+        }
+        self.get(index)
+            .or_else(|| index.checked_sub(1).and_then(|index| self.get(index)))
+            .cloned()
     }
-    opened
-        .get(index)
-        .or_else(|| index.checked_sub(1).and_then(|index| opened.get(index)))
-        .cloned()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{next_default_run_name, selection_after_close};
+    use super::{OpenedTrainingRuns, next_default_run_name};
 
     #[test]
     fn default_run_names_advance_from_history_without_colliding() {
@@ -359,7 +358,7 @@ mod tests {
     #[test]
     fn closing_selected_run_prefers_the_tab_to_its_right() {
         let mut opened = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
-        let selected = selection_after_close(&mut opened, Some("b"), "b");
+        let selected = opened.selection_after_close(Some("b"), "b");
         assert_eq!(opened, ["a", "c"]);
         assert_eq!(selected.as_deref(), Some("c"));
     }
@@ -367,9 +366,9 @@ mod tests {
     #[test]
     fn closing_last_selected_run_falls_back_left_then_to_empty() {
         let mut opened = vec!["a".to_owned(), "b".to_owned()];
-        let selected = selection_after_close(&mut opened, Some("b"), "b");
+        let selected = opened.selection_after_close(Some("b"), "b");
         assert_eq!(selected.as_deref(), Some("a"));
-        let selected = selection_after_close(&mut opened, selected.as_deref(), "a");
+        let selected = opened.selection_after_close(selected.as_deref(), "a");
         assert!(opened.is_empty());
         assert_eq!(selected, None);
     }
@@ -377,7 +376,7 @@ mod tests {
     #[test]
     fn closing_background_run_preserves_selection() {
         let mut opened = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
-        let selected = selection_after_close(&mut opened, Some("c"), "a");
+        let selected = opened.selection_after_close(Some("c"), "a");
         assert_eq!(opened, ["b", "c"]);
         assert_eq!(selected.as_deref(), Some("c"));
     }

@@ -20,17 +20,17 @@ use crate::activities::rollout::workspace::{
 use crate::client::{commands, historical};
 use crate::panels::camera::{
     CameraEditor, CameraEditorSource, RecordedCameraSourceRequest,
-    recorded_camera_registry_placeholder, recorded_camera_streams, recorded_scene_source,
+    recorded_camera_registry_placeholder, recorded_scene_source,
 };
 #[cfg(test)]
 use crate::panels::camera::{historical_camera, historical_camera_at};
 use crate::panels::timeline::panel::{
     RecordedTimelineTraces, SignalSource, StudioTimeline, StudioTimelineState,
-    TimelineCapabilities, TimelineGate, TimelinePlayback, signal_lanes_from_store,
+    TimelineCapabilities, TimelineGate, TimelinePlayback,
 };
 use crate::panels::timeline::state::{
     RecordedTimelineActionState, TimelineActionContext, TimelineActionSession,
-    TimelinePreviewTargets, dispatch_timeline_action,
+    TimelinePreviewTargets,
 };
 #[cfg(test)]
 use crate::shell::activity::LoadState;
@@ -301,7 +301,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
     let live_signal_lanes = Arc::new({
         let recording_signals = studio.recording_signals();
         let store = recording_signals.read();
-        signal_lanes_from_store(&store)
+        store.timeline_lanes()
     });
     let assigned_cameras = assigned_cameras(projection.activity());
     let review_episode = subject.recorded_episode().map(str::to_owned);
@@ -502,7 +502,10 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             PanelRole::Placeholder,
         )),
         CameraRegistrySource::RecordedEpisode(episode) => {
-            let streams = historical.as_ref().map(recorded_camera_streams).unwrap_or_default();
+            let streams = historical
+                .as_ref()
+                .map(HistoricalPreview::recorded_camera_streams)
+                .unwrap_or_default();
             for (stream_id, label) in streams {
                 let id = format!("episode-camera:{stream_id}");
                 let source = RecordedCameraSourceRequest::new(
@@ -585,8 +588,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                 signal_source.clone(),
                 capabilities.clone(),
             ),
-            on_action: move |action| dispatch_timeline_action(
-                TimelineActionContext::new(
+            on_action: move |action| TimelineActionContext::new(
                     TimelineActionSession::new(studio, timeline, action_subject.clone()),
                     RecordedTimelineActionState::new(
                         action_review_episode.clone(),
@@ -601,9 +603,8 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                         automatic_preview_target,
                         interactive_preview_target,
                     ),
-                ),
-                action,
-            ),
+                )
+                .dispatch(action),
         }
     };
     let timeline_panel = Panel::new("timeline", "Timeline", "timeline", timeline_panel)
@@ -1074,7 +1075,7 @@ mod tests {
         );
 
         assert_eq!(
-            recorded_camera_streams(&timeline),
+            timeline.recorded_camera_streams(),
             vec![
                 ("follower.camera.wrist".to_owned(), "wrist".to_owned()),
                 ("follower.camera.top".to_owned(), "top".to_owned()),

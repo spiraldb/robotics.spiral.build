@@ -770,7 +770,7 @@ fn TrainingLearning(run: TrainingRun) -> Element {
     let lr = lr.unwrap_or_else(|| "—".to_owned());
     let chart_id = chart_dom_id("training-loss", run.id());
     let chart_group = training_chart_group(run.id());
-    let loss_chart = training_loss_chart(&run);
+    let loss_chart = run.loss_chart();
 
     rsx! {
         section { class: "training-learning",
@@ -1043,47 +1043,53 @@ fn phase_class(phase: TrainingRunPhase) -> &'static str {
     }
 }
 
-fn training_loss_chart(run: &TrainingRun) -> Chart {
-    let train = metric_series_data(run.metrics(), |point| Some(point.train_loss()), true);
-    let validation = metric_series_data(run.metrics(), |point| point.validation_loss(), true);
-    let observed_steps = run
-        .metrics()
-        .last()
-        .map_or(run.current_step(), |point| {
-            point.step().max(run.current_step())
-        })
-        .max(1);
+trait TrainingRunPresentation {
+    fn loss_chart(&self) -> Chart;
+}
 
-    Chart::new()
-        .animation(false)
-        .color(vec![COLOR_TRAIN, COLOR_VALIDATION])
-        .tooltip(studio_numeric_tooltip(4))
-        .grid(
-            Grid::new()
-                .left(48)
-                .right(12)
-                .top(12)
-                .bottom(50)
-                .contain_label(false),
-        )
-        .x_axis(
-            chart_axis(AxisType::Value, true)
-                .min(0)
-                .max(observed_steps as f64)
-                .split_number(4),
-        )
-        .y_axis(chart_axis(AxisType::Value, true).split_number(5))
-        .data_zoom(training_slider_zoom(48.0, 12.0))
-        .series(
-            MetricLineSpec::new("train-loss", "Train", COLOR_TRAIN)
-                .with_width(2.0)
-                .render(train),
-        )
-        .series(
-            MetricLineSpec::new("validation-loss", "Validation", COLOR_VALIDATION)
-                .with_width(1.8)
-                .render(validation),
-        )
+impl TrainingRunPresentation for TrainingRun {
+    fn loss_chart(&self) -> Chart {
+        let train = metric_series_data(self.metrics(), |point| Some(point.train_loss()), true);
+        let validation = metric_series_data(self.metrics(), |point| point.validation_loss(), true);
+        let observed_steps = self
+            .metrics()
+            .last()
+            .map_or(self.current_step(), |point| {
+                point.step().max(self.current_step())
+            })
+            .max(1);
+
+        Chart::new()
+            .animation(false)
+            .color(vec![COLOR_TRAIN, COLOR_VALIDATION])
+            .tooltip(studio_numeric_tooltip(4))
+            .grid(
+                Grid::new()
+                    .left(48)
+                    .right(12)
+                    .top(12)
+                    .bottom(50)
+                    .contain_label(false),
+            )
+            .x_axis(
+                chart_axis(AxisType::Value, true)
+                    .min(0)
+                    .max(observed_steps as f64)
+                    .split_number(4),
+            )
+            .y_axis(chart_axis(AxisType::Value, true).split_number(5))
+            .data_zoom(training_slider_zoom(48.0, 12.0))
+            .series(
+                MetricLineSpec::new("train-loss", "Train", COLOR_TRAIN)
+                    .with_width(2.0)
+                    .render(train),
+            )
+            .series(
+                MetricLineSpec::new("validation-loss", "Validation", COLOR_VALIDATION)
+                    .with_width(1.8)
+                    .render(validation),
+            )
+    }
 }
 
 fn training_slider_zoom(left: f64, right: f64) -> DataZoom {
@@ -1412,8 +1418,7 @@ mod tests {
                 Vec::new(),
             ),
         );
-        let option =
-            serde_json::to_value(training_loss_chart(&run)).expect("chart should serialize");
+        let option = serde_json::to_value(run.loss_chart()).expect("chart should serialize");
 
         assert_eq!(option["yAxis"]["type"], "value");
         assert_eq!(option["dataZoom"].as_array().map(Vec::len), Some(1));

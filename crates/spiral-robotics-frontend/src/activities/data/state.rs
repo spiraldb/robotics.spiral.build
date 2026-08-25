@@ -155,7 +155,7 @@ impl DataController {
         }
         let mut tabs = self.execution.query_tabs.peek().to_owned();
         let mut active = self.execution.active_query.peek().to_owned();
-        if !close_query_tab(&mut tabs, &mut active, id) {
+        if !tabs.close_query(&mut active, id) {
             return;
         }
         self.execution.query_tabs.set(tabs);
@@ -200,7 +200,7 @@ impl DataController {
             QueryExecutionPresentation::new(statement.clone(), rows, QueryState::Running),
         );
         let mut tabs = self.execution.query_tabs.peek().to_owned();
-        push_bounded_query_tab(&mut tabs, running);
+        tabs.push_bounded(running);
         self.execution.query_tabs.set(tabs);
         self.execution.active_query.set(Some(id));
 
@@ -264,26 +264,33 @@ impl DataController {
     }
 }
 
-fn close_query_tab(tabs: &mut Vec<QueryTab>, active: &mut Option<u64>, id: u64) -> bool {
-    let Some(index) = tabs.iter().position(|tab| tab.id() == id) else {
-        return false;
-    };
-    tabs.remove(index);
-    if *active == Some(id) {
-        *active = index
-            .checked_sub(1)
-            .and_then(|index| tabs.get(index))
-            .or_else(|| tabs.get(index))
-            .map(QueryTab::id);
-    }
-    true
+trait QueryTabs {
+    fn close_query(&mut self, active: &mut Option<u64>, id: u64) -> bool;
+    fn push_bounded(&mut self, tab: QueryTab);
 }
 
-fn push_bounded_query_tab(tabs: &mut Vec<QueryTab>, tab: QueryTab) {
-    if tabs.len() >= MAX_QUERY_TABS {
-        tabs.remove(0);
+impl QueryTabs for Vec<QueryTab> {
+    fn close_query(&mut self, active: &mut Option<u64>, id: u64) -> bool {
+        let Some(index) = self.iter().position(|tab| tab.id() == id) else {
+            return false;
+        };
+        self.remove(index);
+        if *active == Some(id) {
+            *active = index
+                .checked_sub(1)
+                .and_then(|index| self.get(index))
+                .or_else(|| self.get(index))
+                .map(QueryTab::id);
+        }
+        true
     }
-    tabs.push(tab);
+
+    fn push_bounded(&mut self, tab: QueryTab) {
+        if self.len() >= MAX_QUERY_TABS {
+            self.remove(0);
+        }
+        self.push(tab);
+    }
 }
 
 fn query_title(sql: &str, id: u64) -> String {
@@ -307,7 +314,7 @@ fn query_title(sql: &str, id: u64) -> String {
 mod tests {
     use crate::activities::data::workbench::{QueryExecutionPresentation, QueryState, QueryTab};
 
-    use super::{MAX_QUERY_TABS, close_query_tab, push_bounded_query_tab, query_title};
+    use super::{MAX_QUERY_TABS, QueryTabs, query_title};
 
     #[test]
     fn query_tabs_name_the_first_relation_without_hiding_identity() {
@@ -330,7 +337,7 @@ mod tests {
         let mut tabs = vec![tab(1), tab(2), tab(3)];
         let mut active = Some(2);
 
-        assert!(close_query_tab(&mut tabs, &mut active, 2));
+        assert!(tabs.close_query(&mut active, 2));
         assert_eq!(active, Some(1));
         assert_eq!(tabs.iter().map(QueryTab::id).collect::<Vec<_>>(), [1, 3]);
         assert_eq!(tabs[1].presentation().sql(), "SELECT 3");
@@ -346,7 +353,7 @@ mod tests {
             )
         };
         let mut tabs = (1..=MAX_QUERY_TABS as u64).map(tab).collect::<Vec<_>>();
-        push_bounded_query_tab(&mut tabs, tab(99));
+        tabs.push_bounded(tab(99));
         assert_eq!(tabs.len(), MAX_QUERY_TABS);
         assert_eq!(tabs.first().map(QueryTab::id), Some(2));
         assert_eq!(tabs.last().map(QueryTab::id), Some(99));

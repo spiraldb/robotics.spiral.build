@@ -2875,7 +2875,6 @@ mod tests {
 
     use super::*;
     use crate::adbc::ProjectStore;
-    use crate::episode_schema::{dataset_batch, episode_completion_batch};
     use crate::episodes::{EpisodeCompletion, EpisodeStart, EpisodeStore};
     use crate::manager::{
         StorageManager, ensure_dataset_namespace, execute_update_sql, ingest_batch, run_query,
@@ -4299,12 +4298,13 @@ mod tests {
                 ingest_batch(
                     connection,
                     &Table::Datasets.qualified_name(project_store.namespace()),
-                    dataset_batch(&start).map_err(|error| error.to_string())?,
+                    start.dataset_batch().map_err(|error| error.to_string())?,
                 )?;
                 ingest_batch(
                     connection,
                     &Table::Episodes.qualified_name(project_store.namespace()),
-                    episode_completion_batch(&start, &completion, 0)
+                    completion
+                        .episode_batch(&start, 0)
                         .map_err(|error| error.to_string())?,
                 )?;
                 ingest_batch(
@@ -5116,12 +5116,13 @@ mod tests {
             ingest_batch(
                 connection,
                 &Table::Datasets.qualified_name(self.namespace),
-                dataset_batch(&start).map_err(|error| error.to_string())?,
+                start.dataset_batch().map_err(|error| error.to_string())?,
             )?;
             ingest_batch(
                 connection,
                 &Table::Episodes.qualified_name(self.namespace),
-                episode_completion_batch(&start, &completion, 0)
+                completion
+                    .episode_batch(&start, 0)
                     .map_err(|error| error.to_string())?,
             )
         }

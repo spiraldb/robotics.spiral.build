@@ -10,8 +10,8 @@ use safetensors::SafeTensors;
 use serde::Deserialize;
 use spiral_robotics_api::robots::{ModeSelection, ModeStatus, RobotTelemetry};
 use spiral_robotics_api::rollout::{
-    RolloutMetrics as ContractRolloutMetrics, RolloutPhase as ContractRolloutPhase,
-    RolloutSnapshot as ContractRolloutSnapshot, StartRolloutRequest,
+    RolloutPhase as ContractRolloutPhase, RolloutSnapshot as ContractRolloutSnapshot,
+    StartRolloutRequest,
 };
 use spiral_robotics_inference::{
     ActionChunk, ImageDimensions, ImageFrame, InferenceInput, Policy, PolicyLoader,
@@ -35,7 +35,7 @@ use crate::rollout::policy::{
 use crate::rollout::service::{
     CleanupResult, CompletionReason, ControlDecision, ControlObservation, ExecutionOutcome,
     InferenceTiming, PolicyCadence, RolloutAdmission, RolloutCoordinator, RolloutEventPort,
-    RolloutMetrics, RolloutPhase, RolloutRequest, RolloutSnapshot,
+    RolloutRequest, RolloutSnapshot,
 };
 use spiral_robotics_hardware::{HardwareHandle, HardwareState, PolicyGoals};
 use spiral_robotics_storage::StorageManager;
@@ -156,7 +156,7 @@ struct WatchRolloutEvents {
 
 impl RolloutEventPort for WatchRolloutEvents {
     fn publish(&self, snapshot: &RolloutSnapshot) {
-        let snapshot = contract_snapshot(snapshot);
+        let snapshot = ContractRolloutSnapshot::from(snapshot.clone());
         self.state.send_replace(snapshot.clone());
         self.persistence.send_replace(snapshot);
     }
@@ -508,7 +508,7 @@ impl RolloutManager {
         lock(&self.lifecycle.coordinator).admit(RolloutAdmission::new(
             session.clone(),
             created_ms,
-            rollout_request(&request),
+            RolloutRequest::from(request.clone()),
         ))?;
         // Spawn and publish the task handle while holding the same mutex used
         // by shutdown. Once an active session is observable its cleanup task
@@ -945,41 +945,6 @@ impl RolloutManager {
     }
 }
 
-fn rollout_request(request: &StartRolloutRequest) -> RolloutRequest {
-    RolloutRequest::new(
-        request.run_id().to_owned(),
-        request.checkpoint_step(),
-        request.robot().to_owned(),
-    )
-    .with_duration(request.duration_seconds())
-}
-
-fn contract_snapshot(snapshot: &RolloutSnapshot) -> ContractRolloutSnapshot {
-    let phase = match snapshot.phase() {
-        RolloutPhase::Idle => ContractRolloutPhase::Idle,
-        RolloutPhase::Loading => ContractRolloutPhase::Loading,
-        RolloutPhase::WarmingUp => ContractRolloutPhase::WarmingUp,
-        RolloutPhase::Running => ContractRolloutPhase::Running,
-        RolloutPhase::Stopping => ContractRolloutPhase::Stopping,
-        RolloutPhase::Failed => ContractRolloutPhase::Failed,
-    };
-    let identity = spiral_robotics_api::rollout::RolloutIdentity::new(
-        snapshot.session_id().map(str::to_owned),
-        snapshot.run_id().map(str::to_owned),
-        snapshot.robot().map(str::to_owned),
-    )
-    .with_checkpoint(snapshot.checkpoint_step())
-    .with_duration(snapshot.duration_seconds());
-    let lifecycle =
-        spiral_robotics_api::rollout::RolloutLifecycle::new(phase, snapshot.started_ms())
-            .with_finished_ms(snapshot.finished_ms())
-            .with_messages(
-                snapshot.message().map(str::to_owned),
-                snapshot.warning().map(str::to_owned),
-            );
-    ContractRolloutSnapshot::new(identity, lifecycle, contract_metrics(snapshot.metrics()))
-}
-
 fn restored_rollout_snapshot(snapshot: ContractRolloutSnapshot) -> ContractRolloutSnapshot {
     if snapshot.phase().active() {
         let finished_ms = Some(
@@ -1007,16 +972,6 @@ fn restored_rollout_snapshot(snapshot: ContractRolloutSnapshot) -> ContractRollo
         return ContractRolloutSnapshot::new(identity, lifecycle, snapshot.metrics().clone());
     }
     snapshot
-}
-
-fn contract_metrics(metrics: &RolloutMetrics) -> ContractRolloutMetrics {
-    ContractRolloutMetrics::new(
-        metrics.inference_count(),
-        metrics.command_count(),
-        metrics.missed_deadlines(),
-    )
-    .with_latest_timings(metrics.last_latency_ms(), metrics.last_model_ms())
-    .with_latency_summary(metrics.mean_latency_ms(), metrics.max_latency_ms())
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

@@ -938,7 +938,7 @@ pub(crate) async fn start_training<P: TrainingPort + ?Sized>(
     port: &P,
     command: StartTrainingCommand,
 ) -> Result<TrainingRun, OperationError> {
-    let command = validate_training_command(command)?;
+    let command = command.validated()?;
     port.start_training(command).await
 }
 
@@ -984,7 +984,7 @@ pub(crate) fn admit_rollout<T>(
 where
     T: TrainingPort + ?Sized,
 {
-    let command = validate_rollout_command(command)?;
+    let command = command.validated()?;
     let Some(run) = training.training_run_status(command.run_id()) else {
         return Err(OperationError::InvalidInput(
             "the selected training run is no longer available".to_owned(),
@@ -1005,167 +1005,170 @@ where
     Ok(command)
 }
 
-fn validate_training_command(
-    mut command: StartTrainingCommand,
-) -> Result<StartTrainingCommand, OperationError> {
-    command.normalize_identifiers();
+impl StartTrainingCommand {
+    fn validated(mut self) -> Result<Self, OperationError> {
+        let command = &mut self;
+        command.normalize_identifiers();
 
-    if command.run_name().is_empty()
-        || command.run_name().len() > 80
-        || !command
-            .run_name()
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-    {
-        return invalid("Run name must use 1–80 letters, numbers, '.', '_' or '-' characters.");
-    }
-    DatasetId::try_from(command.dataset_id()).map_err(|_| {
-        OperationError::InvalidInput(
-            "Dataset ID must use 1–96 letters, numbers, '.', '_' or '-' characters.".to_owned(),
-        )
-    })?;
-    ReadOnlyQuery::new(command.query(), ReadOnlyQueryMode::Training)
-        .authorize()
-        .map_err(|error| OperationError::InvalidInput(error.to_string()))?;
-    for (label, column) in [
-        ("State column", command.state_column()),
-        ("Action column", command.action_column()),
-    ] {
-        if UnquotedSqlIdentifier::try_from(column).is_err() {
-            return invalid(format!("{label} must be a SQL identifier."));
-        }
-    }
-    if command.state_column() == command.action_column() {
-        return invalid("State and action columns must be different.");
-    }
-    if command.device().is_empty()
-        || command.device().len() > 64
-        || !command.device().bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':' | b'/' | b'+')
-        })
-    {
-        return invalid(
-            "Training device must be a 1–64 character identifier advertised by the runtime.",
-        );
-    }
-    if !(1..=10_000_000).contains(&command.steps()) {
-        return invalid("Training steps must be between 1 and 10,000,000.");
-    }
-    if !(1..=512).contains(&command.batch_size()) {
-        return invalid("Batch size must be between 1 and 512.");
-    }
-    if !command.validation_split().is_finite() || !(0.0..=0.5).contains(&command.validation_split())
-    {
-        return invalid("Validation split must be between 0% and 50%.");
-    }
-    if !(1..=256).contains(&command.chunk_size()) {
-        return invalid("Action chunk size must be between 1 and 256.");
-    }
-    if command
-        .batch_size()
-        .checked_mul(command.chunk_size())
-        .is_none_or(|rows| rows > 8_192)
-    {
-        return invalid("Batch size × action chunk size may not exceed 8,192 manifest rows.");
-    }
-    if command.checkpoint_every() == 0 || command.checkpoint_every() > command.steps() {
-        return invalid("Checkpoint cadence must be between 1 and the run step count.");
-    }
-    if !command.learning_rate().is_finite() || command.learning_rate() <= 0.0 {
-        return invalid("Learning rate must be a finite positive number.");
-    }
-    if command.act().camera_streams().len() > 8 {
-        return invalid("ACT supports at most eight camera streams.");
-    }
-    let mut camera_streams = BTreeSet::new();
-    for stream in command.act().camera_streams() {
-        if stream.is_empty()
-            || !stream
+        if command.run_name().is_empty()
+            || command.run_name().len() > 80
+            || !command
+                .run_name()
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
         {
-            return invalid(format!("Invalid ACT camera stream {stream:?}."));
+            return invalid("Run name must use 1–80 letters, numbers, '.', '_' or '-' characters.");
         }
-        if !camera_streams.insert(stream) {
-            return invalid(format!("ACT camera stream {stream:?} is repeated."));
+        DatasetId::try_from(command.dataset_id()).map_err(|_| {
+            OperationError::InvalidInput(
+                "Dataset ID must use 1–96 letters, numbers, '.', '_' or '-' characters.".to_owned(),
+            )
+        })?;
+        ReadOnlyQuery::new(command.query(), ReadOnlyQueryMode::Training)
+            .authorize()
+            .map_err(|error| OperationError::InvalidInput(error.to_string()))?;
+        for (label, column) in [
+            ("State column", command.state_column()),
+            ("Action column", command.action_column()),
+        ] {
+            if UnquotedSqlIdentifier::try_from(column).is_err() {
+                return invalid(format!("{label} must be a SQL identifier."));
+            }
         }
-    }
-    let native_images = command.act().image_width() == 0 && command.act().image_height() == 0;
-    if !native_images
-        && (!(32..=1_024).contains(&command.act().image_width())
-            || !(32..=1_024).contains(&command.act().image_height()))
-    {
-        return invalid(
-            "ACT image width and height must both be zero (native) or between 32 and 1,024.",
-        );
-    }
-    let runtime_image_bytes = if native_images {
-        // The adapter repeats the exact check after resolving native dataset
-        // dimensions. Budget the largest batch it is allowed to admit here.
-        MAX_TRAINING_IMAGE_BATCH_BYTES
-    } else {
-        // An empty list means automatic selection, not zero cameras. Admission
-        // must budget the maximum the use case permits; the adapter repeats the
-        // check with the exact resolved dataset camera count.
-        let camera_count = if command.act().camera_streams().is_empty() {
-            8
-        } else {
-            command.act().camera_streams().len()
-        };
-        // Training transports one byte per channel, but the runtime expands
-        // every image to f32 before model execution. Admission budgets that
-        // expanded representation rather than the smaller HTTP request body.
-        let image_bytes = command
+        if command.state_column() == command.action_column() {
+            return invalid("State and action columns must be different.");
+        }
+        if command.device().is_empty()
+            || command.device().len() > 64
+            || !command.device().bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'_' | b'-' | b'.' | b':' | b'/' | b'+')
+            })
+        {
+            return invalid(
+                "Training device must be a 1–64 character identifier advertised by the runtime.",
+            );
+        }
+        if !(1..=10_000_000).contains(&command.steps()) {
+            return invalid("Training steps must be between 1 and 10,000,000.");
+        }
+        if !(1..=512).contains(&command.batch_size()) {
+            return invalid("Batch size must be between 1 and 512.");
+        }
+        if !command.validation_split().is_finite()
+            || !(0.0..=0.5).contains(&command.validation_split())
+        {
+            return invalid("Validation split must be between 0% and 50%.");
+        }
+        if !(1..=256).contains(&command.chunk_size()) {
+            return invalid("Action chunk size must be between 1 and 256.");
+        }
+        if command
             .batch_size()
-            .checked_mul(camera_count)
-            .and_then(|values| values.checked_mul(3))
-            .and_then(|values| values.checked_mul(command.act().image_width()))
-            .and_then(|values| values.checked_mul(command.act().image_height()))
-            .and_then(|values| values.checked_mul(std::mem::size_of::<f32>()));
-        if image_bytes.is_none_or(|bytes| bytes > MAX_TRAINING_IMAGE_BATCH_BYTES) {
-            return invalid(format!(
-                "ACT expanded f32 image batch may not exceed {MAX_TRAINING_IMAGE_BATCH_BYTES} bytes. Reduce batch size, camera count, or image dimensions."
-            ));
+            .checked_mul(command.chunk_size())
+            .is_none_or(|rows| rows > 8_192)
+        {
+            return invalid("Batch size × action chunk size may not exceed 8,192 manifest rows.");
         }
-        image_bytes.expect("checked runtime image byte count")
-    };
-    if !matches!(
-        command.act().video_decoder(),
-        "auto" | "ffmpeg" | "videotoolbox" | "nvdec"
-    ) {
-        return invalid("ACT video decoder must be auto, ffmpeg, videotoolbox, or nvdec.");
+        if command.checkpoint_every() == 0 || command.checkpoint_every() > command.steps() {
+            return invalid("Checkpoint cadence must be between 1 and the run step count.");
+        }
+        if !command.learning_rate().is_finite() || command.learning_rate() <= 0.0 {
+            return invalid("Learning rate must be a finite positive number.");
+        }
+        if command.act().camera_streams().len() > 8 {
+            return invalid("ACT supports at most eight camera streams.");
+        }
+        let mut camera_streams = BTreeSet::new();
+        for stream in command.act().camera_streams() {
+            if stream.is_empty()
+                || !stream
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+            {
+                return invalid(format!("Invalid ACT camera stream {stream:?}."));
+            }
+            if !camera_streams.insert(stream) {
+                return invalid(format!("ACT camera stream {stream:?} is repeated."));
+            }
+        }
+        let native_images = command.act().image_width() == 0 && command.act().image_height() == 0;
+        if !native_images
+            && (!(32..=1_024).contains(&command.act().image_width())
+                || !(32..=1_024).contains(&command.act().image_height()))
+        {
+            return invalid(
+                "ACT image width and height must both be zero (native) or between 32 and 1,024.",
+            );
+        }
+        let runtime_image_bytes = if native_images {
+            // The adapter repeats the exact check after resolving native dataset
+            // dimensions. Budget the largest batch it is allowed to admit here.
+            MAX_TRAINING_IMAGE_BATCH_BYTES
+        } else {
+            // An empty list means automatic selection, not zero cameras. Admission
+            // must budget the maximum the use case permits; the adapter repeats the
+            // check with the exact resolved dataset camera count.
+            let camera_count = if command.act().camera_streams().is_empty() {
+                8
+            } else {
+                command.act().camera_streams().len()
+            };
+            // Training transports one byte per channel, but the runtime expands
+            // every image to f32 before model execution. Admission budgets that
+            // expanded representation rather than the smaller HTTP request body.
+            let image_bytes = command
+                .batch_size()
+                .checked_mul(camera_count)
+                .and_then(|values| values.checked_mul(3))
+                .and_then(|values| values.checked_mul(command.act().image_width()))
+                .and_then(|values| values.checked_mul(command.act().image_height()))
+                .and_then(|values| values.checked_mul(std::mem::size_of::<f32>()));
+            if image_bytes.is_none_or(|bytes| bytes > MAX_TRAINING_IMAGE_BATCH_BYTES) {
+                return invalid(format!(
+                    "ACT expanded f32 image batch may not exceed {MAX_TRAINING_IMAGE_BATCH_BYTES} bytes. Reduce batch size, camera count, or image dimensions."
+                ));
+            }
+            image_bytes.expect("checked runtime image byte count")
+        };
+        if !matches!(
+            command.act().video_decoder(),
+            "auto" | "ffmpeg" | "videotoolbox" | "nvdec"
+        ) {
+            return invalid("ACT video decoder must be auto, ffmpeg, videotoolbox, or nvdec.");
+        }
+        if !(1..=16).contains(&command.act().attention_heads()) {
+            return invalid("ACT attention heads must be between 1 and 16.");
+        }
+        if !(64..=1_024).contains(&command.act().hidden_dim())
+            || !command.act().hidden_dim().is_multiple_of(4)
+            || !command
+                .act()
+                .hidden_dim()
+                .is_multiple_of(command.act().attention_heads())
+        {
+            return invalid(
+                "ACT hidden size must be 64–1,024 and divisible by four and the attention-head count.",
+            );
+        }
+        if !(1..=12).contains(&command.act().encoder_layers())
+            || !(1..=12).contains(&command.act().vae_encoder_layers())
+            || !(1..=12).contains(&command.act().decoder_layers())
+            || !(1..=512).contains(&command.act().latent_dim())
+            || command.act().feedforward_dim() < command.act().hidden_dim()
+            || command.act().feedforward_dim() > 16_384
+        {
+            return invalid("ACT transformer configuration is outside the supported range.");
+        }
+        enforce_act_training_resource_budget(estimate_act_training_resource_bytes(
+            &command,
+            runtime_image_bytes,
+        ))?;
+        if !command.act().kl_weight().is_finite() || command.act().kl_weight() < 0.0 {
+            return invalid("ACT KL weight must be finite and non-negative.");
+        }
+        Ok(self)
     }
-    if !(1..=16).contains(&command.act().attention_heads()) {
-        return invalid("ACT attention heads must be between 1 and 16.");
-    }
-    if !(64..=1_024).contains(&command.act().hidden_dim())
-        || !command.act().hidden_dim().is_multiple_of(4)
-        || !command
-            .act()
-            .hidden_dim()
-            .is_multiple_of(command.act().attention_heads())
-    {
-        return invalid(
-            "ACT hidden size must be 64–1,024 and divisible by four and the attention-head count.",
-        );
-    }
-    if !(1..=12).contains(&command.act().encoder_layers())
-        || !(1..=12).contains(&command.act().vae_encoder_layers())
-        || !(1..=12).contains(&command.act().decoder_layers())
-        || !(1..=512).contains(&command.act().latent_dim())
-        || command.act().feedforward_dim() < command.act().hidden_dim()
-        || command.act().feedforward_dim() > 16_384
-    {
-        return invalid("ACT transformer configuration is outside the supported range.");
-    }
-    enforce_act_training_resource_budget(estimate_act_training_resource_bytes(
-        &command,
-        runtime_image_bytes,
-    ))?;
-    if !command.act().kl_weight().is_finite() || command.act().kl_weight() < 0.0 {
-        return invalid("ACT KL weight must be finite and non-negative.");
-    }
-    Ok(command)
 }
 
 fn validate_run_id(run_id: String) -> Result<String, OperationError> {
@@ -1233,27 +1236,29 @@ fn enforce_act_training_resource_budget(estimate: Option<usize>) -> Result<(), O
     Ok(())
 }
 
-fn validate_rollout_command(mut command: RolloutRequest) -> Result<RolloutRequest, OperationError> {
-    command = RolloutRequest::new(
-        command.run_id().trim().to_owned(),
-        command.checkpoint_step(),
-        command.robot().trim().to_owned(),
-    )
-    .with_duration(command.duration_seconds());
-    if command.run_id().is_empty() || command.robot().is_empty() {
-        return invalid("rollout requires a training run and target robot");
+impl RolloutRequest {
+    fn validated(self) -> Result<Self, OperationError> {
+        let command = Self::new(
+            self.run_id().trim().to_owned(),
+            self.checkpoint_step(),
+            self.robot().trim().to_owned(),
+        )
+        .with_duration(self.duration_seconds());
+        if command.run_id().is_empty() || command.robot().is_empty() {
+            return invalid("rollout requires a training run and target robot");
+        }
+        if command.checkpoint_step() == 0 {
+            return invalid("checkpoint step must be greater than zero");
+        }
+        if RolloutDuration::new(command.duration_seconds()).is_none() {
+            return invalid(format!(
+                "rollout duration_seconds must be between {} and {}",
+                spiral_robotics_core::operation::MIN_ROLLOUT_DURATION_SECONDS,
+                spiral_robotics_core::operation::MAX_ROLLOUT_DURATION_SECONDS,
+            ));
+        }
+        Ok(command)
     }
-    if command.checkpoint_step() == 0 {
-        return invalid("checkpoint step must be greater than zero");
-    }
-    if RolloutDuration::new(command.duration_seconds()).is_none() {
-        return invalid(format!(
-            "rollout duration_seconds must be between {} and {}",
-            spiral_robotics_core::operation::MIN_ROLLOUT_DURATION_SECONDS,
-            spiral_robotics_core::operation::MAX_ROLLOUT_DURATION_SECONDS,
-        ));
-    }
-    Ok(command)
 }
 
 fn invalid<T>(message: impl Into<String>) -> Result<T, OperationError> {

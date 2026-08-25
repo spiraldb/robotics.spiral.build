@@ -13,6 +13,7 @@ use serde_json::{Map, Value};
 use spiral_robotics_api::robots::{
     CameraBinding, ConnectionStatus, MotorLimits, MotorSummary, PortSettings, RobotSummary,
 };
+use spiral_robotics_core::OperationError;
 use spiral_robotics_core::arm;
 use spiral_robotics_core::calibration::{Calibration, MotorSpec, MotorSpecifications};
 use spiral_robotics_storage::{
@@ -86,6 +87,20 @@ pub(crate) enum WorkspaceError {
     AlreadyExists(String),
     Invalid(String),
     Config(ConfigError),
+}
+
+impl From<WorkspaceError> for OperationError {
+    fn from(error: WorkspaceError) -> Self {
+        let message = error.to_string();
+        match error {
+            WorkspaceError::InvalidId(_) | WorkspaceError::Invalid(_) => {
+                Self::InvalidInput(message)
+            }
+            WorkspaceError::NotFound(_) => Self::NotFound(message),
+            WorkspaceError::AlreadyExists(_) => Self::Conflict(message),
+            WorkspaceError::Config(_) => Self::Internal(message),
+        }
+    }
 }
 
 impl fmt::Display for WorkspaceError {

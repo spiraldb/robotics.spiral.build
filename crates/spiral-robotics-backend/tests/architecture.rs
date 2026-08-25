@@ -87,6 +87,19 @@ impl ComplexityBoundaryVisitor<'_> {
             }
         }
     }
+
+    fn check_free_function_ownership(&mut self, signature: &Signature) {
+        let name = signature.ident.to_string();
+        if ["capability_", "contract_", "reduce_", "toggle_"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+        {
+            self.violations.push(format!(
+                "{} free function {name:?} names type-owned behavior; use a receiver method or From/TryFrom",
+                self.source_path.display(),
+            ));
+        }
+    }
 }
 
 impl<'ast> Visit<'ast> for ComplexityBoundaryVisitor<'_> {
@@ -142,6 +155,7 @@ impl<'ast> Visit<'ast> for ComplexityBoundaryVisitor<'_> {
 
     fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
         self.check_signature(&function.sig);
+        self.check_free_function_ownership(&function.sig);
         visit::visit_item_fn(self, function);
     }
 

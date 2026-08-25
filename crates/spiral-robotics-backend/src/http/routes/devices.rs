@@ -107,11 +107,7 @@ impl CameraDiscoveryAdapter {
 
 impl CameraDiscoveryPort for CameraDiscoveryAdapter {
     fn cameras(&self) -> Vec<DiscoveredCamera> {
-        self.0
-            .statuses()
-            .into_iter()
-            .map(discovered_camera)
-            .collect()
+        self.0.statuses().into_iter().map(Into::into).collect()
     }
 
     async fn refresh_cameras(&self) -> Result<Vec<DiscoveredCamera>, OperationError> {
@@ -119,23 +115,20 @@ impl CameraDiscoveryPort for CameraDiscoveryAdapter {
         tokio::task::spawn_blocking(move || cameras.refresh_blocking())
             .await
             .map_err(|error| OperationError::Internal(error.to_string()))?;
-        Ok(self
-            .0
-            .statuses()
-            .into_iter()
-            .map(discovered_camera)
-            .collect())
+        Ok(self.0.statuses().into_iter().map(Into::into).collect())
     }
 }
 
-pub(super) fn discovered_camera(camera: CameraStatus) -> DiscoveredCamera {
-    let format = CameraDiscoveryFormat::new(camera.width(), camera.height(), camera.fps());
-    let status = CameraDiscoveryStatus::new(
-        camera.streaming(),
-        camera.frames(),
-        camera.error().map(str::to_owned),
-    );
-    DiscoveredCamera::new(camera.id(), camera.name(), format).with_status(status)
+impl From<CameraStatus> for DiscoveredCamera {
+    fn from(camera: CameraStatus) -> Self {
+        let format = CameraDiscoveryFormat::new(camera.width(), camera.height(), camera.fps());
+        let status = CameraDiscoveryStatus::new(
+            camera.streaming(),
+            camera.frames(),
+            camera.error().map(str::to_owned),
+        );
+        Self::new(camera.id(), camera.name(), format).with_status(status)
+    }
 }
 
 /// Adapts cached JSON robot documents and the live control thread to plain
@@ -201,7 +194,7 @@ impl RobotStore for RobotHttpAdapter<'_> {
             .create(
                 crate::robots::workspace::RobotWorkspaceCreate::new(id, robot_type).with_port(port),
             )
-            .map_err(workspace_capability_error)?;
+            .map_err(OperationError::from)?;
         Ok(SavedRobot::new(record.id()))
     }
 
@@ -214,7 +207,7 @@ impl RobotStore for RobotHttpAdapter<'_> {
             .state
             .workspace()
             .import_configuration(configuration)
-            .map_err(workspace_capability_error)?;
+            .map_err(OperationError::from)?;
         Ok(SavedRobot::new(record.id()))
     }
 
@@ -229,7 +222,7 @@ impl RobotStore for RobotHttpAdapter<'_> {
                     .map_err(WorkspaceError::from)
             })
             .map(|document| ExportedRobotDocument::new(document.into_bytes()))
-            .map_err(workspace_capability_error)
+            .map_err(OperationError::from)
     }
 
     fn camera_configuration(
@@ -241,12 +234,10 @@ impl RobotStore for RobotHttpAdapter<'_> {
             .state
             .workspace()
             .get(robot)
-            .map_err(workspace_capability_error)?;
-        Ok(build_camera_object(
-            &record.camera_object(),
-            assignments,
-            &self.state.cameras().statuses(),
-        ))
+            .map_err(OperationError::from)?;
+        Ok(record
+            .camera_object()
+            .with_camera_assignments(assignments, &self.state.cameras().statuses()))
     }
 
     fn update(
@@ -263,7 +254,7 @@ impl RobotStore for RobotHttpAdapter<'_> {
                     .with_port(port)
                     .with_cameras(cameras),
             )
-            .map_err(workspace_capability_error)?;
+            .map_err(OperationError::from)?;
         Ok(SavedRobot::new(record.id()))
     }
 
@@ -272,14 +263,14 @@ impl RobotStore for RobotHttpAdapter<'_> {
             .workspace()
             .get(robot)
             .map(|_| ())
-            .map_err(workspace_capability_error)
+            .map_err(OperationError::from)
     }
 
     fn delete(&self, robot: &str) -> Result<(), OperationError> {
         self.state
             .workspace()
             .delete(robot)
-            .map_err(workspace_capability_error)
+            .map_err(OperationError::from)
     }
 
     fn saved_robot_ids(&self) -> Vec<String> {
@@ -303,15 +294,15 @@ impl RobotStore for RobotHttpAdapter<'_> {
             .state
             .workspace()
             .get(robot)
-            .map_err(workspace_capability_error)?;
+            .map_err(OperationError::from)?;
         let port = record.port().ok_or_else(|| {
             OperationError::InvalidInput(format!(
                 "robot {:?} has no serial port assigned; set one before connecting",
                 record.id()
             ))
         })?;
-        let motors = record.motors().map_err(workspace_capability_error)?;
-        let calibration = record.calibration().map_err(workspace_capability_error)?;
+        let motors = record.motors().map_err(OperationError::from)?;
+        let calibration = record.calibration().map_err(OperationError::from)?;
         Ok(RobotConnectionSpec::new(
             record.id(),
             SerialPortConfiguration::new(port.path(), port.baud_rate()),
@@ -364,7 +355,7 @@ impl RobotCalibrationStore for RobotWorkspace {
     fn motor_specs(&self, robot: &str) -> Result<BTreeMap<String, MotorSpec>, OperationError> {
         self.get(robot)
             .and_then(|record| record.motors())
-            .map_err(workspace_capability_error)
+            .map_err(OperationError::from)
     }
 
     fn save_calibration(
@@ -374,7 +365,7 @@ impl RobotCalibrationStore for RobotWorkspace {
     ) -> Result<(), OperationError> {
         RobotWorkspace::save_calibration(self, robot, update)
             .map(|_| ())
-            .map_err(workspace_capability_error)
+            .map_err(OperationError::from)
     }
 }
 
@@ -428,9 +419,9 @@ impl CalibrationHistoryPort for CalibrationHistoryHttpAdapter<'_> {
             .state
             .workspace()
             .get(robot)
-            .map_err(workspace_capability_error)?;
-        let motors = record.motors().map_err(workspace_capability_error)?;
-        let calibration = record.calibration().map_err(workspace_capability_error)?;
+            .map_err(OperationError::from)?;
+        let motors = record.motors().map_err(OperationError::from)?;
+        let calibration = record.calibration().map_err(OperationError::from)?;
         if let Some(calibration) = &calibration {
             calibration
                 .validate_for_motor_specs(&motors)
@@ -453,7 +444,7 @@ impl CalibrationHistoryPort for CalibrationHistoryHttpAdapter<'_> {
             tokio::task::spawn_blocking(move || episodes.reapply_calibration(&robot, &calibration))
                 .await
                 .map_err(|error| OperationError::Internal(error.to_string()))?
-                .map_err(episode_capability_error)?;
+                .map_err(OperationError::from)?;
         let (updated_episode_ids, frames_updated, episodes_unchanged, episodes_skipped, warnings) =
             result.into_parts();
         Ok(
@@ -798,37 +789,48 @@ async fn update_robot(
 /// Fields this build does not understand are kept for cameras that keep their
 /// role name, and the resolution of a known device is refreshed so the file
 /// records what will actually be captured.
-pub(super) fn build_camera_object(
-    existing: &Map<String, Value>,
-    assignments: &[CameraAssignment],
-    discovered: &[CameraStatus],
-) -> Map<String, Value> {
-    let mut cameras = Map::new();
+pub(super) trait CameraConfigurationObject {
+    fn with_camera_assignments(
+        &self,
+        assignments: &[CameraAssignment],
+        discovered: &[CameraStatus],
+    ) -> Map<String, Value>;
+}
 
-    for assignment in assignments {
-        let mut fields = match existing.get(assignment.role()) {
-            Some(Value::Object(fields)) => fields.clone(),
-            _ => Map::new(),
-        };
-        fields
-            .entry("type".to_owned())
-            .or_insert_with(|| Value::String("opencv".to_owned()));
-        fields.insert(
-            "id".to_owned(),
-            Value::String(assignment.device_id().to_owned()),
-        );
-        if let Some(camera) = discovered
-            .iter()
-            .find(|camera| camera.id() == assignment.device_id())
-        {
-            fields.insert("width".to_owned(), Value::from(camera.width()));
-            fields.insert("height".to_owned(), Value::from(camera.height()));
-            fields.insert("fps".to_owned(), Value::from(camera.fps()));
+impl CameraConfigurationObject for Map<String, Value> {
+    fn with_camera_assignments(
+        &self,
+        assignments: &[CameraAssignment],
+        discovered: &[CameraStatus],
+    ) -> Map<String, Value> {
+        let existing = self;
+        let mut cameras = Self::new();
+
+        for assignment in assignments {
+            let mut fields = match existing.get(assignment.role()) {
+                Some(Value::Object(fields)) => fields.clone(),
+                _ => Map::new(),
+            };
+            fields
+                .entry("type".to_owned())
+                .or_insert_with(|| Value::String("opencv".to_owned()));
+            fields.insert(
+                "id".to_owned(),
+                Value::String(assignment.device_id().to_owned()),
+            );
+            if let Some(camera) = discovered
+                .iter()
+                .find(|camera| camera.id() == assignment.device_id())
+            {
+                fields.insert("width".to_owned(), Value::from(camera.width()));
+                fields.insert("height".to_owned(), Value::from(camera.height()));
+                fields.insert("fps".to_owned(), Value::from(camera.fps()));
+            }
+            cameras.insert(assignment.role().to_owned(), Value::Object(fields));
         }
-        cameras.insert(assignment.role().to_owned(), Value::Object(fields));
-    }
 
-    cameras
+        cameras
+    }
 }
 
 async fn delete_robot(

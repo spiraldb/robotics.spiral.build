@@ -341,7 +341,7 @@ impl WorkflowManager {
             )));
         }
         workflow.set_revision(current.workflow().revision());
-        derive_model_outputs(&mut workflow);
+        workflow.derive_model_outputs();
         let report = workflow.validate();
         Ok((workflow, report))
     }
@@ -374,7 +374,7 @@ impl WorkflowManager {
         )?;
         let mut workflow = request.workflow().clone();
         workflow.set_revision(next_revision);
-        derive_model_outputs(&mut workflow);
+        workflow.derive_model_outputs();
         let validation = workflow.validate();
         let empty_draft = workflow.nodes().is_empty() && workflow.edges().is_empty();
         if !workflow_save_allowed(&workflow, validation.valid()) {
@@ -1272,33 +1272,35 @@ fn substitute_outputs(
     Ok(substituted)
 }
 
-fn derive_model_outputs(workflow: &mut WorkflowSpec) {
-    let source_relations = workflow
-        .nodes()
-        .iter()
-        .filter(|node| matches!(node.config(), WorkflowNodeConfig::Model { .. }))
-        .map(|node| {
-            (
-                node.id().to_owned(),
-                model_source_relation(workflow, node.id()),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    for node in workflow.nodes_mut() {
-        let node_id = node.id().to_owned();
-        if let WorkflowNodeConfig::Model {
-            features,
-            feature_cache_relation,
-            ..
-        } = node.config_mut()
-        {
-            let source = source_relations.get(&node_id).cloned().flatten();
-            if let Some(source) = source.as_deref() {
-                for feature in features {
-                    feature.set_source_relation(source.to_owned());
+trait WorkflowOutputs {
+    fn derive_model_outputs(&mut self);
+}
+
+impl WorkflowOutputs for WorkflowSpec {
+    fn derive_model_outputs(&mut self) {
+        let source_relations = self
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.config(), WorkflowNodeConfig::Model { .. }))
+            .map(|node| (node.id().to_owned(), model_source_relation(self, node.id())))
+            .collect::<BTreeMap<_, _>>();
+        for node in self.nodes_mut() {
+            let node_id = node.id().to_owned();
+            if let WorkflowNodeConfig::Model {
+                features,
+                feature_cache_relation,
+                ..
+            } = node.config_mut()
+            {
+                let source = source_relations.get(&node_id).cloned().flatten();
+                if let Some(source) = source.as_deref() {
+                    for feature in features {
+                        feature.set_source_relation(source.to_owned());
+                    }
                 }
+                *feature_cache_relation =
+                    source.map(|source| derived_feature_cache_relation(&source));
             }
-            *feature_cache_relation = source.map(|source| derived_feature_cache_relation(&source));
         }
     }
 }
@@ -1532,7 +1534,7 @@ mod tests {
     #[test]
     fn model_output_is_one_shared_server_owned_feature_cache() {
         let mut workflow = siglip_video_workflow("media.manifest", "model");
-        derive_model_outputs(&mut workflow);
+        workflow.derive_model_outputs();
         let WorkflowNodeConfig::Model {
             feature_cache_relation,
             ..
@@ -1709,7 +1711,7 @@ mod tests {
     #[test]
     fn query_only_graph_edits_preserve_model_fingerprint_for_safe_reuse() {
         let mut workflow = siglip_video_workflow("media.manifest", "model");
-        derive_model_outputs(&mut workflow);
+        workflow.derive_model_outputs();
         let mut previous = WorkflowRunSnapshot::idle_for(&workflow);
         let metadata = WorkflowModelRunMetadata::new(
             WorkflowModelIdentity::new(
@@ -1764,7 +1766,7 @@ mod tests {
             unreachable!()
         };
         *feature_cache_relation = Some("training.episodes".to_owned());
-        derive_model_outputs(&mut current);
+        current.derive_model_outputs();
         let WorkflowNodeConfig::Model {
             feature_cache_relation,
             ..
@@ -1796,7 +1798,7 @@ mod tests {
             unreachable!()
         };
         features[0].set_source_relation("provider.chosen");
-        derive_model_outputs(&mut workflow);
+        workflow.derive_model_outputs();
         let WorkflowNodeConfig::Model {
             feature_cache_relation,
             features,
@@ -1987,7 +1989,7 @@ mod tests {
         let model_node_id = format!("model_{}_{}", std::process::id(), now_millis());
         let mut workflow = siglip_video_workflow(&manifest_relation, &model_node_id);
         set_video_candidate_sql(&mut workflow, &media_relation);
-        derive_model_outputs(&mut workflow);
+        workflow.derive_model_outputs();
         let output_relation = workflow
             .nodes()
             .iter()

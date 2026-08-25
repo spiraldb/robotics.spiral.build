@@ -30,15 +30,18 @@ pub(crate) fn datasets_schema() -> SchemaRef {
 
 /// Build the owning dataset row. Dataset IDs double as their initial display
 /// name until richer dataset metadata is edited in a future workflow.
-pub(crate) fn dataset_batch(start: &EpisodeStart) -> Result<RecordBatch, EpisodeError> {
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from(vec![start.dataset_id()])),
-        Arc::new(StringArray::from(vec![start.dataset_id()])),
-        Arc::new(Int64Array::from(vec![start.started_ms()])),
-        Arc::new(StringArray::from(vec![None::<&str>])),
-    ];
-    RecordBatch::try_new(datasets_schema(), columns)
-        .map_err(|error| invalid(format!("building Spiral dataset batch: {error}")))
+impl EpisodeStart {
+    pub(crate) fn dataset_batch(&self) -> Result<RecordBatch, EpisodeError> {
+        let start = self;
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(vec![start.dataset_id()])),
+            Arc::new(StringArray::from(vec![start.dataset_id()])),
+            Arc::new(Int64Array::from(vec![start.started_ms()])),
+            Arc::new(StringArray::from(vec![None::<&str>])),
+        ];
+        RecordBatch::try_new(datasets_schema(), columns)
+            .map_err(|error| invalid(format!("building Spiral dataset batch: {error}")))
+    }
 }
 
 /// One row destined for [`crate::schema::Table::JointSamples`].
@@ -139,7 +142,7 @@ impl SpiralEpisodeEncoder {
 
     /// Convert one control frame without performing I/O.
     pub(crate) fn encode(&mut self, sample: &Sample) -> Result<Vec<JointSampleRow>, EpisodeError> {
-        validate_sample(&self.start, sample)?;
+        sample.validate_for(&self.start)?;
         let episode_time_ns = seconds_to_ns(sample.seconds(), "sample time")?;
         let sample_index = self.next_sample_index;
 
@@ -206,32 +209,32 @@ pub(crate) fn episodes_schema() -> SchemaRef {
 }
 
 /// Build the single row that makes an episode visible to readers.
-pub(crate) fn episode_completion_batch(
-    start: &EpisodeStart,
-    completion: &EpisodeCompletion,
-    frames: u64,
-) -> Result<RecordBatch, EpisodeError> {
-    let duration_ns = seconds_to_ns(completion.duration_seconds(), "episode duration")?;
-    let metadata = serde_json::to_string(&(start, completion))
-        .map_err(|error| invalid(format!("encoding episode metadata: {error}")))?;
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from(vec![start.id()])),
-        Arc::new(StringArray::from(vec![start.dataset_id()])),
-        Arc::new(UInt32Array::from(vec![SCHEMA_VERSION])),
-        Arc::new(Int64Array::from(vec![start.started_ms()])),
-        Arc::new(Float64Array::from(vec![start.sample_hz()])),
-        Arc::new(StringArray::from(vec![start.source()])),
-        Arc::new(StringArray::from(vec![start.note()])),
-        Arc::new(UInt64Array::from(vec![frames])),
-        Arc::new(UInt64Array::from(vec![duration_ns])),
-        Arc::new(Float64Array::from(vec![
-            completion.max_follow_error_degrees(),
-        ])),
-        Arc::new(BooleanArray::from(vec![completion.discarded()])),
-        Arc::new(StringArray::from(vec![metadata])),
-    ];
-    RecordBatch::try_new(episodes_schema(), columns)
-        .map_err(|error| invalid(format!("building Spiral episode batch: {error}")))
+impl EpisodeCompletion {
+    pub(crate) fn episode_batch(
+        &self,
+        start: &EpisodeStart,
+        frames: u64,
+    ) -> Result<RecordBatch, EpisodeError> {
+        let duration_ns = seconds_to_ns(self.duration_seconds(), "episode duration")?;
+        let metadata = serde_json::to_string(&(start, self))
+            .map_err(|error| invalid(format!("encoding episode metadata: {error}")))?;
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(vec![start.id()])),
+            Arc::new(StringArray::from(vec![start.dataset_id()])),
+            Arc::new(UInt32Array::from(vec![SCHEMA_VERSION])),
+            Arc::new(Int64Array::from(vec![start.started_ms()])),
+            Arc::new(Float64Array::from(vec![start.sample_hz()])),
+            Arc::new(StringArray::from(vec![start.source()])),
+            Arc::new(StringArray::from(vec![start.note()])),
+            Arc::new(UInt64Array::from(vec![frames])),
+            Arc::new(UInt64Array::from(vec![duration_ns])),
+            Arc::new(Float64Array::from(vec![self.max_follow_error_degrees()])),
+            Arc::new(BooleanArray::from(vec![self.discarded()])),
+            Arc::new(StringArray::from(vec![metadata])),
+        ];
+        RecordBatch::try_new(episodes_schema(), columns)
+            .map_err(|error| invalid(format!("building Spiral episode batch: {error}")))
+    }
 }
 
 /// Schema for [`crate::schema::Table::EpisodeStreams`].
@@ -254,76 +257,80 @@ pub(crate) fn episode_streams_schema() -> SchemaRef {
 }
 
 /// Describe every joint stream before its samples are appended.
-pub(crate) fn episode_streams_batch(start: &EpisodeStart) -> Result<RecordBatch, EpisodeError> {
-    let mut joint_names = ListBuilder::new(StringBuilder::new()).with_field(Arc::new(Field::new(
-        "item",
-        DataType::Utf8,
-        false,
-    )));
-    for arm in start.arms() {
-        for joint in arm.joints() {
-            joint_names.values().append_value(joint);
+impl EpisodeStart {
+    pub(crate) fn streams_batch(&self) -> Result<RecordBatch, EpisodeError> {
+        let start = self;
+        let mut joint_names = ListBuilder::new(StringBuilder::new())
+            .with_field(Arc::new(Field::new("item", DataType::Utf8, false)));
+        for arm in start.arms() {
+            for joint in arm.joints() {
+                joint_names.values().append_value(joint);
+            }
+            joint_names.append(true);
         }
-        joint_names.append(true);
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from_iter_values(
+                start.arms().iter().map(|_| start.id()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                start.arms().iter().map(EpisodeArm::id),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                start.arms().iter().map(|_| "joint"),
+            )),
+            Arc::new(StringArray::from_iter(
+                start.arms().iter().map(EpisodeArm::robot_type),
+            )),
+            Arc::new(joint_names.finish()),
+            Arc::new(StringArray::from(vec![None::<&str>; start.arms().len()])),
+            Arc::new(UInt32Array::from(vec![None; start.arms().len()])),
+            Arc::new(UInt32Array::from(vec![None; start.arms().len()])),
+            Arc::new(UInt32Array::from(vec![None; start.arms().len()])),
+        ];
+        RecordBatch::try_new(episode_streams_schema(), columns)
+            .map_err(|error| invalid(format!("building Spiral stream batch: {error}")))
     }
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from_iter_values(
-            start.arms().iter().map(|_| start.id()),
-        )),
-        Arc::new(StringArray::from_iter_values(
-            start.arms().iter().map(EpisodeArm::id),
-        )),
-        Arc::new(StringArray::from_iter_values(
-            start.arms().iter().map(|_| "joint"),
-        )),
-        Arc::new(StringArray::from_iter(
-            start.arms().iter().map(EpisodeArm::robot_type),
-        )),
-        Arc::new(joint_names.finish()),
-        Arc::new(StringArray::from(vec![None::<&str>; start.arms().len()])),
-        Arc::new(UInt32Array::from(vec![None; start.arms().len()])),
-        Arc::new(UInt32Array::from(vec![None; start.arms().len()])),
-        Arc::new(UInt32Array::from(vec![None; start.arms().len()])),
-    ];
-    RecordBatch::try_new(episode_streams_schema(), columns)
-        .map_err(|error| invalid(format!("building Spiral stream batch: {error}")))
 }
 
 /// Describe camera streams using the same keyed stream table as robot joints.
-pub(crate) fn video_streams_batch(rows: &[VideoStreamRow]) -> Result<RecordBatch, EpisodeError> {
-    let mut joint_names = ListBuilder::new(StringBuilder::new()).with_field(Arc::new(Field::new(
-        "item",
-        DataType::Utf8,
-        false,
-    )));
-    for _ in rows {
-        joint_names.append(false);
+pub(crate) trait VideoStreamRows {
+    fn batch(&self) -> Result<RecordBatch, EpisodeError>;
+}
+
+impl VideoStreamRows for [VideoStreamRow] {
+    fn batch(&self) -> Result<RecordBatch, EpisodeError> {
+        let rows = self;
+        let mut joint_names = ListBuilder::new(StringBuilder::new())
+            .with_field(Arc::new(Field::new("item", DataType::Utf8, false)));
+        for _ in rows {
+            joint_names.append(false);
+        }
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.episode_id.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.stream_id.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(rows.iter().map(|_| "video"))),
+            Arc::new(StringArray::from(vec![None::<&str>; rows.len()])),
+            Arc::new(joint_names.finish()),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.properties.camera_id.as_str()),
+            )),
+            Arc::new(UInt32Array::from_iter_values(
+                rows.iter().map(|row| row.properties.size.width()),
+            )),
+            Arc::new(UInt32Array::from_iter_values(
+                rows.iter().map(|row| row.properties.size.height()),
+            )),
+            Arc::new(UInt32Array::from_iter_values(
+                rows.iter().map(|row| row.properties.fps),
+            )),
+        ];
+        RecordBatch::try_new(episode_streams_schema(), columns)
+            .map_err(|error| invalid(format!("building Spiral video stream batch: {error}")))
     }
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from_iter_values(
-            rows.iter().map(|row| row.episode_id.as_str()),
-        )),
-        Arc::new(StringArray::from_iter_values(
-            rows.iter().map(|row| row.stream_id.as_str()),
-        )),
-        Arc::new(StringArray::from_iter_values(rows.iter().map(|_| "video"))),
-        Arc::new(StringArray::from(vec![None::<&str>; rows.len()])),
-        Arc::new(joint_names.finish()),
-        Arc::new(StringArray::from_iter_values(
-            rows.iter().map(|row| row.properties.camera_id.as_str()),
-        )),
-        Arc::new(UInt32Array::from_iter_values(
-            rows.iter().map(|row| row.properties.size.width()),
-        )),
-        Arc::new(UInt32Array::from_iter_values(
-            rows.iter().map(|row| row.properties.size.height()),
-        )),
-        Arc::new(UInt32Array::from_iter_values(
-            rows.iter().map(|row| row.properties.fps),
-        )),
-    ];
-    RecordBatch::try_new(episode_streams_schema(), columns)
-        .map_err(|error| invalid(format!("building Spiral video stream batch: {error}")))
 }
 
 /// Schema for [`crate::schema::Table::JointSamples`].
@@ -351,62 +358,66 @@ pub(crate) fn joint_samples_schema() -> SchemaRef {
 }
 
 /// Convert rows into a batch suitable for ADBC `bind_stream` ingestion.
-pub(crate) fn joint_samples_batch(rows: &[JointSampleRow]) -> Result<RecordBatch, EpisodeError> {
-    let mut state_position = ListBuilder::new(Float64Builder::new());
-    let mut action_position = ListBuilder::new(Float64Builder::new());
-    let mut raw_position = ListBuilder::new(Int64Builder::new()).with_field(Arc::new(Field::new(
-        "item",
-        DataType::Int64,
-        false,
-    )));
-    let mut velocity = ListBuilder::new(Float64Builder::new());
-    let mut effort = ListBuilder::new(Float64Builder::new());
+pub(crate) trait JointSampleRows {
+    fn batch(&self) -> Result<RecordBatch, EpisodeError>;
+}
 
-    for row in rows {
-        append_nullable_values(&mut state_position, Some(&row.state.position));
-        append_nullable_values(&mut action_position, row.action_position.as_deref());
-        for value in &row.state.raw_position {
-            raw_position.values().append_value(*value);
+impl JointSampleRows for [JointSampleRow] {
+    fn batch(&self) -> Result<RecordBatch, EpisodeError> {
+        let rows = self;
+        let mut state_position = ListBuilder::new(Float64Builder::new());
+        let mut action_position = ListBuilder::new(Float64Builder::new());
+        let mut raw_position = ListBuilder::new(Int64Builder::new())
+            .with_field(Arc::new(Field::new("item", DataType::Int64, false)));
+        let mut velocity = ListBuilder::new(Float64Builder::new());
+        let mut effort = ListBuilder::new(Float64Builder::new());
+
+        for row in rows {
+            append_nullable_values(&mut state_position, Some(&row.state.position));
+            append_nullable_values(&mut action_position, row.action_position.as_deref());
+            for value in &row.state.raw_position {
+                raw_position.values().append_value(*value);
+            }
+            raw_position.append(true);
+            append_nullable_values(&mut velocity, row.state.velocity.as_deref());
+            append_nullable_values(&mut effort, row.state.effort.as_deref());
         }
-        raw_position.append(true);
-        append_nullable_values(&mut velocity, row.state.velocity.as_deref());
-        append_nullable_values(&mut effort, row.state.effort.as_deref());
-    }
 
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from_iter_values(
-            rows.iter().map(|row| row.key.episode_id.as_str()),
-        )),
-        Arc::new(StringArray::from_iter_values(
-            rows.iter().map(|row| row.key.stream_id.as_str()),
-        )),
-        Arc::new(UInt64Array::from_iter_values(
-            rows.iter().map(|row| row.key.sample_index),
-        )),
-        Arc::new(UInt64Array::from_iter_values(
-            rows.iter().map(|row| row.key.episode_time_ns),
-        )),
-        Arc::new(BooleanArray::from(
-            rows.iter()
-                .map(|row| row.validity.state)
-                .collect::<Vec<_>>(),
-        )),
-        Arc::new(BooleanArray::from(
-            rows.iter()
-                .map(|row| row.validity.action)
-                .collect::<Vec<_>>(),
-        )),
-        Arc::new(state_position.finish()),
-        Arc::new(action_position.finish()),
-        Arc::new(raw_position.finish()),
-        Arc::new(velocity.finish()),
-        Arc::new(effort.finish()),
-        Arc::new(Float64Array::from_iter(
-            rows.iter().map(|row| row.follow_error_degrees),
-        )),
-    ];
-    RecordBatch::try_new(joint_samples_schema(), columns)
-        .map_err(|error| invalid(format!("building Spiral joint sample batch: {error}")))
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.key.episode_id.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.key.stream_id.as_str()),
+            )),
+            Arc::new(UInt64Array::from_iter_values(
+                rows.iter().map(|row| row.key.sample_index),
+            )),
+            Arc::new(UInt64Array::from_iter_values(
+                rows.iter().map(|row| row.key.episode_time_ns),
+            )),
+            Arc::new(BooleanArray::from(
+                rows.iter()
+                    .map(|row| row.validity.state)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(BooleanArray::from(
+                rows.iter()
+                    .map(|row| row.validity.action)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(state_position.finish()),
+            Arc::new(action_position.finish()),
+            Arc::new(raw_position.finish()),
+            Arc::new(velocity.finish()),
+            Arc::new(effort.finish()),
+            Arc::new(Float64Array::from_iter(
+                rows.iter().map(|row| row.follow_error_degrees),
+            )),
+        ];
+        RecordBatch::try_new(joint_samples_schema(), columns)
+            .map_err(|error| invalid(format!("building Spiral joint sample batch: {error}")))
+    }
 }
 
 fn append_nullable_values(
@@ -426,85 +437,92 @@ fn append_nullable_values(
     builder.append(true);
 }
 
-fn validate_sample(start: &EpisodeStart, sample: &Sample) -> Result<(), EpisodeError> {
-    if !sample.seconds().is_finite() || sample.seconds() < 0.0 {
-        return Err(invalid("sample time must be finite and non-negative"));
-    }
-    if sample
-        .follow_error_degrees()
-        .is_some_and(|value| !value.is_finite())
-    {
-        return Err(invalid("follow error must be finite when present"));
-    }
-    validate_outer_shape(
-        "normalized position",
-        start.arms().len(),
-        sample.normalized().len(),
-    )?;
-    validate_outer_shape("raw position", start.arms().len(), sample.raw().len())?;
-    if let Some(velocity) = &sample.velocity() {
-        validate_outer_shape("velocity", start.arms().len(), velocity.len())?;
-    }
-    if let Some(effort) = &sample.effort() {
-        validate_outer_shape("effort", start.arms().len(), effort.len())?;
-    }
-    if !sample.action().is_empty() {
-        validate_outer_shape("action", start.arms().len(), sample.action().len())?;
-    }
+trait EpisodeSample {
+    fn validate_for(&self, start: &EpisodeStart) -> Result<(), EpisodeError>;
+}
 
-    for (arm_index, arm) in start.arms().iter().enumerate() {
-        validate_joint_shape(
-            "normalized position",
-            arm.id(),
-            Shape {
-                expected: arm.joints().len(),
-                actual: sample.normalized()[arm_index].len(),
-            },
-        )?;
-        validate_joint_shape(
-            "raw position",
-            arm.id(),
-            Shape {
-                expected: arm.joints().len(),
-                actual: sample.raw()[arm_index].len(),
-            },
-        )?;
-        validate_finite_values("normalized position", &sample.normalized()[arm_index])?;
-        if let Some(action) = sample.action().get(arm_index).and_then(Option::as_ref) {
-            validate_joint_shape(
-                "action",
-                arm.id(),
-                Shape {
-                    expected: arm.joints().len(),
-                    actual: action.len(),
-                },
-            )?;
-            validate_finite_values("action", action)?;
+impl EpisodeSample for Sample {
+    fn validate_for(&self, start: &EpisodeStart) -> Result<(), EpisodeError> {
+        let sample = self;
+        if !self.seconds().is_finite() || self.seconds() < 0.0 {
+            return Err(invalid("sample time must be finite and non-negative"));
         }
+        if sample
+            .follow_error_degrees()
+            .is_some_and(|value| !value.is_finite())
+        {
+            return Err(invalid("follow error must be finite when present"));
+        }
+        validate_outer_shape(
+            "normalized position",
+            start.arms().len(),
+            sample.normalized().len(),
+        )?;
+        validate_outer_shape("raw position", start.arms().len(), sample.raw().len())?;
         if let Some(velocity) = &sample.velocity() {
-            validate_joint_shape(
-                "velocity",
-                arm.id(),
-                Shape {
-                    expected: arm.joints().len(),
-                    actual: velocity[arm_index].len(),
-                },
-            )?;
-            validate_finite_values("velocity", &velocity[arm_index])?;
+            validate_outer_shape("velocity", start.arms().len(), velocity.len())?;
         }
         if let Some(effort) = &sample.effort() {
+            validate_outer_shape("effort", start.arms().len(), effort.len())?;
+        }
+        if !sample.action().is_empty() {
+            validate_outer_shape("action", start.arms().len(), sample.action().len())?;
+        }
+
+        for (arm_index, arm) in start.arms().iter().enumerate() {
             validate_joint_shape(
-                "effort",
+                "normalized position",
                 arm.id(),
                 Shape {
                     expected: arm.joints().len(),
-                    actual: effort[arm_index].len(),
+                    actual: sample.normalized()[arm_index].len(),
                 },
             )?;
-            validate_finite_values("effort", &effort[arm_index])?;
+            validate_joint_shape(
+                "raw position",
+                arm.id(),
+                Shape {
+                    expected: arm.joints().len(),
+                    actual: sample.raw()[arm_index].len(),
+                },
+            )?;
+            validate_finite_values("normalized position", &sample.normalized()[arm_index])?;
+            if let Some(action) = sample.action().get(arm_index).and_then(Option::as_ref) {
+                validate_joint_shape(
+                    "action",
+                    arm.id(),
+                    Shape {
+                        expected: arm.joints().len(),
+                        actual: action.len(),
+                    },
+                )?;
+                validate_finite_values("action", action)?;
+            }
+            if let Some(velocity) = &sample.velocity() {
+                validate_joint_shape(
+                    "velocity",
+                    arm.id(),
+                    Shape {
+                        expected: arm.joints().len(),
+                        actual: velocity[arm_index].len(),
+                    },
+                )?;
+                validate_finite_values("velocity", &velocity[arm_index])?;
+            }
+            if let Some(effort) = &sample.effort() {
+                validate_joint_shape(
+                    "effort",
+                    arm.id(),
+                    Shape {
+                        expected: arm.joints().len(),
+                        actual: effort[arm_index].len(),
+                    },
+                )?;
+                validate_finite_values("effort", &effort[arm_index])?;
+            }
         }
+        Ok(())
     }
-    Ok(())
 }
 
 fn validate_outer_shape(label: &str, expected: usize, actual: usize) -> Result<(), EpisodeError> {
@@ -653,7 +671,7 @@ mod tests {
     fn arrow_batches_preserve_keys_lists_and_nullability() {
         let mut encoder = SpiralEpisodeEncoder::new(start()).unwrap();
         let rows = encoder.encode(&sample(0.25)).unwrap();
-        let batch = joint_samples_batch(&rows).unwrap();
+        let batch = rows.batch().unwrap();
 
         assert_eq!(batch.num_rows(), 2);
         let streams = batch
@@ -691,7 +709,7 @@ mod tests {
         let start = start();
         let completion = EpisodeCompletion::new(2.5, Vec::new(), Vec::new())
             .with_max_follow_error_degrees(Some(1.25));
-        let batch = episode_completion_batch(&start, &completion, 150).unwrap();
+        let batch = completion.episode_batch(&start, 150).unwrap();
 
         assert_eq!(batch.num_rows(), 1);
         let dataset = batch
@@ -719,7 +737,7 @@ mod tests {
 
     #[test]
     fn dataset_row_precedes_its_episode_reference() {
-        let batch = dataset_batch(&start()).unwrap();
+        let batch = start().dataset_batch().unwrap();
         assert_eq!(batch.num_rows(), 1);
         let id = batch
             .column_by_name("dataset_id")
@@ -732,7 +750,7 @@ mod tests {
 
     #[test]
     fn stream_rows_keep_joint_order() {
-        let batch = episode_streams_batch(&start()).unwrap();
+        let batch = start().streams_batch().unwrap();
         let joint_names = batch
             .column_by_name("joint_names")
             .unwrap()
@@ -747,11 +765,12 @@ mod tests {
 
     #[test]
     fn camera_rows_share_the_stream_catalog_without_fake_joints() {
-        let batch = video_streams_batch(&[VideoStreamRow::new(
+        let batch = [VideoStreamRow::new(
             "episode_000042".to_owned(),
             "follower.camera.wrist".to_owned(),
             VideoStreamProperties::new("camera-1".to_owned(), VideoSize::new(640, 480), 30),
-        )])
+        )]
+        .batch()
         .unwrap();
         assert_eq!(batch.num_rows(), 1);
         assert!(batch.column_by_name("joint_names").unwrap().is_null(0));

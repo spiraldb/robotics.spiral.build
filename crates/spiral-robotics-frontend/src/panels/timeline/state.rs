@@ -187,170 +187,175 @@ impl TimelinePreviewTargets {
 /// Apply a typed Timeline action after validating that it still names the
 /// controller's current subject. The controlled Timeline view never mutates
 /// transport or calls the backend directly.
-pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: TimelineAction) {
-    let TimelineActionContext {
-        session:
-            TimelineActionSession {
-                studio,
-                controller,
-                subject,
-            },
-        recorded:
-            RecordedTimelineActionState {
-                review_episode,
-                seek_context,
-                historical,
-            },
-        preview_targets:
-            TimelinePreviewTargets {
-                automatic: mut automatic_preview_target,
-                interactive: mut interactive_preview_target,
-            },
-    } = context;
-    let (mut historical_state, mut historical_revision, mut historical_cache) =
-        historical.into_signals();
-    let mut playhead = controller.playhead;
-    let mut follow_live = controller.follow_live;
-    let mut robot_sync_target = controller.robot_sync_target;
+impl TimelineActionContext {
+    pub(crate) fn dispatch(self, action: TimelineAction) {
+        let TimelineActionContext {
+            session:
+                TimelineActionSession {
+                    studio,
+                    controller,
+                    subject,
+                },
+            recorded:
+                RecordedTimelineActionState {
+                    review_episode,
+                    seek_context,
+                    historical,
+                },
+            preview_targets:
+                TimelinePreviewTargets {
+                    automatic: mut automatic_preview_target,
+                    interactive: mut interactive_preview_target,
+                },
+        } = self;
+        let (mut historical_state, mut historical_revision, mut historical_cache) =
+            historical.into_signals();
+        let mut playhead = controller.playhead;
+        let mut follow_live = controller.follow_live;
+        let mut robot_sync_target = controller.robot_sync_target;
 
-    match action {
-        TimelineAction::Capture { episode, action } => match action {
-            TimelineCaptureAction::Start if subject.activity() == Activity::Live => {
-                studio.start_recording();
-            }
-            TimelineCaptureAction::Pause | TimelineCaptureAction::Resume => {
-                if let Some(episode) = episode {
-                    let paused = action == TimelineCaptureAction::Pause;
-                    studio.set_recording_paused(&episode, paused);
-                    follow_live.set(!paused);
-                    if !paused {
-                        historical_cache.write().invalidate(&episode);
-                        historical_state.set(None);
+        match action {
+            TimelineAction::Capture { episode, action } => match action {
+                TimelineCaptureAction::Start if subject.activity() == Activity::Live => {
+                    studio.start_recording();
+                }
+                TimelineCaptureAction::Pause | TimelineCaptureAction::Resume => {
+                    if let Some(episode) = episode {
+                        let paused = action == TimelineCaptureAction::Pause;
+                        studio.set_recording_paused(&episode, paused);
+                        follow_live.set(!paused);
+                        if !paused {
+                            historical_cache.write().invalidate(&episode);
+                            historical_state.set(None);
+                        }
                     }
                 }
-            }
-            TimelineCaptureAction::Stop | TimelineCaptureAction::Discard => {
-                if let Some(episode) = episode {
-                    let keep = action == TimelineCaptureAction::Stop;
-                    let finished_episode = episode.clone();
-                    studio.stop_recording(
-                        &episode,
-                        RecordingCompletion::new(
-                            keep,
-                            EventHandler::new(
-                                move |_: spiral_robotics_api::recording::EpisodeSummary| {
-                                    historical_cache.write().invalidate(&finished_episode);
-                                    let next_revision = historical_revision.peek().wrapping_add(1);
-                                    historical_revision.set(next_revision);
-                                    historical_state.set(None);
-                                    automatic_preview_target.set(None);
-                                    interactive_preview_target.set(None);
-                                },
+                TimelineCaptureAction::Stop | TimelineCaptureAction::Discard => {
+                    if let Some(episode) = episode {
+                        let keep = action == TimelineCaptureAction::Stop;
+                        let finished_episode = episode.clone();
+                        studio.stop_recording(
+                            &episode,
+                            RecordingCompletion::new(
+                                keep,
+                                EventHandler::new(
+                                    move |_: spiral_robotics_api::recording::EpisodeSummary| {
+                                        historical_cache.write().invalidate(&finished_episode);
+                                        let next_revision =
+                                            historical_revision.peek().wrapping_add(1);
+                                        historical_revision.set(next_revision);
+                                        historical_state.set(None);
+                                        automatic_preview_target.set(None);
+                                        interactive_preview_target.set(None);
+                                    },
+                                ),
                             ),
-                        ),
-                    );
-                }
-            }
-            TimelineCaptureAction::Start => {
-                studio.report("Recording is only available in Live.");
-            }
-        },
-        TimelineAction::Preview { episode, action }
-            if subject.episode_id() == Some(episode.as_str()) =>
-        {
-            match action {
-                TimelinePreviewAction::Play => {
-                    controller.start_preview(episode, subject.duration_seconds());
-                    follow_live.set(false);
-                }
-                TimelinePreviewAction::Pause => controller.stop_preview(),
-            }
-        }
-        TimelineAction::RobotSyncTransport { episode, action }
-            if subject.episode_id() == Some(episode.as_str()) =>
-        {
-            match action {
-                TimelineRobotSyncAction::Start => {
-                    controller.stop_preview();
-                    follow_live.set(false);
-                    if let Some(summary) = subject.episode() {
-                        studio.start_replay(summary, playhead());
+                        );
                     }
                 }
-                TimelineRobotSyncAction::Pause => studio.set_replay_paused(&episode, true),
-                TimelineRobotSyncAction::Resume => studio.set_replay_paused(&episode, false),
+                TimelineCaptureAction::Start => {
+                    studio.report("Recording is only available in Live.");
+                }
+            },
+            TimelineAction::Preview { episode, action }
+                if subject.episode_id() == Some(episode.as_str()) =>
+            {
+                match action {
+                    TimelinePreviewAction::Play => {
+                        controller.start_preview(episode, subject.duration_seconds());
+                        follow_live.set(false);
+                    }
+                    TimelinePreviewAction::Pause => controller.stop_preview(),
+                }
             }
-        }
-        TimelineAction::Seek(request) if subject.target().as_ref() == Some(request.target()) => {
-            controller.stop_preview();
-            playhead.set(request.seconds());
-            if let Some(episode) = review_episode.clone() {
-                let target = (episode.clone(), historical_replay_slot(request.seconds()));
+            TimelineAction::RobotSyncTransport { episode, action }
+                if subject.episode_id() == Some(episode.as_str()) =>
+            {
+                match action {
+                    TimelineRobotSyncAction::Start => {
+                        controller.stop_preview();
+                        follow_live.set(false);
+                        if let Some(summary) = subject.episode() {
+                            studio.start_replay(summary, playhead());
+                        }
+                    }
+                    TimelineRobotSyncAction::Pause => studio.set_replay_paused(&episode, true),
+                    TimelineRobotSyncAction::Resume => studio.set_replay_paused(&episode, false),
+                }
+            }
+            TimelineAction::Seek(request)
+                if subject.target().as_ref() == Some(request.target()) =>
+            {
+                controller.stop_preview();
+                playhead.set(request.seconds());
+                if let Some(episode) = review_episode.clone() {
+                    let target = (episode.clone(), historical_replay_slot(request.seconds()));
+                    if request.committed()
+                        || interactive_preview_target.peek().as_ref() != Some(&target)
+                    {
+                        interactive_preview_target.set(Some(target));
+                        request_historical_preview(
+                            studio,
+                            HistoricalPreviewRequest::new(episode, None, request.seconds()),
+                            HistoricalPreviewSignals::new(
+                                historical_state,
+                                historical_revision,
+                                historical_cache,
+                            ),
+                        );
+                    }
+                }
                 if request.committed()
-                    || interactive_preview_target.peek().as_ref() != Some(&target)
+                    && request.moves_robot()
+                    && let Some((episode, robot, source_arm)) = seek_context
                 {
-                    interactive_preview_target.set(Some(target));
-                    request_historical_preview(
-                        studio,
-                        HistoricalPreviewRequest::new(episode, None, request.seconds()),
-                        HistoricalPreviewSignals::new(
-                            historical_state,
-                            historical_revision,
-                            historical_cache,
-                        ),
+                    studio.physical_seek(
+                        episode,
+                        TimelineSeekBody::new(robot, source_arm, request.seconds()),
                     );
                 }
             }
-            if request.committed()
-                && request.moves_robot()
-                && let Some((episode, robot, source_arm)) = seek_context
+            TimelineAction::SetFollowLive(next) => {
+                follow_live.set(next);
+                if next {
+                    controller.stop_preview();
+                    if let Some(recording) = studio.recording() {
+                        playhead.set(recording.elapsed_seconds());
+                    }
+                }
+            }
+            TimelineAction::SetRobotSync { target, enabled }
+                if subject.target().as_ref() == Some(&target) =>
             {
-                studio.physical_seek(
-                    episode,
-                    TimelineSeekBody::new(robot, source_arm, request.seconds()),
+                if enabled {
+                    controller.stop_preview();
+                    robot_sync_target.set(Some(target));
+                } else {
+                    robot_sync_target.set(None);
+                    if let Some(replay) = studio.replay()
+                        && subject.episode_id() == Some(replay.episode())
+                    {
+                        studio.stop_replay(replay.episode());
+                    }
+                }
+            }
+            TimelineAction::ReloadRecorded { episode }
+                if review_episode.as_deref() == Some(episode.as_str()) =>
+            {
+                historical_state.set(None);
+                historical_cache.write().invalidate(&episode);
+                request_historical_preview(
+                    studio,
+                    HistoricalPreviewRequest::new(episode, None, playhead()),
+                    HistoricalPreviewSignals::new(
+                        historical_state,
+                        historical_revision,
+                        historical_cache,
+                    ),
                 );
             }
+            _ => studio.report("The Timeline subject changed before the action was applied."),
         }
-        TimelineAction::SetFollowLive(next) => {
-            follow_live.set(next);
-            if next {
-                controller.stop_preview();
-                if let Some(recording) = studio.recording() {
-                    playhead.set(recording.elapsed_seconds());
-                }
-            }
-        }
-        TimelineAction::SetRobotSync { target, enabled }
-            if subject.target().as_ref() == Some(&target) =>
-        {
-            if enabled {
-                controller.stop_preview();
-                robot_sync_target.set(Some(target));
-            } else {
-                robot_sync_target.set(None);
-                if let Some(replay) = studio.replay()
-                    && subject.episode_id() == Some(replay.episode())
-                {
-                    studio.stop_replay(replay.episode());
-                }
-            }
-        }
-        TimelineAction::ReloadRecorded { episode }
-            if review_episode.as_deref() == Some(episode.as_str()) =>
-        {
-            historical_state.set(None);
-            historical_cache.write().invalidate(&episode);
-            request_historical_preview(
-                studio,
-                HistoricalPreviewRequest::new(episode, None, playhead()),
-                HistoricalPreviewSignals::new(
-                    historical_state,
-                    historical_revision,
-                    historical_cache,
-                ),
-            );
-        }
-        _ => studio.report("The Timeline subject changed before the action was applied."),
     }
 }
 

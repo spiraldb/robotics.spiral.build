@@ -17,6 +17,7 @@ use spiral_robotics_api::recording::{
 };
 use spiral_robotics_api::robots::MotorLimits;
 pub use spiral_robotics_core::MAX_EPISODE_FRAMES;
+use spiral_robotics_core::OperationError;
 use spiral_robotics_core::arm::SO101_JOINTS;
 use spiral_robotics_core::calibration::Calibration;
 use spiral_robotics_hardware::RecordingCompletion;
@@ -24,7 +25,7 @@ use spiral_robotics_hardware::RecordingWriter;
 pub use spiral_robotics_hardware::{ArmConditionSummary, EpisodeCheckpoint, Sample};
 
 use crate::adbc::ProjectStore;
-use crate::episode_schema::{SpiralEpisodeEncoder, episode_completion_batch, joint_samples_batch};
+use crate::episode_schema::{JointSampleRows, SpiralEpisodeEncoder};
 use crate::manager::{
     EpisodeReplacement, execute_update_sql, ingest_batch, run_query, table_exists,
 };
@@ -80,6 +81,16 @@ impl fmt::Display for EpisodeError {
 }
 
 impl std::error::Error for EpisodeError {}
+
+impl From<EpisodeError> for OperationError {
+    fn from(error: EpisodeError) -> Self {
+        let message = error.to_string();
+        match error {
+            EpisodeError::InvalidId(_) | EpisodeError::Invalid(_) => Self::InvalidInput(message),
+            EpisodeError::NotFound(_) => Self::NotFound(message),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ArmCondition {
@@ -799,7 +810,7 @@ impl EpisodeStore {
                 } else {
                     Vec::new()
                 };
-                let decoded = decode_samples(&start, rows)?;
+                let decoded = start.decode_samples(rows)?;
                 Ok(CompletedEpisode {
                     start,
                     samples: decoded,
@@ -811,11 +822,9 @@ impl EpisodeStore {
 
     pub fn inspection(&self, id: &str) -> Result<EpisodeInspection, EpisodeError> {
         let episode = self.completed(id)?;
-        let summary = summary(
-            &episode.start,
-            &episode.completion,
-            episode.samples.len() as u64,
-        );
+        let summary = episode
+            .start
+            .summary(&episode.completion, episode.samples.len() as u64);
         let videos = self.video_metadata_for_existing(id)?;
         Ok(EpisodeInspection {
             episode,
@@ -1013,7 +1022,7 @@ impl EpisodeStore {
                     .then_with(|| left_index.cmp(right_index))
             })
             .ok_or_else(|| EpisodeError::Invalid(format!("take {id:?} has no samples")))?;
-        Ok(render_timeline_sample(&episode.start, sample, frame as u64))
+        Ok(episode.start.timeline_sample(sample, frame as u64))
     }
 
     pub fn reserve_seek(&self, robot: &str) -> u64 {
@@ -1123,7 +1132,11 @@ impl EpisodeStore {
         self.project_store.run_blocking(move |connection| {
             if !table_exists(connection, &relation)? { return Ok(Vec::new()); }
             let result = run_query(connection, &format!("SELECT {}, {}, {}, {}, {}, {}, {}, {} FROM {relation} WHERE {} = {id} ORDER BY {}, {}", db::STREAM_ID, db::CAMERA_ID, db::WIDTH, db::HEIGHT, db::FPS, db::FRAMES, db::SEGMENT_INDEX, db::TIMELINE_OFFSET_NS, db::EPISODE_ID, db::STREAM_ID, db::SEGMENT_INDEX), 10_000)?;
-            result.into_rows().into_iter().map(|row| video_metadata_row(&row)).collect()
+            result
+                .into_rows()
+                .into_iter()
+                .map(|row| row.video_metadata())
+                .collect()
         }).map_err(EpisodeError::Invalid)
     }
 
@@ -1147,7 +1160,7 @@ impl EpisodeStore {
                 result
                     .into_rows()
                     .into_iter()
-                    .map(|row| summary_row(&row))
+                    .map(|row| row.episode_summary())
                     .collect()
             })
             .map_err(EpisodeError::Invalid)
@@ -1166,12 +1179,10 @@ impl EpisodeStore {
                 ingest_batch(
                     connection,
                     &relation,
-                    episode_completion_batch(
-                        &episode.start,
-                        &episode.completion,
-                        episode.samples.len() as u64,
-                    )
-                    .map_err(|error| error.to_string())?,
+                    episode
+                        .completion
+                        .episode_batch(&episode.start, episode.samples.len() as u64)
+                        .map_err(|error| error.to_string())?,
                 )
             })
             .map_err(EpisodeError::Invalid)
@@ -1201,7 +1212,7 @@ impl EpisodeStore {
                         ingest_batch(
                             connection,
                             &sample_relation,
-                            joint_samples_batch(&rows).map_err(|error| error.to_string())?,
+                            rows.batch().map_err(|error| error.to_string())?,
                         )?;
                         rows.clear();
                     }
@@ -1210,13 +1221,15 @@ impl EpisodeStore {
                     ingest_batch(
                         connection,
                         &sample_relation,
-                        joint_samples_batch(&rows).map_err(|error| error.to_string())?,
+                        rows.batch().map_err(|error| error.to_string())?,
                     )?;
                 }
                 ingest_batch(
                     connection,
                     &episode_relation,
-                    episode_completion_batch(&episode.start, &episode.completion, encoder.frames())
+                    episode
+                        .completion
+                        .episode_batch(&episode.start, encoder.frames())
                         .map_err(|error| error.to_string())?,
                 )
             })
@@ -1447,11 +1460,9 @@ impl EpisodeWriteSession for SpiralEpisodeWriter {
                 EpisodeReplacement::new(&namespace, &completed, &[]).save(connection)
             })
             .map_err(EpisodeError::Invalid)?;
-        Ok(summary(
-            &completed.start,
-            &completed.completion,
-            completed.samples.len() as u64,
-        ))
+        Ok(completed
+            .start
+            .summary(&completed.completion, completed.samples.len() as u64))
     }
 }
 
@@ -1538,83 +1549,160 @@ struct SampleBuilder {
     follow_error: Option<f64>,
 }
 
-fn decode_samples(
-    start: &EpisodeStart,
-    rows: Vec<JsonMap<String, JsonValue>>,
-) -> Result<Vec<Sample>, String> {
-    let mut frames = BTreeMap::<u64, SampleBuilder>::new();
-    for row in rows {
-        let index = json_u64(&row, db::SAMPLE_INDEX)?;
-        let stream = json_str(&row, db::STREAM_ID)?;
-        let arm = start
+impl EpisodeStart {
+    fn decode_samples(&self, rows: Vec<JsonMap<String, JsonValue>>) -> Result<Vec<Sample>, String> {
+        let start = self;
+        let mut frames = BTreeMap::<u64, SampleBuilder>::new();
+        for row in rows {
+            let index = row.u64(db::SAMPLE_INDEX)?;
+            let stream = row.string(db::STREAM_ID)?;
+            let arm = start
+                .arms
+                .iter()
+                .position(|arm| arm.id() == stream)
+                .ok_or_else(|| {
+                    format!(
+                        "episode {:?} has sample for unknown stream {stream:?}",
+                        start.id()
+                    )
+                })?;
+            let frame = frames.entry(index).or_insert_with(|| SampleBuilder {
+                normalized: vec![None; start.arms().len()],
+                raw: vec![None; start.arms().len()],
+                velocity: vec![None; start.arms().len()],
+                effort: vec![None; start.arms().len()],
+                action: vec![None; start.arms().len()],
+                ..SampleBuilder::default()
+            });
+            let seconds = row.u64(db::EPISODE_TIME_NS)? as f64 / 1_000_000_000.0;
+            if frame
+                .seconds
+                .is_some_and(|existing| existing.to_bits() != seconds.to_bits())
+            {
+                return Err(format!(
+                    "episode {:?} sample {index} has inconsistent clocks",
+                    start.id()
+                ));
+            }
+            frame.seconds = Some(seconds);
+            frame.normalized[arm] = Some(row.optional_f64s(db::STATE_POSITION)?);
+            frame.raw[arm] = Some(row.i64s(db::RAW_POSITION)?);
+            frame.velocity[arm] = row.optional_optional_f64s(db::VELOCITY)?;
+            frame.effort[arm] = row.optional_optional_f64s(db::EFFORT)?;
+            frame.action[arm] = row.optional_optional_f64s(db::ACTION_POSITION)?;
+            if let Some(error) = row
+                .get(db::FOLLOW_ERROR_DEGREES)
+                .and_then(JsonValue::as_f64)
+            {
+                frame.follow_error = Some(
+                    frame
+                        .follow_error
+                        .map_or(error, |current| current.max(error)),
+                );
+            }
+        }
+        frames
+            .into_iter()
+            .map(|(index, frame)| {
+                let location = SampleLocation {
+                    episode_id: start.id(),
+                    sample_index: index,
+                };
+                let normalized = location.require(frame.normalized, "state")?;
+                let raw = location.require(frame.raw, "raw state")?;
+                let velocity = location.all_or_none(frame.velocity, "velocity")?;
+                let effort = location.all_or_none(frame.effort, "effort")?;
+                Ok(Sample::new(
+                    frame.seconds.ok_or_else(|| {
+                        format!("episode {:?} sample {index} has no clock", start.id())
+                    })?,
+                    normalized,
+                    raw,
+                )
+                .with_velocity(velocity)
+                .with_effort(effort)
+                .with_action(frame.action)
+                .with_follow_error_degrees(frame.follow_error))
+            })
+            .collect()
+    }
+
+    fn summary(&self, completion: &EpisodeCompletion, frames: u64) -> EpisodeSummary {
+        let start = self;
+        let identity =
+            EpisodeSummaryIdentity::new(start.id(), start.dataset_id(), start.arms().to_vec())
+                .with_source(start.source());
+        let timeline =
+            EpisodeTimeline::new(frames, completion.duration_seconds(), start.sample_hz())
+                .with_recording_gaps(completion.recording_gaps().to_vec())
+                .with_started_ms(start.started_ms());
+        let assessment = EpisodeAssessment::new(
+            completion.discarded(),
+            completion.max_follow_error_degrees(),
+            None,
+        );
+        EpisodeSummary::new(identity, timeline, assessment)
+    }
+
+    fn timeline_sample(&self, sample: &Sample, frame: u64) -> TimelineSample {
+        let start = self;
+        let arms = start
             .arms
             .iter()
-            .position(|arm| arm.id() == stream)
-            .ok_or_else(|| {
-                format!(
-                    "episode {:?} has sample for unknown stream {stream:?}",
-                    start.id()
-                )
-            })?;
-        let frame = frames.entry(index).or_insert_with(|| SampleBuilder {
-            normalized: vec![None; start.arms().len()],
-            raw: vec![None; start.arms().len()],
-            velocity: vec![None; start.arms().len()],
-            effort: vec![None; start.arms().len()],
-            action: vec![None; start.arms().len()],
-            ..SampleBuilder::default()
-        });
-        let seconds = json_u64(&row, db::EPISODE_TIME_NS)? as f64 / 1_000_000_000.0;
-        if frame
-            .seconds
-            .is_some_and(|existing| existing.to_bits() != seconds.to_bits())
-        {
-            return Err(format!(
-                "episode {:?} sample {index} has inconsistent clocks",
-                start.id()
-            ));
-        }
-        frame.seconds = Some(seconds);
-        frame.normalized[arm] = Some(json_optional_f64s(&row, db::STATE_POSITION)?);
-        frame.raw[arm] = Some(json_i64s(&row, db::RAW_POSITION)?);
-        frame.velocity[arm] = json_optional_optional_f64s(&row, db::VELOCITY)?;
-        frame.effort[arm] = json_optional_optional_f64s(&row, db::EFFORT)?;
-        frame.action[arm] = json_optional_optional_f64s(&row, db::ACTION_POSITION)?;
-        if let Some(error) = row
-            .get(db::FOLLOW_ERROR_DEGREES)
-            .and_then(JsonValue::as_f64)
-        {
-            frame.follow_error = Some(
-                frame
-                    .follow_error
-                    .map_or(error, |current| current.max(error)),
-            );
+            .enumerate()
+            .map(|(arm_index, arm)| {
+                let values = |values: Option<&[Vec<Option<f64>>]>| {
+                    values.map(|values| {
+                        arm.joints()
+                            .iter()
+                            .enumerate()
+                            .map(|(joint_index, joint)| {
+                                (joint.clone(), values[arm_index][joint_index])
+                            })
+                            .collect()
+                    })
+                };
+                TimelineArmSample {
+                    arm: arm.id().to_owned(),
+                    normalized: arm
+                        .joints()
+                        .iter()
+                        .enumerate()
+                        .map(|(joint_index, joint)| {
+                            (joint.clone(), sample.normalized()[arm_index][joint_index])
+                        })
+                        .collect(),
+                    raw: arm
+                        .joints()
+                        .iter()
+                        .enumerate()
+                        .map(|(joint_index, joint)| {
+                            (joint.clone(), sample.raw()[arm_index][joint_index])
+                        })
+                        .collect(),
+                    velocity: values(sample.velocity()),
+                    effort: values(sample.effort()),
+                    action: sample
+                        .action()
+                        .get(arm_index)
+                        .and_then(Option::as_ref)
+                        .map(|values| {
+                            arm.joints()
+                                .iter()
+                                .enumerate()
+                                .map(|(joint_index, joint)| (joint.clone(), values[joint_index]))
+                                .collect()
+                        }),
+                }
+            })
+            .collect();
+        TimelineSample {
+            frame,
+            seconds: sample.seconds(),
+            follow_error_degrees: sample.follow_error_degrees(),
+            arms,
         }
     }
-    frames
-        .into_iter()
-        .map(|(index, frame)| {
-            let location = SampleLocation {
-                episode_id: start.id(),
-                sample_index: index,
-            };
-            let normalized = location.require(frame.normalized, "state")?;
-            let raw = location.require(frame.raw, "raw state")?;
-            let velocity = location.all_or_none(frame.velocity, "velocity")?;
-            let effort = location.all_or_none(frame.effort, "effort")?;
-            Ok(Sample::new(
-                frame.seconds.ok_or_else(|| {
-                    format!("episode {:?} sample {index} has no clock", start.id())
-                })?,
-                normalized,
-                raw,
-            )
-            .with_velocity(velocity)
-            .with_effort(effort)
-            .with_action(frame.action)
-            .with_follow_error_degrees(frame.follow_error))
-        })
-        .collect()
 }
 
 #[derive(Clone, Copy)]
@@ -1647,159 +1735,97 @@ impl SampleLocation<'_> {
     }
 }
 
-fn summary_row(row: &JsonMap<String, JsonValue>) -> Result<EpisodeSummary, String> {
-    let metadata = row
-        .get(db::METADATA_JSON)
-        .and_then(JsonValue::as_str)
-        .ok_or_else(|| "episode row has no metadata_json".to_owned())?;
-    let (start, completion): (EpisodeStart, EpisodeCompletion) =
-        serde_json::from_str(metadata).map_err(|error| error.to_string())?;
-    Ok(summary(&start, &completion, json_u64(row, db::FRAMES)?))
+trait EpisodeJsonRow {
+    fn string(&self, name: &str) -> Result<&str, String>;
+    fn u64(&self, name: &str) -> Result<u64, String>;
+    fn i64s(&self, name: &str) -> Result<Vec<i64>, String>;
+    fn optional_f64s(&self, name: &str) -> Result<Vec<Option<f64>>, String>;
+    fn optional_optional_f64s(&self, name: &str) -> Result<Option<Vec<Option<f64>>>, String>;
+    fn episode_summary(&self) -> Result<EpisodeSummary, String>;
+    fn video_metadata(&self) -> Result<VideoAssetMetadata, String>;
 }
 
-fn summary(start: &EpisodeStart, completion: &EpisodeCompletion, frames: u64) -> EpisodeSummary {
-    let identity =
-        EpisodeSummaryIdentity::new(start.id(), start.dataset_id(), start.arms().to_vec())
-            .with_source(start.source());
-    let timeline = EpisodeTimeline::new(frames, completion.duration_seconds(), start.sample_hz())
-        .with_recording_gaps(completion.recording_gaps().to_vec())
-        .with_started_ms(start.started_ms());
-    let assessment = EpisodeAssessment::new(
-        completion.discarded(),
-        completion.max_follow_error_degrees(),
-        None,
-    );
-    EpisodeSummary::new(identity, timeline, assessment)
-}
-
-fn render_timeline_sample(start: &EpisodeStart, sample: &Sample, frame: u64) -> TimelineSample {
-    let arms = start
-        .arms
-        .iter()
-        .enumerate()
-        .map(|(arm_index, arm)| {
-            let values = |values: Option<&[Vec<Option<f64>>]>| {
-                values.map(|values| {
-                    arm.joints()
-                        .iter()
-                        .enumerate()
-                        .map(|(joint_index, joint)| (joint.clone(), values[arm_index][joint_index]))
-                        .collect()
-                })
-            };
-            TimelineArmSample {
-                arm: arm.id().to_owned(),
-                normalized: arm
-                    .joints()
-                    .iter()
-                    .enumerate()
-                    .map(|(joint_index, joint)| {
-                        (joint.clone(), sample.normalized()[arm_index][joint_index])
-                    })
-                    .collect(),
-                raw: arm
-                    .joints()
-                    .iter()
-                    .enumerate()
-                    .map(|(joint_index, joint)| {
-                        (joint.clone(), sample.raw()[arm_index][joint_index])
-                    })
-                    .collect(),
-                velocity: values(sample.velocity()),
-                effort: values(sample.effort()),
-                action: sample
-                    .action()
-                    .get(arm_index)
-                    .and_then(Option::as_ref)
-                    .map(|values| {
-                        arm.joints()
-                            .iter()
-                            .enumerate()
-                            .map(|(joint_index, joint)| (joint.clone(), values[joint_index]))
-                            .collect()
-                    }),
-            }
-        })
-        .collect();
-    TimelineSample {
-        frame,
-        seconds: sample.seconds(),
-        follow_error_degrees: sample.follow_error_degrees(),
-        arms,
+impl EpisodeJsonRow for JsonMap<String, JsonValue> {
+    fn string(&self, name: &str) -> Result<&str, String> {
+        self.get(name)
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| format!("row has no string {name}"))
     }
-}
 
-fn video_metadata_row(row: &JsonMap<String, JsonValue>) -> Result<VideoAssetMetadata, String> {
-    let fps = json_u64(row, db::FPS)? as u32;
-    let frames = json_u64(row, db::FRAMES)?;
-    let timing = VideoTiming::new(fps, frames);
-    Ok(VideoAssetMetadata::new(
-        json_str(row, db::STREAM_ID)?.to_owned(),
-        json_str(row, db::CAMERA_ID)?.to_owned(),
-        timing.duration_seconds(),
-    )
-    .with_size(VideoSize::new(
-        json_u64(row, db::WIDTH)? as u32,
-        json_u64(row, db::HEIGHT)? as u32,
-    ))
-    .with_timing(timing)
-    .with_segment(VideoSegment::new(
-        json_u64(row, db::SEGMENT_INDEX)? as u32,
-        row.get(db::TIMELINE_OFFSET_NS)
+    fn u64(&self, name: &str) -> Result<u64, String> {
+        self.get(name)
             .and_then(JsonValue::as_u64)
-            .map(|value| value as f64 / 1_000_000_000.0),
-    )))
-}
+            .ok_or_else(|| format!("row has no unsigned {name}"))
+    }
 
-fn json_str<'a>(row: &'a JsonMap<String, JsonValue>, name: &str) -> Result<&'a str, String> {
-    row.get(name)
-        .and_then(JsonValue::as_str)
-        .ok_or_else(|| format!("row has no string {name}"))
-}
-fn json_u64(row: &JsonMap<String, JsonValue>, name: &str) -> Result<u64, String> {
-    row.get(name)
-        .and_then(JsonValue::as_u64)
-        .ok_or_else(|| format!("row has no unsigned {name}"))
-}
-fn json_i64s(row: &JsonMap<String, JsonValue>, name: &str) -> Result<Vec<i64>, String> {
-    row.get(name)
-        .and_then(JsonValue::as_array)
-        .ok_or_else(|| format!("row has no array {name}"))?
-        .iter()
-        .map(|value| {
-            value
-                .as_i64()
-                .ok_or_else(|| format!("{name} contains a non-integer"))
-        })
-        .collect()
-}
-fn json_optional_f64s(
-    row: &JsonMap<String, JsonValue>,
-    name: &str,
-) -> Result<Vec<Option<f64>>, String> {
-    row.get(name)
-        .and_then(JsonValue::as_array)
-        .ok_or_else(|| format!("row has no array {name}"))?
-        .iter()
-        .map(|value| {
-            if value.is_null() {
-                Ok(None)
-            } else {
+    fn i64s(&self, name: &str) -> Result<Vec<i64>, String> {
+        self.get(name)
+            .and_then(JsonValue::as_array)
+            .ok_or_else(|| format!("row has no array {name}"))?
+            .iter()
+            .map(|value| {
                 value
-                    .as_f64()
-                    .map(Some)
-                    .ok_or_else(|| format!("{name} contains a non-number"))
-            }
-        })
-        .collect()
-}
-fn json_optional_optional_f64s(
-    row: &JsonMap<String, JsonValue>,
-    name: &str,
-) -> Result<Option<Vec<Option<f64>>>, String> {
-    match row.get(name) {
-        None | Some(JsonValue::Null) => Ok(None),
-        Some(_) => json_optional_f64s(row, name).map(Some),
+                    .as_i64()
+                    .ok_or_else(|| format!("{name} contains a non-integer"))
+            })
+            .collect()
+    }
+
+    fn optional_f64s(&self, name: &str) -> Result<Vec<Option<f64>>, String> {
+        self.get(name)
+            .and_then(JsonValue::as_array)
+            .ok_or_else(|| format!("row has no array {name}"))?
+            .iter()
+            .map(|value| {
+                if value.is_null() {
+                    Ok(None)
+                } else {
+                    value
+                        .as_f64()
+                        .map(Some)
+                        .ok_or_else(|| format!("{name} contains a non-number"))
+                }
+            })
+            .collect()
+    }
+
+    fn optional_optional_f64s(&self, name: &str) -> Result<Option<Vec<Option<f64>>>, String> {
+        match self.get(name) {
+            None | Some(JsonValue::Null) => Ok(None),
+            Some(_) => self.optional_f64s(name).map(Some),
+        }
+    }
+
+    fn episode_summary(&self) -> Result<EpisodeSummary, String> {
+        let metadata = self
+            .get(db::METADATA_JSON)
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| "episode row has no metadata_json".to_owned())?;
+        let (start, completion): (EpisodeStart, EpisodeCompletion) =
+            serde_json::from_str(metadata).map_err(|error| error.to_string())?;
+        Ok(start.summary(&completion, self.u64(db::FRAMES)?))
+    }
+
+    fn video_metadata(&self) -> Result<VideoAssetMetadata, String> {
+        let fps = self.u64(db::FPS)? as u32;
+        let frames = self.u64(db::FRAMES)?;
+        let timing = VideoTiming::new(fps, frames);
+        Ok(VideoAssetMetadata::new(
+            self.string(db::STREAM_ID)?.to_owned(),
+            self.string(db::CAMERA_ID)?.to_owned(),
+            timing.duration_seconds(),
+        )
+        .with_size(VideoSize::new(
+            self.u64(db::WIDTH)? as u32,
+            self.u64(db::HEIGHT)? as u32,
+        ))
+        .with_timing(timing)
+        .with_segment(VideoSegment::new(
+            self.u64(db::SEGMENT_INDEX)? as u32,
+            self.get(db::TIMELINE_OFFSET_NS)
+                .and_then(JsonValue::as_u64)
+                .map(|value| value as f64 / 1_000_000_000.0),
+        )))
     }
 }
 

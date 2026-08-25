@@ -46,10 +46,13 @@ use spiral_robotics_api::robots::{
     ModeStatus, MotorElectricalReadings, MotorFault, MotorLimits, MotorVoltageRange, PortSettings,
     RobotTelemetry, TelemetryFrame,
 };
+#[cfg(test)]
 use spiral_robotics_core::arm;
+#[cfg(test)]
+use spiral_robotics_core::calibration::MotorDirection;
 use spiral_robotics_core::calibration::{
-    Calibration, CalibrationError, CalibrationInput, MotorCalibration, MotorDirection,
-    MotorRangeTracker, MotorSpec, MotorSpecifications,
+    Calibration, CalibrationError, CalibrationInput, MotorRangeTracker, MotorSpec,
+    MotorSpecifications,
 };
 use tokio::sync::{oneshot, watch};
 
@@ -1329,7 +1332,9 @@ impl ConnectedRobot {
             .filter_map(|(name, target)| {
                 let motor = calibration.motors().get(name)?;
                 let measured = self.motion.positions.get(name).copied()?;
-                let error = (joint_degrees(motor, measured) - joint_degrees(motor, *target)).abs();
+                let error = (motor.degrees_from_center(measured)
+                    - motor.degrees_from_center(*target))
+                .abs();
                 error.is_finite().then_some(error)
             })
             .reduce(f64::max)
@@ -1362,14 +1367,14 @@ impl ConnectedRobot {
                     .flatten();
                 let kinematics = JointKinematics::new(
                     raw,
-                    motor.map(|motor| joint_degrees(motor, raw)),
+                    motor.map(|motor| motor.degrees_from_center(raw)),
                     motor.and_then(|motor| motor.normalize_raw(raw).ok()),
                 )
                 .with_raw_targets(goal_raw, target_raw)
                 .with_calibrated_target(
                     target_raw
                         .zip(motor)
-                        .map(|(target, motor)| joint_degrees(motor, target)),
+                        .map(|(target, motor)| motor.degrees_from_center(target)),
                     motor.map(|motor| {
                         JointRange::new(
                             motor.reading().range_min(),
@@ -1424,15 +1429,6 @@ impl ConnectedRobot {
     }
 }
 
-/// Degrees from a joint's calibrated center, in the joint's own direction.
-fn joint_degrees(motor: &MotorCalibration, raw: i64) -> f64 {
-    let degrees = arm::counts_to_degrees(raw.saturating_sub(motor.reading().center()));
-    match motor.direction() {
-        MotorDirection::Normal => degrees,
-        MotorDirection::Reversed => -degrees,
-    }
-}
-
 /// Translate the delivery contract into the framework-neutral ownership model.
 impl From<&ModeSelection> for ControlMode {
     fn from(selection: &ModeSelection) -> Self {
@@ -1472,10 +1468,12 @@ impl From<ControlMode> for ModeSelection {
     }
 }
 
-const fn replay_policy_state(phase: ReplayPhase) -> ReplayPolicyState {
-    match phase {
-        ReplayPhase::Seeking => ReplayPolicyState::Seeking,
-        ReplayPhase::Playing => ReplayPolicyState::Playing,
+impl From<ReplayPhase> for ReplayPolicyState {
+    fn from(phase: ReplayPhase) -> Self {
+        match phase {
+            ReplayPhase::Seeking => Self::Seeking,
+            ReplayPhase::Playing => Self::Playing,
+        }
     }
 }
 
@@ -2702,7 +2700,7 @@ impl Controller {
         let (robot_id, episode) = (replay.robot.clone(), replay.episode.clone());
 
         if replay.timing.paused {
-            let decision = replay_policy_state(replay.phase)
+            let decision = ReplayPolicyState::from(replay.phase)
                 .decide(ReplayPolicyEvent::Paused)
                 .expect("pause is legal in every replay phase");
             debug_assert_eq!(decision, ReplayPolicyDecision::Keep);
@@ -2710,7 +2708,7 @@ impl Controller {
         }
 
         let Some(robot) = self.robots.get(&robot_id) else {
-            let decision = replay_policy_state(replay.phase)
+            let decision = ReplayPolicyState::from(replay.phase)
                 .decide(ReplayPolicyEvent::Failed(
                     "stopped Replay: the arm is no longer connected".to_owned(),
                 ))
@@ -2719,7 +2717,7 @@ impl Controller {
             return;
         };
         let Some(calibration) = robot.spec.calibration.clone() else {
-            let decision = replay_policy_state(replay.phase)
+            let decision = ReplayPolicyState::from(replay.phase)
                 .decide(ReplayPolicyEvent::Failed(format!(
                     "stopped Replay: robot {robot_id:?} is no longer calibrated"
                 )))
@@ -2826,7 +2824,7 @@ impl Controller {
                     .operations
                     .replay
                     .as_ref()
-                    .map(|replay| replay_policy_state(replay.phase))
+                    .map(|replay| ReplayPolicyState::from(replay.phase))
                     .unwrap_or(ReplayPolicyState::Playing);
                 let decision = state
                     .decide(ReplayPolicyEvent::Failed(format!(

@@ -112,7 +112,7 @@ async fn import_huggingface_dataset(
         lease: state.catalog_lease().clone(),
         token,
     };
-    require_import_idle(&state, "a dataset")?;
+    state.require_import_idle("a dataset")?;
     let storage = state.storage().clone();
     tokio::task::spawn_blocking(move || storage.import_huggingface_dataset(inspection))
         .await
@@ -182,8 +182,8 @@ async fn import_project(
             "choose a .spiral-project file to import",
         ));
     }
-    require_project_import_idle(&state)?;
-    disconnect_all_robots(&state).await?;
+    state.require_project_import_idle()?;
+    state.disconnect_all_robots().await?;
     let storage = state.storage().clone();
     let summary = tokio::task::spawn_blocking(move || storage.import_project_bundle(&body))
         .await
@@ -270,7 +270,7 @@ async fn import_episodes(
         lease: state.catalog_lease().clone(),
         token,
     };
-    require_import_idle(&state, "episodes")?;
+    state.require_import_idle("episodes")?;
     if body.is_empty() {
         return Err(Failure::bad_request(
             "choose a .spiral-episodes file to import",
@@ -286,69 +286,71 @@ async fn import_episodes(
     Ok(Json(summary))
 }
 
-fn require_import_idle(state: &AppState, subject: &str) -> Result<(), Failure> {
-    let hardware = state.hardware().state();
-    let connected = hardware
-        .connections()
-        .values()
-        .any(|connection| connection.connected());
-    if import_activity_is_busy(state, &hardware) || connected {
-        return Err(Failure::conflict(format!(
-            "Disconnect robots and stop recording, replay, rollout, training, Workflow, or the Workflow Assistant before importing {subject}"
-        )));
+impl AppState {
+    fn require_import_idle(&self, subject: &str) -> Result<(), Failure> {
+        let hardware = self.hardware().state();
+        let connected = hardware
+            .connections()
+            .values()
+            .any(|connection| connection.connected());
+        if self.import_activity_is_busy(&hardware) || connected {
+            return Err(Failure::conflict(format!(
+                "Disconnect robots and stop recording, replay, rollout, training, Workflow, or the Workflow Assistant before importing {subject}"
+            )));
+        }
+        Ok(())
     }
-    Ok(())
-}
 
-fn require_project_import_idle(state: &AppState) -> Result<(), Failure> {
-    let hardware = state.hardware().state();
-    if import_activity_is_busy(state, &hardware) {
-        return Err(Failure::conflict(
-            "Stop recording, replay, rollout, training, Workflow, or the Workflow Assistant before importing a project",
-        ));
+    fn require_project_import_idle(&self) -> Result<(), Failure> {
+        let hardware = self.hardware().state();
+        if self.import_activity_is_busy(&hardware) {
+            return Err(Failure::conflict(
+                "Stop recording, replay, rollout, training, Workflow, or the Workflow Assistant before importing a project",
+            ));
+        }
+        Ok(())
     }
-    Ok(())
-}
 
-fn import_activity_is_busy(state: &AppState, hardware: &HardwareState) -> bool {
-    hardware.telemetry().recording().is_some()
-        || !matches!(hardware.mode().selection(), ModeSelection::Idle)
-        || state
-            .training()
-            .snapshot()
-            .runs()
+    fn import_activity_is_busy(&self, hardware: &HardwareState) -> bool {
+        hardware.telemetry().recording().is_some()
+            || !matches!(hardware.mode().selection(), ModeSelection::Idle)
+            || self
+                .training()
+                .snapshot()
+                .runs()
+                .iter()
+                .any(|run| run.phase().active())
+            || matches!(
+                rollout_application::snapshot(&super::training_rollout::RolloutHttpAdapter::new(
+                    self.rollout().clone(),
+                ))
+                .phase(),
+                CapabilityRolloutPhase::Loading
+                    | CapabilityRolloutPhase::WarmingUp
+                    | CapabilityRolloutPhase::Running
+                    | CapabilityRolloutPhase::Stopping
+            )
+            || self.workflow().is_active()
+            || self.workflow_agent().is_active()
+    }
+
+    async fn disconnect_all_robots(&self) -> Result<(), Failure> {
+        let hardware = self.hardware().state();
+        let robot_ids = hardware
+            .connections()
             .iter()
-            .any(|run| run.phase().active())
-        || matches!(
-            rollout_application::snapshot(&super::training_rollout::RolloutHttpAdapter::new(
-                state.rollout().clone(),
-            ))
-            .phase(),
-            CapabilityRolloutPhase::Loading
-                | CapabilityRolloutPhase::WarmingUp
-                | CapabilityRolloutPhase::Running
-                | CapabilityRolloutPhase::Stopping
-        )
-        || state.workflow().is_active()
-        || state.workflow_agent().is_active()
-}
-
-async fn disconnect_all_robots(state: &AppState) -> Result<(), Failure> {
-    let hardware = state.hardware().state();
-    let robot_ids = hardware
-        .connections()
-        .iter()
-        .filter(|(_, connection)| connection.connected())
-        .map(|(robot, _)| robot.clone())
-        .collect::<Vec<_>>();
-    for robot in robot_ids {
-        state.hardware().disconnect(&robot).await.map_err(|error| {
+            .filter(|(_, connection)| connection.connected())
+            .map(|(robot, _)| robot.clone())
+            .collect::<Vec<_>>();
+        for robot in robot_ids {
+            self.hardware().disconnect(&robot).await.map_err(|error| {
             Failure::conflict(format!(
                 "Could not safely disconnect robot {robot:?} before importing the project: {error}"
             ))
         })?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 pub(super) struct DataHttpAdapter<'a> {
@@ -480,7 +482,7 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
             .storage()
             .query(command.statement(), command.max_rows())
             .await
-            .map(capability_query_result)
+            .map(Into::into)
             .map_err(OperationError::External)
     }
 
@@ -564,142 +566,152 @@ impl<'a> DataSettingsOverrides<'a> {
     }
 }
 
-pub(super) fn contract_data_settings(settings: DataSettingsSnapshot) -> DataSettings {
-    DataSettings::new(
-        ContractSpiralSettings::new(
-            settings.spiral().endpoint(),
-            settings.spiral().spfs_endpoint(),
-            settings.spiral().project_id(),
+impl From<DataSettingsSnapshot> for DataSettings {
+    fn from(settings: DataSettingsSnapshot) -> Self {
+        Self::new(
+            ContractSpiralSettings::new(
+                settings.spiral().endpoint(),
+                settings.spiral().spfs_endpoint(),
+                settings.spiral().project_id(),
+            )
+            .with_client(
+                settings.spiral().client_id(),
+                settings.spiral().client_secret_configured(),
+            )
+            .with_namespace(settings.spiral().namespace())
+            .with_endpoint_restart_required(settings.spiral().endpoint_restart_required()),
+            spiral_robotics_api::settings::TrainingRuntimeSettings::new(
+                settings.training_endpoint(),
+            ),
+            VideoSettings::new(settings.video_enabled()),
         )
-        .with_client(
-            settings.spiral().client_id(),
-            settings.spiral().client_secret_configured(),
-        )
-        .with_namespace(settings.spiral().namespace())
-        .with_endpoint_restart_required(settings.spiral().endpoint_restart_required()),
-        spiral_robotics_api::settings::TrainingRuntimeSettings::new(settings.training_endpoint()),
-        VideoSettings::new(settings.video_enabled()),
-    )
-}
-
-pub(super) fn capability_query_result(result: SpiralQueryResponse) -> CapabilityQueryResult {
-    let truncated = result.truncated();
-    let elapsed_ms = result.elapsed_ms();
-    let columns = result
-        .columns()
-        .iter()
-        .map(|column| {
-            CapabilityQueryColumn::new(column.name(), column.data_type(), column.nullable())
-                .with_semantic_type(column.semantic_type().map(str::to_owned))
-        })
-        .collect();
-    let rows = result
-        .into_rows()
-        .into_iter()
-        .map(|row| {
-            row.into_iter()
-                .map(|(name, value)| (name, capability_query_value(value)))
-                .collect()
-        })
-        .collect();
-    CapabilityQueryResult::new(columns, rows).with_status(truncated, elapsed_ms)
-}
-
-fn capability_query_value(value: Value) -> QueryValue {
-    match value {
-        Value::Null => QueryValue::Null,
-        Value::Bool(value) => QueryValue::Bool(value),
-        Value::Number(value) => value.as_i64().map_or_else(
-            || {
-                value.as_u64().map_or_else(
-                    || QueryValue::Float(value.as_f64().unwrap_or(f64::NAN)),
-                    QueryValue::Unsigned,
-                )
-            },
-            QueryValue::Signed,
-        ),
-        Value::String(value) => QueryValue::String(value),
-        Value::Array(values) => {
-            QueryValue::Array(values.into_iter().map(capability_query_value).collect())
-        }
-        Value::Object(values) => QueryValue::Object(
-            values
-                .into_iter()
-                .map(|(name, value)| (name, capability_query_value(value)))
-                .collect(),
-        ),
     }
 }
 
-fn contract_query_value(value: QueryValue) -> Value {
-    match value {
-        QueryValue::Null => Value::Null,
-        QueryValue::Bool(value) => Value::Bool(value),
-        QueryValue::Signed(value) => Value::from(value),
-        QueryValue::Unsigned(value) => Value::from(value),
-        QueryValue::Float(value) => Value::from(value),
-        QueryValue::String(value) => Value::String(value),
-        QueryValue::Array(values) => {
-            Value::Array(values.into_iter().map(contract_query_value).collect())
-        }
-        QueryValue::Object(values) => Value::Object(
-            values
-                .into_iter()
-                .map(|(name, value)| (name, contract_query_value(value)))
-                .collect(),
-        ),
-    }
-}
-
-pub(super) fn contract_query_result(result: CapabilityQueryResult) -> SpiralQueryResponse {
-    let (columns, rows, truncated, elapsed_ms) = result.into_parts();
-    SpiralQueryResponse::new(
-        columns
-            .into_iter()
+impl From<SpiralQueryResponse> for CapabilityQueryResult {
+    fn from(result: SpiralQueryResponse) -> Self {
+        let truncated = result.truncated();
+        let elapsed_ms = result.elapsed_ms();
+        let columns = result
+            .columns()
+            .iter()
             .map(|column| {
-                let (name, data_type, nullable, semantic_type) = column.into_parts();
-                spiral_robotics_api::relations::QueryColumn::new(name, data_type, nullable)
-                    .with_semantic_type(semantic_type)
+                CapabilityQueryColumn::new(column.name(), column.data_type(), column.nullable())
+                    .with_semantic_type(column.semantic_type().map(str::to_owned))
             })
-            .collect(),
-        rows.into_iter()
+            .collect();
+        let rows = result
+            .into_rows()
+            .into_iter()
             .map(|row| {
                 row.into_iter()
-                    .map(|(name, value)| (name, contract_query_value(value)))
+                    .map(|(name, value)| (name, value.into()))
                     .collect()
             })
-            .collect(),
-        truncated,
-    )
-    .with_elapsed_ms(elapsed_ms)
+            .collect();
+        Self::new(columns, rows).with_status(truncated, elapsed_ms)
+    }
 }
 
-fn data_settings_command(request: UpdateDataSettingsRequest) -> UpdateDataSettingsCommand {
-    UpdateDataSettingsCommand::new(
-        request.spiral_endpoint(),
-        request.project_id(),
-        request.training().endpoint(),
-    )
-    .with_spfs_endpoint(request.spiral_spfs_endpoint())
-    .with_client(request.client_id())
-    .with_client_secret(if request.clear_client_secret() {
-        Some(String::new())
-    } else if request.client_secret().trim().is_empty() {
-        None
-    } else {
-        Some(request.client_secret().to_owned())
-    })
-    .with_video_enabled(request.video().enabled())
+impl From<Value> for QueryValue {
+    fn from(value: Value) -> Self {
+        match value {
+            Value::Null => QueryValue::Null,
+            Value::Bool(value) => QueryValue::Bool(value),
+            Value::Number(value) => value.as_i64().map_or_else(
+                || {
+                    value.as_u64().map_or_else(
+                        || QueryValue::Float(value.as_f64().unwrap_or(f64::NAN)),
+                        QueryValue::Unsigned,
+                    )
+                },
+                QueryValue::Signed,
+            ),
+            Value::String(value) => QueryValue::String(value),
+            Value::Array(values) => QueryValue::Array(values.into_iter().map(Into::into).collect()),
+            Value::Object(values) => QueryValue::Object(
+                values
+                    .into_iter()
+                    .map(|(name, value)| (name, value.into()))
+                    .collect(),
+            ),
+        }
+    }
 }
 
-fn spiral_replay_command(request: StartSpiralReplayRequest) -> StartSpiralReplayCommand {
-    StartSpiralReplayCommand::new(request.episode(), request.robot(), request.stream())
+impl From<QueryValue> for Value {
+    fn from(value: QueryValue) -> Self {
+        match value {
+            QueryValue::Null => Value::Null,
+            QueryValue::Bool(value) => Value::Bool(value),
+            QueryValue::Signed(value) => Value::from(value),
+            QueryValue::Unsigned(value) => Value::from(value),
+            QueryValue::Float(value) => Value::from(value),
+            QueryValue::String(value) => Value::String(value),
+            QueryValue::Array(values) => Value::Array(values.into_iter().map(Into::into).collect()),
+            QueryValue::Object(values) => Value::Object(
+                values
+                    .into_iter()
+                    .map(|(name, value)| (name, value.into()))
+                    .collect(),
+            ),
+        }
+    }
+}
+
+impl From<CapabilityQueryResult> for SpiralQueryResponse {
+    fn from(result: CapabilityQueryResult) -> Self {
+        let (columns, rows, truncated, elapsed_ms) = result.into_parts();
+        Self::new(
+            columns
+                .into_iter()
+                .map(|column| {
+                    let (name, data_type, nullable, semantic_type) = column.into_parts();
+                    spiral_robotics_api::relations::QueryColumn::new(name, data_type, nullable)
+                        .with_semantic_type(semantic_type)
+                })
+                .collect(),
+            rows.into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|(name, value)| (name, value.into()))
+                        .collect()
+                })
+                .collect(),
+            truncated,
+        )
+        .with_elapsed_ms(elapsed_ms)
+    }
+}
+
+impl From<UpdateDataSettingsRequest> for UpdateDataSettingsCommand {
+    fn from(request: UpdateDataSettingsRequest) -> Self {
+        Self::new(
+            request.spiral_endpoint(),
+            request.project_id(),
+            request.training().endpoint(),
+        )
+        .with_spfs_endpoint(request.spiral_spfs_endpoint())
+        .with_client(request.client_id())
+        .with_client_secret(if request.clear_client_secret() {
+            Some(String::new())
+        } else if request.client_secret().trim().is_empty() {
+            None
+        } else {
+            Some(request.client_secret().to_owned())
+        })
+        .with_video_enabled(request.video().enabled())
+    }
+}
+
+impl From<StartSpiralReplayRequest> for StartSpiralReplayCommand {
+    fn from(request: StartSpiralReplayRequest) -> Self {
+        Self::new(request.episode(), request.robot(), request.stream())
+    }
 }
 
 async fn get_data_settings(State(state): State<AppState>) -> Json<DataSettings> {
-    Json(contract_data_settings(
-        DataHttpAdapter { state: &state }.settings(),
-    ))
+    Json(DataHttpAdapter { state: &state }.settings().into())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -863,14 +875,14 @@ async fn update_data_settings(
     } else {
         None
     };
-    let settings = data_settings_command(request)
+    let settings = UpdateDataSettingsCommand::from(request)
         .apply(&DataHttpAdapter { state: &state })
         .await?;
     if !endpoint_changed {
         state.bootstrap().ready();
         tokio::spawn(super::auto_connect_saved_robots(state.clone()));
     }
-    Ok(Json(contract_data_settings(settings)))
+    Ok(Json(settings.into()))
 }
 
 async fn test_spiral(State(state): State<AppState>) -> Json<ConnectionTestResponse> {
@@ -890,14 +902,14 @@ async fn spiral_query(
     let result = QueryCommand::new(request.sql(), request.max_rows())
         .execute(&DataHttpAdapter { state: &state })
         .await?;
-    Ok(Json(contract_query_result(result)))
+    Ok(Json(result.into()))
 }
 
 async fn start_spiral_replay(
     State(state): State<AppState>,
     Json(request): Json<StartSpiralReplayRequest>,
 ) -> Result<StatusCode, Failure> {
-    spiral_replay_command(request)
+    StartSpiralReplayCommand::from(request)
         .start(
             &DataHttpAdapter { state: &state },
             state.hardware().as_ref(),

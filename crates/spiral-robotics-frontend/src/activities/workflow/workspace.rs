@@ -16,9 +16,7 @@ use spiral_robotics_api::workflow::{
     WorkflowNodeKind, WorkflowNodePhase, WorkflowRunPhase,
 };
 
-use crate::activities::data::workbench::{
-    QueryExecutionPresentation, QueryState, render_query_result,
-};
+use crate::activities::data::workbench::{QueryExecutionPresentation, QueryState};
 use crate::activities::workflow::state::{
     ASSISTANT_PANEL_ID, AcceptedAgentDraft, AgentDraftKey, CANVAS_PANEL_ID, ModelFeatureTarget,
     NODE_PANEL_ID, RESULTS_PANEL_ID, WorkflowAgentCommand, WorkflowCommand, WorkflowNodeData,
@@ -1572,7 +1570,7 @@ fn WorkflowResults() -> Element {
             }
             div { class: "workflow-result-body",
                 if let Some(model) = result_model.or(transient_model) {
-                    {render_query_result(&model)}
+                    {model.render()}
                 } else {
                     div { class: "workflow-panel-empty",
                         ResultNodeIcon {}

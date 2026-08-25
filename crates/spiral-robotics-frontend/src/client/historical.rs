@@ -98,7 +98,7 @@ struct CachedInspection {
 
 impl CachedInspection {
     fn try_new(snapshot: EpisodeInspectionSnapshot) -> Result<Self, String> {
-        validate_snapshot(&snapshot)?;
+        snapshot.validate()?;
         let timeline = Arc::new(api::EpisodeTimelineResponse::new(
             snapshot.episode().to_owned(),
             api::TimelineMetadata::new(
@@ -108,7 +108,7 @@ impl CachedInspection {
             ),
             snapshot.videos().to_owned(),
         ));
-        let signal_lanes = Arc::new(signal_lanes(&snapshot, TRACE_BUCKETS));
+        let signal_lanes = Arc::new(snapshot.signal_lanes(TRACE_BUCKETS));
         Ok(Self {
             snapshot,
             timeline,
@@ -117,7 +117,7 @@ impl CachedInspection {
     }
 
     fn preview_at(&self, seconds: f64) -> Result<HistoricalPreview, String> {
-        let sample = sample_at(&self.snapshot, seconds)?;
+        let sample = self.snapshot.sample_at(seconds)?;
         Ok(HistoricalPreview::from_inspection(self, sample))
     }
 }
@@ -342,84 +342,139 @@ pub(crate) fn request_historical_preview(
     });
 }
 
-fn validate_snapshot(snapshot: &EpisodeInspectionSnapshot) -> Result<(), String> {
-    let frames = snapshot.sample_times_seconds().len();
-    if frames == 0 {
-        return Err(format!(
-            "Episode {:?} has no visual samples.",
-            snapshot.episode().id()
-        ));
-    }
-    if snapshot.episode().frames() != frames as u64 {
-        return Err(format!(
-            "Episode {:?} declares {} frames but delivered {frames} visual samples.",
-            snapshot.episode().id(),
-            snapshot.episode().frames()
-        ));
-    }
-    if snapshot.follow_error_degrees().len() != frames {
-        return Err(format!(
-            "Episode {:?} delivered an inconsistent follow-error track.",
-            snapshot.episode().id()
-        ));
-    }
-    let mut previous = None;
-    for seconds in snapshot.sample_times_seconds() {
-        if !seconds.is_finite() || *seconds < 0.0 || previous.is_some_and(|last| *seconds < last) {
+trait HistoricalSnapshot {
+    fn validate(&self) -> Result<(), String>;
+    fn sample_at(&self, seconds: f64) -> Result<api::TimelineSample, String>;
+    fn signal_lanes(&self, buckets: usize) -> [TimelineSignalLane; 6];
+}
+
+impl HistoricalSnapshot for EpisodeInspectionSnapshot {
+    fn validate(&self) -> Result<(), String> {
+        let snapshot = self;
+        let frames = self.sample_times_seconds().len();
+        if frames == 0 {
             return Err(format!(
-                "Episode {:?} delivered an invalid visual sample clock.",
+                "Episode {:?} has no visual samples.",
                 snapshot.episode().id()
             ));
         }
-        previous = Some(*seconds);
+        if snapshot.episode().frames() != frames as u64 {
+            return Err(format!(
+                "Episode {:?} declares {} frames but delivered {frames} visual samples.",
+                snapshot.episode().id(),
+                snapshot.episode().frames()
+            ));
+        }
+        if snapshot.follow_error_degrees().len() != frames {
+            return Err(format!(
+                "Episode {:?} delivered an inconsistent follow-error track.",
+                snapshot.episode().id()
+            ));
+        }
+        let mut previous = None;
+        for seconds in snapshot.sample_times_seconds() {
+            if !seconds.is_finite()
+                || *seconds < 0.0
+                || previous.is_some_and(|last| *seconds < last)
+            {
+                return Err(format!(
+                    "Episode {:?} delivered an invalid visual sample clock.",
+                    snapshot.episode().id()
+                ));
+            }
+            previous = Some(*seconds);
+        }
+        if snapshot.arms().len() != snapshot.episode().arms().len() {
+            return Err(format!(
+                "Episode {:?} delivered an inconsistent arm layout.",
+                snapshot.episode().id()
+            ));
+        }
+        for arm in snapshot.arms() {
+            let Some(expected) = snapshot
+                .episode()
+                .arms()
+                .iter()
+                .find(|expected| expected.id() == arm.arm())
+            else {
+                return Err(format!(
+                    "Episode {:?} delivered an unknown arm {:?}.",
+                    snapshot.episode().id(),
+                    arm.arm()
+                ));
+            };
+            if arm.joints() != expected.joints() {
+                return Err(format!(
+                    "Episode {:?} delivered a different joint layout for {:?}.",
+                    snapshot.episode().id(),
+                    arm.arm()
+                ));
+            }
+            let values = frames
+                .checked_mul(arm.joints().len())
+                .ok_or_else(|| "Episode inspection dimensions overflowed.".to_owned())?;
+            if arm.normalized().len() != values || arm.raw().len() != values {
+                return Err(format!(
+                    "Episode {:?} delivered an incomplete state track for {:?}.",
+                    snapshot.episode().id(),
+                    arm.arm()
+                ));
+            }
+            let matrices = OptionalMatrixValidation {
+                snapshot,
+                arm,
+                frames,
+                values,
+            };
+            matrices.validate("velocity", arm.velocity())?;
+            matrices.validate("effort", arm.effort())?;
+            matrices.validate("action", arm.action())?;
+        }
+        Ok(())
     }
-    if snapshot.arms().len() != snapshot.episode().arms().len() {
-        return Err(format!(
-            "Episode {:?} delivered an inconsistent arm layout.",
-            snapshot.episode().id()
-        ));
-    }
-    for arm in snapshot.arms() {
-        let Some(expected) = snapshot
-            .episode()
+
+    fn sample_at(&self, seconds: f64) -> Result<api::TimelineSample, String> {
+        if !seconds.is_finite() {
+            return Err("Timeline time must be finite.".to_owned());
+        }
+        let frame = self
+            .sample_times_seconds()
+            .nearest_frame(seconds)
+            .ok_or_else(|| format!("Episode {:?} has no visual samples.", self.episode().id()))?;
+        let arms = self
             .arms()
             .iter()
-            .find(|expected| expected.id() == arm.arm())
-        else {
-            return Err(format!(
-                "Episode {:?} delivered an unknown arm {:?}.",
-                snapshot.episode().id(),
-                arm.arm()
-            ));
-        };
-        if arm.joints() != expected.joints() {
-            return Err(format!(
-                "Episode {:?} delivered a different joint layout for {:?}.",
-                snapshot.episode().id(),
-                arm.arm()
-            ));
-        }
-        let values = frames
-            .checked_mul(arm.joints().len())
-            .ok_or_else(|| "Episode inspection dimensions overflowed.".to_owned())?;
-        if arm.normalized().len() != values || arm.raw().len() != values {
-            return Err(format!(
-                "Episode {:?} delivered an incomplete state track for {:?}.",
-                snapshot.episode().id(),
-                arm.arm()
-            ));
-        }
-        let matrices = OptionalMatrixValidation {
-            snapshot,
-            arm,
-            frames,
-            values,
-        };
-        matrices.validate("velocity", arm.velocity())?;
-        matrices.validate("effort", arm.effort())?;
-        matrices.validate("action", arm.action())?;
+            .map(|arm| arm.sample_at(frame))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(
+            api::TimelineSample::new(frame as u64, self.sample_times_seconds()[frame])
+                .with_measurements(self.follow_error_degrees()[frame], arms),
+        )
     }
-    Ok(())
+
+    fn signal_lanes(&self, buckets: usize) -> [TimelineSignalLane; 6] {
+        std::array::from_fn(|lane_index| {
+            let joint = SO101_JOINTS[lane_index];
+            let series = self
+                .arms()
+                .iter()
+                .filter_map(|arm| {
+                    let joint_index = arm.joints().iter().position(|name| name == joint.name())?;
+                    let joint_count = arm.joints().len();
+                    let values = arm
+                        .normalized()
+                        .chunks_exact(joint_count)
+                        .map(|frame| frame[joint_index]);
+                    Some(TimelineSignalSeries::new(
+                        arm.arm(),
+                        TraceReduction::new(self.sample_times_seconds(), buckets).apply(values),
+                    ))
+                })
+                .collect();
+            TimelineSignalLane::new(joint.name(), joint.label(), signal_color(joint.name()))
+                .with_series(series)
+        })
+    }
 }
 
 struct OptionalMatrixValidation<'a> {
@@ -442,134 +497,106 @@ impl OptionalMatrixValidation<'_> {
     }
 }
 
-fn sample_at(
-    snapshot: &EpisodeInspectionSnapshot,
-    seconds: f64,
-) -> Result<api::TimelineSample, String> {
-    if !seconds.is_finite() {
-        return Err("Timeline time must be finite.".to_owned());
-    }
-    let frame = nearest_frame(snapshot.sample_times_seconds(), seconds).ok_or_else(|| {
-        format!(
-            "Episode {:?} has no visual samples.",
-            snapshot.episode().id()
-        )
-    })?;
-    let arms = snapshot
-        .arms()
-        .iter()
-        .map(|arm| sample_arm(arm, frame))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(
-        api::TimelineSample::new(frame as u64, snapshot.sample_times_seconds()[frame])
-            .with_measurements(snapshot.follow_error_degrees()[frame], arms),
-    )
+trait SampleClock {
+    fn nearest_frame(&self, requested: f64) -> Option<usize>;
 }
 
-fn nearest_frame(times: &[f64], requested: f64) -> Option<usize> {
-    if times.is_empty() {
-        return None;
-    }
-    let after = times.partition_point(|candidate| *candidate <= requested);
-    match after {
-        0 => Some(0),
-        index if index >= times.len() => Some(times.len() - 1),
-        index => {
-            let before = index - 1;
-            if (requested - times[before]).abs() <= (times[index] - requested).abs() {
-                Some(before)
-            } else {
-                Some(index)
+impl SampleClock for [f64] {
+    fn nearest_frame(&self, requested: f64) -> Option<usize> {
+        if self.is_empty() {
+            return None;
+        }
+        let after = self.partition_point(|candidate| *candidate <= requested);
+        match after {
+            0 => Some(0),
+            index if index >= self.len() => Some(self.len() - 1),
+            index => {
+                let before = index - 1;
+                if (requested - self[before]).abs() <= (self[index] - requested).abs() {
+                    Some(before)
+                } else {
+                    Some(index)
+                }
             }
         }
     }
 }
 
-fn sample_arm(arm: &EpisodeInspectionArm, frame: usize) -> Result<api::TimelineArmSample, String> {
-    let joint_count = arm.joints().len();
-    let start = frame
-        .checked_mul(joint_count)
-        .ok_or_else(|| "Episode inspection frame offset overflowed.".to_owned())?;
-    let end = start + joint_count;
-    let optional = |matrix: &EpisodeOptionalFrameMatrix| {
-        matrix.present()[frame].then(|| {
+trait HistoricalArm {
+    fn sample_at(&self, frame: usize) -> Result<api::TimelineArmSample, String>;
+}
+
+impl HistoricalArm for EpisodeInspectionArm {
+    fn sample_at(&self, frame: usize) -> Result<api::TimelineArmSample, String> {
+        let arm = self;
+        let joint_count = self.joints().len();
+        let start = frame
+            .checked_mul(joint_count)
+            .ok_or_else(|| "Episode inspection frame offset overflowed.".to_owned())?;
+        let end = start + joint_count;
+        let optional = |matrix: &EpisodeOptionalFrameMatrix| {
+            matrix.present()[frame].then(|| {
+                arm.joints()
+                    .iter()
+                    .cloned()
+                    .zip(matrix.values()[start..end].iter().copied())
+                    .collect::<BTreeMap<_, _>>()
+            })
+        };
+        Ok(api::TimelineArmSample::new(
+            arm.arm(),
             arm.joints()
                 .iter()
                 .cloned()
-                .zip(matrix.values()[start..end].iter().copied())
-                .collect::<BTreeMap<_, _>>()
-        })
-    };
-    Ok(api::TimelineArmSample::new(
-        arm.arm(),
-        arm.joints()
-            .iter()
-            .cloned()
-            .zip(arm.normalized()[start..end].iter().copied())
-            .collect(),
-        arm.joints()
-            .iter()
-            .cloned()
-            .zip(arm.raw()[start..end].iter().copied())
-            .collect(),
-    )
-    .with_optional_channels(api::TimelineOptionalArmChannels::new(
-        optional(arm.velocity()),
-        optional(arm.effort()),
-        optional(arm.action()),
-    )))
+                .zip(arm.normalized()[start..end].iter().copied())
+                .collect(),
+            arm.joints()
+                .iter()
+                .cloned()
+                .zip(arm.raw()[start..end].iter().copied())
+                .collect(),
+        )
+        .with_optional_channels(api::TimelineOptionalArmChannels::new(
+            optional(arm.velocity()),
+            optional(arm.effort()),
+            optional(arm.action()),
+        )))
+    }
 }
 
-fn signal_lanes(snapshot: &EpisodeInspectionSnapshot, buckets: usize) -> [TimelineSignalLane; 6] {
-    std::array::from_fn(|lane_index| {
-        let joint = SO101_JOINTS[lane_index];
-        let series = snapshot
-            .arms()
-            .iter()
-            .filter_map(|arm| {
-                let joint_index = arm.joints().iter().position(|name| name == joint.name())?;
-                let joint_count = arm.joints().len();
-                let values = arm
-                    .normalized()
-                    .chunks_exact(joint_count)
-                    .map(|frame| frame[joint_index]);
-                Some(TimelineSignalSeries::new(
-                    arm.arm(),
-                    reduce_trace(snapshot.sample_times_seconds(), values, buckets),
-                ))
-            })
-            .collect();
-        TimelineSignalLane::new(joint.name(), joint.label(), signal_color(joint.name()))
-            .with_series(series)
-    })
-}
-
-fn reduce_trace(
-    times: &[f64],
-    values: impl Iterator<Item = Option<f64>>,
+struct TraceReduction<'a> {
+    times: &'a [f64],
     buckets: usize,
-) -> Vec<TimelineSignalPoint> {
-    let bucket_count = buckets.clamp(1, 512).min(times.len());
-    if bucket_count == 0 {
-        return Vec::new();
+}
+
+impl<'a> TraceReduction<'a> {
+    const fn new(times: &'a [f64], buckets: usize) -> Self {
+        Self { times, buckets }
     }
-    let start = times[0];
-    let end = times[times.len() - 1];
-    let mut reduced = vec![TraceBucket::default(); bucket_count];
-    for (seconds, value) in times.iter().copied().zip(values) {
-        let bucket = if bucket_count <= 1 || end <= start {
-            0
-        } else {
-            ((((seconds - start) / (end - start)).clamp(0.0, 1.0) * bucket_count as f64).floor()
-                as usize)
-                .min(bucket_count - 1)
-        };
-        reduced[bucket].observe(seconds, value);
+
+    fn apply(&self, values: impl Iterator<Item = Option<f64>>) -> Vec<TimelineSignalPoint> {
+        let bucket_count = self.buckets.clamp(1, 512).min(self.times.len());
+        if bucket_count == 0 {
+            return Vec::new();
+        }
+        let start = self.times[0];
+        let end = self.times[self.times.len() - 1];
+        let mut reduced = vec![TraceBucket::default(); bucket_count];
+        for (seconds, value) in self.times.iter().copied().zip(values) {
+            let bucket = if bucket_count <= 1 || end <= start {
+                0
+            } else {
+                ((((seconds - start) / (end - start)).clamp(0.0, 1.0) * bucket_count as f64).floor()
+                    as usize)
+                    .min(bucket_count - 1)
+            };
+            reduced[bucket].observe(seconds, value);
+        }
+        reduced
+            .into_iter()
+            .flat_map(TraceBucket::into_points)
+            .collect()
     }
-    reduced
-        .into_iter()
-        .flat_map(TraceBucket::into_points)
-        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Default)]

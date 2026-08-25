@@ -10,9 +10,7 @@ use spiral_robotics_api::relations::{
 };
 
 use crate::activities::data::state::data_controller;
-use crate::activities::data::workbench::{
-    QueryExecutionPresentation, QueryState, render_query_result,
-};
+use crate::activities::data::workbench::{QueryExecutionPresentation, QueryState};
 use crate::client::http as api;
 
 const PREVIEW_ROWS: usize = 5;
@@ -327,7 +325,7 @@ fn render_preview(
                 PREVIEW_ROWS,
                 QueryState::Ready(response.clone()),
             );
-            render_query_result(&model)
+            model.render()
         }
     }
 }

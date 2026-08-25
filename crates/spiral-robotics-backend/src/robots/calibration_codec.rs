@@ -93,29 +93,33 @@ struct CalibrationWire {
 
 /// Decode a strict calibration document and apply all domain invariants.
 pub(crate) fn decode_calibration(value: serde_json::Value) -> serde_json::Result<Calibration> {
-    calibration_from_wire(serde_json::from_value::<CalibrationWire>(value)?)
+    Calibration::try_from(serde_json::from_value::<CalibrationWire>(value)?)
 }
 
 /// Decode calibration JSON before generic values can erase duplicate keys.
 #[cfg(test)]
 fn decode_calibration_json(json: &str) -> serde_json::Result<Calibration> {
     let wire = serde_json::from_str::<CalibrationWire>(json)?;
-    calibration_from_wire(wire)
+    wire.try_into()
 }
 
-fn calibration_from_wire(wire: CalibrationWire) -> serde_json::Result<Calibration> {
-    let motors = wire
-        .motors
-        .0
-        .into_iter()
-        .map(|(name, motor)| MotorCalibration::try_from(motor).map(|motor| (name, motor)))
-        .collect::<Result<_, _>>()
-        .map_err(json_error)?;
-    Calibration::from_persisted(
-        CalibrationFormat::new(wire.format_version, wire.units, wire.coordinate_space),
-        motors,
-    )
-    .map_err(json_error)
+impl TryFrom<CalibrationWire> for Calibration {
+    type Error = serde_json::Error;
+
+    fn try_from(wire: CalibrationWire) -> Result<Self, Self::Error> {
+        let motors = wire
+            .motors
+            .0
+            .into_iter()
+            .map(|(name, motor)| MotorCalibration::try_from(motor).map(|motor| (name, motor)))
+            .collect::<Result<_, _>>()
+            .map_err(json_error)?;
+        Self::from_persisted(
+            CalibrationFormat::new(wire.format_version, wire.units, wire.coordinate_space),
+            motors,
+        )
+        .map_err(json_error)
+    }
 }
 
 /// Encode a validated calibration document for a robot file.

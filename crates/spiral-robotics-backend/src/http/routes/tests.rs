@@ -1,12 +1,6 @@
-use super::data::{
-    DataSettingsOverrides, capability_query_result, contract_data_settings, contract_query_result,
-};
-use super::devices::{build_camera_object, multipart_part};
+use super::data::DataSettingsOverrides;
+use super::devices::{CameraConfigurationObject, multipart_part};
 use super::recordings::{ByteRange, parse_byte_range};
-use super::training_rollout::{
-    capability_rollout_snapshot, capability_training_run, contract_rollout_snapshot,
-    contract_training_run,
-};
 use super::*;
 
 #[test]
@@ -190,11 +184,8 @@ fn camera_assignments_keep_unknown_fields_and_refresh_resolution() {
         }),
     )]);
 
-    let cameras = build_camera_object(
-        &existing,
-        &[binding("wrist", "/dev/video0")],
-        &[status("/dev/video0")],
-    );
+    let cameras = existing
+        .with_camera_assignments(&[binding("wrist", "/dev/video0")], &[status("/dev/video0")]);
 
     assert_eq!(cameras["wrist"]["id"], "/dev/video0");
     assert_eq!(cameras["wrist"]["width"], 1280);
@@ -216,7 +207,7 @@ fn a_camera_mount_survives_being_reassigned() {
         }),
     )]);
 
-    let cameras = build_camera_object(&existing, &[binding("wrist", "/dev/video9")], &[]);
+    let cameras = existing.with_camera_assignments(&[binding("wrist", "/dev/video9")], &[]);
 
     assert_eq!(cameras["wrist"]["id"], "/dev/video9");
     assert_eq!(cameras["wrist"]["mount"]["frame"], "gripper_link");
@@ -225,7 +216,7 @@ fn a_camera_mount_survives_being_reassigned() {
 
 #[test]
 fn an_unknown_device_still_records_the_assignment() {
-    let cameras = build_camera_object(&Map::new(), &[binding("top", "/dev/video7")], &[]);
+    let cameras = Map::new().with_camera_assignments(&[binding("top", "/dev/video7")], &[]);
 
     assert_eq!(cameras["top"]["id"], "/dev/video7");
     assert_eq!(cameras["top"]["type"], "opencv");
@@ -239,7 +230,7 @@ fn removing_a_camera_drops_it_from_the_stored_object() {
         ("top".to_owned(), serde_json::json!({"id": "/dev/video1"})),
     ]);
 
-    let cameras = build_camera_object(&existing, &[binding("top", "/dev/video1")], &[]);
+    let cameras = existing.with_camera_assignments(&[binding("top", "/dev/video1")], &[]);
 
     assert_eq!(cameras.len(), 1);
     assert!(cameras.contains_key("top"));
@@ -344,7 +335,7 @@ fn data_presenters_round_trip_transport_values_without_leaking_them_to_policy() 
         VideoSettings::new(true),
     );
     assert_eq!(
-        contract_data_settings(DataSettingsOverrides::new(None, None).apply(settings.clone())),
+        DataSettings::from(DataSettingsOverrides::new(None, None).apply(settings.clone())),
         settings
     );
 
@@ -373,7 +364,7 @@ fn data_presenters_round_trip_transport_values_without_leaking_them_to_policy() 
     )
     .with_elapsed_ms(9);
     assert_eq!(
-        contract_query_result(capability_query_result(query.clone())),
+        SpiralQueryResponse::from(CapabilityQueryResult::from(query.clone())),
         query
     );
 }
@@ -408,10 +399,8 @@ fn training_and_rollout_presenters_round_trip_semantic_state() {
             vec!["ready".to_owned()],
         ),
     );
-    assert_eq!(
-        contract_training_run(capability_training_run(run.clone())),
-        run
-    );
+    let capability_run = CapabilityTrainingRun::from(run.clone());
+    assert_eq!(TrainingRun::from(capability_run), run);
 
     let rollout = RolloutSnapshot::new(
         spiral_robotics_api::rollout::RolloutIdentity::new(
@@ -428,8 +417,6 @@ fn training_and_rollout_presenters_round_trip_semantic_state() {
         .with_messages(None, Some("clamped wrist".to_owned())),
         spiral_robotics_api::rollout::RolloutMetrics::new(2, 1, 0),
     );
-    assert_eq!(
-        contract_rollout_snapshot(capability_rollout_snapshot(rollout.clone())),
-        rollout
-    );
+    let capability_rollout = CapabilityRolloutSnapshot::from(rollout.clone());
+    assert_eq!(RolloutSnapshot::from(capability_rollout), rollout);
 }

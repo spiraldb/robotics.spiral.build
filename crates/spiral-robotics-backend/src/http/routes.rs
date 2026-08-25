@@ -50,9 +50,7 @@ use spiral_robotics_api::settings::{
 use spiral_robotics_api::status::{
     ApiError, BackendReadiness, BackendReadinessState, StudioSnapshot,
 };
-use spiral_robotics_api::training::{
-    StartTrainingRequest, TrainingPolicy as ContractTrainingPolicy, TrainingRun, TrainingSnapshot,
-};
+use spiral_robotics_api::training::{StartTrainingRequest, TrainingRun, TrainingSnapshot};
 use spiral_robotics_core::calibration::{Calibration, MotorSpec};
 use spiral_robotics_hardware::serial_ports::{available_ports, port_description, port_kind};
 
@@ -115,18 +113,9 @@ use crate::rollout::service::{
 };
 use crate::training::manager::TrainingManager;
 use crate::training::service::{
-    self as training_application, ActTrainingInputSettings, ActTrainingLayerSettings,
-    ActTrainingModelSettings, ActTrainingSettings, DeleteTrainingRunCommand, StartTrainingCommand,
-    TrainingCheckpoint as CapabilityTrainingCheckpoint, TrainingCheckpointSettings,
-    TrainingCheckpointStatus, TrainingCommandIdentity, TrainingDataSettings,
-    TrainingExecutionSettings, TrainingMetric as CapabilityTrainingMetric, TrainingMetricProgress,
-    TrainingMetricResources, TrainingMetricThroughput, TrainingMetricTimings,
-    TrainingOptimizerSettings, TrainingPolicy as CapabilityTrainingPolicy, TrainingPort,
-    TrainingProgressSettings, TrainingReadiness as CapabilityTrainingReadiness,
-    TrainingRun as CapabilityTrainingRun, TrainingRunActivity, TrainingRunHistory,
-    TrainingRunIdentity, TrainingRunPhase as CapabilityTrainingRunPhase, TrainingRunState,
-    TrainingRunStatus, TrainingSnapshot as CapabilityTrainingSnapshot,
-    TrainingSource as CapabilityTrainingSource,
+    self as training_application, DeleteTrainingRunCommand, StartTrainingCommand,
+    TrainingCheckpointStatus, TrainingPort, TrainingRun as CapabilityTrainingRun,
+    TrainingRunActivity, TrainingRunStatus, TrainingSnapshot as CapabilityTrainingSnapshot,
 };
 use crate::workflow::agent::WorkflowAgentManager;
 use crate::workflow::manager::WorkflowManager;
@@ -616,28 +605,6 @@ impl From<OperationError> for Failure {
     }
 }
 
-fn episode_capability_error(error: EpisodeError) -> OperationError {
-    let message = error.to_string();
-    match error {
-        EpisodeError::InvalidId(_) | EpisodeError::Invalid(_) => {
-            OperationError::InvalidInput(message)
-        }
-        EpisodeError::NotFound(_) => OperationError::NotFound(message),
-    }
-}
-
-fn workspace_capability_error(error: WorkspaceError) -> OperationError {
-    let message = error.to_string();
-    match error {
-        WorkspaceError::InvalidId(_) | WorkspaceError::Invalid(_) => {
-            OperationError::InvalidInput(message)
-        }
-        WorkspaceError::NotFound(_) => OperationError::NotFound(message),
-        WorkspaceError::AlreadyExists(_) => OperationError::Conflict(message),
-        WorkspaceError::Config(_) => OperationError::Internal(message),
-    }
-}
-
 /// Build the studio's API routes.
 pub(crate) fn api_router(state: AppState) -> Router {
     let catalog_routes = Router::new()
@@ -674,79 +641,82 @@ async fn require_catalog_ready(
 }
 
 /// Assemble the current setup-level view of the studio.
-pub(crate) fn build_snapshot(state: &AppState) -> StudioSnapshot {
-    let hardware = state.hardware().state();
-    let readiness = state.bootstrap().current();
-    let robots = if readiness.catalog_available() {
-        let robot_adapter = devices::RobotHttpAdapter::prefetched(state);
-        robots::list(&robot_adapter)
-            .into_iter()
-            .filter_map(|saved| {
-                let connection = hardware
-                    .connections()
-                    .get(saved.id())
-                    .cloned()
-                    .unwrap_or_default();
-                let mut summary = robot_adapter.summary(saved.id(), connection).ok()?;
-                // Limits come from the motors, not the saved configuration, so they
-                // are folded in here after loading the SpiralDB row.
-                if let Some(limits) = hardware.limits().get(saved.id()) {
-                    let motors = summary
-                        .motors()
-                        .iter()
+impl AppState {
+    pub(crate) fn snapshot(&self) -> StudioSnapshot {
+        let state = self;
+        let hardware = state.hardware().state();
+        let readiness = state.bootstrap().current();
+        let robots = if readiness.catalog_available() {
+            let robot_adapter = devices::RobotHttpAdapter::prefetched(state);
+            robots::list(&robot_adapter)
+                .into_iter()
+                .filter_map(|saved| {
+                    let connection = hardware
+                        .connections()
+                        .get(saved.id())
                         .cloned()
-                        .map(|mut motor| {
-                            if let Some(limits) = limits.get(motor.name()) {
-                                motor.set_limits(*limits);
-                            }
-                            motor
-                        })
-                        .collect();
-                    summary = summary.with_motors(motors);
-                }
-                Some(summary)
+                        .unwrap_or_default();
+                    let mut summary = robot_adapter.summary(saved.id(), connection).ok()?;
+                    // Limits come from the motors, not the saved configuration, so they
+                    // are folded in here after loading the SpiralDB row.
+                    if let Some(limits) = hardware.limits().get(saved.id()) {
+                        let motors = summary
+                            .motors()
+                            .iter()
+                            .cloned()
+                            .map(|mut motor| {
+                                if let Some(limits) = limits.get(motor.name()) {
+                                    motor.set_limits(*limits);
+                                }
+                                motor
+                            })
+                            .collect();
+                        summary = summary.with_motors(motors);
+                    }
+                    Some(summary)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let mut issues = if readiness.catalog_available() {
+            state.workspace().issues()
+        } else {
+            Vec::new()
+        };
+        issues.extend(state.cameras().issues());
+        // A take that stopped itself has to be visible after the counters that were
+        // describing it have gone.
+        if let Some(issue) = hardware.recording_issue() {
+            issues.push(issue.to_owned());
+        }
+
+        let cameras = devices::CameraDiscoveryAdapter::new(state.cameras().clone())
+            .cameras()
+            .into_iter()
+            .map(|camera| {
+                CameraStatus::new(
+                    camera.id(),
+                    camera.name(),
+                    CameraStreamFormat::new(camera.width(), camera.height(), camera.fps()),
+                )
+                .with_state(CameraStreamState::new(
+                    camera.streaming(),
+                    camera.frames(),
+                    camera.error().map(str::to_owned),
+                ))
             })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    let mut issues = if readiness.catalog_available() {
-        state.workspace().issues()
-    } else {
-        Vec::new()
-    };
-    issues.extend(state.cameras().issues());
-    // A take that stopped itself has to be visible after the counters that were
-    // describing it have gone.
-    if let Some(issue) = hardware.recording_issue() {
-        issues.push(issue.to_owned());
+            .collect();
+        StudioSnapshot::new(readiness, "SpiralDB", hardware.mode().clone())
+            .with_robots(robots)
+            .with_cameras(cameras)
+            .with_issues(issues)
     }
-
-    let cameras = devices::CameraDiscoveryAdapter::new(state.cameras().clone())
-        .cameras()
-        .into_iter()
-        .map(|camera| {
-            CameraStatus::new(
-                camera.id(),
-                camera.name(),
-                CameraStreamFormat::new(camera.width(), camera.height(), camera.fps()),
-            )
-            .with_state(CameraStreamState::new(
-                camera.streaming(),
-                camera.frames(),
-                camera.error().map(str::to_owned),
-            ))
-        })
-        .collect();
-    StudioSnapshot::new(readiness, "SpiralDB", hardware.mode().clone())
-        .with_robots(robots)
-        .with_cameras(cameras)
-        .with_issues(issues)
 }
 
 async fn get_state(State(state): State<AppState>) -> Json<StudioSnapshot> {
-    Json(build_snapshot(&state))
+    Json(state.snapshot())
 }
 
 /// Push setup changes and live telemetry to the browser.
@@ -801,7 +771,7 @@ async fn events(
         loop {
             tokio::select! {
                 _ = snapshot_timer.tick() => {
-                    let snapshot = build_snapshot(&state);
+                    let snapshot = state.snapshot();
                     if last_snapshot.as_ref() == Some(&snapshot) {
                         continue;
                     }

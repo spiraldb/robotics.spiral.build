@@ -50,6 +50,26 @@ impl RolloutRequest {
     pub(crate) fn duration_seconds(&self) -> u32 {
         self.duration_seconds
     }
+
+    fn validate_for_session(&self, session: &str) -> Result<(), String> {
+        if session.trim().is_empty() || session.trim() != session {
+            return Err("policy session id must be non-empty and trimmed".to_owned());
+        }
+        if self.run_id.trim().is_empty()
+            || self.run_id.trim() != self.run_id
+            || self.robot.trim().is_empty()
+            || self.robot.trim() != self.robot
+        {
+            return Err("rollout run and robot ids must be non-empty and trimmed".to_owned());
+        }
+        if self.checkpoint_step == 0 {
+            return Err("rollout checkpoint step must be positive".to_owned());
+        }
+        if RolloutDuration::new(self.duration_seconds).is_none() {
+            return Err("rollout duration is outside the approved safety window".to_owned());
+        }
+        Ok(())
+    }
 }
 
 /// Publication seam. Delivery adapters map this semantic snapshot to their
@@ -304,6 +324,23 @@ pub(crate) enum CompletionReason {
     ControlReplaced(String),
 }
 
+impl CompletionReason {
+    fn message(self) -> String {
+        match self {
+            Self::StoppedBeforeModel => "Stopped before model loading.".to_owned(),
+            Self::StoppedBeforeControl => "Stopped before the arm was enabled.".to_owned(),
+            Self::StoppedSafely => {
+                "Policy stopped safely; the follower is holding its current position.".to_owned()
+            }
+            Self::DurationReached { duration_seconds } => format!(
+                "Policy completed its configured {} duration; the follower is holding its current position.",
+                format_duration(duration_seconds)
+            ),
+            Self::ControlReplaced(message) => message,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ControlDecision {
     Continue,
@@ -449,7 +486,7 @@ impl RolloutCoordinator {
             started_ms,
             request,
         } = admission;
-        validate_request(&session, &request)?;
+        request.validate_for_session(&session)?;
         if let Some(active) = &self.active {
             return Err(format!(
                 "policy session {:?} is already active",
@@ -777,26 +814,6 @@ impl RolloutCoordinator {
     }
 }
 
-fn validate_request(session: &str, request: &RolloutRequest) -> Result<(), String> {
-    if session.trim().is_empty() || session.trim() != session {
-        return Err("policy session id must be non-empty and trimmed".to_owned());
-    }
-    if request.run_id.trim().is_empty()
-        || request.run_id.trim() != request.run_id
-        || request.robot.trim().is_empty()
-        || request.robot.trim() != request.robot
-    {
-        return Err("rollout run and robot ids must be non-empty and trimmed".to_owned());
-    }
-    if request.checkpoint_step == 0 {
-        return Err("rollout checkpoint step must be positive".to_owned());
-    }
-    if RolloutDuration::new(request.duration_seconds).is_none() {
-        return Err("rollout duration is outside the approved safety window".to_owned());
-    }
-    Ok(())
-}
-
 fn finite_metric(value: f64) -> Option<f64> {
     (value.is_finite() && value >= 0.0).then_some(value)
 }
@@ -806,7 +823,7 @@ fn terminal_state(
     cleanup: Result<(), String>,
 ) -> (RolloutPhase, String) {
     let execution = match outcome {
-        ExecutionOutcome::Completed(reason) => Ok(completion_message(reason)),
+        ExecutionOutcome::Completed(reason) => Ok(reason.message()),
         ExecutionOutcome::Failed(error) => Err(error),
     };
     match (execution, cleanup) {
@@ -820,21 +837,6 @@ fn terminal_state(
             RolloutPhase::Failed,
             format!("{error}; safe control cleanup also failed: {cleanup}"),
         ),
-    }
-}
-
-fn completion_message(reason: CompletionReason) -> String {
-    match reason {
-        CompletionReason::StoppedBeforeModel => "Stopped before model loading.".to_owned(),
-        CompletionReason::StoppedBeforeControl => "Stopped before the arm was enabled.".to_owned(),
-        CompletionReason::StoppedSafely => {
-            "Policy stopped safely; the follower is holding its current position.".to_owned()
-        }
-        CompletionReason::DurationReached { duration_seconds } => format!(
-            "Policy completed its configured {} duration; the follower is holding its current position.",
-            format_duration(duration_seconds)
-        ),
-        CompletionReason::ControlReplaced(message) => message,
     }
 }
 

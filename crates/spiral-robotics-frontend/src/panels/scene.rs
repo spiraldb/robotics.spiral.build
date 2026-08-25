@@ -21,7 +21,10 @@ use dioxus::prelude::*;
 use dioxus_elements::geometry::WheelDelta;
 use dioxus_elements::input_data::MouseButton;
 use spiral_robotics_api::robots::{MotorCondition, RobotSummary};
-use spiral_robotics_core::arm::{JointAngles, counts_to_degrees};
+use spiral_robotics_core::arm::JointAngles;
+#[cfg(test)]
+use spiral_robotics_core::arm::counts_to_degrees;
+#[cfg(test)]
 use spiral_robotics_core::calibration::MotorDirection;
 use spiral_robotics_viewport::glam::Vec3;
 use spiral_robotics_viewport::{
@@ -333,7 +336,7 @@ pub(crate) fn Viewport(
                             .pick();
                             // Clicking bare bench clears the selection, the way
                             // clicking empty space does everywhere else.
-                            on_select.call(picked.map(|hit| selection_of(&hit.entity)));
+                            on_select.call(picked.map(|hit| Selection::from(&hit.entity)));
                         }
                         drag.set(None);
                     }
@@ -506,17 +509,19 @@ fn describe(
 }
 
 /// Turn a scene entity into the studio's own idea of what is selected.
-fn selection_of(entity: &RobotEntity) -> Selection {
-    match entity {
-        RobotEntity::Joint { robot, joint } => Selection::Joint {
-            robot: robot.clone(),
-            joint: joint.clone(),
-        },
-        RobotEntity::Structure { robot } => Selection::Robot(robot.clone()),
-        RobotEntity::Camera { robot, role } => Selection::Camera {
-            robot: robot.clone(),
-            role: role.clone(),
-        },
+impl From<&RobotEntity> for Selection {
+    fn from(entity: &RobotEntity) -> Self {
+        match entity {
+            RobotEntity::Joint { robot, joint } => Selection::Joint {
+                robot: robot.clone(),
+                joint: joint.clone(),
+            },
+            RobotEntity::Structure { robot } => Selection::Robot(robot.clone()),
+            RobotEntity::Camera { robot, role } => Selection::Camera {
+                robot: robot.clone(),
+                role: role.clone(),
+            },
+        }
     }
 }
 
@@ -792,11 +797,7 @@ fn historical_angles(arm: &RobotSummary, sample: &TimelineArmSample) -> Option<J
                 .find(|motor| motor.name() == *joint)?
                 .calibration()?;
             let raw = calibration.denormalize(normalized).ok()?;
-            let degrees = counts_to_degrees(raw.saturating_sub(calibration.reading().center()));
-            let degrees = match calibration.direction() {
-                MotorDirection::Normal => degrees,
-                MotorDirection::Reversed => -degrees,
-            };
+            let degrees = calibration.degrees_from_center(raw);
             Some((joint.clone(), degrees))
         })
         .collect::<BTreeMap<_, _>>();

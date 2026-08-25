@@ -192,20 +192,19 @@ pub(crate) enum WorkflowUiAction {
     ActivatePanel(String),
 }
 
-pub(crate) fn reduce_workflow_ui(
-    state: &WorkflowUiState,
-    action: WorkflowUiAction,
-) -> WorkflowUiState {
-    let mut next = state.clone();
-    match action {
-        WorkflowUiAction::SelectNode(id) => {
-            next.selected_node = Some(id);
-            next.active_panel = Some(NODE_PANEL_ID.to_owned());
+impl WorkflowUiState {
+    pub(crate) fn reduce(&self, action: WorkflowUiAction) -> Self {
+        let mut next = self.clone();
+        match action {
+            WorkflowUiAction::SelectNode(id) => {
+                next.selected_node = Some(id);
+                next.active_panel = Some(NODE_PANEL_ID.to_owned());
+            }
+            WorkflowUiAction::ClearSelection => next.selected_node = None,
+            WorkflowUiAction::ActivatePanel(id) => next.active_panel = Some(id),
         }
-        WorkflowUiAction::ClearSelection => next.selected_node = None,
-        WorkflowUiAction::ActivatePanel(id) => next.active_panel = Some(id),
+        next
     }
-    next
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -616,10 +615,11 @@ impl WorkflowController {
         if !self.graph.nodes.peek().iter().any(|node| node.id == id) {
             return;
         }
-        let next = reduce_workflow_ui(
-            &self.graph.ui.peek(),
-            WorkflowUiAction::SelectNode(id.clone()),
-        );
+        let next = self
+            .graph
+            .ui
+            .peek()
+            .reduce(WorkflowUiAction::SelectNode(id.clone()));
         self.graph.ui.set(next);
         self.graph.nodes.with_mut(|nodes| {
             for node in nodes {
@@ -629,7 +629,11 @@ impl WorkflowController {
     }
 
     pub(crate) fn clear_selection(mut self) {
-        let next = reduce_workflow_ui(&self.graph.ui.peek(), WorkflowUiAction::ClearSelection);
+        let next = self
+            .graph
+            .ui
+            .peek()
+            .reduce(WorkflowUiAction::ClearSelection);
         self.graph.ui.set(next);
         self.graph.nodes.with_mut(|nodes| {
             for node in nodes {
@@ -639,10 +643,11 @@ impl WorkflowController {
     }
 
     pub(crate) fn activate_panel(mut self, id: PanelId) {
-        let next = reduce_workflow_ui(
-            &self.graph.ui.peek(),
-            WorkflowUiAction::ActivatePanel(id.to_string()),
-        );
+        let next = self
+            .graph
+            .ui
+            .peek()
+            .reduce(WorkflowUiAction::ActivatePanel(id.to_string()));
         self.graph.ui.set(next);
     }
 
@@ -656,10 +661,11 @@ impl WorkflowController {
         let Some(panel) = self.receipt_panel(&receipt) else {
             return;
         };
-        let next = reduce_workflow_ui(
-            &self.graph.ui.peek(),
-            WorkflowUiAction::ActivatePanel(panel.to_string()),
-        );
+        let next = self
+            .graph
+            .ui
+            .peek()
+            .reduce(WorkflowUiAction::ActivatePanel(panel.to_string()));
         self.graph.ui.set(next);
     }
 
@@ -686,7 +692,7 @@ impl WorkflowController {
 
     pub(crate) fn set_table_relation(mut self, node_id: &str, relation: String) {
         let mut draft = self.document.draft.write();
-        let changed = edit_node(&mut draft, node_id, |config| {
+        let changed = draft.edit_node(node_id, |config| {
             let WorkflowNodeConfig::Table { relation: current } = config else {
                 return false;
             };
@@ -697,7 +703,7 @@ impl WorkflowController {
             true
         });
         if changed {
-            normalize_draft_model_sources(&mut draft);
+            draft.normalize_model_sources();
         }
         drop(draft);
         if changed {
@@ -706,7 +712,7 @@ impl WorkflowController {
     }
 
     pub(crate) fn set_query_sql(mut self, node_id: &str, sql: String) {
-        let changed = edit_node(&mut self.document.draft.write(), node_id, |config| {
+        let changed = self.document.draft.write().edit_node(node_id, |config| {
             let WorkflowNodeConfig::Query { sql: current, .. } = config else {
                 return false;
             };
@@ -727,7 +733,7 @@ impl WorkflowController {
         edit: impl FnOnce(&mut WorkflowFeatureDefinition),
     ) {
         let mut draft = self.document.draft.write();
-        let changed = edit_node(&mut draft, target.node_id, |config| {
+        let changed = draft.edit_node(target.node_id, |config| {
             let WorkflowNodeConfig::Model { features, .. } = config else {
                 return false;
             };
@@ -747,7 +753,7 @@ impl WorkflowController {
             })
             .unwrap_or_default();
         if changed {
-            refresh_generated_feature_query(&mut draft, target.node_id, &features);
+            draft.refresh_generated_feature_query(target.node_id, &features);
         }
         drop(draft);
         if changed {
@@ -757,7 +763,7 @@ impl WorkflowController {
 
     pub(crate) fn add_model_feature(mut self, node_id: &str) {
         let mut draft = self.document.draft.write();
-        let changed = edit_node(&mut draft, node_id, |config| {
+        let changed = draft.edit_node(node_id, |config| {
             let WorkflowNodeConfig::Model { features, .. } = config else {
                 return false;
             };
@@ -773,8 +779,8 @@ impl WorkflowController {
             true
         });
         if changed {
-            let features = model_features(&draft, node_id);
-            refresh_generated_feature_query(&mut draft, node_id, &features);
+            let features = draft.model_features(node_id);
+            draft.refresh_generated_feature_query(node_id, &features);
         }
         drop(draft);
         if changed {
@@ -784,7 +790,7 @@ impl WorkflowController {
 
     pub(crate) fn remove_model_feature(mut self, node_id: &str, index: usize) {
         let mut draft = self.document.draft.write();
-        let changed = edit_node(&mut draft, node_id, |config| {
+        let changed = draft.edit_node(node_id, |config| {
             let WorkflowNodeConfig::Model { features, .. } = config else {
                 return false;
             };
@@ -795,8 +801,8 @@ impl WorkflowController {
             true
         });
         if changed {
-            let features = model_features(&draft, node_id);
-            refresh_generated_feature_query(&mut draft, node_id, &features);
+            let features = draft.model_features(node_id);
+            draft.refresh_generated_feature_query(node_id, &features);
         }
         drop(draft);
         if changed {
@@ -808,7 +814,7 @@ impl WorkflowController {
         if self.has_model() || topology_mutation_blocked(self.snapshot().phase(), self.command()) {
             return;
         }
-        let Some(node_id) = insert_siglip_model(&mut self.document.draft.write()) else {
+        let Some(node_id) = self.document.draft.write().insert_siglip_model() else {
             return;
         };
         self.sync_graph();
@@ -819,7 +825,7 @@ impl WorkflowController {
         if topology_mutation_blocked(self.snapshot().phase(), self.command()) {
             return;
         }
-        let Some(query_id) = remove_siglip_model(&mut self.document.draft.write(), node_id) else {
+        let Some(query_id) = self.document.draft.write().remove_siglip_model(node_id) else {
             return;
         };
         self.sync_graph();
@@ -1501,260 +1507,280 @@ const fn run_phase_order(phase: WorkflowRunPhase) -> u8 {
     }
 }
 
-fn edit_node(
-    workflow: &mut WorkflowSpec,
-    node_id: &str,
-    edit: impl FnOnce(&mut WorkflowNodeConfig) -> bool,
-) -> bool {
-    workflow
-        .nodes_mut()
-        .iter_mut()
-        .find(|node| node.id() == node_id)
-        .is_some_and(|node| edit(node.config_mut()))
+trait WorkflowDraft {
+    fn edit_node(
+        &mut self,
+        node_id: &str,
+        edit: impl FnOnce(&mut WorkflowNodeConfig) -> bool,
+    ) -> bool;
+    fn insert_siglip_model(&mut self) -> Option<String>;
+    fn remove_siglip_model(&mut self, node_id: &str) -> Option<String>;
+    fn model_features(&self, model_id: &str) -> Vec<WorkflowFeatureDefinition>;
+    fn refresh_generated_feature_query(
+        &mut self,
+        model_id: &str,
+        features: &[WorkflowFeatureDefinition],
+    );
+    fn normalize_model_sources(&mut self);
 }
 
-fn insert_siglip_model(workflow: &mut WorkflowSpec) -> Option<String> {
-    let result_edge_index = workflow.edges().iter().position(|edge| {
-        let source = workflow
-            .nodes()
-            .iter()
-            .find(|node| node.id() == edge.source());
-        let target = workflow
-            .nodes()
-            .iter()
-            .find(|node| node.id() == edge.target());
-        source.is_some_and(|node| node.config().kind() == WorkflowNodeKind::Query)
-            && target.is_some_and(|node| node.config().kind() == WorkflowNodeKind::Result)
-    })?;
-    let result_edge = workflow.edges()[result_edge_index].clone();
-    let candidate_id = result_edge.source().to_owned();
-    let source_id = workflow
-        .edges()
-        .iter()
-        .find(|edge| edge.target() == candidate_id)
-        .and_then(|edge| {
-            workflow
+impl WorkflowDraft for WorkflowSpec {
+    fn edit_node(
+        &mut self,
+        node_id: &str,
+        edit: impl FnOnce(&mut WorkflowNodeConfig) -> bool,
+    ) -> bool {
+        self.nodes_mut()
+            .iter_mut()
+            .find(|node| node.id() == node_id)
+            .is_some_and(|node| edit(node.config_mut()))
+    }
+
+    fn insert_siglip_model(&mut self) -> Option<String> {
+        let workflow = self;
+        let result_edge_index = workflow.edges().iter().position(|edge| {
+            let source = workflow
                 .nodes()
                 .iter()
-                .find(|node| node.id() == edge.source())
-                .filter(|node| node.config().kind() == WorkflowNodeKind::Table)
-                .map(|_| edge.source().to_owned())
+                .find(|node| node.id() == edge.source());
+            let target = workflow
+                .nodes()
+                .iter()
+                .find(|node| node.id() == edge.target());
+            source.is_some_and(|node| node.config().kind() == WorkflowNodeKind::Query)
+                && target.is_some_and(|node| node.config().kind() == WorkflowNodeKind::Result)
         })?;
-    let source_relation = workflow
-        .nodes()
-        .iter()
-        .find(|node| node.id() == source_id)
-        .and_then(|node| match &node.config() {
-            WorkflowNodeConfig::Table { relation } => Some(relation.clone()),
-            _ => None,
-        })?;
-    workflow.edges_mut().remove(result_edge_index);
-    let mut suffix = 1_u32;
-    let node_id = loop {
-        let candidate = if suffix == 1 {
-            "siglip".to_owned()
-        } else {
-            format!("siglip_{suffix}")
+        let result_edge = workflow.edges()[result_edge_index].clone();
+        let candidate_id = result_edge.source().to_owned();
+        let source_id = workflow
+            .edges()
+            .iter()
+            .find(|edge| edge.target() == candidate_id)
+            .and_then(|edge| {
+                workflow
+                    .nodes()
+                    .iter()
+                    .find(|node| node.id() == edge.source())
+                    .filter(|node| node.config().kind() == WorkflowNodeKind::Table)
+                    .map(|_| edge.source().to_owned())
+            })?;
+        let source_relation = workflow
+            .nodes()
+            .iter()
+            .find(|node| node.id() == source_id)
+            .and_then(|node| match &node.config() {
+                WorkflowNodeConfig::Table { relation } => Some(relation.clone()),
+                _ => None,
+            })?;
+        workflow.edges_mut().remove(result_edge_index);
+        let mut suffix = 1_u32;
+        let node_id = loop {
+            let candidate = if suffix == 1 {
+                "siglip".to_owned()
+            } else {
+                format!("siglip_{suffix}")
+            };
+            if !workflow.nodes().iter().any(|node| node.id() == candidate) {
+                break candidate;
+            }
+            suffix += 1;
         };
-        if !workflow.nodes().iter().any(|node| node.id() == candidate) {
-            break candidate;
-        }
-        suffix += 1;
-    };
-    let mut query_suffix = 1_u32;
-    let final_query_id = loop {
-        let candidate = if query_suffix == 1 {
-            "feature_query".to_owned()
-        } else {
-            format!("feature_query_{query_suffix}")
+        let mut query_suffix = 1_u32;
+        let final_query_id = loop {
+            let candidate = if query_suffix == 1 {
+                "feature_query".to_owned()
+            } else {
+                format!("feature_query_{query_suffix}")
+            };
+            if !workflow.nodes().iter().any(|node| node.id() == candidate) {
+                break candidate;
+            }
+            query_suffix += 1;
         };
-        if !workflow.nodes().iter().any(|node| node.id() == candidate) {
-            break candidate;
-        }
-        query_suffix += 1;
-    };
-    let insert_at = workflow
-        .nodes()
-        .iter()
-        .position(|node| node.id() == result_edge.target())
-        .unwrap_or(workflow.nodes().len());
-    workflow.nodes_mut().insert(
-        insert_at,
-        spiral_robotics_api::workflow::WorkflowNodeSpec::new(
-            node_id.clone(),
-            "Backfill visual features",
-            WorkflowNodeConfig::Model {
-                model_id: SIGLIP_BASE_MODEL_ID.to_owned(),
-                features: vec![
-                    WorkflowFeatureDefinition::new("", "", "").with_applicability(
-                        WorkflowFeatureApplicability::new(source_relation, "image"),
-                    ),
-                ],
-                feature_cache_relation: None,
-            },
-        ),
-    );
-    workflow.nodes_mut().insert(
-        insert_at + 1,
-        spiral_robotics_api::workflow::WorkflowNodeSpec::new(
-            final_query_id.clone(),
-            "Join candidates and features",
-            WorkflowNodeConfig::Query {
-                sql: feature_join_sql(&candidate_id, &node_id, &[]),
-                max_rows: 100,
-            },
-        ),
-    );
-    workflow.edges_mut().extend([
-        WorkflowEdgeSpec::new(candidate_id.clone(), node_id.clone()),
-        WorkflowEdgeSpec::new(candidate_id.clone(), final_query_id.clone()),
-        WorkflowEdgeSpec::new(node_id.clone(), final_query_id.clone()),
-        WorkflowEdgeSpec::new(final_query_id, result_edge.target()),
-    ]);
-    Some(node_id)
-}
-
-fn remove_siglip_model(workflow: &mut WorkflowSpec, node_id: &str) -> Option<String> {
-    let model_index = workflow
-        .nodes()
-        .iter()
-        .position(|node| node.id() == node_id && node.config().kind() == WorkflowNodeKind::Model)?;
-    let candidate_id = workflow
-        .edges()
-        .iter()
-        .find(|edge| edge.target() == node_id)
-        .map(|edge| edge.source().to_owned())?;
-    let final_query_id = workflow
-        .edges()
-        .iter()
-        .find(|edge| edge.source() == node_id)
-        .map(|edge| edge.target().to_owned())?;
-    let result_id = workflow
-        .edges()
-        .iter()
-        .find(|edge| edge.source() == final_query_id)
-        .map(|edge| edge.target().to_owned())?;
-    let query_is_upstream = workflow
-        .nodes()
-        .iter()
-        .any(|node| node.id() == candidate_id && node.config().kind() == WorkflowNodeKind::Query);
-    let query_is_downstream = workflow
-        .nodes()
-        .iter()
-        .any(|node| node.id() == final_query_id && node.config().kind() == WorkflowNodeKind::Query);
-    if !query_is_upstream || !query_is_downstream {
-        return None;
+        let insert_at = workflow
+            .nodes()
+            .iter()
+            .position(|node| node.id() == result_edge.target())
+            .unwrap_or(workflow.nodes().len());
+        workflow.nodes_mut().insert(
+            insert_at,
+            spiral_robotics_api::workflow::WorkflowNodeSpec::new(
+                node_id.clone(),
+                "Backfill visual features",
+                WorkflowNodeConfig::Model {
+                    model_id: SIGLIP_BASE_MODEL_ID.to_owned(),
+                    features: vec![
+                        WorkflowFeatureDefinition::new("", "", "").with_applicability(
+                            WorkflowFeatureApplicability::new(source_relation, "image"),
+                        ),
+                    ],
+                    feature_cache_relation: None,
+                },
+            ),
+        );
+        workflow.nodes_mut().insert(
+            insert_at + 1,
+            spiral_robotics_api::workflow::WorkflowNodeSpec::new(
+                final_query_id.clone(),
+                "Join candidates and features",
+                WorkflowNodeConfig::Query {
+                    sql: feature_join_sql(&candidate_id, &node_id, &[]),
+                    max_rows: 100,
+                },
+            ),
+        );
+        workflow.edges_mut().extend([
+            WorkflowEdgeSpec::new(candidate_id.clone(), node_id.clone()),
+            WorkflowEdgeSpec::new(candidate_id.clone(), final_query_id.clone()),
+            WorkflowEdgeSpec::new(node_id.clone(), final_query_id.clone()),
+            WorkflowEdgeSpec::new(final_query_id, result_edge.target()),
+        ]);
+        Some(node_id)
     }
 
-    workflow.nodes_mut().remove(model_index);
-    workflow
-        .nodes_mut()
-        .retain(|node| node.id() != final_query_id);
-    workflow.edges_mut().retain(|edge| {
-        edge.source() != node_id
-            && edge.target() != node_id
-            && edge.source() != final_query_id
-            && edge.target() != final_query_id
-    });
-    workflow
-        .edges_mut()
-        .push(WorkflowEdgeSpec::new(candidate_id.clone(), result_id));
-    Some(candidate_id)
-}
+    fn remove_siglip_model(&mut self, node_id: &str) -> Option<String> {
+        let workflow = self;
+        let model_index = workflow.nodes().iter().position(|node| {
+            node.id() == node_id && node.config().kind() == WorkflowNodeKind::Model
+        })?;
+        let candidate_id = workflow
+            .edges()
+            .iter()
+            .find(|edge| edge.target() == node_id)
+            .map(|edge| edge.source().to_owned())?;
+        let final_query_id = workflow
+            .edges()
+            .iter()
+            .find(|edge| edge.source() == node_id)
+            .map(|edge| edge.target().to_owned())?;
+        let result_id = workflow
+            .edges()
+            .iter()
+            .find(|edge| edge.source() == final_query_id)
+            .map(|edge| edge.target().to_owned())?;
+        let query_is_upstream = workflow.nodes().iter().any(|node| {
+            node.id() == candidate_id && node.config().kind() == WorkflowNodeKind::Query
+        });
+        let query_is_downstream = workflow.nodes().iter().any(|node| {
+            node.id() == final_query_id && node.config().kind() == WorkflowNodeKind::Query
+        });
+        if !query_is_upstream || !query_is_downstream {
+            return None;
+        }
 
-fn model_features(workflow: &WorkflowSpec, model_id: &str) -> Vec<WorkflowFeatureDefinition> {
-    workflow
-        .nodes()
-        .iter()
-        .find(|node| node.id() == model_id)
-        .and_then(|node| match &node.config() {
-            WorkflowNodeConfig::Model { features, .. } => Some(features.clone()),
-            _ => None,
-        })
-        .unwrap_or_default()
-}
-
-fn refresh_generated_feature_query(
-    workflow: &mut WorkflowSpec,
-    model_id: &str,
-    features: &[WorkflowFeatureDefinition],
-) {
-    let Some(candidate_id) = workflow
-        .edges()
-        .iter()
-        .find(|edge| edge.target() == model_id)
-        .map(|edge| edge.source().to_owned())
-    else {
-        return;
-    };
-    let Some(final_query_id) = workflow
-        .edges()
-        .iter()
-        .find(|edge| edge.source() == model_id)
-        .map(|edge| edge.target().to_owned())
-    else {
-        return;
-    };
-    if let Some(query) = workflow
-        .nodes_mut()
-        .iter_mut()
-        .find(|node| node.id() == final_query_id)
-        && let WorkflowNodeConfig::Query { sql, .. } = query.config_mut()
-    {
-        *sql = feature_join_sql(&candidate_id, model_id, features);
+        workflow.nodes_mut().remove(model_index);
+        workflow
+            .nodes_mut()
+            .retain(|node| node.id() != final_query_id);
+        workflow.edges_mut().retain(|edge| {
+            edge.source() != node_id
+                && edge.target() != node_id
+                && edge.source() != final_query_id
+                && edge.target() != final_query_id
+        });
+        workflow
+            .edges_mut()
+            .push(WorkflowEdgeSpec::new(candidate_id.clone(), result_id));
+        Some(candidate_id)
     }
-}
 
-/// Keep deterministic server-owned Model fields visible and valid while the
-/// user edits its one authoritative source Table. The backend repeats this
-/// normalization at admission; the browser never chooses a cache relation.
-fn normalize_draft_model_sources(workflow: &mut WorkflowSpec) {
-    let incoming = workflow.edges().iter().fold(
-        BTreeMap::<String, Vec<String>>::new(),
-        |mut incoming, edge| {
-            incoming
-                .entry(edge.target().to_owned())
-                .or_default()
-                .push(edge.source().to_owned());
-            incoming
-        },
-    );
-    let nodes = workflow
-        .nodes()
-        .iter()
-        .map(|node| (node.id().to_owned(), node.config().to_owned()))
-        .collect::<BTreeMap<_, _>>();
-    for node in workflow.nodes_mut() {
-        let node_id = node.id().to_owned();
-        let WorkflowNodeConfig::Model {
-            features,
-            feature_cache_relation,
-            ..
-        } = node.config_mut()
+    fn model_features(&self, model_id: &str) -> Vec<WorkflowFeatureDefinition> {
+        self.nodes()
+            .iter()
+            .find(|node| node.id() == model_id)
+            .and_then(|node| match &node.config() {
+                WorkflowNodeConfig::Model { features, .. } => Some(features.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    fn refresh_generated_feature_query(
+        &mut self,
+        model_id: &str,
+        features: &[WorkflowFeatureDefinition],
+    ) {
+        let workflow = self;
+        let Some(candidate_id) = workflow
+            .edges()
+            .iter()
+            .find(|edge| edge.target() == model_id)
+            .map(|edge| edge.source().to_owned())
         else {
-            continue;
+            return;
         };
-        let mut sources = BTreeSet::new();
-        let mut visited = BTreeSet::new();
-        let mut pending = incoming.get(node_id.as_str()).cloned().unwrap_or_default();
-        while let Some(upstream_id) = pending.pop() {
-            if !visited.insert(upstream_id.clone()) {
-                continue;
-            }
-            match nodes.get(&upstream_id) {
-                Some(WorkflowNodeConfig::Table { relation }) if !relation.is_empty() => {
-                    sources.insert(relation.clone());
-                }
-                Some(_) => pending.extend(incoming.get(&upstream_id).cloned().unwrap_or_default()),
-                None => {}
-            }
+        let Some(final_query_id) = workflow
+            .edges()
+            .iter()
+            .find(|edge| edge.source() == model_id)
+            .map(|edge| edge.target().to_owned())
+        else {
+            return;
+        };
+        if let Some(query) = workflow
+            .nodes_mut()
+            .iter_mut()
+            .find(|node| node.id() == final_query_id)
+            && let WorkflowNodeConfig::Query { sql, .. } = query.config_mut()
+        {
+            *sql = feature_join_sql(&candidate_id, model_id, features);
         }
-        let source = (sources.len() == 1)
-            .then(|| sources.into_iter().next())
-            .flatten();
-        *feature_cache_relation = source.as_deref().map(derived_feature_cache_relation);
-        for feature in features {
-            feature.set_source_relation(source.clone().unwrap_or_default());
+    }
+
+    /// Keep deterministic server-owned Model fields visible and valid while the
+    /// user edits its one authoritative source Table. The backend repeats this
+    /// normalization at admission; the browser never chooses a cache relation.
+    fn normalize_model_sources(&mut self) {
+        let workflow = self;
+        let incoming = workflow.edges().iter().fold(
+            BTreeMap::<String, Vec<String>>::new(),
+            |mut incoming, edge| {
+                incoming
+                    .entry(edge.target().to_owned())
+                    .or_default()
+                    .push(edge.source().to_owned());
+                incoming
+            },
+        );
+        let nodes = workflow
+            .nodes()
+            .iter()
+            .map(|node| (node.id().to_owned(), node.config().to_owned()))
+            .collect::<BTreeMap<_, _>>();
+        for node in workflow.nodes_mut() {
+            let node_id = node.id().to_owned();
+            let WorkflowNodeConfig::Model {
+                features,
+                feature_cache_relation,
+                ..
+            } = node.config_mut()
+            else {
+                continue;
+            };
+            let mut sources = BTreeSet::new();
+            let mut visited = BTreeSet::new();
+            let mut pending = incoming.get(node_id.as_str()).cloned().unwrap_or_default();
+            while let Some(upstream_id) = pending.pop() {
+                if !visited.insert(upstream_id.clone()) {
+                    continue;
+                }
+                match nodes.get(&upstream_id) {
+                    Some(WorkflowNodeConfig::Table { relation }) if !relation.is_empty() => {
+                        sources.insert(relation.clone());
+                    }
+                    Some(_) => {
+                        pending.extend(incoming.get(&upstream_id).cloned().unwrap_or_default())
+                    }
+                    None => {}
+                }
+            }
+            let source = (sources.len() == 1)
+                .then(|| sources.into_iter().next())
+                .flatten();
+            *feature_cache_relation = source.as_deref().map(derived_feature_cache_relation);
+            for feature in features {
+                feature.set_source_relation(source.clone().unwrap_or_default());
+            }
         }
     }
 }
@@ -2046,10 +2072,8 @@ mod tests {
 
     #[test]
     fn explicit_selection_activates_the_node_inspector() {
-        let selected = reduce_workflow_ui(
-            &WorkflowUiState::default(),
-            WorkflowUiAction::SelectNode("query".to_owned()),
-        );
+        let selected =
+            WorkflowUiState::default().reduce(WorkflowUiAction::SelectNode("query".to_owned()));
         assert_eq!(selected.selected_node.as_deref(), Some("query"));
         assert_eq!(selected.active_panel.as_deref(), Some(NODE_PANEL_ID));
     }
@@ -2125,7 +2149,7 @@ mod tests {
             unreachable!()
         };
         *relation = "pick_place.camera_frames".to_owned();
-        let node_id = insert_siglip_model(&mut workflow).unwrap();
+        let node_id = workflow.insert_siglip_model().unwrap();
         assert_eq!(node_id, "siglip");
         assert_eq!(workflow.nodes().len(), 5);
         assert_eq!(workflow.edges().len(), 5);
@@ -2189,7 +2213,7 @@ mod tests {
             unreachable!()
         };
         *relation = "pick_place.camera_frames".to_owned();
-        insert_siglip_model(&mut workflow).unwrap();
+        workflow.insert_siglip_model().unwrap();
         let mut joint_state = workflow.nodes()[0].clone();
         joint_state.set_id("joint_state");
         joint_state.set_name("Joint state");
@@ -2243,14 +2267,14 @@ mod tests {
         ]);
         let before = workflow.clone();
 
-        assert!(insert_siglip_model(&mut workflow).is_none());
+        assert!(workflow.insert_siglip_model().is_none());
         assert_eq!(workflow, before);
     }
 
     #[test]
     fn configured_source_and_feature_make_the_manual_model_draft_applicable() {
         let mut workflow = WorkflowSpec::default();
-        let model_id = insert_siglip_model(&mut workflow).unwrap();
+        let model_id = workflow.insert_siglip_model().unwrap();
         let blank_report = workflow.validate();
         assert_eq!(
             blank_report
@@ -2281,8 +2305,8 @@ mod tests {
         features[0].set_description("Probability that the frame shows rain");
         features[0].set_concept("raining");
         let features = features.clone();
-        refresh_generated_feature_query(&mut workflow, &model_id, &features);
-        normalize_draft_model_sources(&mut workflow);
+        workflow.refresh_generated_feature_query(&model_id, &features);
+        workflow.normalize_model_sources();
 
         assert!(workflow.validate().valid());
         let WorkflowNodeConfig::Model {
@@ -2321,9 +2345,9 @@ mod tests {
     #[test]
     fn removing_siglip_restores_the_candidate_query_as_terminal() {
         let mut workflow = WorkflowSpec::default();
-        insert_siglip_model(&mut workflow).unwrap();
+        workflow.insert_siglip_model().unwrap();
 
-        let selected = remove_siglip_model(&mut workflow, "siglip").unwrap();
+        let selected = workflow.remove_siglip_model("siglip").unwrap();
 
         assert_eq!(selected, "query");
         assert_eq!(workflow.nodes().len(), 3);

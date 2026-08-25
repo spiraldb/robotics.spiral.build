@@ -416,7 +416,7 @@ impl UpdateDataSettingsCommand {
         self,
         port: &P,
     ) -> Result<DataSettingsSnapshot, OperationError> {
-        let command = validate_settings(self)?;
+        let command = self.validated()?;
         let settings = port.update_settings(command)?;
         // Training readiness depends on the selected runtime endpoint, so publish
         // preferences before rebuilding it.
@@ -444,28 +444,28 @@ impl StartSpiralReplayCommand {
         D: DataCatalogPort + ?Sized,
         R: SpiralReplayPort + ?Sized,
     {
-        validate_replay_command(&self)?;
+        self.validate()?;
         let trajectory = data
             .load_replay_trajectory(&self.episode, &self.stream)
             .await?;
-        validate_replay_trajectory(&trajectory)?;
+        trajectory.validate()?;
         replay.start_spiral_replay(self, trajectory).await
     }
-}
 
-fn validate_replay_command(command: &StartSpiralReplayCommand) -> Result<(), OperationError> {
-    for (label, value) in [
-        ("episode", command.episode.as_str()),
-        ("robot", command.robot.as_str()),
-        ("stream", command.stream.as_str()),
-    ] {
-        if value.trim().is_empty() {
-            return Err(OperationError::InvalidInput(format!(
-                "Spiral replay requires a non-empty {label}"
-            )));
+    fn validate(&self) -> Result<(), OperationError> {
+        for (label, value) in [
+            ("episode", self.episode.as_str()),
+            ("robot", self.robot.as_str()),
+            ("stream", self.stream.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(OperationError::InvalidInput(format!(
+                    "Spiral replay requires a non-empty {label}"
+                )));
+            }
         }
+        Ok(())
     }
-    Ok(())
 }
 
 fn validate_identifier(label: &str, value: &str) -> Result<(), OperationError> {
@@ -477,66 +477,68 @@ fn validate_identifier(label: &str, value: &str) -> Result<(), OperationError> {
     Ok(())
 }
 
-fn validate_replay_trajectory(trajectory: &ReplayTrajectory) -> Result<(), OperationError> {
-    if !trajectory.sample_hz.is_finite() || trajectory.sample_hz <= 0.0 {
-        return Err(OperationError::External(
-            "Spiral returned an invalid replay sample rate".to_owned(),
-        ));
+impl ReplayTrajectory {
+    fn validate(&self) -> Result<(), OperationError> {
+        if !self.sample_hz.is_finite() || self.sample_hz <= 0.0 {
+            return Err(OperationError::External(
+                "Spiral returned an invalid replay sample rate".to_owned(),
+            ));
+        }
+        if self.frames.is_empty()
+            || self.frames.iter().any(|frame| {
+                frame.is_empty()
+                    || frame
+                        .values()
+                        .any(|value| !value.is_finite() || !(-1.0..=1.0).contains(value))
+            })
+        {
+            return Err(OperationError::External(
+                "Spiral returned an empty replay trajectory or a position outside normalized [-1, 1]"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
     }
-    if trajectory.frames.is_empty()
-        || trajectory.frames.iter().any(|frame| {
-            frame.is_empty()
-                || frame
-                    .values()
-                    .any(|value| !value.is_finite() || !(-1.0..=1.0).contains(value))
-        })
-    {
-        return Err(OperationError::External(
-            "Spiral returned an empty replay trajectory or a position outside normalized [-1, 1]"
-                .to_owned(),
-        ));
-    }
-    Ok(())
 }
 
-fn validate_settings(
-    mut command: UpdateDataSettingsCommand,
-) -> Result<UpdateDataSettingsCommand, OperationError> {
-    command.spiral_endpoint =
-        normalize_spiral_endpoint(&command.spiral_endpoint, "Spiral API endpoint")?;
-    command.spiral_spfs_endpoint =
-        normalize_spiral_endpoint(&command.spiral_spfs_endpoint, "Spiral SpFS endpoint")?;
-    command.project_id = command.project_id.trim().to_owned();
-    command.client_id = command.client_id.trim().to_owned();
-    command.client_secret = command.client_secret.map(|secret| secret.trim().to_owned());
-    command.training_endpoint = command.training_endpoint.trim().to_owned();
+impl UpdateDataSettingsCommand {
+    fn validated(mut self) -> Result<Self, OperationError> {
+        self.spiral_endpoint =
+            normalize_spiral_endpoint(&self.spiral_endpoint, "Spiral API endpoint")?;
+        self.spiral_spfs_endpoint =
+            normalize_spiral_endpoint(&self.spiral_spfs_endpoint, "Spiral SpFS endpoint")?;
+        self.project_id = self.project_id.trim().to_owned();
+        self.client_id = self.client_id.trim().to_owned();
+        self.client_secret = self.client_secret.map(|secret| secret.trim().to_owned());
+        self.training_endpoint = self.training_endpoint.trim().to_owned();
 
-    if command.project_id.is_empty()
-        || !command
-            .project_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
-        return Err(OperationError::InvalidInput(
-            "Spiral project must contain only letters, numbers, '_' or '-'".to_owned(),
-        ));
+        if self.project_id.is_empty()
+            || !self
+                .project_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err(OperationError::InvalidInput(
+                "Spiral project must contain only letters, numbers, '_' or '-'".to_owned(),
+            ));
+        }
+
+        if self.client_id.is_empty()
+            && self
+                .client_secret
+                .as_ref()
+                .is_some_and(|secret| !secret.is_empty())
+        {
+            return Err(OperationError::InvalidInput(
+                "Spiral client secret requires a client ID".to_owned(),
+            ));
+        }
+
+        self.training_endpoint =
+            normalize_spiral_endpoint(&self.training_endpoint, "Training runtime endpoint")?;
+
+        Ok(self)
     }
-
-    if command.client_id.is_empty()
-        && command
-            .client_secret
-            .as_ref()
-            .is_some_and(|secret| !secret.is_empty())
-    {
-        return Err(OperationError::InvalidInput(
-            "Spiral client secret requires a client ID".to_owned(),
-        ));
-    }
-
-    command.training_endpoint =
-        normalize_spiral_endpoint(&command.training_endpoint, "Training runtime endpoint")?;
-
-    Ok(command)
 }
 
 fn normalize_spiral_endpoint(endpoint: &str, label: &str) -> Result<String, OperationError> {

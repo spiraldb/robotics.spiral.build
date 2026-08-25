@@ -39,8 +39,7 @@ use crate::checkpoints::{
     validate_checkpoint_artifact_size,
 };
 use crate::episode_schema::{
-    SpiralEpisodeEncoder, VideoStreamProperties, VideoStreamRow, dataset_batch,
-    episode_completion_batch, episode_streams_batch, joint_samples_batch, video_streams_batch,
+    JointSampleRows, SpiralEpisodeEncoder, VideoStreamProperties, VideoStreamRow, VideoStreamRows,
 };
 use crate::episodes::CompletedEpisode;
 use crate::settings::{SpiralConnectionSettings, StoredStudioPreferences};
@@ -1269,13 +1268,19 @@ impl<'a> EpisodeReplacement<'a> {
             ingest_batch(
                 connection,
                 &datasets,
-                dataset_batch(episode.start()).map_err(|error| error.to_string())?,
+                episode
+                    .start()
+                    .dataset_batch()
+                    .map_err(|error| error.to_string())?,
             )?;
         }
         ingest_batch(
             connection,
             &Table::EpisodeStreams.qualified_name(namespace),
-            episode_streams_batch(episode.start()).map_err(|error| error.to_string())?,
+            episode
+                .start()
+                .streams_batch()
+                .map_err(|error| error.to_string())?,
         )?;
         if !videos.is_empty() {
             let streams = videos
@@ -1300,7 +1305,7 @@ impl<'a> EpisodeReplacement<'a> {
             ingest_batch(
                 connection,
                 &Table::EpisodeStreams.qualified_name(namespace),
-                video_streams_batch(&streams).map_err(|error| error.to_string())?,
+                streams.batch().map_err(|error| error.to_string())?,
             )?;
         }
         let mut encoder = SpiralEpisodeEncoder::new(episode.start().clone())
@@ -1309,7 +1314,7 @@ impl<'a> EpisodeReplacement<'a> {
         for sample in episode.samples() {
             rows.extend(encoder.encode(sample).map_err(|error| error.to_string())?);
             if rows.len() >= JOINT_BATCH_ROWS {
-                let batch = joint_samples_batch(&rows).map_err(|error| error.to_string())?;
+                let batch = rows.batch().map_err(|error| error.to_string())?;
                 ingest_batch(
                     connection,
                     &Table::JointSamples.qualified_name(namespace),
@@ -1319,7 +1324,7 @@ impl<'a> EpisodeReplacement<'a> {
             }
         }
         if !rows.is_empty() {
-            let batch = joint_samples_batch(&rows).map_err(|error| error.to_string())?;
+            let batch = rows.batch().map_err(|error| error.to_string())?;
             ingest_batch(
                 connection,
                 &Table::JointSamples.qualified_name(namespace),
@@ -1347,7 +1352,9 @@ impl<'a> EpisodeReplacement<'a> {
         ingest_batch(
             connection,
             &Table::Episodes.qualified_name(namespace),
-            episode_completion_batch(episode.start(), episode.completion(), encoder.frames())
+            episode
+                .completion()
+                .episode_batch(episode.start(), encoder.frames())
                 .map_err(|error| error.to_string())?,
         )?;
         Ok(())

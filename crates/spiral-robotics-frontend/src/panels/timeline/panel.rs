@@ -218,40 +218,42 @@ impl RecordedTimelineTraces {
 
 /// Convert the studio's existing take signal store into the timeline's fixed
 /// six-lane view model. Each lane overlays the arms that reported that joint.
-pub(crate) fn signal_lanes_from_store(store: &SignalStore) -> [TimelineSignalLane; 6] {
-    std::array::from_fn(|index| {
-        let definition = SO101_JOINTS[index];
-        let series = store
-            .arms()
-            .iter()
-            .filter_map(|arm| {
-                let joint = arm
-                    .joints()
-                    .iter()
-                    .find(|joint| joint.name() == definition.name())?;
-                let points = store
-                    .times()
-                    .iter()
-                    .zip(joint.values())
-                    .map(|(seconds, value)| TimelineSignalPoint {
-                        seconds: f64::from(*seconds),
-                        value: value.map(f64::from),
+impl SignalStore {
+    pub(crate) fn timeline_lanes(&self) -> [TimelineSignalLane; 6] {
+        std::array::from_fn(|index| {
+            let definition = SO101_JOINTS[index];
+            let series = self
+                .arms()
+                .iter()
+                .filter_map(|arm| {
+                    let joint = arm
+                        .joints()
+                        .iter()
+                        .find(|joint| joint.name() == definition.name())?;
+                    let points = self
+                        .times()
+                        .iter()
+                        .zip(joint.values())
+                        .map(|(seconds, value)| TimelineSignalPoint {
+                            seconds: f64::from(*seconds),
+                            value: value.map(f64::from),
+                        })
+                        .collect();
+                    Some(TimelineSignalSeries {
+                        arm: arm.id().to_owned(),
+                        points,
                     })
-                    .collect();
-                Some(TimelineSignalSeries {
-                    arm: arm.id().to_owned(),
-                    points,
                 })
-            })
-            .collect();
+                .collect();
 
-        TimelineSignalLane {
-            joint: definition.name().to_owned(),
-            label: definition.label().to_owned(),
-            color: signal_color(definition.name()).to_owned(),
-            series,
-        }
-    })
+            TimelineSignalLane {
+                joint: definition.name().to_owned(),
+                label: definition.label().to_owned(),
+                color: signal_color(definition.name()).to_owned(),
+                series,
+            }
+        })
+    }
 }
 
 /// Whether a Timeline action is currently available, with a concrete recovery
@@ -644,7 +646,7 @@ pub(crate) fn StudioTimeline(
         Activity::Training => "Training step timeline",
         Activity::Rollout => "Rollout live timeline",
     };
-    let signal_chart = timeline_signal_chart(&signal_lanes, duration);
+    let signal_chart = signal_lanes.chart(duration);
     let signal_chart_label = format!("Six robot joint signals over {}", format_clock(duration));
 
     rsx! {
@@ -1071,60 +1073,66 @@ fn percent(seconds: f64, duration: f64) -> f64 {
     }
 }
 
-fn timeline_signal_chart(lanes: &[TimelineSignalLane; 6], duration: f64) -> Chart {
-    let mut chart = Chart::new()
-        .animation(false)
-        .tooltip(studio_numeric_tooltip(3));
+trait TimelineSignalLanes {
+    fn chart(&self, duration: f64) -> Chart;
+}
 
-    for (lane_index, lane) in lanes.iter().enumerate() {
-        let grid_index = lane_index as f64;
-        let (low, high) = signal_bounds(&lane.series).unwrap_or((0.0, 1.0));
-        let padding = ((high - low) * 0.08).max(0.5);
-        chart = chart
-            .grid(
-                Grid::new()
-                    .id(format!("timeline-grid-{lane_index}"))
-                    .left(0)
-                    .right(0)
-                    .top(lane_index as f64 * TRACE_LANE_HEIGHT)
-                    .height(TRACE_LANE_HEIGHT),
-            )
-            .x_axis(
-                hidden_timeline_axis(AxisType::Value, grid_index)
-                    .min(0)
-                    .max(duration.max(0.001)),
-            )
-            .y_axis(
-                hidden_timeline_axis(AxisType::Value, grid_index)
-                    .min(low - padding)
-                    .max(high + padding)
-                    .scale(true),
-            );
+impl TimelineSignalLanes for [TimelineSignalLane; 6] {
+    fn chart(&self, duration: f64) -> Chart {
+        let mut chart = Chart::new()
+            .animation(false)
+            .tooltip(studio_numeric_tooltip(3));
 
-        for (series_index, series) in lane.series.iter().enumerate() {
-            chart = chart.series(
-                Line::new()
-                    .id(format!("{}-{}-{series_index}", lane.joint, series.arm))
-                    .name(format!("{} · {}", lane.label, series.arm))
-                    .x_axis_index(grid_index)
-                    .y_axis_index(grid_index)
-                    .show_symbol(false)
-                    .symbol(Symbol::None)
-                    .sampling(Sampling::Minmax)
-                    .connect_nulls(false)
-                    .line_style(
-                        LineStyle::new()
-                            .color(lane.color.clone())
-                            .width(if series_index == 0 { 1.5 } else { 1.2 })
-                            .opacity(if series_index == 0 { 0.95 } else { 0.52 }),
-                    )
-                    .emphasis(Emphasis::new().disabled(true))
-                    .data(timeline_series_data(&series.points, TRACE_POINT_BUDGET)),
-            );
+        for (lane_index, lane) in self.iter().enumerate() {
+            let grid_index = lane_index as f64;
+            let (low, high) = signal_bounds(&lane.series).unwrap_or((0.0, 1.0));
+            let padding = ((high - low) * 0.08).max(0.5);
+            chart = chart
+                .grid(
+                    Grid::new()
+                        .id(format!("timeline-grid-{lane_index}"))
+                        .left(0)
+                        .right(0)
+                        .top(lane_index as f64 * TRACE_LANE_HEIGHT)
+                        .height(TRACE_LANE_HEIGHT),
+                )
+                .x_axis(
+                    hidden_timeline_axis(AxisType::Value, grid_index)
+                        .min(0)
+                        .max(duration.max(0.001)),
+                )
+                .y_axis(
+                    hidden_timeline_axis(AxisType::Value, grid_index)
+                        .min(low - padding)
+                        .max(high + padding)
+                        .scale(true),
+                );
+
+            for (series_index, series) in lane.series.iter().enumerate() {
+                chart = chart.series(
+                    Line::new()
+                        .id(format!("{}-{}-{series_index}", lane.joint, series.arm))
+                        .name(format!("{} · {}", lane.label, series.arm))
+                        .x_axis_index(grid_index)
+                        .y_axis_index(grid_index)
+                        .show_symbol(false)
+                        .symbol(Symbol::None)
+                        .sampling(Sampling::Minmax)
+                        .connect_nulls(false)
+                        .line_style(
+                            LineStyle::new()
+                                .color(lane.color.clone())
+                                .width(if series_index == 0 { 1.5 } else { 1.2 })
+                                .opacity(if series_index == 0 { 0.95 } else { 0.52 }),
+                        )
+                        .emphasis(Emphasis::new().disabled(true))
+                        .data(timeline_series_data(&series.points, TRACE_POINT_BUDGET)),
+                );
+            }
         }
-    }
 
-    chart
+        chart
+    }
 }
 
 fn hidden_timeline_axis(kind: AxisType, grid_index: f64) -> Axis {
@@ -1295,7 +1303,7 @@ mod tests {
 
     #[test]
     fn timeline_chart_uses_one_grid_per_canonical_lane() {
-        let chart = timeline_signal_chart(&signal_lanes_from_store(&SignalStore::default()), 12.0);
+        let chart = SignalStore::default().timeline_lanes().chart(12.0);
         let option = serde_json::to_value(chart).expect("timeline chart should serialize");
 
         assert_eq!(option["grid"].as_array().map(Vec::len), Some(6));
@@ -1306,7 +1314,7 @@ mod tests {
 
     #[test]
     fn canonical_lane_helper_always_returns_six_joint_slots() {
-        let lanes = signal_lanes_from_store(&SignalStore::default());
+        let lanes = SignalStore::default().timeline_lanes();
         assert_eq!(lanes.len(), 6);
         assert_eq!(lanes[0].joint, "shoulder_pan");
         assert_eq!(lanes[5].joint, "gripper");

@@ -13,13 +13,15 @@ pub(crate) enum ShellAction {
     CloseSettings,
 }
 
-pub(crate) fn reduce_shell(state: &ShellState, action: ShellAction) -> ShellState {
-    let mut next = state.clone();
-    match action {
-        ShellAction::OpenSettings => next.settings_open = true,
-        ShellAction::CloseSettings => next.settings_open = false,
+impl ShellState {
+    pub(crate) fn reduce(&self, action: ShellAction) -> Self {
+        let mut next = self.clone();
+        match action {
+            ShellAction::OpenSettings => next.settings_open = true,
+            ShellAction::CloseSettings => next.settings_open = false,
+        }
+        next
     }
-    next
 }
 
 #[derive(Clone, Copy)]
@@ -39,7 +41,7 @@ impl ShellController {
 
     pub(super) fn dispatch(mut self, action: ShellAction) {
         let current = self.state.peek();
-        let next = reduce_shell(&current, action);
+        let next = current.reduce(action);
         let changed = *current != next;
         drop(current);
         if changed {
@@ -55,8 +57,8 @@ mod tests {
     #[test]
     fn settings_view_state_is_independent_from_routing() {
         let initial = ShellState::default();
-        let open = reduce_shell(&initial, ShellAction::OpenSettings);
-        let closed = reduce_shell(&open, ShellAction::CloseSettings);
+        let open = initial.reduce(ShellAction::OpenSettings);
+        let closed = open.reduce(ShellAction::CloseSettings);
 
         assert!(open.settings_open);
         assert!(!closed.settings_open);
