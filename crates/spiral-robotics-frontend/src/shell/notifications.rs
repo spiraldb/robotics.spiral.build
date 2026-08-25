@@ -81,16 +81,78 @@ impl MessageAction {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StudioMessage {
-    pub(crate) id: u64,
-    pub(crate) text: String,
-    pub(crate) severity: MessageSeverity,
-    pub(crate) source: MessageSource,
-    pub(crate) raised_ms: f64,
+    id: u64,
+    text: String,
+    severity: MessageSeverity,
+    source: MessageSource,
+    timing: MessageTiming,
+    read: bool,
+    action: Option<MessageAction>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MessageTiming {
+    raised_ms: f64,
     /// How long this message receives space in the status bar. It remains in
     /// history after this deadline until the operator dismisses it.
-    pub(crate) prominent_until_ms: f64,
-    pub(crate) read: bool,
-    pub(crate) action: Option<MessageAction>,
+    prominent_until_ms: f64,
+}
+
+impl StudioMessage {
+    pub(crate) const fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub(crate) const fn severity(&self) -> MessageSeverity {
+        self.severity
+    }
+
+    pub(crate) const fn source(&self) -> MessageSource {
+        self.source
+    }
+
+    pub(crate) const fn raised_ms(&self) -> f64 {
+        self.timing.raised_ms
+    }
+
+    pub(crate) const fn is_read(&self) -> bool {
+        self.read
+    }
+
+    pub(crate) const fn action(&self) -> Option<&MessageAction> {
+        self.action.as_ref()
+    }
+}
+
+pub(crate) struct MessageNotice {
+    text: String,
+    severity: MessageSeverity,
+    source: MessageSource,
+    action: Option<MessageAction>,
+}
+
+impl MessageNotice {
+    pub(crate) fn new(
+        text: impl Into<String>,
+        severity: MessageSeverity,
+        source: MessageSource,
+    ) -> Self {
+        Self {
+            text: text.into(),
+            severity,
+            source,
+            action: None,
+        }
+    }
+
+    pub(crate) fn with_action(mut self, action: MessageAction) -> Self {
+        self.action = Some(action);
+        self
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -101,15 +163,13 @@ pub(crate) struct NotificationCenterState {
 }
 
 impl NotificationCenterState {
-    pub(crate) fn push(
-        &mut self,
-        text: impl Into<String>,
-        severity: MessageSeverity,
-        source: MessageSource,
-        action: Option<MessageAction>,
-        now_ms: f64,
-    ) -> u64 {
-        let text = text.into();
+    pub(crate) fn push(&mut self, notice: MessageNotice, now_ms: f64) -> u64 {
+        let MessageNotice {
+            text,
+            severity,
+            source,
+            action,
+        } = notice;
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         let prominent_until_ms = now_ms + f64::from(linger_ms(&text, severity));
@@ -118,8 +178,10 @@ impl NotificationCenterState {
             text,
             severity,
             source,
-            raised_ms: now_ms,
-            prominent_until_ms,
+            timing: MessageTiming {
+                raised_ms: now_ms,
+                prominent_until_ms,
+            },
             read: self.open,
             action,
         });
@@ -137,7 +199,7 @@ impl NotificationCenterState {
         self.messages
             .iter()
             .rev()
-            .find(|message| now_ms < message.prominent_until_ms)
+            .find(|message| now_ms < message.timing.prominent_until_ms)
     }
 
     pub(crate) fn unread_count(&self) -> usize {
@@ -187,13 +249,14 @@ mod tests {
     fn messages_expire_from_the_status_bar_but_remain_in_history() {
         let mut center = NotificationCenterState::default();
         center.push(
-            "Episode saved.",
-            MessageSeverity::Success,
-            MessageSource::Live,
-            None,
+            MessageNotice::new(
+                "Episode saved.",
+                MessageSeverity::Success,
+                MessageSource::Live,
+            ),
             100.0,
         );
-        let deadline = center.messages().next().unwrap().prominent_until_ms;
+        let deadline = center.messages().next().unwrap().timing.prominent_until_ms;
 
         assert!(center.latest_prominent(deadline - 1.0).is_some());
         assert!(center.latest_prominent(deadline).is_none());
@@ -204,10 +267,7 @@ mod tests {
     fn opening_the_center_marks_every_visible_message_read() {
         let mut center = NotificationCenterState::default();
         center.push(
-            "Failed.",
-            MessageSeverity::Error,
-            MessageSource::Training,
-            None,
+            MessageNotice::new("Failed.", MessageSeverity::Error, MessageSource::Training),
             0.0,
         );
         assert_eq!(center.unread_count(), 1);
@@ -223,10 +283,11 @@ mod tests {
         let mut center = NotificationCenterState::default();
         for index in 0..MAX_MESSAGES + 5 {
             center.push(
-                format!("Message {index}"),
-                MessageSeverity::Info,
-                MessageSource::Studio,
-                None,
+                MessageNotice::new(
+                    format!("Message {index}"),
+                    MessageSeverity::Info,
+                    MessageSource::Studio,
+                ),
                 index as f64,
             );
         }

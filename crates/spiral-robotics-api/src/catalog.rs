@@ -129,6 +129,18 @@ impl ManagedTable {
             }
         }
     }
+
+    /// Build the default native-training query for one logical dataset.
+    pub fn training_sql_for_dataset(self, namespace: &str, dataset_id: &str) -> String {
+        let datasets = self.qualified_name(namespace);
+        let samples = Self::JointSamples.qualified_name(namespace);
+        let episodes = Self::Episodes.qualified_name(namespace);
+        let streams = Self::EpisodeStreams.qualified_name(namespace);
+        let escaped_dataset_id = dataset_id.replace('\'', "''");
+        format!(
+            "SELECT j.episode_id, j.stream_id, j.sample_index, j.episode_time_ns,\n       e.sample_hz, e.frames AS episode_frames, s.robot_type, s.joint_names,\n       j.state_position AS state,\n       j.action_position AS action\nFROM {samples} AS j\nJOIN {episodes} AS e ON e.episode_id = j.episode_id\nJOIN {datasets} AS d ON d.dataset_id = e.dataset_id\nJOIN {streams} AS s ON s.episode_id = j.episode_id AND s.stream_id = j.stream_id\nWHERE e.schema_version = {SCHEMA_VERSION}\n  AND d.dataset_id = '{escaped_dataset_id}'\n  AND NOT e.discarded\n  AND s.modality = 'joint'\n  AND (\n      LOWER(s.robot_type) LIKE '%follower%'\n      OR (s.robot_type IS NULL AND s.stream_id = 'follower')\n  )\n  AND j.state_valid\n  AND j.action_valid"
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -223,23 +235,12 @@ impl QueryPreset {
     }
 }
 
-pub fn is_dataset_id(value: &str) -> bool {
-    spiral_robotics_core::identity::DatasetId::parse(value)
-        .is_ok_and(|identity| identity.as_str() == value)
+pub fn is_dataset_id(dataset_id: &str) -> bool {
+    spiral_robotics_core::identity::DatasetId::try_from(dataset_id)
+        .is_ok_and(|identity| identity.as_str() == dataset_id)
 }
 
 pub mod column {
     pub const STATE_VALID: &str = "state_valid";
     pub const ACTION_VALID: &str = "action_valid";
-}
-
-pub fn default_training_sql_for_dataset(namespace: &str, dataset_id: &str) -> String {
-    let datasets = ManagedTable::Datasets.qualified_name(namespace);
-    let samples = ManagedTable::JointSamples.qualified_name(namespace);
-    let episodes = ManagedTable::Episodes.qualified_name(namespace);
-    let streams = ManagedTable::EpisodeStreams.qualified_name(namespace);
-    let dataset_id = dataset_id.replace('\'', "''");
-    format!(
-        "SELECT j.episode_id, j.stream_id, j.sample_index, j.episode_time_ns,\n       e.sample_hz, e.frames AS episode_frames, s.robot_type, s.joint_names,\n       j.state_position AS state,\n       j.action_position AS action\nFROM {samples} AS j\nJOIN {episodes} AS e ON e.episode_id = j.episode_id\nJOIN {datasets} AS d ON d.dataset_id = e.dataset_id\nJOIN {streams} AS s ON s.episode_id = j.episode_id AND s.stream_id = j.stream_id\nWHERE e.schema_version = {SCHEMA_VERSION}\n  AND d.dataset_id = '{dataset_id}'\n  AND NOT e.discarded\n  AND s.modality = 'joint'\n  AND (\n      LOWER(s.robot_type) LIKE '%follower%'\n      OR (s.robot_type IS NULL AND s.stream_id = 'follower')\n  )\n  AND j.state_valid\n  AND j.action_valid"
-    )
 }

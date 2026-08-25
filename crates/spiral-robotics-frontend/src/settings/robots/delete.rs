@@ -1,7 +1,7 @@
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant, InlineConfirmation};
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_api::api::RobotSummary;
+use spiral_robotics_api::robots::RobotSummary;
 
 use crate::client::http as api;
 use crate::shell::state::studio;

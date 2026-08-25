@@ -7,7 +7,7 @@ use std::rc::Rc;
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_api::api::{
+use spiral_robotics_api::robots::{
     GoalRequest, JointTelemetry, MotorCondition, MotorLimits, RobotSummary, RobotTelemetry,
 };
 use spiral_robotics_core::arm::{self, JointAngles};
@@ -107,7 +107,7 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
             .reduce(f64::max)
     });
     let lagging = tracking_error
-        .is_some_and(|error| error >= spiral_robotics_api::api::CAUTION_FOLLOW_ERROR_DEGREES);
+        .is_some_and(|error| error >= spiral_robotics_api::robots::CAUTION_FOLLOW_ERROR_DEGREES);
 
     rsx! {
         dl { class: "live-summary-readouts grid gap-1.5 px-3 pb-1 pt-2",
@@ -128,7 +128,7 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
             // out of alignment with each other.
             Readout {
                 label: "Gripper open",
-                value: angles.map(|angles| format!("{:.0}", angles.gripper * 100.0)),
+                value: angles.map(|angles| format!("{:.0}", angles.gripper_opening() * 100.0)),
                 unit: "%",
             }
             // One name for one number, in every mode. This is the same quantity
@@ -284,7 +284,7 @@ fn MotorDetail(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> Elemen
         return rsx! {};
     };
 
-    let label = arm::so101_joint(&joint.name).map_or(joint.name.clone(), |j| j.label.to_owned());
+    let label = arm::so101_joint(&joint.name).map_or(joint.name.clone(), |j| j.label().to_owned());
     let model = robot
         .motors
         .iter()
@@ -402,7 +402,7 @@ pub(crate) fn measured_angles(joints: &[JointTelemetry]) -> JointAngles {
         .find(|joint| joint.name == "gripper")
         .and_then(|joint| joint.normalized)
         .unwrap_or(0.0);
-    JointAngles::from_named_degrees(&degrees).with_gripper_normalized(gripper)
+    JointAngles::from(&degrees).with_gripper_normalized(gripper)
 }
 
 #[component]
@@ -588,7 +588,7 @@ fn JointRow(
     on_select: EventHandler<()>,
     on_point: EventHandler<bool>,
 ) -> Element {
-    let label = arm::so101_joint(&joint.name).map_or(joint.name.clone(), |j| j.label.to_owned());
+    let label = arm::so101_joint(&joint.name).map_or(joint.name.clone(), |j| j.label().to_owned());
     let measured = joint.normalized.unwrap_or(0.0);
     let shown = value.unwrap_or(measured);
     let interactive = drivable && joint.range.is_some();

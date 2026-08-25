@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
-use spiral_robotics_api::api::{
+use spiral_robotics_api::settings::{
     DEFAULT_SPIRAL_ENDPOINT, DEFAULT_SPIRAL_SPFS_ENDPOINT, TrainingRuntimeSettings, VideoSettings,
 };
 use url::Url;
@@ -33,8 +33,74 @@ struct BackendState {
 
 #[derive(Clone, Default, Eq, PartialEq)]
 pub struct SpiralCredentials {
-    pub client_id: String,
-    pub client_secret: String,
+    client_id: String,
+    client_secret: String,
+}
+
+impl SpiralCredentials {
+    pub fn new(client_id: String, client_secret: String) -> Self {
+        Self {
+            client_id,
+            client_secret,
+        }
+    }
+
+    pub fn client_id(&self) -> &str {
+        &self.client_id
+    }
+
+    pub fn client_secret(&self) -> &str {
+        &self.client_secret
+    }
+}
+
+/// Validated bootstrap destination for the one Spiral project connection.
+///
+/// Construction keeps endpoints and project identity together so callers
+/// cannot partially reconfigure a live store.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SpiralConnectionSettings {
+    endpoint: String,
+    spfs_endpoint: String,
+    project_id: Option<String>,
+    credentials: Option<SpiralCredentials>,
+}
+
+impl SpiralConnectionSettings {
+    pub fn new(endpoint: String, spfs_endpoint: String) -> Result<Self, String> {
+        Ok(Self {
+            endpoint: normalize_spiral_endpoint(&endpoint)?,
+            spfs_endpoint: normalize_spiral_spfs_endpoint(&spfs_endpoint)?,
+            project_id: None,
+            credentials: None,
+        })
+    }
+
+    pub fn with_project(mut self, project_id: &str) -> Result<Self, String> {
+        self.project_id = Some(validate_project_id(project_id)?);
+        Ok(self)
+    }
+
+    pub fn with_credentials(mut self, credentials: Option<SpiralCredentials>) -> Self {
+        self.credentials = credentials;
+        self
+    }
+
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    pub fn spfs_endpoint(&self) -> &str {
+        &self.spfs_endpoint
+    }
+
+    pub fn project_id(&self) -> Option<&str> {
+        self.project_id.as_deref()
+    }
+
+    pub fn credentials(&self) -> Option<&SpiralCredentials> {
+        self.credentials.as_ref()
+    }
 }
 
 /// Private backend-local bootstrap state. Future auth/session metadata may
@@ -93,42 +159,29 @@ impl BackendStateStore {
         let current = lock(&self.current);
         let client_id = current.client_id.trim().to_owned();
         let client_secret = current.client_secret.clone();
-        (!client_id.is_empty() && !client_secret.is_empty()).then_some(SpiralCredentials {
-            client_id,
-            client_secret,
-        })
+        (!client_id.is_empty() && !client_secret.is_empty())
+            .then_some(SpiralCredentials::new(client_id, client_secret))
     }
 
     pub fn client_id(&self) -> String {
         lock(&self.current).client_id.trim().to_owned()
     }
 
-    pub fn save_connection(
-        &self,
-        project_id: &str,
-        spiral_endpoint: &str,
-        spiral_spfs_endpoint: &str,
-        credentials: Option<&SpiralCredentials>,
-    ) -> Result<(), String> {
-        let project_id = project_id.trim();
-        if project_id.is_empty()
-            || !project_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        {
-            return Err("Spiral project must contain only letters, numbers, '_' or '-'".to_owned());
-        }
-        let spiral_endpoint = normalize_spiral_endpoint(spiral_endpoint)?;
-        let spiral_spfs_endpoint = normalize_spiral_spfs_endpoint(spiral_spfs_endpoint)?;
+    pub fn save_connection(&self, settings: &SpiralConnectionSettings) -> Result<(), String> {
+        let project_id = settings.project_id().ok_or_else(|| {
+            "Spiral project is not configured. Choose a project in Settings → SpiralDB.".to_owned()
+        })?;
         let next = BackendState {
             project_id: project_id.to_owned(),
-            spiral_endpoint,
-            spiral_spfs_endpoint,
-            client_id: credentials
-                .map(|credentials| credentials.client_id.clone())
+            spiral_endpoint: settings.endpoint().to_owned(),
+            spiral_spfs_endpoint: settings.spfs_endpoint().to_owned(),
+            client_id: settings
+                .credentials()
+                .map(|credentials| credentials.client_id().to_owned())
                 .unwrap_or_default(),
-            client_secret: credentials
-                .map(|credentials| credentials.client_secret.clone())
+            client_secret: settings
+                .credentials()
+                .map(|credentials| credentials.client_secret().to_owned())
                 .unwrap_or_default(),
         };
         write_private_json(&self.path, &next)?;
@@ -167,6 +220,18 @@ fn normalize_service_endpoint(endpoint: &str, label: &str) -> Result<String, Str
         ));
     }
     Ok(parsed.as_str().trim_end_matches('/').to_owned())
+}
+
+fn validate_project_id(project_id: &str) -> Result<String, String> {
+    let project_id = project_id.trim();
+    if project_id.is_empty()
+        || !project_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err("Spiral project must contain only letters, numbers, '_' or '-'".to_owned());
+    }
+    Ok(project_id.to_owned())
 }
 
 pub fn environment_spiral_endpoint() -> String {
@@ -279,18 +344,17 @@ mod tests {
         assert_eq!(store.spiral_spfs_endpoint(), None);
         assert!(store.credentials().is_none());
 
-        let credentials = SpiralCredentials {
-            client_id: "client-id".to_owned(),
-            client_secret: "client-secret".to_owned(),
-        };
-        store
-            .save_connection(
-                " project-123 ",
-                " http://127.0.0.1:4279/ ",
-                " http://127.0.0.1:4295/ ",
-                Some(&credentials),
-            )
-            .unwrap();
+        let credentials =
+            SpiralCredentials::new("client-id".to_owned(), "client-secret".to_owned());
+        let settings = SpiralConnectionSettings::new(
+            " http://127.0.0.1:4279/ ".to_owned(),
+            " http://127.0.0.1:4295/ ".to_owned(),
+        )
+        .unwrap()
+        .with_project(" project-123 ")
+        .unwrap()
+        .with_credentials(Some(credentials.clone()));
+        store.save_connection(&settings).unwrap();
         assert_eq!(store.project_id().as_deref(), Some("project-123"));
         assert_eq!(
             store.spiral_endpoint().as_deref(),
@@ -301,8 +365,8 @@ mod tests {
             Some("http://127.0.0.1:4295")
         );
         let saved = store.credentials().expect("credentials are saved");
-        assert_eq!(saved.client_id, credentials.client_id);
-        assert_eq!(saved.client_secret, credentials.client_secret);
+        assert_eq!(saved.client_id(), credentials.client_id());
+        assert_eq!(saved.client_secret(), credentials.client_secret());
         let reopened = BackendStateStore::open(path).unwrap();
         assert_eq!(reopened.project_id().as_deref(), Some("project-123"));
         assert_eq!(
@@ -314,8 +378,8 @@ mod tests {
             Some("http://127.0.0.1:4295")
         );
         let saved = reopened.credentials().expect("credentials are reopened");
-        assert_eq!(saved.client_id, credentials.client_id);
-        assert_eq!(saved.client_secret, credentials.client_secret);
+        assert_eq!(saved.client_id(), credentials.client_id());
+        assert_eq!(saved.client_secret(), credentials.client_secret());
     }
 
     #[test]

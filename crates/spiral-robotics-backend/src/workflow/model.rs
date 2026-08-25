@@ -33,10 +33,10 @@ use spiral_robotics_api::workflow::{
     MAX_WORKFLOW_FEATURE_STREAMS, SIGLIP_BASE_MODEL_ID, SIGLIP_BASE_REPOSITORY,
     SIGLIP_BASE_REVISION, WORKFLOW_FEATURE_REGISTRY_RELATION as FEATURE_REGISTRY_RELATION,
     WorkflowFeatureDefinition, WorkflowModelRunMetadata, WorkflowNodeProgress,
-    WorkflowQuarantineSummary, derived_feature_cache_relation, is_workflow_feature_name,
+    WorkflowQuarantineSummary, derived_feature_cache_relation,
 };
-use spiral_robotics_core::query::{ReadOnlyMode, ensure_read_only, is_identifier};
-use spiral_robotics_core::workflow::validate_qualified_relation;
+use spiral_robotics_core::query::{ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier};
+use spiral_robotics_core::workflow::QualifiedRelation;
 use tokenizers::Tokenizer;
 use tokenizers::utils::padding::{PaddingDirection, PaddingParams, PaddingStrategy};
 use tokenizers::utils::truncation::TruncationParams;
@@ -116,11 +116,13 @@ pub(crate) fn run_model(
     publication_gate: Arc<Mutex<()>>,
     mut publish: impl FnMut(ModelRunEvent),
 ) -> Result<ModelRunResult, ModelRunFailure> {
-    ensure_read_only(&request.candidate_sql, ReadOnlyMode::Training).map_err(|error| {
-        error
-            .to_string()
-            .replace("Training SQL", "Workflow candidate SQL")
-    })?;
+    ReadOnlyQuery::new(&request.candidate_sql, ReadOnlyQueryMode::Training)
+        .authorize()
+        .map_err(|error| {
+            error
+                .to_string()
+                .replace("Training SQL", "Workflow candidate SQL")
+        })?;
     publish(ModelRunEvent::Validating(
         "Inspecting candidate keys and feature cache".to_owned(),
     ));
@@ -874,9 +876,9 @@ fn insert_loaded_registry_entry(
 }
 
 fn validate_feature_registry_entry(entry: &FeatureRegistryEntry) -> Result<(), String> {
-    validate_qualified_relation(&entry.definition.applicability.source_relation)
+    QualifiedRelation::try_from(entry.definition.applicability.source_relation.as_str())
         .map_err(|error| format!("Workflow feature registry source relation is unsafe: {error}"))?;
-    validate_qualified_relation(&entry.cache_relation)
+    QualifiedRelation::try_from(entry.cache_relation.as_str())
         .map_err(|error| format!("Workflow feature registry cache relation is unsafe: {error}"))?;
     if entry.cache_relation
         != derived_feature_cache_relation(&entry.definition.applicability.source_relation)
@@ -886,13 +888,14 @@ fn validate_feature_registry_entry(entry: &FeatureRegistryEntry) -> Result<(), S
                 .to_owned(),
         );
     }
-    if !is_workflow_feature_name(&entry.definition.name)
+    if !entry.definition.has_valid_name()
         || entry.definition.description.trim().is_empty()
         || entry.definition.description.chars().count() > MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH
         || entry.definition.concept.trim().is_empty()
         || entry.definition.concept.chars().count() > MAX_SIGLIP_CONCEPT_LENGTH
         || entry.definition.applicability.stream_ids.len() > MAX_WORKFLOW_FEATURE_STREAMS
-        || !is_identifier(&entry.definition.applicability.media_field)
+        || UnquotedSqlIdentifier::try_from(entry.definition.applicability.media_field.as_str())
+            .is_err()
     {
         return Err("Workflow feature registry contains an invalid feature definition.".to_owned());
     }
@@ -1984,7 +1987,8 @@ mod tests {
         execute_update_sql, ingest_batch, run_query, table_exists,
     };
     use spiral_robotics_storage::settings::{
-        BackendStateStore, environment_spiral_endpoint, environment_spiral_spfs_endpoint,
+        BackendStateStore, SpiralConnectionSettings, environment_spiral_endpoint,
+        environment_spiral_spfs_endpoint,
     };
 
     fn image_field() -> Field {
@@ -2657,21 +2661,22 @@ mod tests {
             .filter(|project| !project.trim().is_empty())
             .or_else(|| stored.as_ref().and_then(BackendStateStore::project_id))
             .expect("SPIRAL_PROJECT_ID or a disposable project saved in Settings is required");
+        let connection = SpiralConnectionSettings::new(
+            stored
+                .as_ref()
+                .and_then(BackendStateStore::spiral_endpoint)
+                .unwrap_or_else(environment_spiral_endpoint),
+            stored
+                .as_ref()
+                .and_then(BackendStateStore::spiral_spfs_endpoint)
+                .unwrap_or_else(environment_spiral_spfs_endpoint),
+        )
+        .and_then(|settings| settings.with_project(&project))
+        .expect("the Workflow registry connection must be valid")
+        .with_credentials(stored.as_ref().and_then(BackendStateStore::credentials));
         let project_store = Arc::new(
-            ProjectStore::new(
-                stored
-                    .as_ref()
-                    .and_then(BackendStateStore::spiral_endpoint)
-                    .unwrap_or_else(environment_spiral_endpoint),
-                stored
-                    .as_ref()
-                    .and_then(BackendStateStore::spiral_spfs_endpoint)
-                    .unwrap_or_else(environment_spiral_spfs_endpoint),
-                Some(project),
-                stored.as_ref().and_then(BackendStateStore::credentials),
-                "workflow".to_owned(),
-            )
-            .expect("the Workflow registry project store must be valid"),
+            ProjectStore::new(connection, "workflow".to_owned())
+                .expect("the Workflow registry project store must be valid"),
         );
         let registry_existed = project_store
             .run_blocking(|connection| table_exists(connection, FEATURE_REGISTRY_RELATION))
@@ -2874,21 +2879,22 @@ mod tests {
         let namespace = format!("workflow_golden_{}_{}", std::process::id(), suffix);
         let input_relation = format!("{namespace}.images");
         let output_relation = format!("{namespace}.scores");
+        let connection = SpiralConnectionSettings::new(
+            stored
+                .as_ref()
+                .and_then(BackendStateStore::spiral_endpoint)
+                .unwrap_or_else(environment_spiral_endpoint),
+            stored
+                .as_ref()
+                .and_then(BackendStateStore::spiral_spfs_endpoint)
+                .unwrap_or_else(environment_spiral_spfs_endpoint),
+        )
+        .and_then(|settings| settings.with_project(&project))
+        .expect("the Workflow golden connection must be valid")
+        .with_credentials(stored.as_ref().and_then(BackendStateStore::credentials));
         let project_store = Arc::new(
-            ProjectStore::new(
-                stored
-                    .as_ref()
-                    .and_then(BackendStateStore::spiral_endpoint)
-                    .unwrap_or_else(environment_spiral_endpoint),
-                stored
-                    .as_ref()
-                    .and_then(BackendStateStore::spiral_spfs_endpoint)
-                    .unwrap_or_else(environment_spiral_spfs_endpoint),
-                Some(project),
-                stored.as_ref().and_then(BackendStateStore::credentials),
-                namespace.clone(),
-            )
-            .expect("the Workflow golden project store must be valid"),
+            ProjectStore::new(connection, namespace.clone())
+                .expect("the Workflow golden project store must be valid"),
         );
         let _cleanup = GoldenRelations {
             project_store: project_store.clone(),

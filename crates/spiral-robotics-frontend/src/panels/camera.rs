@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 
 use crate::client::historical::HistoricalPreview;
 use crate::shell::activity::{LoadState, RecordedSource, TimelineSubject};
-use crate::shell::shell::format_elapsed_status;
+use crate::shell::frame::format_elapsed_status;
 
 #[cfg(feature = "web")]
 use wasm_bindgen::{JsCast as _, JsValue};

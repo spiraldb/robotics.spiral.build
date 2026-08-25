@@ -10,14 +10,14 @@ const MAX_QUERY_BYTES: usize = 64 * 1024;
 
 /// Product context in which a read-only query will run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReadOnlyMode {
+pub enum ReadOnlyQueryMode {
     /// Interactive data preview, where explaining a query is useful and safe.
     Preview,
     /// Training input selection, which must directly produce rows.
     Training,
 }
 
-impl ReadOnlyMode {
+impl ReadOnlyQueryMode {
     const fn label(self) -> &'static str {
         match self {
             Self::Preview => "Spiral preview",
@@ -44,174 +44,218 @@ impl fmt::Display for QueryPolicyError {
 
 impl std::error::Error for QueryPolicyError {}
 
-/// Apply the conservative authorization gate for a user-supplied query.
-///
-/// This is intentionally not a SQL parser. The database driver's parser is
-/// authoritative after this policy admits the input. This gate ignores words
-/// inside quoted values, quoted identifiers, and comments; rejects additional
-/// statements; and rejects mutating keywords in any unquoted position so that
-/// writable CTEs cannot bypass a first-keyword check.
-pub fn ensure_read_only(sql: &str, mode: ReadOnlyMode) -> Result<(), QueryPolicyError> {
-    let sql = sql.trim();
-    let label = mode.label();
-    if sql.is_empty() {
-        return Err(QueryPolicyError::new(format!("{label} cannot be empty")));
-    }
-    if sql.len() > MAX_QUERY_BYTES {
-        return Err(QueryPolicyError::new(format!(
-            "{label} must be under 64 KiB"
-        )));
+/// One user-supplied SQL statement paired with its product authorization context.
+#[derive(Clone, Copy, Debug)]
+pub struct ReadOnlyQuery<'a> {
+    sql: &'a str,
+    mode: ReadOnlyQueryMode,
+}
+
+impl<'a> ReadOnlyQuery<'a> {
+    pub const fn new(sql: &'a str, mode: ReadOnlyQueryMode) -> Self {
+        Self { sql, mode }
     }
 
-    let (tokens, semicolons) = sql_tokens(sql)?;
-    if semicolons > 1 {
-        return Err(QueryPolicyError::new(format!(
-            "{label} must contain exactly one read-only query"
-        )));
-    }
+    /// Apply the conservative authorization gate for a user-supplied query.
+    ///
+    /// This is intentionally not a SQL parser. The database driver's parser is
+    /// authoritative after this policy admits the input. This gate ignores words
+    /// inside quoted values, quoted identifiers, and comments; rejects additional
+    /// statements; and rejects mutating keywords in any unquoted position so that
+    /// writable CTEs cannot bypass a first-keyword check.
+    pub fn authorize(self) -> Result<(), QueryPolicyError> {
+        let sql = self.sql.trim();
+        let label = self.mode.label();
+        if sql.is_empty() {
+            return Err(QueryPolicyError::new(format!("{label} cannot be empty")));
+        }
+        if sql.len() > MAX_QUERY_BYTES {
+            return Err(QueryPolicyError::new(format!(
+                "{label} must be under 64 KiB"
+            )));
+        }
 
-    let first = tokens.first().map(String::as_str).unwrap_or_default();
-    let allowed = match mode {
-        ReadOnlyMode::Preview => matches!(first, "SELECT" | "WITH" | "EXPLAIN"),
-        ReadOnlyMode::Training => matches!(first, "SELECT" | "WITH"),
-    };
-    if !allowed {
-        return Err(QueryPolicyError::new(match mode {
-            ReadOnlyMode::Preview => "Spiral preview accepts SELECT, WITH, or EXPLAIN queries only",
-            ReadOnlyMode::Training => "Training SQL must be a read-only SELECT or WITH query",
-        }));
-    }
+        let (tokens, semicolons) = SqlTokenScanner::new(sql).scan()?;
+        if semicolons > 1 {
+            return Err(QueryPolicyError::new(format!(
+                "{label} must contain exactly one read-only query"
+            )));
+        }
 
-    const MUTATING_KEYWORDS: &[&str] = &[
-        "ALTER", "ATTACH", "CALL", "COPY", "CREATE", "DELETE", "DETACH", "DROP", "EXECUTE",
-        "GRANT", "INSERT", "MERGE", "REFRESH", "REPLACE", "REVOKE", "TRUNCATE", "UPDATE",
-    ];
-    if let Some(keyword) = tokens
-        .iter()
-        .find(|token| MUTATING_KEYWORDS.contains(&token.as_str()))
-    {
-        return Err(QueryPolicyError::new(format!(
-            "{label} is read-only; {:?} is not allowed",
-            keyword.to_ascii_lowercase()
-        )));
+        let first = tokens.first().map(String::as_str).unwrap_or_default();
+        let allowed = match self.mode {
+            ReadOnlyQueryMode::Preview => matches!(first, "SELECT" | "WITH" | "EXPLAIN"),
+            ReadOnlyQueryMode::Training => matches!(first, "SELECT" | "WITH"),
+        };
+        if !allowed {
+            return Err(QueryPolicyError::new(match self.mode {
+                ReadOnlyQueryMode::Preview => {
+                    "Spiral preview accepts SELECT, WITH, or EXPLAIN queries only"
+                }
+                ReadOnlyQueryMode::Training => {
+                    "Training SQL must be a read-only SELECT or WITH query"
+                }
+            }));
+        }
+
+        const MUTATING_KEYWORDS: &[&str] = &[
+            "ALTER", "ATTACH", "CALL", "COPY", "CREATE", "DELETE", "DETACH", "DROP", "EXECUTE",
+            "GRANT", "INSERT", "MERGE", "REFRESH", "REPLACE", "REVOKE", "TRUNCATE", "UPDATE",
+        ];
+        if let Some(keyword) = tokens
+            .iter()
+            .find(|token| MUTATING_KEYWORDS.contains(&token.as_str()))
+        {
+            return Err(QueryPolicyError::new(format!(
+                "{label} is read-only; {:?} is not allowed",
+                keyword.to_ascii_lowercase()
+            )));
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 /// Whether a value is safe to interpolate as one unquoted SQL identifier.
 ///
 /// Relation construction belongs to a database adapter. This predicate is the
 /// policy boundary it must apply before interpolating caller-owned names.
-pub fn is_identifier(value: &str) -> bool {
-    let mut bytes = value.bytes();
-    bytes
-        .next()
-        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
-        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnquotedSqlIdentifier<'a>(&'a str);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidSqlIdentifier;
+
+impl<'a> TryFrom<&'a str> for UnquotedSqlIdentifier<'a> {
+    type Error = InvalidSqlIdentifier;
+
+    fn try_from(identifier: &'a str) -> Result<Self, Self::Error> {
+        let mut bytes = identifier.bytes();
+        let valid = bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+            && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        valid
+            .then_some(Self(identifier))
+            .ok_or(InvalidSqlIdentifier)
+    }
+}
+
+impl UnquotedSqlIdentifier<'_> {
+    pub const fn as_str(&self) -> &str {
+        self.0
+    }
 }
 
 /// Extract unquoted SQL words while rejecting extra statements.
-fn sql_tokens(sql: &str) -> Result<(Vec<String>, usize), QueryPolicyError> {
-    #[derive(Clone, Copy, Eq, PartialEq)]
-    enum State {
-        Normal,
-        SingleQuote,
-        DoubleQuote,
-        LineComment,
-        BlockComment,
+struct SqlTokenScanner<'a>(&'a str);
+
+impl<'a> SqlTokenScanner<'a> {
+    const fn new(sql: &'a str) -> Self {
+        Self(sql)
     }
 
-    let bytes = sql.as_bytes();
-    let mut state = State::Normal;
-    let mut tokens = Vec::new();
-    let mut token = String::new();
-    let mut semicolons = 0;
-    let mut statement_token_count = None;
-    let mut index = 0;
-    let flush = |token: &mut String, tokens: &mut Vec<String>| {
-        if !token.is_empty() {
-            tokens.push(std::mem::take(token).to_ascii_uppercase());
+    fn scan(self) -> Result<(Vec<String>, usize), QueryPolicyError> {
+        #[derive(Clone, Copy, Eq, PartialEq)]
+        enum SqlScanState {
+            Normal,
+            SingleQuote,
+            DoubleQuote,
+            LineComment,
+            BlockComment,
         }
-    };
 
-    while index < bytes.len() {
-        let byte = bytes[index];
-        let next = bytes.get(index + 1).copied();
-        match state {
-            State::Normal => match (byte, next) {
-                (b'-', Some(b'-')) => {
-                    flush(&mut token, &mut tokens);
-                    state = State::LineComment;
-                    index += 1;
-                }
-                (b'/', Some(b'*')) => {
-                    flush(&mut token, &mut tokens);
-                    state = State::BlockComment;
-                    index += 1;
-                }
-                (b'\'', _) => {
-                    flush(&mut token, &mut tokens);
-                    state = State::SingleQuote;
-                }
-                (b'"', _) => {
-                    flush(&mut token, &mut tokens);
-                    state = State::DoubleQuote;
-                }
-                (b';', _) => {
-                    flush(&mut token, &mut tokens);
-                    semicolons += 1;
-                    statement_token_count.get_or_insert(tokens.len());
-                }
-                _ if byte.is_ascii_alphanumeric() || byte == b'_' => {
-                    token.push(char::from(byte));
-                }
-                _ => flush(&mut token, &mut tokens),
-            },
-            State::SingleQuote => {
-                if byte == b'\'' {
-                    if next == Some(b'\'') {
+        let bytes = self.0.as_bytes();
+        let mut state = SqlScanState::Normal;
+        let mut tokens = Vec::new();
+        let mut token = String::new();
+        let mut semicolons = 0;
+        let mut statement_token_count = None;
+        let mut index = 0;
+        let flush = |token: &mut String, tokens: &mut Vec<String>| {
+            if !token.is_empty() {
+                tokens.push(std::mem::take(token).to_ascii_uppercase());
+            }
+        };
+
+        while index < bytes.len() {
+            let byte = bytes[index];
+            let next = bytes.get(index + 1).copied();
+            match state {
+                SqlScanState::Normal => match (byte, next) {
+                    (b'-', Some(b'-')) => {
+                        flush(&mut token, &mut tokens);
+                        state = SqlScanState::LineComment;
                         index += 1;
-                    } else {
-                        state = State::Normal;
+                    }
+                    (b'/', Some(b'*')) => {
+                        flush(&mut token, &mut tokens);
+                        state = SqlScanState::BlockComment;
+                        index += 1;
+                    }
+                    (b'\'', _) => {
+                        flush(&mut token, &mut tokens);
+                        state = SqlScanState::SingleQuote;
+                    }
+                    (b'"', _) => {
+                        flush(&mut token, &mut tokens);
+                        state = SqlScanState::DoubleQuote;
+                    }
+                    (b';', _) => {
+                        flush(&mut token, &mut tokens);
+                        semicolons += 1;
+                        statement_token_count.get_or_insert(tokens.len());
+                    }
+                    _ if byte.is_ascii_alphanumeric() || byte == b'_' => {
+                        token.push(char::from(byte));
+                    }
+                    _ => flush(&mut token, &mut tokens),
+                },
+                SqlScanState::SingleQuote => {
+                    if byte == b'\'' {
+                        if next == Some(b'\'') {
+                            index += 1;
+                        } else {
+                            state = SqlScanState::Normal;
+                        }
+                    }
+                }
+                SqlScanState::DoubleQuote => {
+                    if byte == b'"' {
+                        if next == Some(b'"') {
+                            index += 1;
+                        } else {
+                            state = SqlScanState::Normal;
+                        }
+                    }
+                }
+                SqlScanState::LineComment => {
+                    if matches!(byte, b'\n' | b'\r') {
+                        state = SqlScanState::Normal;
+                    }
+                }
+                SqlScanState::BlockComment => {
+                    if byte == b'*' && next == Some(b'/') {
+                        state = SqlScanState::Normal;
+                        index += 1;
                     }
                 }
             }
-            State::DoubleQuote => {
-                if byte == b'"' {
-                    if next == Some(b'"') {
-                        index += 1;
-                    } else {
-                        state = State::Normal;
-                    }
-                }
-            }
-            State::LineComment => {
-                if matches!(byte, b'\n' | b'\r') {
-                    state = State::Normal;
-                }
-            }
-            State::BlockComment => {
-                if byte == b'*' && next == Some(b'/') {
-                    state = State::Normal;
-                    index += 1;
-                }
-            }
+            index += 1;
         }
-        index += 1;
-    }
 
-    flush(&mut token, &mut tokens);
-    if !matches!(state, State::Normal | State::LineComment) {
-        return Err(QueryPolicyError::new(
-            "Spiral SQL contains an unterminated quote or comment",
-        ));
+        flush(&mut token, &mut tokens);
+        if !matches!(state, SqlScanState::Normal | SqlScanState::LineComment) {
+            return Err(QueryPolicyError::new(
+                "Spiral SQL contains an unterminated quote or comment",
+            ));
+        }
+        if statement_token_count.is_some_and(|count| tokens.len() != count) {
+            return Err(QueryPolicyError::new(
+                "Spiral SQL must contain exactly one read-only query",
+            ));
+        }
+        Ok((tokens, semicolons))
     }
-    if statement_token_count.is_some_and(|count| tokens.len() != count) {
-        return Err(QueryPolicyError::new(
-            "Spiral SQL must contain exactly one read-only query",
-        ));
-    }
-    Ok((tokens, semicolons))
 }
 
 #[cfg(test)]
@@ -224,12 +268,25 @@ mod tests {
             "SELECT * FROM episodes",
             "WITH recent AS (SELECT 1) SELECT * FROM recent",
         ] {
-            assert!(ensure_read_only(sql, ReadOnlyMode::Preview).is_ok());
-            assert!(ensure_read_only(sql, ReadOnlyMode::Training).is_ok());
+            assert!(
+                ReadOnlyQuery::new(sql, ReadOnlyQueryMode::Preview)
+                    .authorize()
+                    .is_ok()
+            );
+            assert!(
+                ReadOnlyQuery::new(sql, ReadOnlyQueryMode::Training)
+                    .authorize()
+                    .is_ok()
+            );
         }
-        assert!(ensure_read_only("EXPLAIN SELECT 1", ReadOnlyMode::Preview).is_ok());
+        assert!(
+            ReadOnlyQuery::new("EXPLAIN SELECT 1", ReadOnlyQueryMode::Preview)
+                .authorize()
+                .is_ok()
+        );
         assert_eq!(
-            ensure_read_only("EXPLAIN SELECT 1", ReadOnlyMode::Training)
+            ReadOnlyQuery::new("EXPLAIN SELECT 1", ReadOnlyQueryMode::Training)
+                .authorize()
                 .unwrap_err()
                 .to_string(),
             "Training SQL must be a read-only SELECT or WITH query"
@@ -239,17 +296,20 @@ mod tests {
     #[test]
     fn writable_ctes_and_extra_statements_are_rejected() {
         assert_eq!(
-            ensure_read_only(
+            ReadOnlyQuery::new(
                 "WITH removed AS (DELETE FROM episodes RETURNING *) SELECT * FROM removed",
-                ReadOnlyMode::Training,
+                ReadOnlyQueryMode::Training,
             )
+            .authorize()
             .unwrap_err()
             .to_string(),
             "Training SQL is read-only; \"delete\" is not allowed"
         );
         for sql in ["SELECT 1; DROP TABLE t", "SELECT 1; SELECT 2", "SELECT 1;;"] {
             assert!(
-                ensure_read_only(sql, ReadOnlyMode::Preview).is_err(),
+                ReadOnlyQuery::new(sql, ReadOnlyQueryMode::Preview)
+                    .authorize()
+                    .is_err(),
                 "{sql}"
             );
         }
@@ -265,7 +325,9 @@ mod tests {
             "SELECT \"a\"\"quoted\"",
         ] {
             assert!(
-                ensure_read_only(sql, ReadOnlyMode::Preview).is_ok(),
+                ReadOnlyQuery::new(sql, ReadOnlyQueryMode::Preview)
+                    .authorize()
+                    .is_ok(),
                 "{sql}"
             );
         }
@@ -275,7 +337,8 @@ mod tests {
             "SELECT 1 /* open",
         ] {
             assert_eq!(
-                ensure_read_only(sql, ReadOnlyMode::Preview)
+                ReadOnlyQuery::new(sql, ReadOnlyQueryMode::Preview)
+                    .authorize()
                     .unwrap_err()
                     .to_string(),
                 "Spiral SQL contains an unterminated quote or comment"
@@ -286,14 +349,16 @@ mod tests {
     #[test]
     fn size_and_empty_limits_keep_execution_bounded() {
         assert_eq!(
-            ensure_read_only(" \n\t", ReadOnlyMode::Preview)
+            ReadOnlyQuery::new(" \n\t", ReadOnlyQueryMode::Preview)
+                .authorize()
                 .unwrap_err()
                 .to_string(),
             "Spiral preview cannot be empty"
         );
         let oversized = format!("SELECT '{}'", "x".repeat(MAX_QUERY_BYTES));
         assert_eq!(
-            ensure_read_only(&oversized, ReadOnlyMode::Training)
+            ReadOnlyQuery::new(&oversized, ReadOnlyQueryMode::Training)
+                .authorize()
                 .unwrap_err()
                 .to_string(),
             "Training SQL must be under 64 KiB"
@@ -303,7 +368,7 @@ mod tests {
     #[test]
     fn identifiers_are_ascii_and_safe_for_unquoted_interpolation() {
         for valid in ["spiral_robotics_v3", "_internal", "Dataset42"] {
-            assert!(is_identifier(valid), "{valid}");
+            assert!(UnquotedSqlIdentifier::try_from(valid).is_ok(), "{valid}");
         }
         for invalid in [
             "",
@@ -313,7 +378,10 @@ mod tests {
             "robot arm",
             "café",
         ] {
-            assert!(!is_identifier(invalid), "{invalid}");
+            assert!(
+                UnquotedSqlIdentifier::try_from(invalid).is_err(),
+                "{invalid}"
+            );
         }
     }
 }

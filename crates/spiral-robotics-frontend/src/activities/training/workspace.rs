@@ -15,10 +15,10 @@ use charming::element::{
 use charming::series::Line;
 use dioxus::prelude::*;
 use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
-use spiral_robotics_api::api::{
+use spiral_robotics_api::catalog as spiral;
+use spiral_robotics_api::training::{
     TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase,
 };
-use spiral_robotics_api::catalog as spiral;
 
 use crate::activities::training::state::training_controller;
 use crate::components::charts::{
@@ -969,7 +969,7 @@ enum ResourceSeries {
 }
 
 pub(crate) fn default_training_sql(namespace: &str, dataset_id: &str) -> String {
-    spiral::default_training_sql_for_dataset(namespace, dataset_id)
+    spiral::ManagedTable::Datasets.training_sql_for_dataset(namespace, dataset_id)
 }
 
 fn phase_class(phase: TrainingRunPhase) -> &'static str {

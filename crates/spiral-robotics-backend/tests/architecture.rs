@@ -187,12 +187,12 @@ fn read_controllers_delegate_selection_and_admission_to_backend_capabilities() {
 fn episode_catalog_is_loaded_explicitly_from_spiral() {
     let backend = Path::new(env!("CARGO_MANIFEST_DIR"));
     let crates = backend.parent().expect("workspace crates directory");
-    let contracts = fs::read_to_string(crates.join("spiral-robotics-api/src/api.rs"))
+    let contracts = fs::read_to_string(crates.join("spiral-robotics-api/src/status.rs"))
         .expect("contracts source");
     let snapshot = contracts
         .split("pub struct StudioSnapshot")
         .nth(1)
-        .and_then(|source| source.split("/// One robot instance").next())
+        .and_then(|source| source.split("/// Lifecycle of the backend services").next())
         .expect("StudioSnapshot declaration");
     assert!(
         !snapshot.contains("pub episodes:"),
@@ -434,11 +434,14 @@ fn synchronous_adbc_is_confined_to_one_bounded_adapter() {
             continue;
         }
         let source = fs::read_to_string(&path).expect("backend source must be readable");
+        let names_spiral_connection = source
+            .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+            .any(|token| token == "SpiralConnection");
         assert!(
             !source.contains("adbc_core")
                 && !source.contains("adbc_driver_manager")
                 && !source.contains("adbc_driver_spiraldb")
-                && !source.contains("SpiralConnection"),
+                && !names_spiral_connection,
             "{} bypasses the storage-owned ADBC adapter",
             path.display()
         );
@@ -648,7 +651,7 @@ fn studio_training_owns_only_the_remote_backend_trait_boundary() {
     assert!(
         manager.contains("training_backend: Arc<dyn TrainingBackend>")
             && job_loop.contains("create_job(job_request)")
-            && job_loop.contains("backend.job(&next_run_id, cursor)")
+            && job_loop.contains("backend.job_snapshot(&next_run_id, cursor)")
             && job_loop.contains("backend.stop_job(&next_run_id, cursor)"),
         "Studio must orchestrate a backend-neutral worker job"
     );

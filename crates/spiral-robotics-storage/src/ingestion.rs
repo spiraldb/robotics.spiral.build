@@ -18,7 +18,7 @@ use reqwest::StatusCode;
 use reqwest::header::LINK;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
-use spiral_robotics_api::api::{
+use spiral_robotics_api::datasets::{
     HuggingFaceDatasetFile, HuggingFaceDatasetFormat, HuggingFaceDatasetImportSummary,
     HuggingFaceDatasetInspection, HuggingFaceDatasetRequest,
 };
@@ -72,6 +72,105 @@ struct ImportRelations {
     tasks: Option<String>,
     video_source: Option<String>,
     video_dataset: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct ImportTarget<'a> {
+    namespace: &'a str,
+    dataset_id: &'a str,
+}
+
+impl ImportTarget<'_> {
+    fn relations(
+        self,
+        format: HuggingFaceDatasetFormat,
+        files: &[HuggingFaceDatasetFile],
+    ) -> ImportRelations {
+        let namespace = self.namespace;
+        let dataset_id = self.dataset_id;
+        let slug = dataset_id
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() {
+                    character.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .take(32)
+            .collect::<String>();
+        let digest = Sha256::digest(dataset_id.as_bytes());
+        let hash = digest[..4]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let base = format!("{namespace}.hf_{slug}_{hash}");
+        match format {
+            HuggingFaceDatasetFormat::LeRobot => {
+                let has_episodes = files
+                    .iter()
+                    .any(|file| is_lerobot_episode_metadata(&file.path));
+                let has_tasks = files.iter().any(|file| file.path == "meta/tasks.parquet");
+                let has_video = files.iter().any(|file| is_lerobot_video(&file.path));
+                ImportRelations {
+                    primary: format!("{base}_frames"),
+                    episodes: has_episodes.then(|| format!("{base}_episodes")),
+                    tasks: has_tasks.then(|| format!("{base}_tasks")),
+                    video_source: has_video.then(|| format!("{base}_video_sources")),
+                    video_dataset: has_video.then(|| format!("{base}_video")),
+                    base,
+                    source: None,
+                }
+            }
+            HuggingFaceDatasetFormat::Mcap => ImportRelations {
+                source: Some(format!("{base}_sources")),
+                primary: base.clone(),
+                episodes: None,
+                tasks: None,
+                video_source: None,
+                video_dataset: None,
+                base,
+            },
+        }
+    }
+}
+
+struct ImportCollision<'a> {
+    project: &'a str,
+    namespace: &'a str,
+    dataset_id: &'a str,
+    relations: &'a ImportRelations,
+}
+
+impl ImportCollision<'_> {
+    fn refuse(self, connection: &mut StorageConnection) -> Result<(), String> {
+        let datasets = Table::Datasets.qualified_name(self.namespace);
+        if table_exists(connection, &datasets)?
+            && !run_query(
+                connection,
+                &sql::dataset_exists(&datasets, self.dataset_id),
+                1,
+            )?
+            .rows
+            .is_empty()
+        {
+            return Err(format!(
+                "dataset {:?} already exists; choose another dataset ID",
+                self.dataset_id
+            ));
+        }
+        if let Some(existing) = connection
+            .list_catalog_relations(self.project)?
+            .into_iter()
+            .map(|relation| relation.name)
+            .find(|name| name.starts_with(&self.relations.base))
+        {
+            return Err(format!(
+                "Spiral relation {existing} already occupies this import target; choose another dataset ID"
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl ImportRelations {
@@ -141,7 +240,11 @@ pub async fn inspect_huggingface_dataset(
             .checked_add(file.bytes)
             .ok_or_else(|| "Hugging Face file sizes overflow u64".to_owned())
     })?;
-    let relations = import_relations(namespace, &request.dataset_id, request.format, &selected);
+    let relations = ImportTarget {
+        namespace,
+        dataset_id: &request.dataset_id,
+    }
+    .relations(request.format, &selected);
     let mut warnings = Vec::new();
     if selected.iter().any(|file| file.bytes == 0) {
         warnings.push(
@@ -197,19 +300,24 @@ impl StorageManager {
     ) -> Result<HuggingFaceDatasetImportSummary, String> {
         let namespace = self.project_store.namespace().to_owned();
         let project = self.project_store.project_id();
-        let relations = import_relations(
-            &namespace,
-            &inspection.dataset_id,
-            inspection.format,
-            &inspection.files,
-        );
+        let relations = ImportTarget {
+            namespace: &namespace,
+            dataset_id: &inspection.dataset_id,
+        }
+        .relations(inspection.format, &inspection.files);
         let expected_prefix = relations.base.clone();
         let dataset_id = inspection.dataset_id.clone();
         self.project_store.run_invalidating_blocking(move |connection| {
             ensure_dataset_namespace(connection, &namespace)?;
             connection.set_autocommit(false)?;
             let mutation = (|| {
-                refuse_collision(connection, &project, &namespace, &dataset_id, &relations)?;
+                ImportCollision {
+                    project: &project,
+                    namespace: &namespace,
+                    dataset_id: &dataset_id,
+                    relations: &relations,
+                }
+                .refuse(connection)?;
                 match inspection.format {
                     HuggingFaceDatasetFormat::LeRobot => {
                         materialize_lerobot(connection, &inspection, &relations)?
@@ -495,88 +603,6 @@ fn is_lerobot_video(path: &str) -> bool {
     path.starts_with("videos/") && path.to_ascii_lowercase().ends_with(".mp4")
 }
 
-fn import_relations(
-    namespace: &str,
-    dataset_id: &str,
-    format: HuggingFaceDatasetFormat,
-    files: &[HuggingFaceDatasetFile],
-) -> ImportRelations {
-    let slug = dataset_id
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .take(32)
-        .collect::<String>();
-    let digest = Sha256::digest(dataset_id.as_bytes());
-    let hash = digest[..4]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    let base = format!("{namespace}.hf_{slug}_{hash}");
-    match format {
-        HuggingFaceDatasetFormat::LeRobot => {
-            let has_episodes = files
-                .iter()
-                .any(|file| is_lerobot_episode_metadata(&file.path));
-            let has_tasks = files.iter().any(|file| file.path == "meta/tasks.parquet");
-            let has_video = files.iter().any(|file| is_lerobot_video(&file.path));
-            ImportRelations {
-                primary: format!("{base}_frames"),
-                episodes: has_episodes.then(|| format!("{base}_episodes")),
-                tasks: has_tasks.then(|| format!("{base}_tasks")),
-                video_source: has_video.then(|| format!("{base}_video_sources")),
-                video_dataset: has_video.then(|| format!("{base}_video")),
-                base,
-                source: None,
-            }
-        }
-        HuggingFaceDatasetFormat::Mcap => ImportRelations {
-            source: Some(format!("{base}_sources")),
-            primary: base.clone(),
-            episodes: None,
-            tasks: None,
-            video_source: None,
-            video_dataset: None,
-            base,
-        },
-    }
-}
-
-fn refuse_collision(
-    connection: &mut StorageConnection,
-    project: &str,
-    namespace: &str,
-    dataset_id: &str,
-    relations: &ImportRelations,
-) -> Result<(), String> {
-    let datasets = Table::Datasets.qualified_name(namespace);
-    if table_exists(connection, &datasets)?
-        && !run_query(connection, &sql::dataset_exists(&datasets, dataset_id), 1)?
-            .rows
-            .is_empty()
-    {
-        return Err(format!(
-            "dataset {dataset_id:?} already exists; choose another dataset ID"
-        ));
-    }
-    if let Some(existing) = connection
-        .list_catalog_relations(project)?
-        .into_iter()
-        .map(|relation| relation.name)
-        .find(|name| name.starts_with(&relations.base))
-    {
-        return Err(format!(
-            "Spiral relation {existing} already occupies this import target; choose another dataset ID"
-        ));
-    }
-    Ok(())
-}
-
 fn materialize_lerobot(
     connection: &mut StorageConnection,
     inspection: &HuggingFaceDatasetInspection,
@@ -821,13 +847,11 @@ fn unix_millis() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_api::api::{
+    use spiral_robotics_api::datasets::{
         HuggingFaceDatasetFile, HuggingFaceDatasetFormat, HuggingFaceDatasetRequest,
     };
 
-    use super::{
-        TreeEntry, import_relations, normalize_repository, select_files, validate_request,
-    };
+    use super::{ImportTarget, TreeEntry, normalize_repository, select_files, validate_request};
 
     #[test]
     fn repository_inputs_normalize_without_accepting_arbitrary_hosts() {
@@ -908,18 +932,12 @@ mod tests {
             path: "data/chunk-000/file-000.parquet".to_owned(),
             bytes: 1,
         }];
-        let first = import_relations(
-            "spiral_robotics",
-            "Pick.Place-v1",
-            HuggingFaceDatasetFormat::LeRobot,
-            &files,
-        );
-        let second = import_relations(
-            "spiral_robotics",
-            "Pick.Place-v1",
-            HuggingFaceDatasetFormat::LeRobot,
-            &files,
-        );
+        let target = ImportTarget {
+            namespace: "spiral_robotics",
+            dataset_id: "Pick.Place-v1",
+        };
+        let first = target.relations(HuggingFaceDatasetFormat::LeRobot, &files);
+        let second = target.relations(HuggingFaceDatasetFormat::LeRobot, &files);
         assert_eq!(first.base, second.base);
         assert!(
             first

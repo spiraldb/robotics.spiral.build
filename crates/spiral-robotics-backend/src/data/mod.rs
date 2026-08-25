@@ -8,7 +8,7 @@ pub mod seek;
 
 use std::collections::BTreeMap;
 
-use spiral_robotics_core::query::{ReadOnlyMode, ensure_read_only};
+use spiral_robotics_core::query::{ReadOnlyQuery, ReadOnlyQueryMode};
 use url::Url;
 
 use spiral_robotics_core::error::OperationError;
@@ -164,7 +164,8 @@ impl QueryCommand {
         mut self,
         port: &P,
     ) -> Result<QueryResult, OperationError> {
-        ensure_read_only(&self.statement, ReadOnlyMode::Preview)
+        ReadOnlyQuery::new(&self.statement, ReadOnlyQueryMode::Preview)
+            .authorize()
             .map_err(|error| OperationError::InvalidInput(error.to_string()))?;
         self.max_rows = self.max_rows.clamp(1, MAX_QUERY_ROWS);
         port.query(self).await

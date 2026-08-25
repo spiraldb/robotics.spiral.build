@@ -22,14 +22,15 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha2::{Digest as _, Sha256};
-use spiral_robotics_api::api::{
-    ConnectionTestResponse, DataSettings, DatasetSummary, ProjectDataRelation,
-    ProjectDataRelationsResponse, QueryColumn, SpiralQueryResponse, SpiralSettings,
+use spiral_robotics_api::recording::DatasetSummary;
+use spiral_robotics_api::relations::{
+    ProjectDataRelation, ProjectDataRelationsResponse, QueryColumn, SpiralQueryResponse,
 };
+use spiral_robotics_api::settings::{ConnectionTestResponse, DataSettings, SpiralSettings};
 use spiral_robotics_api::workflow::{
     WorkflowDocument, WorkflowRelation, WorkflowRelationsResponse,
 };
-use spiral_robotics_core::workflow::validate_qualified_relation;
+use spiral_robotics_core::workflow::QualifiedRelation;
 
 use crate::adbc::{ProjectStore, StorageConnection};
 use crate::bundle;
@@ -42,9 +43,9 @@ use crate::episode_schema::{
     episode_streams_batch, joint_samples_batch, video_streams_batch,
 };
 use crate::episodes::CompletedEpisode;
-use crate::settings::StoredStudioPreferences;
-use crate::sql::{self, ReadOnlyMode};
-use crate::video::VideoAsset;
+use crate::settings::{SpiralConnectionSettings, StoredStudioPreferences};
+use crate::sql::{self, ReadOnlyQueryMode};
+use crate::video::{VideoAsset, VideoAssetKey, VideoByteRange};
 
 const MAX_QUERY_ROWS: usize = 1_000;
 const MAX_QUERY_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -76,7 +77,7 @@ impl StorageManager {
                 client_id: self
                     .project_store
                     .credentials()
-                    .map(|credentials| credentials.client_id)
+                    .map(|credentials| credentials.client_id().to_owned())
                     .unwrap_or_default(),
                 client_secret_configured: self.project_store.credentials().is_some(),
                 namespace: self.project_store.namespace().to_owned(),
@@ -119,15 +120,8 @@ impl StorageManager {
             .await
     }
 
-    pub fn configure_connection(
-        &self,
-        endpoint: String,
-        spfs_endpoint: String,
-        project_id: &str,
-        credentials: Option<crate::settings::SpiralCredentials>,
-    ) -> Result<(), String> {
-        self.project_store
-            .configure_connection(endpoint, spfs_endpoint, project_id, credentials)
+    pub fn configure_connection(&self, settings: SpiralConnectionSettings) -> Result<(), String> {
+        self.project_store.configure_connection(settings)
     }
 
     pub fn invalidate_idle_connections(&self) {
@@ -386,7 +380,7 @@ impl StorageManager {
     pub fn import_project_bundle(
         &self,
         bytes: &[u8],
-    ) -> Result<spiral_robotics_api::api::ProjectImportSummary, String> {
+    ) -> Result<spiral_robotics_api::datasets::ProjectImportSummary, String> {
         let namespace = self.project_store.namespace().to_owned();
         self.project_store
             .run_exclusive_blocking(move |connection| {
@@ -407,7 +401,7 @@ impl StorageManager {
         &self,
         dataset_id: &str,
         bytes: &[u8],
-    ) -> Result<spiral_robotics_api::api::EpisodeImportSummary, String> {
+    ) -> Result<spiral_robotics_api::datasets::EpisodeImportSummary, String> {
         let namespace = self.project_store.namespace().to_owned();
         let dataset_id = dataset_id.to_owned();
         self.project_store
@@ -578,7 +572,7 @@ impl StorageManager {
     }
 
     pub async fn query(&self, sql: &str, max_rows: usize) -> Result<SpiralQueryResponse, String> {
-        sql::ensure_read_only(sql, ReadOnlyMode::Preview)?;
+        sql::ensure_read_only(sql, ReadOnlyQueryMode::Preview)?;
         let sql = sql.to_owned();
         self.project_store
             .run(move |connection| {
@@ -660,7 +654,7 @@ impl StorageManager {
                 let mut relations = Vec::with_capacity(catalog.len());
                 let mut skipped = 0_usize;
                 for entry in catalog {
-                    if validate_qualified_relation(&entry.name).is_err() {
+                    if QualifiedRelation::try_from(entry.name.as_str()).is_err() {
                         skipped += 1;
                         continue;
                     }
@@ -753,7 +747,7 @@ impl StorageManager {
                     if !is_user_project_relation(&entry.name, &namespace) {
                         continue;
                     }
-                    if validate_qualified_relation(&entry.name).is_err() {
+                    if QualifiedRelation::try_from(entry.name.as_str()).is_err() {
                         skipped += 1;
                         continue;
                     }
@@ -875,13 +869,8 @@ impl StorageManager {
     }
 
     /// Read the authoritative MP4 size without materializing its bytes.
-    pub async fn video_asset_size(
-        &self,
-        episode: &str,
-        stream: &str,
-        segment: Option<u32>,
-    ) -> Result<u64, String> {
-        let sql = sql::video_asset_size(self.project_store.namespace(), episode, stream, segment);
+    pub async fn video_asset_size(&self, asset: &VideoAssetKey) -> Result<u64, String> {
+        let sql = sql::video_asset_size(self.project_store.namespace(), asset);
         self.project_store
             .run(move |connection| run_u64_query(connection, &sql, db::BYTE_SIZE))
             .await
@@ -894,36 +883,21 @@ impl StorageManager {
     /// into object storage instead of materializing the complete MP4 in Studio.
     pub async fn video_asset_range(
         &self,
-        episode: &str,
-        stream: &str,
-        segment: Option<u32>,
-        offset: u64,
-        size: u64,
+        asset: &VideoAssetKey,
+        range: VideoByteRange,
     ) -> Result<Vec<u8>, String> {
-        let sql = sql::video_asset_range(
-            self.project_store.namespace(),
-            episode,
-            stream,
-            segment,
-            offset,
-            size,
-        );
+        let sql = sql::video_asset_range(self.project_store.namespace(), asset, range);
         self.project_store
             .run(move |connection| run_binary_query(connection, &sql))
             .await
     }
 
-    pub async fn video_asset(
-        &self,
-        episode: &str,
-        stream: &str,
-        segment: Option<u32>,
-    ) -> Result<Vec<u8>, String> {
-        let size = self.video_asset_size(episode, stream, segment).await?;
+    pub async fn video_asset(&self, asset: VideoAssetKey) -> Result<Vec<u8>, String> {
+        let size = self.video_asset_size(&asset).await?;
         if size == 0 {
             return Ok(Vec::new());
         }
-        self.video_asset_range(episode, stream, segment, 0, size)
+        self.video_asset_range(&asset, VideoByteRange::new(0, size))
             .await
     }
 }
@@ -1143,14 +1117,14 @@ pub fn replace_episode_blocking(
             .iter()
             .map(|video| {
                 (
-                    video.stream_id.clone(),
+                    video.stream_id().to_owned(),
                     VideoStreamRow {
                         episode_id: episode.start.id.clone(),
-                        stream_id: video.stream_id.clone(),
-                        camera_id: video.camera_id.clone(),
-                        width: video.width,
-                        height: video.height,
-                        fps: video.fps,
+                        stream_id: video.stream_id().to_owned(),
+                        camera_id: video.camera_id().to_owned(),
+                        width: video.size().width(),
+                        height: video.size().height(),
+                        fps: video.timing().fps(),
                     },
                 )
             })
@@ -1263,7 +1237,7 @@ pub fn drop_video_dataset(
     namespace: &str,
 ) -> Result<(), String> {
     let dataset = sql::video_dataset_relation(namespace);
-    validate_qualified_relation(&dataset)
+    QualifiedRelation::try_from(dataset.as_str())
         .map_err(|error| format!("refusing to drop an invalid Spiral MP4 Dataset: {error}"))?;
     execute_update_sql(connection, &sql::drop_video_dataset(&dataset))
         .map_err(|error| format!("dropping Spiral MP4 dataset with CASCADE: {error}"))?;
@@ -1564,27 +1538,25 @@ pub fn video_assets_batch(
     videos: &[VideoAsset],
     media_relation: &str,
 ) -> Result<RecordBatch, String> {
-    let payloads = videos
-        .iter()
-        .map(|video| video.payload.as_slice())
-        .collect::<Vec<_>>();
+    let payloads = videos.iter().map(VideoAsset::payload).collect::<Vec<_>>();
     let timeline_offsets = videos
         .iter()
         .map(|video| {
             video
-                .timeline_offset_seconds
+                .segment()
+                .timeline_offset_seconds()
                 .map(|seconds| {
                     if !seconds.is_finite() || seconds < 0.0 {
                         return Err(format!(
                             "video timeline offset for {} must be finite and non-negative",
-                            video.stream_id
+                            video.stream_id()
                         ));
                     }
                     let nanos = seconds * 1_000_000_000.0;
                     if nanos > u64::MAX as f64 {
                         return Err(format!(
                             "video timeline offset for {} is too large",
-                            video.stream_id
+                            video.stream_id()
                         ));
                     }
                     Ok(nanos.round() as u64)
@@ -1598,30 +1570,30 @@ pub fn video_assets_batch(
             videos.iter().map(|_| episode_id),
         )),
         Arc::new(StringArray::from_iter_values(
-            videos.iter().map(|video| video.stream_id.as_str()),
+            videos.iter().map(VideoAsset::stream_id),
         )),
         Arc::new(UInt32Array::from_iter_values(
-            videos.iter().map(|video| video.segment_index),
+            videos.iter().map(|video| video.segment().index()),
         )),
         Arc::new(UInt64Array::from(timeline_offsets)),
         Arc::new(StringArray::from_iter_values(
-            videos.iter().map(|video| video.camera_id.as_str()),
+            videos.iter().map(VideoAsset::camera_id),
         )),
         inline_video_blob_array(&payloads)?,
         Arc::new(UInt64Array::from_iter_values(
             payloads.iter().map(|payload| payload.len() as u64),
         )),
         Arc::new(UInt32Array::from_iter_values(
-            videos.iter().map(|video| video.width),
+            videos.iter().map(|video| video.size().width()),
         )),
         Arc::new(UInt32Array::from_iter_values(
-            videos.iter().map(|video| video.height),
+            videos.iter().map(|video| video.size().height()),
         )),
         Arc::new(UInt32Array::from_iter_values(
-            videos.iter().map(|video| video.fps),
+            videos.iter().map(|video| video.timing().fps()),
         )),
         Arc::new(UInt64Array::from_iter_values(
-            videos.iter().map(|video| video.frames),
+            videos.iter().map(|video| video.timing().frames()),
         )),
         Arc::new(StringArray::from_iter_values(
             videos.iter().map(|_| media_relation),
@@ -2432,12 +2404,17 @@ mod tests {
     #[test]
     fn query_preview_rejects_mutation_and_multiple_statements() {
         assert!(
-            sql::ensure_read_only("SELECT * FROM robotics.episodes", ReadOnlyMode::Preview).is_ok()
+            sql::ensure_read_only(
+                "SELECT * FROM robotics.episodes",
+                ReadOnlyQueryMode::Preview
+            )
+            .is_ok()
         );
         assert!(
-            sql::ensure_read_only("DELETE FROM robotics.episodes", ReadOnlyMode::Preview).is_err()
+            sql::ensure_read_only("DELETE FROM robotics.episodes", ReadOnlyQueryMode::Preview)
+                .is_err()
         );
-        assert!(sql::ensure_read_only("SELECT 1; SELECT 2", ReadOnlyMode::Preview).is_err());
+        assert!(sql::ensure_read_only("SELECT 1; SELECT 2", ReadOnlyQueryMode::Preview).is_err());
     }
 
     #[test]

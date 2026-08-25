@@ -22,11 +22,11 @@ use std::time::{Duration, Instant};
 
 use serialport::{ClearBuffer, SerialPort};
 
-use crate::bus::{BusError, MotorBus};
+use crate::bus::{BusError, MotorBus, MotorElectricalSample};
 use spiral_robotics_core::calibration::MotorSpec;
 // Keep the original paths available to callers while making the types
 // themselves owned by the protocol-neutral bus boundary.
-pub use crate::bus::{MotorFault, MotorFaults, MotorLimits, MotorSample};
+use crate::bus::{MotorFaults, MotorLimits, MotorSample};
 
 const BROADCAST_ID: u8 = 0xfe;
 const INSTRUCTION_READ: u8 = 0x02;
@@ -87,7 +87,7 @@ const LOAD_FULL_SCALE: f64 = 1000.0;
 const LOAD_SIGN_BIT: u32 = 10;
 
 /// Highest goal position an STS-series servo accepts on its 12-bit encoder.
-pub const MAX_GOAL_POSITION: i64 = 4095;
+const MAX_GOAL_POSITION: i64 = 4095;
 
 /// Most motors that fit in one protocol-0 sync-write packet.
 ///
@@ -130,9 +130,22 @@ struct Motor {
     id: u8,
 }
 
+#[derive(Clone, Copy)]
+struct RegisterBlock<'a> {
+    address: u8,
+    length: u8,
+    operation: &'a str,
+}
+
+#[derive(Clone, Copy)]
+struct StatusExpectation<'a> {
+    parameters: usize,
+    operation: &'a str,
+}
+
 /// Errors reported while opening or communicating with a Feetech motor bus.
 #[derive(Debug)]
-pub enum FeetechError {
+pub(crate) enum FeetechError {
     InvalidMotorId {
         motor: String,
         id: u32,
@@ -254,7 +267,7 @@ impl Error for FeetechError {
 }
 
 /// A connection to a Feetech protocol-0 serial motor bus.
-pub struct FeetechBus {
+pub(crate) struct FeetechBus {
     port: Box<dyn SerialPort>,
     motors: Vec<Motor>,
     sync_read: SyncRead,
@@ -263,7 +276,7 @@ pub struct FeetechBus {
 
 impl FeetechBus {
     /// Open `path` and validate that all motor definitions are supported.
-    pub fn connect(
+    pub(crate) fn connect(
         path: &str,
         baud_rate: u32,
         specs: &BTreeMap<String, MotorSpec>,
@@ -286,10 +299,6 @@ impl FeetechBus {
     }
 
     /// Names of the configured motors, in bus-ID order.
-    pub fn motor_names(&self) -> Vec<String> {
-        self.motors.iter().map(|motor| motor.name.clone()).collect()
-    }
-
     /// Read every configured motor's status block once.
     ///
     /// The first calls probe whether the servos answer the wide request. A
@@ -297,13 +306,13 @@ impl FeetechBus {
     /// the session — but only once a position read has succeeded in its place,
     /// so an arm that was simply unplugged mid-transaction keeps its telemetry
     /// when it comes back.
-    pub fn read_samples(&mut self) -> Result<BTreeMap<String, MotorSample>, FeetechError> {
+    fn read_samples(&mut self) -> Result<BTreeMap<String, MotorSample>, FeetechError> {
         if self.status_block != StatusBlock::Unsupported {
-            match self.read_block(
-                PRESENT_POSITION_ADDRESS,
-                STATUS_BLOCK_LENGTH,
-                "read motor status",
-            ) {
+            match self.read_block(RegisterBlock {
+                address: PRESENT_POSITION_ADDRESS,
+                length: STATUS_BLOCK_LENGTH,
+                operation: "read motor status",
+            }) {
                 Ok(blocks) => {
                     self.status_block = StatusBlock::Supported;
                     return Ok(blocks
@@ -348,9 +357,13 @@ impl FeetechBus {
     /// Torque changes and calibration sweeps want the position and have no use
     /// for the rest of the block, so they pay for two bytes per motor instead
     /// of fifteen.
-    pub fn read_positions(&mut self) -> Result<BTreeMap<String, i64>, FeetechError> {
+    fn read_positions(&mut self) -> Result<BTreeMap<String, i64>, FeetechError> {
         Ok(self
-            .read_block(PRESENT_POSITION_ADDRESS, 2, "read present position")?
+            .read_block(RegisterBlock {
+                address: PRESENT_POSITION_ADDRESS,
+                length: 2,
+                operation: "read present position",
+            })?
             .into_iter()
             .map(|(name, bytes)| (name, decode_position(&bytes)))
             .collect())
@@ -362,13 +375,20 @@ impl FeetechBus {
     /// that will not answer reports no limits rather than failing the
     /// connection: an arm that drives without known thresholds is far more
     /// useful than an arm that refuses to open.
-    pub fn read_limits(&mut self) -> BTreeMap<String, MotorLimits> {
+    fn read_limits(&mut self) -> BTreeMap<String, MotorLimits> {
         let motors = self.motors.clone();
         motors
             .into_iter()
             .filter_map(|motor| {
                 let bytes = self
-                    .read_register(&motor, LIMITS_ADDRESS, LIMITS_LENGTH, "read motor limits")
+                    .read_register(
+                        &motor,
+                        RegisterBlock {
+                            address: LIMITS_ADDRESS,
+                            length: LIMITS_LENGTH,
+                            operation: "read motor limits",
+                        },
+                    )
                     .ok()?;
                 Some((motor.name, decode_limits(&bytes)))
             })
@@ -382,12 +402,10 @@ impl FeetechBus {
     /// rather than retrying an unsupported instruction forever.
     fn read_block(
         &mut self,
-        address: u8,
-        length: u8,
-        operation: &str,
+        register: RegisterBlock<'_>,
     ) -> Result<BTreeMap<String, Vec<u8>>, FeetechError> {
         if self.sync_read != SyncRead::Unsupported {
-            match self.sync_read_block(address, length, operation) {
+            match self.sync_read_block(register) {
                 Ok(values) => {
                     self.sync_read = SyncRead::Supported;
                     return Ok(values);
@@ -416,7 +434,7 @@ impl FeetechBus {
         motors
             .into_iter()
             .map(|motor| {
-                let bytes = self.read_register(&motor, address, length, operation)?;
+                let bytes = self.read_register(&motor, register)?;
                 Ok((motor.name, bytes))
             })
             .collect()
@@ -428,10 +446,7 @@ impl FeetechBus {
     /// calibrated per-joint limits are enforced by the caller, which is the
     /// only layer that knows them. Names that are not on this bus are rejected
     /// so a typo cannot silently move nothing.
-    pub fn write_goal_positions(
-        &mut self,
-        goals: &BTreeMap<String, i64>,
-    ) -> Result<(), FeetechError> {
+    fn write_goal_positions(&mut self, goals: &BTreeMap<String, i64>) -> Result<(), FeetechError> {
         if goals.is_empty() {
             return Ok(());
         }
@@ -461,7 +476,7 @@ impl FeetechBus {
     /// Enabling torque first copies each motor's present position into its goal
     /// register. Without that, a servo would snap to whatever goal was left in
     /// its registers by a previous session the instant it is energized.
-    pub fn set_torque(&mut self, enabled: bool) -> Result<(), FeetechError> {
+    fn set_torque(&mut self, enabled: bool) -> Result<(), FeetechError> {
         if !enabled {
             return self.apply_torque_and_verify(false);
         }
@@ -497,8 +512,14 @@ impl FeetechBus {
         thread::sleep(Duration::from_millis(5));
         let motors = self.motors.clone();
         for motor in motors {
-            let reported =
-                self.read_register(&motor, TORQUE_ENABLE_ADDRESS, 1, "verify torque state")?[0];
+            let reported = self.read_register(
+                &motor,
+                RegisterBlock {
+                    address: TORQUE_ENABLE_ADDRESS,
+                    length: 1,
+                    operation: "verify torque state",
+                },
+            )?[0];
             if (reported != 0) != enabled {
                 return Err(FeetechError::TorqueMismatch {
                     motor: motor.name,
@@ -511,30 +532,29 @@ impl FeetechBus {
         Ok(())
     }
 
-    /// Disable torque for every configured motor and verify the result.
-    pub fn disable_torque(&mut self) -> Result<(), FeetechError> {
-        self.set_torque(false)
-    }
-
     /// Read the same register run from every motor in one broadcast
     /// transaction.
     fn sync_read_block(
         &mut self,
-        address: u8,
-        length: u8,
-        operation: &str,
+        register: RegisterBlock<'_>,
     ) -> Result<BTreeMap<String, Vec<u8>>, FeetechError> {
         let motors = self.motors.clone();
         let mut parameters = Vec::with_capacity(2 + motors.len());
-        parameters.extend_from_slice(&[address, length]);
+        parameters.extend_from_slice(&[register.address, register.length]);
         parameters.extend(motors.iter().map(|motor| motor.id));
         let packet = instruction_packet(BROADCAST_ID, INSTRUCTION_SYNC_READ, &parameters);
         let ids = motors.iter().map(|motor| motor.id).collect::<Vec<_>>();
-        let operation = format!("sync {operation}");
+        let operation = format!("sync {}", register.operation);
 
         self.clear_input("clear stale serial input before a sync read")?;
         self.write_packet(&packet, "send sync-read packet")?;
-        let mut responses = self.read_status_group(&ids, usize::from(length), &operation)?;
+        let mut responses = self.read_status_group(
+            &ids,
+            StatusExpectation {
+                parameters: usize::from(register.length),
+                operation: &operation,
+            },
+        )?;
 
         motors
             .into_iter()
@@ -555,12 +575,17 @@ impl FeetechBus {
     fn read_register(
         &mut self,
         motor: &Motor,
-        address: u8,
-        length: u8,
-        operation: &str,
+        register: RegisterBlock<'_>,
     ) -> Result<Vec<u8>, FeetechError> {
-        let packet = instruction_packet(motor.id, INSTRUCTION_READ, &[address, length]);
-        let operation = format!("{operation} for motor {:?} (id {})", motor.name, motor.id);
+        let packet = instruction_packet(
+            motor.id,
+            INSTRUCTION_READ,
+            &[register.address, register.length],
+        );
+        let operation = format!(
+            "{} for motor {:?} (id {})",
+            register.operation, motor.name, motor.id
+        );
         let mut last_detail = String::new();
 
         for _ in 0..RETRIES {
@@ -572,7 +597,13 @@ impl FeetechBus {
                 last_detail = error.to_string();
                 continue;
             }
-            match self.read_status(motor.id, usize::from(length), &operation) {
+            match self.read_status(
+                motor.id,
+                StatusExpectation {
+                    parameters: usize::from(register.length),
+                    operation: &operation,
+                },
+            ) {
                 Ok(parameters) => return Ok(parameters),
                 Err(error) => last_detail = error.to_string(),
             }
@@ -606,15 +637,13 @@ impl FeetechBus {
     fn read_status(
         &mut self,
         expected_id: u8,
-        expected_parameters: usize,
-        operation: &str,
+        expectation: StatusExpectation<'_>,
     ) -> Result<Vec<u8>, FeetechError> {
-        let mut responses =
-            self.read_status_group(&[expected_id], expected_parameters, operation)?;
+        let mut responses = self.read_status_group(&[expected_id], expectation)?;
         responses
             .remove(&expected_id)
             .ok_or_else(|| FeetechError::Protocol {
-                operation: operation.to_owned(),
+                operation: expectation.operation.to_owned(),
                 detail: format!("motor ID {expected_id} did not answer"),
             })
     }
@@ -627,8 +656,7 @@ impl FeetechBus {
     fn read_status_group(
         &mut self,
         expected_ids: &[u8],
-        expected_parameters: usize,
-        operation: &str,
+        expectation: StatusExpectation<'_>,
     ) -> Result<BTreeMap<u8, Vec<u8>>, FeetechError> {
         let deadline = Instant::now() + RESPONSE_TIMEOUT;
         let mut received = Vec::with_capacity(32);
@@ -649,14 +677,14 @@ impl FeetechBus {
                     ) => {}
                 Err(source) => {
                     return Err(FeetechError::Communication {
-                        operation: operation.to_owned(),
+                        operation: expectation.operation.to_owned(),
                         source,
                     });
                 }
             }
 
             loop {
-                match take_status_packet(&mut received, expected_ids, expected_parameters) {
+                match take_status_packet(&mut received, expected_ids, expectation.parameters) {
                     PacketParse::NeedMore => break,
                     PacketParse::Skip(detail) => last_parse_error = Some(detail),
                     PacketParse::Ready((id, parameters)) => {
@@ -676,7 +704,7 @@ impl FeetechBus {
             .map(|id| id.to_string())
             .collect::<Vec<_>>();
         Err(FeetechError::Protocol {
-            operation: operation.to_owned(),
+            operation: expectation.operation.to_owned(),
             detail: last_parse_error.unwrap_or_else(|| {
                 format!(
                     "timed out waiting for a response from motor ID {}",
@@ -693,10 +721,6 @@ impl FeetechBus {
 /// limits have already been decoded from Feetech registers into the neutral
 /// physical-unit types owned by [`crate::bus`].
 impl MotorBus for FeetechBus {
-    fn motor_names(&self) -> Vec<String> {
-        FeetechBus::motor_names(self)
-    }
-
     fn read_positions(&mut self) -> Result<BTreeMap<String, i64>, BusError> {
         FeetechBus::read_positions(self).map_err(BusError::driver)
     }
@@ -746,14 +770,14 @@ fn motors_from_specs(specs: &BTreeMap<String, MotorSpec>) -> Result<Vec<Motor>, 
 
     let mut motors = Vec::with_capacity(specs.len());
     for (name, spec) in specs {
-        let id = u8::try_from(spec.id)
+        let id = u8::try_from(spec.id())
             .ok()
             .filter(|id| *id < BROADCAST_ID)
             .ok_or_else(|| FeetechError::InvalidMotorId {
                 motor: name.clone(),
-                id: spec.id,
+                id: spec.id(),
             })?;
-        if let Some(model) = spec.model.as_deref()
+        if let Some(model) = spec.model()
             && !SUPPORTED_MODELS.contains(&model)
         {
             return Err(FeetechError::UnsupportedModel {
@@ -835,22 +859,22 @@ fn decode_status_block(bytes: &[u8]) -> MotorSample {
             .map(|load| f64::from(decode_sign_magnitude_at(load, LOAD_SIGN_BIT)) / LOAD_FULL_SCALE),
         // A servo answering at all is a servo with supply voltage, so a zero
         // here is a register this firmware does not fill rather than a reading.
-        voltage_volts: bytes
-            .get(OFFSET_VOLTAGE)
-            .copied()
-            .filter(|volts| *volts != 0)
-            .map(|volts| f64::from(volts) * VOLTS_PER_COUNT),
-        temperature_celsius: bytes
-            .get(OFFSET_TEMPERATURE)
-            .map(|celsius| f64::from(*celsius)),
-        // Direction of current draw says nothing an operator acts on, and the
-        // magnitude is what a stall shows up in.
-        current_amps: word_at(bytes, OFFSET_CURRENT)
-            .map(|current| f64::from(decode_sign_magnitude(current).abs()) * AMPS_PER_COUNT),
-        moving: bytes.get(OFFSET_MOVING).map(|moving| *moving != 0),
-        faults: MotorFaults {
-            raw: bytes.get(OFFSET_STATUS).copied().unwrap_or_default(),
+        electrical: MotorElectricalSample {
+            voltage_volts: bytes
+                .get(OFFSET_VOLTAGE)
+                .copied()
+                .filter(|volts| *volts != 0)
+                .map(|volts| f64::from(volts) * VOLTS_PER_COUNT),
+            temperature_celsius: bytes
+                .get(OFFSET_TEMPERATURE)
+                .map(|celsius| f64::from(*celsius)),
+            // Direction of current draw says nothing an operator acts on, and the
+            // magnitude is what a stall shows up in.
+            current_amps: word_at(bytes, OFFSET_CURRENT)
+                .map(|current| f64::from(decode_sign_magnitude(current).abs()) * AMPS_PER_COUNT),
         },
+        moving: bytes.get(OFFSET_MOVING).map(|moving| *moving != 0),
+        faults: MotorFaults::from_raw(bytes.get(OFFSET_STATUS).copied().unwrap_or_default()),
     }
 }
 
@@ -952,7 +976,8 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
-    use spiral_robotics_core::calibration::Direction;
+    use crate::bus::MotorFault;
+    use spiral_robotics_core::calibration::MotorDirection;
 
     /// Build a well-formed status packet carrying `parameters` from `id`.
     fn status_packet(id: u8, parameters: &[u8]) -> Vec<u8> {
@@ -964,10 +989,10 @@ mod tests {
     }
 
     fn spec(id: u32, model: Option<&str>) -> MotorSpec {
-        MotorSpec {
-            id,
-            direction: Direction::Normal,
-            model: model.map(str::to_owned),
+        let specification = MotorSpec::new(id, MotorDirection::Normal);
+        match model {
+            Some(model) => specification.with_model(model),
+            None => specification,
         }
     }
 
@@ -1193,11 +1218,11 @@ mod tests {
         assert_eq!(reading.position, 2048);
         assert_eq!(reading.speed_degrees_per_second, Some(-45.0));
         assert_eq!(reading.load, Some(0.25));
-        assert_eq!(reading.voltage_volts, Some(7.4));
-        assert_eq!(reading.temperature_celsius, Some(43.0));
-        assert!((reading.current_amps.unwrap() - 0.78).abs() < 1e-9);
+        assert_eq!(reading.electrical.voltage_volts, Some(7.4));
+        assert_eq!(reading.electrical.temperature_celsius, Some(43.0));
+        assert!((reading.electrical.current_amps.unwrap() - 0.78).abs() < 1e-9);
         assert_eq!(reading.moving, Some(true));
-        assert!(!reading.faults.any());
+        assert!(!reading.faults.has_faults());
     }
 
     #[test]
@@ -1205,11 +1230,11 @@ mod tests {
         let reading = decode_status_block(&status_block()[..OFFSET_TEMPERATURE]);
 
         assert_eq!(reading.position, 2048);
-        assert_eq!(reading.temperature_celsius, None);
-        assert_eq!(reading.current_amps, None);
+        assert_eq!(reading.electrical.temperature_celsius, None);
+        assert_eq!(reading.electrical.current_amps, None);
         assert_eq!(reading.moving, None);
         // Voltage is the last field that did arrive, so it is still reported.
-        assert_eq!(reading.voltage_volts, Some(7.4));
+        assert_eq!(reading.electrical.voltage_volts, Some(7.4));
     }
 
     #[test]
@@ -1231,7 +1256,7 @@ mod tests {
         let mut bytes = status_block();
         bytes[OFFSET_VOLTAGE] = 0;
 
-        assert_eq!(decode_status_block(&bytes).voltage_volts, None);
+        assert_eq!(decode_status_block(&bytes).electrical.voltage_volts, None);
     }
 
     #[test]
@@ -1240,9 +1265,12 @@ mod tests {
         bytes[OFFSET_STATUS] = MotorFaults::OVERHEAT | MotorFaults::OVERLOAD | 0x40;
         let faults = decode_status_block(&bytes).faults;
 
-        assert!(faults.any());
-        assert_eq!(faults.named(), [MotorFault::Overheat, MotorFault::Overload]);
-        assert_eq!(faults.unnamed(), 0x40);
+        assert!(faults.has_faults());
+        assert_eq!(
+            faults.known_faults(),
+            [MotorFault::Overheat, MotorFault::Overload]
+        );
+        assert_eq!(faults.unknown_bits(), 0x40);
     }
 
     #[test]

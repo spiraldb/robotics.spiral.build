@@ -106,7 +106,7 @@ fn legacy_action_styles_cannot_return() {
 #[test]
 fn status_bar_keeps_messages_and_live_rates_in_stable_lanes() {
     let frontend = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let shell = fs::read_to_string(frontend.join("src/shell/shell.rs"))
+    let shell = fs::read_to_string(frontend.join("src/shell/frame.rs"))
         .expect("status-bar source should be readable");
     let styles = fs::read_to_string(frontend.join("tailwind.css"))
         .expect("status-bar styles should be readable");
@@ -211,7 +211,7 @@ fn activity_rail_actions_center_their_vertical_content() {
 #[test]
 fn workflow_language_stays_relation_first_and_truthful() {
     let frontend = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let shell = fs::read_to_string(frontend.join("src/shell/shell.rs"))
+    let shell = fs::read_to_string(frontend.join("src/shell/frame.rs"))
         .expect("activity rail source should be readable");
     let workflow = fs::read_to_string(frontend.join("src/activities/workflow/workspace.rs"))
         .expect("workflow source should be readable");

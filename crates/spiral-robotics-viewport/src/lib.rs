@@ -26,23 +26,24 @@
 //! The seam between them is the useful one: **this crate answers where a thing
 //! is on screen, and the application answers what should be said about it.**
 
-pub mod camera;
-pub mod gesture;
-pub mod pick;
-pub mod render;
-pub mod robot;
-pub mod scene;
-pub mod urdf;
+mod camera;
+mod gesture;
+mod pick;
+mod render;
+mod robot;
+mod scene;
+mod urdf;
 
 /// Re-export the viewport's matrix types so callers use its presentation
 /// geometry without depending on the domain crate for rendering details.
 pub use glam;
 
 pub use camera::Camera;
-pub use gesture::{Drag, Gesture};
-pub use pick::Viewport;
+pub use gesture::{Drag, DragUpdate, Gesture};
+pub use pick::{PickRequest, SceneFrame, Viewport};
 pub use robot::{
-    ArmPlacement, CameraMount, RobotEntity, RobotScene, so101_joint_positions, tool_position,
+    ArmPlacement, BENCH_SPACING, BenchPosition, CameraAttachment, CameraMount, RobotEntity,
+    RobotScene, SceneAppearance,
 };
 pub use scene::{Condition, Entity, EntityKey, Interaction, Scene};
 pub use urdf::{SO101_URDF, Urdf, UrdfError};

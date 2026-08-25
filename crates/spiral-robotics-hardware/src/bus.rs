@@ -2,18 +2,19 @@
 //!
 //! The studio's control loop is written against [`MotorBus`] so that every
 //! screen — setup, calibration, joint control, teleoperation — can be exercised
-//! without an arm on the desk. [`SimulatedBus`] is deterministic: it advances
+//! without an arm on the desk. The test-only `SimulatedBus` is deterministic: it advances
 //! only when it is read, so a test can step it exactly as far as it likes.
 
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
+#[cfg(test)]
 use spiral_robotics_core::calibration::MotorSpec;
 
 /// A fault reported by a motor controller.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MotorFault {
+pub(crate) enum MotorFault {
     Voltage,
     Overheat,
     Overload,
@@ -34,8 +35,8 @@ impl fmt::Display for MotorFault {
 /// The raw byte remains available so an adapter never turns an unfamiliar
 /// hardware fault into a healthy reading.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct MotorFaults {
-    pub raw: u8,
+pub(crate) struct MotorFaults {
+    raw: u8,
 }
 
 impl MotorFaults {
@@ -44,12 +45,13 @@ impl MotorFaults {
     pub(crate) const OVERLOAD: u8 = 0x20;
 
     /// True when the motor is reporting anything at all.
-    pub fn any(self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn has_faults(self) -> bool {
         self.raw != 0
     }
 
     /// The faults this program can name, in the order it names them.
-    pub fn named(self) -> Vec<MotorFault> {
+    pub(crate) fn known_faults(self) -> Vec<MotorFault> {
         let mut faults = Vec::new();
         if self.raw & Self::OVERHEAT != 0 {
             faults.push(MotorFault::Overheat);
@@ -64,8 +66,12 @@ impl MotorFaults {
     }
 
     /// Bits that are set but not named above.
-    pub fn unnamed(self) -> u8 {
+    pub(crate) fn unknown_bits(self) -> u8 {
         self.raw & !(Self::VOLTAGE | Self::OVERHEAT | Self::OVERLOAD)
+    }
+
+    pub(crate) const fn from_raw(raw: u8) -> Self {
+        Self { raw }
     }
 }
 
@@ -74,35 +80,42 @@ impl MotorFaults {
 /// Values use physical units. Every field but position is optional so an
 /// adapter can faithfully represent hardware that supplies fewer readings.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct MotorSample {
-    pub position: i64,
+pub(crate) struct MotorSample {
+    pub(crate) position: i64,
     /// Shaft speed in degrees per second, signed.
-    pub speed_degrees_per_second: Option<f64>,
+    pub(crate) speed_degrees_per_second: Option<f64>,
     /// Load as a signed fraction of the motor's rated torque.
-    pub load: Option<f64>,
-    pub voltage_volts: Option<f64>,
-    pub temperature_celsius: Option<f64>,
-    pub current_amps: Option<f64>,
-    pub moving: Option<bool>,
-    pub faults: MotorFaults,
+    pub(crate) load: Option<f64>,
+    pub(crate) electrical: MotorElectricalSample,
+    pub(crate) moving: Option<bool>,
+    pub(crate) faults: MotorFaults,
+}
+
+/// Electrical and thermal readings captured in the same motor transaction.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct MotorElectricalSample {
+    pub(crate) voltage_volts: Option<f64>,
+    pub(crate) temperature_celsius: Option<f64>,
+    pub(crate) current_amps: Option<f64>,
 }
 
 /// Limits a motor controller enforces on itself.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct MotorLimits {
-    pub max_temperature_celsius: Option<f64>,
-    pub min_voltage_volts: Option<f64>,
-    pub max_voltage_volts: Option<f64>,
+pub(crate) struct MotorLimits {
+    pub(crate) max_temperature_celsius: Option<f64>,
+    pub(crate) min_voltage_volts: Option<f64>,
+    pub(crate) max_voltage_volts: Option<f64>,
     /// Configured torque ceiling as a fraction of the motor's rated torque.
-    pub max_load: Option<f64>,
+    pub(crate) max_load: Option<f64>,
 }
 
 /// Something went wrong talking to a motor bus.
 #[derive(Debug)]
-pub enum BusError {
+pub(crate) enum BusError {
     /// A concrete driver reported a protocol or transport failure.
     Driver(Box<dyn Error + Send + Sync>),
     /// A command named a motor the bus does not have.
+    #[cfg(test)]
     UnknownMotor { motor: String },
 }
 
@@ -110,6 +123,7 @@ impl fmt::Display for BusError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Driver(source) => source.fmt(formatter),
+            #[cfg(test)]
             Self::UnknownMotor { motor } => {
                 write!(formatter, "motor {motor:?} is not configured on this bus")
             }
@@ -121,6 +135,7 @@ impl Error for BusError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Driver(source) => Some(source.as_ref()),
+            #[cfg(test)]
             Self::UnknownMotor { .. } => None,
         }
     }
@@ -129,7 +144,7 @@ impl Error for BusError {
 impl BusError {
     /// Preserve a driver's concrete error as a source without exposing its
     /// type in the policy-facing boundary.
-    pub fn driver(source: impl Error + Send + Sync + 'static) -> Self {
+    pub(crate) fn driver(source: impl Error + Send + Sync + 'static) -> Self {
         Self::Driver(Box::new(source))
     }
 }
@@ -139,10 +154,7 @@ impl BusError {
 /// Positions are raw encoder counts in the coordinate system the motors report;
 /// converting to and from calibrated units is the caller's job, because only
 /// the caller knows the calibration.
-pub trait MotorBus: Send {
-    /// Motor names on this bus, in bus-ID order.
-    fn motor_names(&self) -> Vec<String>;
-
+pub(crate) trait MotorBus: Send {
     /// Read the present position of every motor.
     fn read_positions(&mut self) -> Result<BTreeMap<String, i64>, BusError>;
 
@@ -176,21 +188,27 @@ pub trait MotorBus: Send {
 ///
 /// At the studio's control rate this is roughly a quarter turn per second,
 /// slow enough to watch and fast enough to feel responsive.
+#[cfg(test)]
 const SIMULATED_STEP: i64 = 24;
 
 /// The simulated motor's physical 12-bit encoder span.
+#[cfg(test)]
 const SIMULATED_MAX_POSITION: i64 = 4095;
 
 /// Center of a simulated motor's travel, matching a 12-bit encoder.
+#[cfg(test)]
 const SIMULATED_CENTER: i64 = (SIMULATED_MAX_POSITION + 1) / 2;
 
 /// How far an idle simulated motor sweeps either side of center.
+#[cfg(test)]
 const SIMULATED_DRIFT_AMPLITUDE: f64 = 800.0;
 
 /// Reads it takes an idle simulated motor to complete one sweep.
+#[cfg(test)]
 const SIMULATED_DRIFT_PERIOD: f64 = 420.0;
 
 /// Supply a simulated bus reports, matching the 2S pack an SO-101 runs on.
+#[cfg(test)]
 const SIMULATED_VOLTS: f64 = 7.4;
 
 /// Reads per second the simulation assumes when it reports a rate.
@@ -199,12 +217,15 @@ const SIMULATED_VOLTS: f64 = 7.4;
 /// steppable from a test — so it has to be told what one read is worth before
 /// it can answer in degrees per second. This matches the studio's control rate
 /// and affects nothing but simulated readings.
+#[cfg(test)]
 const SIMULATED_READS_PER_SECOND: f64 = 60.0;
 
 /// Temperature a simulated motor rests at.
+#[cfg(test)]
 const SIMULATED_AMBIENT_CELSIUS: f64 = 28.0;
 
 /// Temperature a simulated motor climbs toward while it is holding torque.
+#[cfg(test)]
 const SIMULATED_DRIVEN_CELSIUS: f64 = 52.0;
 
 /// Fraction of the remaining thermal gap a simulated motor closes per read.
@@ -213,18 +234,23 @@ const SIMULATED_DRIVEN_CELSIUS: f64 = 52.0;
 /// minute under load — slow enough to read as a real motor warming up, fast
 /// enough that the studio's rise-rate readout has something to say during a
 /// session someone is actually watching.
+#[cfg(test)]
 const SIMULATED_THERMAL_RATE: f64 = 0.0001;
 
 /// Current a simulated motor draws at full effort, in amps.
+#[cfg(test)]
 const SIMULATED_STALL_AMPS: f64 = 1.4;
 
 /// Effort a simulated motor spends merely holding its position.
+#[cfg(test)]
 const SIMULATED_HOLDING_LOAD: f64 = 0.08;
 
 /// Position error at which a simulated motor is working at its rated torque.
+#[cfg(test)]
 const SIMULATED_FULL_LOAD_ERROR: f64 = 400.0;
 
 /// Limits a simulated motor claims for itself, in the shape a real one reports.
+#[cfg(test)]
 fn simulated_limits() -> MotorLimits {
     MotorLimits {
         max_temperature_celsius: Some(70.0),
@@ -235,6 +261,7 @@ fn simulated_limits() -> MotorLimits {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg(test)]
 struct SimulatedMotor {
     id: u32,
     position: i64,
@@ -255,19 +282,21 @@ struct SimulatedMotor {
 /// see the UI, the calibration sweep, and teleoperation work end to end without
 /// hardware. A motor under torque ignores the sweep and tracks its goal.
 #[derive(Clone, Debug, PartialEq)]
-pub struct SimulatedBus {
+#[cfg(test)]
+pub(crate) struct SimulatedBus {
     motors: BTreeMap<String, SimulatedMotor>,
     torque: bool,
     drift: bool,
     reads: u64,
 }
 
+#[cfg(test)]
 impl SimulatedBus {
     /// Create a simulated bus for `specs`, with every motor parked at center.
     ///
     /// When `drift` is set, motors that are not being driven sweep through
     /// their travel on every read.
-    pub fn new(specs: &BTreeMap<String, MotorSpec>, drift: bool) -> Self {
+    pub(crate) fn new(specs: &BTreeMap<String, MotorSpec>, drift: bool) -> Self {
         let count = specs.len().max(1) as f64;
         let motors = specs
             .iter()
@@ -276,7 +305,7 @@ impl SimulatedBus {
                 (
                     name.clone(),
                     SimulatedMotor {
-                        id: spec.id,
+                        id: spec.id(),
                         position: SIMULATED_CENTER,
                         goal: SIMULATED_CENTER,
                         phase: index as f64 / count,
@@ -294,6 +323,12 @@ impl SimulatedBus {
             drift,
             reads: 0,
         }
+    }
+
+    fn motor_names(&self) -> Vec<String> {
+        let mut names = self.motors.keys().cloned().collect::<Vec<_>>();
+        names.sort_by_key(|name| self.motors[name].id);
+        names
     }
 
     /// Advance the simulation by one step and return the new positions.
@@ -341,13 +376,8 @@ impl SimulatedBus {
     }
 }
 
+#[cfg(test)]
 impl MotorBus for SimulatedBus {
-    fn motor_names(&self) -> Vec<String> {
-        let mut names = self.motors.keys().cloned().collect::<Vec<_>>();
-        names.sort_by_key(|name| self.motors[name].id);
-        names
-    }
-
     fn read_positions(&mut self) -> Result<BTreeMap<String, i64>, BusError> {
         Ok(self.step())
     }
@@ -368,9 +398,11 @@ impl MotorBus for SimulatedBus {
                                 * SIMULATED_READS_PER_SECOND,
                         ),
                         load: Some(motor.load),
-                        voltage_volts: Some(SIMULATED_VOLTS),
-                        temperature_celsius: Some(motor.temperature.round()),
-                        current_amps: Some(motor.load.abs() * SIMULATED_STALL_AMPS),
+                        electrical: MotorElectricalSample {
+                            voltage_volts: Some(SIMULATED_VOLTS),
+                            temperature_celsius: Some(motor.temperature.round()),
+                            current_amps: Some(motor.load.abs() * SIMULATED_STALL_AMPS),
+                        },
                         moving: Some(travelled != 0),
                         faults: MotorFaults::default(),
                     },
@@ -418,7 +450,7 @@ impl MotorBus for SimulatedBus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_core::calibration::Direction;
+    use spiral_robotics_core::calibration::MotorDirection;
 
     fn specs() -> BTreeMap<String, MotorSpec> {
         BTreeMap::from([
@@ -429,11 +461,7 @@ mod tests {
     }
 
     fn spec(id: u32) -> MotorSpec {
-        MotorSpec {
-            id,
-            direction: Direction::Normal,
-            model: Some("sts3215".to_owned()),
-        }
+        MotorSpec::new(id, MotorDirection::Normal).with_model("sts3215")
     }
 
     #[test]
@@ -523,10 +551,10 @@ mod tests {
         let cold = resting["shoulder_pan"];
 
         assert_eq!(cold.load, Some(0.0));
-        assert_eq!(cold.current_amps, Some(0.0));
-        assert_eq!(cold.voltage_volts, Some(SIMULATED_VOLTS));
+        assert_eq!(cold.electrical.current_amps, Some(0.0));
+        assert_eq!(cold.electrical.voltage_volts, Some(SIMULATED_VOLTS));
         assert_eq!(
-            cold.temperature_celsius,
+            cold.electrical.temperature_celsius,
             Some(SIMULATED_AMBIENT_CELSIUS.round())
         );
 
@@ -548,13 +576,13 @@ mod tests {
             hot.load.unwrap().abs() > SIMULATED_HOLDING_LOAD,
             "a motor under load reports more than its holding effort"
         );
-        assert!(hot.current_amps.unwrap() > 0.0);
+        assert!(hot.electrical.current_amps.unwrap() > 0.0);
         assert!(
-            hot.temperature_celsius.unwrap() > SIMULATED_AMBIENT_CELSIUS,
+            hot.electrical.temperature_celsius.unwrap() > SIMULATED_AMBIENT_CELSIUS,
             "a working motor warms above ambient"
         );
         assert!(
-            hot.temperature_celsius.unwrap() < SIMULATED_DRIVEN_CELSIUS,
+            hot.electrical.temperature_celsius.unwrap() < SIMULATED_DRIVEN_CELSIUS,
             "and does not arrive there instantly"
         );
     }
@@ -596,7 +624,7 @@ mod tests {
     fn motor_bus_signature_contains_only_neutral_boundary_types() {
         let source = include_str!("bus.rs");
         let (_, after_declaration) = source
-            .split_once("pub trait MotorBus")
+            .split_once("pub(crate) trait MotorBus")
             .expect("MotorBus declaration");
         let (signature, _) = after_declaration
             .split_once("\n}")

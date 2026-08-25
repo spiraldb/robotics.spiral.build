@@ -14,7 +14,7 @@ use arrow_ipc::reader::StreamReader;
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
-use spiral_robotics_api::api::{EpisodeImportSummary, ProjectImportSummary};
+use spiral_robotics_api::datasets::{EpisodeImportSummary, ProjectImportSummary};
 use spiral_robotics_api::workflow::{
     DEFAULT_WORKFLOW_ID, MAX_SIGLIP_CONCEPT_LENGTH, MAX_WORKFLOW_AGENT_CONVERSATION_TITLE_CHARS,
     MAX_WORKFLOW_AGENT_CONVERSATIONS, MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION,
@@ -22,10 +22,10 @@ use spiral_robotics_api::workflow::{
     SIGLIP_BASE_REPOSITORY, SIGLIP_BASE_REVISION, WORKFLOW_FEATURE_REGISTRY_RELATION,
     WorkflowAgentArtifactKind, WorkflowAgentMessagePhase, WorkflowAgentPhase, WorkflowAgentRole,
     WorkflowAgentToolPhase, WorkflowFeatureApplicability, WorkflowFeatureDefinition,
-    derived_feature_cache_relation, is_workflow_feature_name,
+    derived_feature_cache_relation,
 };
-use spiral_robotics_core::query::is_identifier;
-use spiral_robotics_core::workflow::validate_qualified_relation;
+use spiral_robotics_core::query::UnquotedSqlIdentifier;
+use spiral_robotics_core::workflow::QualifiedRelation;
 
 use crate::adbc::StorageConnection;
 #[cfg(test)]
@@ -1718,10 +1718,10 @@ fn validate_workflow_registry_with_limits(
                     stream_ids: workflow_registry_stream_ids(batch, row)?,
                 },
             };
-            validate_qualified_relation(&source_relation).map_err(|error| {
+            QualifiedRelation::try_from(source_relation.as_str()).map_err(|error| {
                 format!("Workflow feature registry has unsafe source relation: {error}")
             })?;
-            validate_qualified_relation(&cache_relation).map_err(|error| {
+            QualifiedRelation::try_from(cache_relation.as_str()).map_err(|error| {
                 format!("Workflow feature registry has unsafe cache relation: {error}")
             })?;
             let expected = derived_feature_cache_relation(&source_relation);
@@ -1834,12 +1834,12 @@ fn validate_workflow_definition(definition: &WorkflowFeatureDefinition) -> Resul
         .stream_ids
         .iter()
         .collect::<BTreeSet<_>>();
-    if !is_workflow_feature_name(&definition.name)
+    if !definition.has_valid_name()
         || definition.description.trim().is_empty()
         || definition.description.chars().count() > MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH
         || definition.concept.trim().is_empty()
         || definition.concept.chars().count() > MAX_SIGLIP_CONCEPT_LENGTH
-        || !is_identifier(&definition.applicability.media_field)
+        || UnquotedSqlIdentifier::try_from(definition.applicability.media_field.as_str()).is_err()
         || definition.applicability.stream_ids.len() > MAX_WORKFLOW_FEATURE_STREAMS
         || streams.len() != definition.applicability.stream_ids.len()
         || streams
@@ -2726,7 +2726,7 @@ mod tests {
     use std::fs;
     use std::io::Write as _;
     use std::process::Command;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::Instant;
 
     use arrow_array::builder::{ListBuilder, StringBuilder};
@@ -2746,10 +2746,9 @@ mod tests {
         table_exists,
     };
     use crate::settings::{
-        BackendStateStore, environment_spiral_endpoint, environment_spiral_spfs_endpoint,
+        BackendStateStore, SpiralConnectionSettings, environment_spiral_endpoint,
+        environment_spiral_spfs_endpoint,
     };
-
-    static SPIRAL_E2E: Mutex<()> = Mutex::new(());
 
     fn envelope(manifest: Manifest, entries: &[(&str, &[u8])]) -> Vec<u8> {
         envelope_for(PROJECT_MAGIC, manifest, entries)
@@ -3959,9 +3958,6 @@ mod tests {
     #[test]
     #[ignore = "requires a real SpiralDB server, SpFS, and disposable project access"]
     fn spiral_export_import_round_trip_overwrites_existing_data() {
-        let _serial = SPIRAL_E2E
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let project = required_project();
         let namespace = format!(
             "spiral_robotics_transfer_e2e_{}_{}",
@@ -3971,16 +3967,7 @@ mod tests {
                 .expect("system clock must be after the Unix epoch")
                 .as_nanos()
         );
-        let project_store = Arc::new(
-            ProjectStore::new(
-                configured_spiral_endpoint(),
-                configured_spiral_spfs_endpoint(),
-                Some(project),
-                stored_credentials(),
-                namespace,
-            )
-            .expect("the Spiral E2E project_store must be valid"),
-        );
+        let project_store = configured_project_store(project, namespace);
         let _cleanup = TestNamespace::new(project_store.clone());
         let storage = StorageManager::new(project_store.clone());
 
@@ -4058,9 +4045,6 @@ mod tests {
     #[test]
     #[ignore = "requires a real SpiralDB server, SpFS, and disposable project access"]
     fn spiral_episode_export_import_round_trip_merges_without_overwrite() {
-        let _serial = SPIRAL_E2E
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let project = required_project();
         let namespace = format!(
             "spiral_robotics_episode_transfer_e2e_{}_{}",
@@ -4070,16 +4054,7 @@ mod tests {
                 .expect("system clock must be after the Unix epoch")
                 .as_nanos()
         );
-        let project_store = Arc::new(
-            ProjectStore::new(
-                configured_spiral_endpoint(),
-                configured_spiral_spfs_endpoint(),
-                Some(project),
-                stored_credentials(),
-                namespace,
-            )
-            .expect("the Spiral episode E2E project_store must be valid"),
-        );
+        let project_store = configured_project_store(project, namespace);
         let _cleanup = TestNamespace::new(project_store.clone());
         let storage = StorageManager::new(project_store.clone());
 
@@ -4159,9 +4134,6 @@ mod tests {
     #[test]
     #[ignore = "requires a real SpiralDB server, SpFS, disposable project access, and FFmpeg"]
     fn spiral_project_import_rebuilds_the_shared_managed_video_dataset() {
-        let _serial = SPIRAL_E2E
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let project = required_project();
         let namespace = format!(
             "spiral_robotics_video_transfer_e2e_{}_{}",
@@ -4171,16 +4143,7 @@ mod tests {
                 .expect("system clock must be after the Unix epoch")
                 .as_nanos()
         );
-        let project_store = Arc::new(
-            ProjectStore::new(
-                configured_spiral_endpoint(),
-                configured_spiral_spfs_endpoint(),
-                Some(project),
-                stored_credentials(),
-                namespace,
-            )
-            .expect("the Spiral video import E2E project_store must be valid"),
-        );
+        let project_store = configured_project_store(project, namespace);
         let _cleanup = TestNamespace::new(project_store.clone());
         let storage = StorageManager::new(project_store.clone());
         let episode_id = "episode_video_import";
@@ -4191,7 +4154,7 @@ mod tests {
             sample_hz: 2.0,
             source: "transfer-e2e".to_owned(),
             note: None,
-            arms: vec![spiral_robotics_api::api::EpisodeArm {
+            arms: vec![spiral_robotics_api::recording::EpisodeArm {
                 id: "follower".to_owned(),
                 robot_type: Some("test".to_owned()),
                 joints: vec!["joint".to_owned()],
@@ -4300,11 +4263,12 @@ mod tests {
                     connection,
                     &sql::video_asset_range(
                         project_store.namespace(),
-                        episode_id,
-                        "camera.main",
-                        Some(0),
-                        512,
-                        1024,
+                        &crate::video::VideoAssetKey::new(
+                            episode_id.to_owned(),
+                            "camera.main".to_owned(),
+                            Some(0),
+                        ),
+                        crate::video::VideoByteRange::new(512, 1024),
                     ),
                 )?;
                 assert_eq!(range, mp4[512..1536]);
@@ -4347,9 +4311,6 @@ mod tests {
     #[test]
     #[ignore = "profiles a real project import and creates temporary Spiral resources"]
     fn spiral_profile_project_import() {
-        let _serial = SPIRAL_E2E
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let bundle_path = std::env::var("SPIRAL_PROJECT_BUNDLE")
             .expect("SPIRAL_PROJECT_BUNDLE must name the project archive to profile");
         let process_start = Instant::now();
@@ -4371,16 +4332,7 @@ mod tests {
                 .as_nanos()
         );
         let repository_start = Instant::now();
-        let project_store = Arc::new(
-            ProjectStore::new(
-                configured_spiral_endpoint(),
-                configured_spiral_spfs_endpoint(),
-                Some(project),
-                stored_credentials(),
-                namespace,
-            )
-            .expect("the Spiral profiling project_store must be valid"),
-        );
+        let project_store = configured_project_store(project, namespace);
         profile_event("studio.repository_config", repository_start, 0, 0);
         let cleanup = TestNamespace::new(project_store.clone());
 
@@ -4413,12 +4365,12 @@ mod tests {
         profile_event("studio.reload_preferences", preferences_start, 0, 0);
         let training_start = Instant::now();
         storage
-            .load_training_snapshot::<spiral_robotics_api::api::TrainingSnapshot>()
+            .load_training_snapshot::<spiral_robotics_api::training::TrainingSnapshot>()
             .expect("profiled training reload must succeed");
         profile_event("studio.reload_training", training_start, 0, 0);
         let rollout_start = Instant::now();
         storage
-            .load_rollout_snapshot::<spiral_robotics_api::api::RolloutSnapshot>()
+            .load_rollout_snapshot::<spiral_robotics_api::rollout::RolloutSnapshot>()
             .expect("profiled rollout reload must succeed");
         profile_event("studio.reload_rollout", rollout_start, 0, 0);
         let catalog_start = Instant::now();
@@ -4460,9 +4412,6 @@ mod tests {
     #[test]
     #[ignore = "profiles real hosted Arbor replacements in temporary Spiral resources"]
     fn spiral_profile_write_fixed_cost() {
-        let _serial = SPIRAL_E2E
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let bundle_path = std::env::var("SPIRAL_PROJECT_BUNDLE")
             .expect("SPIRAL_PROJECT_BUNDLE must name the project archive to profile");
         let bytes = fs::read(&bundle_path).expect("the profiling archive must be readable");
@@ -4484,16 +4433,7 @@ mod tests {
                 .expect("system clock must be after the Unix epoch")
                 .as_nanos()
         );
-        let project_store = Arc::new(
-            ProjectStore::new(
-                configured_spiral_endpoint(),
-                configured_spiral_spfs_endpoint(),
-                Some(project),
-                stored_credentials(),
-                namespace,
-            )
-            .expect("the Spiral profiling project_store must be valid"),
-        );
+        let project_store = configured_project_store(project, namespace);
         let cleanup = TestNamespace::new(project_store.clone());
 
         project_store
@@ -4972,6 +4912,21 @@ mod tests {
             .ok()
             .and_then(|store| store.spiral_spfs_endpoint())
             .unwrap_or_else(environment_spiral_spfs_endpoint)
+    }
+
+    fn configured_project_store(project: String, namespace: String) -> Arc<ProjectStore> {
+        let settings = SpiralConnectionSettings::new(
+            configured_spiral_endpoint(),
+            configured_spiral_spfs_endpoint(),
+        )
+        .expect("the configured Spiral endpoints must be valid")
+        .with_project(&project)
+        .expect("the Spiral E2E project must be valid")
+        .with_credentials(stored_credentials());
+        Arc::new(
+            ProjectStore::new(settings, namespace)
+                .expect("the Spiral E2E project store must be valid"),
+        )
     }
 
     fn relation_payloads(bundle: &[u8]) -> BTreeMap<String, Vec<u8>> {

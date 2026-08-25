@@ -6,12 +6,15 @@
 //! policy remains in `spiral-robotics-core`; delivery lives in the backend and
 //! persistence lives in `spiral-robotics-storage`.
 
-pub mod bus;
+mod bus;
 pub mod cameras;
 mod control;
 mod control_policy;
-pub mod feetech;
+mod feetech;
 pub mod serial_ports;
 
-pub use control::*;
-pub use control_policy::*;
+pub use control::{
+    ArmConditionSummary, CONTROL_HZ, CONTROL_PERIOD, ControlSettings, DEFAULT_MAX_STEP_COUNTS,
+    DEFAULT_TELEOP_MAX_STEP_COUNTS, EpisodeCheckpoint, HardwareHandle, HardwareState, PolicyGoals,
+    RecordingCompletion, RecordingWriter, ReplayRequest, ReplayTrajectory, RobotSpec, Sample,
+};

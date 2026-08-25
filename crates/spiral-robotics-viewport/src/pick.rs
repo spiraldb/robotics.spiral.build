@@ -13,8 +13,42 @@ use crate::urdf::Geometry;
 use web_sys::HtmlCanvasElement;
 
 use crate::camera::Camera;
-use crate::render::Renderer;
+use crate::render::{RenderFrame, Renderer};
 use crate::scene::{EntityKey, Scene};
+
+/// Everything that varies between two rendered frames.
+pub struct SceneFrame<'a> {
+    camera: &'a Camera,
+    scene: &'a Scene,
+    pixel_ratio: f64,
+}
+
+impl<'a> SceneFrame<'a> {
+    pub fn new(camera: &'a Camera, scene: &'a Scene, pixel_ratio: f64) -> Self {
+        Self {
+            camera,
+            scene,
+            pixel_ratio,
+        }
+    }
+}
+
+/// The scene and screen position used by one picking query.
+pub struct PickRequest<'a> {
+    camera: &'a Camera,
+    scene: &'a Scene,
+    client_position: (f64, f64),
+}
+
+impl<'a> PickRequest<'a> {
+    pub fn new(camera: &'a Camera, scene: &'a Scene, client_position: (f64, f64)) -> Self {
+        Self {
+            camera,
+            scene,
+            client_position,
+        }
+    }
+}
 
 /// A canvas, the renderer bound to it, and the geometry to read against it.
 pub struct Viewport {
@@ -30,9 +64,10 @@ impl Viewport {
     }
 
     /// Draw the scene, resizing the drawing buffer to the canvas first.
-    pub fn draw(&mut self, camera: &Camera, scene: &Scene, pixel_ratio: f64) {
-        if let Some(aspect) = self.renderer.resize(&self.canvas, pixel_ratio) {
-            self.renderer.draw(camera, aspect, scene);
+    pub fn draw(&mut self, frame: SceneFrame<'_>) {
+        if let Some(aspect_ratio) = self.renderer.resize(&self.canvas, frame.pixel_ratio) {
+            self.renderer
+                .draw(RenderFrame::new(frame.camera, aspect_ratio, frame.scene));
         }
     }
 
@@ -42,24 +77,28 @@ impl Viewport {
     }
 
     /// The nearest pickable entity under a client-space point.
-    pub fn pick(&self, camera: &Camera, scene: &Scene, client: (f64, f64)) -> Option<EntityKey> {
-        let (near, direction) = self.ray(camera, client)?;
-        scene
-            .entities
-            .iter()
-            .filter(|entity| entity.pickable)
+    pub fn pick(&self, request: PickRequest<'_>) -> Option<EntityKey> {
+        let (ray_origin, ray_direction) = self.ray(request.camera, request.client_position)?;
+        request
+            .scene
+            .entities()
+            .filter(|entity| entity.is_pickable())
             .filter_map(|entity| {
-                let radius = bounding_radius(&entity.geometry)?;
-                let to_center = entity.origin() - near;
-                let along = to_center.dot(direction);
-                if along < 0.0 {
+                let radius = entity.geometry().bounding_radius()?;
+                let center_offset = entity.origin() - ray_origin;
+                let distance_along_ray = center_offset.dot(ray_direction);
+                if distance_along_ray < 0.0 {
                     return None;
                 }
-                let offset = to_center.length_squared() - along * along;
-                if offset > radius * radius {
+                let perpendicular_distance_squared =
+                    center_offset.length_squared() - distance_along_ray * distance_along_ray;
+                if perpendicular_distance_squared > radius * radius {
                     return None;
                 }
-                Some((along - (radius * radius - offset).sqrt(), entity.key))
+                Some((
+                    distance_along_ray - (radius * radius - perpendicular_distance_squared).sqrt(),
+                    entity.key(),
+                ))
             })
             .min_by(|(left, _), (right, _)| left.total_cmp(right))
             .map(|(_, key)| key)
@@ -69,13 +108,13 @@ impl Viewport {
     ///
     /// `None` behind the camera, so a label for something that has orbited out
     /// of view is not drawn folded onto the opposite edge of the screen.
-    pub fn anchor(&self, camera: &Camera, world: Vec3) -> Option<(f64, f64)> {
+    pub fn anchor(&self, camera: &Camera, world_position: Vec3) -> Option<(f64, f64)> {
         let rect = self.canvas.get_bounding_client_rect();
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
             return None;
         }
         let aspect = (rect.width() / rect.height()) as f32;
-        let clip = camera.view_projection(aspect) * world.extend(1.0);
+        let clip = camera.view_projection(aspect) * world_position.extend(1.0);
         if clip.w <= 0.0 {
             return None;
         }
@@ -90,18 +129,19 @@ impl Viewport {
     }
 
     /// The world-space ray through a client-space point.
-    fn ray(&self, camera: &Camera, client: (f64, f64)) -> Option<(Vec3, Vec3)> {
+    fn ray(&self, camera: &Camera, client_position: (f64, f64)) -> Option<(Vec3, Vec3)> {
         let rect = self.canvas.get_bounding_client_rect();
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
             return None;
         }
-        let x = ((client.0 - rect.left()) / rect.width() * 2.0 - 1.0) as f32;
-        let y = (1.0 - (client.1 - rect.top()) / rect.height() * 2.0) as f32;
+        let normalized_x = ((client_position.0 - rect.left()) / rect.width() * 2.0 - 1.0) as f32;
+        let normalized_y = (1.0 - (client_position.1 - rect.top()) / rect.height() * 2.0) as f32;
         let aspect = (rect.width() / rect.height()) as f32;
-        let inverse: Mat4 = camera.view_projection(aspect).inverse();
-        let near = inverse.project_point3(Vec3::new(x, y, -1.0));
-        let far = inverse.project_point3(Vec3::new(x, y, 1.0));
-        Some((near, (far - near).normalize_or(Vec3::X)))
+        let inverse_projection: Mat4 = camera.view_projection(aspect).inverse();
+        let ray_origin =
+            inverse_projection.project_point3(Vec3::new(normalized_x, normalized_y, -1.0));
+        let ray_end = inverse_projection.project_point3(Vec3::new(normalized_x, normalized_y, 1.0));
+        Some((ray_origin, (ray_end - ray_origin).normalize_or(Vec3::X)))
     }
 }
 
@@ -109,13 +149,15 @@ impl Viewport {
 ///
 /// Meshes have no bounds this crate can compute without loading them, so they
 /// are not picked rather than picked at a guessed size.
-fn bounding_radius(geometry: &Geometry) -> Option<f32> {
-    match geometry {
-        Geometry::Box { size } => Some(size.length() * 0.5),
-        Geometry::Cylinder { radius, length } => {
-            Some((radius * radius + length * length * 0.25).sqrt())
+impl Geometry {
+    fn bounding_radius(&self) -> Option<f32> {
+        match self {
+            Self::Box { size } => Some(size.length() * 0.5),
+            Self::Cylinder { radius, length } => {
+                Some((radius * radius + length * length * 0.25).sqrt())
+            }
+            Self::Sphere { radius } => Some(*radius),
+            Self::Mesh { .. } => None,
         }
-        Geometry::Sphere { radius } => Some(*radius),
-        Geometry::Mesh { .. } => None,
     }
 }

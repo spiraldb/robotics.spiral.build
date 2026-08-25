@@ -2,7 +2,7 @@
 
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant, focus_after_render};
 use dioxus::prelude::*;
-use spiral_robotics_api::api::BackendReadinessState;
+use spiral_robotics_api::status::BackendReadinessState;
 use spiral_robotics_api::workflow::{WorkflowRunPhase, WorkflowStateResponse};
 
 use crate::components::icons::{
@@ -162,13 +162,12 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
     let message_count = center.messages().count();
     let center_open = center.open();
     let saved_to_data = center.messages().rev().find_map(|message| {
-        if message.read {
+        if message.is_read() {
             return None;
         }
         message
-            .action
-            .as_ref()
-            .map(|MessageAction::OpenEpisode(episode)| (message.id, episode.clone()))
+            .action()
+            .map(|MessageAction::OpenEpisode(episode)| (message.id(), episode.clone()))
     });
     let mut center_was_open = use_signal(|| false);
     use_effect(use_reactive((&center_open,), move |(center_open,)| {
@@ -234,15 +233,17 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                 } else {
                     ol { class: "notification-list",
                         for message in center.messages().rev().cloned() {
-                            li { class: "notification-item {message.severity.class_name()}", key: "{message.id}",
+                            {
+                                let message_id = message.id();
+                                rsx! { li { class: "notification-item {message.severity().class_name()}", key: "{message_id}",
                                 div { class: "notification-item-heading",
-                                    span { class: "notification-severity", "{message.severity.label()}" }
-                                    strong { "{message.source.label()}" }
-                                    time { "{format_message_age(now, message.raised_ms)}" }
+                                    span { class: "notification-severity", "{message.severity().label()}" }
+                                    strong { "{message.source().label()}" }
+                                    time { "{format_message_age(now, message.raised_ms())}" }
                                 }
-                                p { "{message.text}" }
+                                p { "{message.text()}" }
                                 div { class: "notification-item-actions",
-                                    if let Some(action) = message.action.clone() {
+                                    if let Some(action) = message.action().cloned() {
                                         {
                                             let action_label = action.label();
                                             let action_for_click = action.clone();
@@ -264,10 +265,11 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                                         purpose: ActionPurpose::Remove,
                                         variant: ActionVariant::Link,
                                         class: "notification-center-action",
-                                        onclick: move |_| studio.notifications.write().dismiss(message.id),
+                                        onclick: move |_| studio.notifications.write().dismiss(message_id),
                                         "Dismiss"
                                     }
                                 }
+                            } }
                             }
                         }
                     }
@@ -289,11 +291,11 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                 }
                 if let Some(message) = latest.clone() {
                     span {
-                        class: "status-bar-message {message.severity.class_name()}",
-                        title: "{message.text}",
-                        role: if message.severity == crate::shell::notifications::MessageSeverity::Error { "alert" } else { "status" },
-                        "aria-live": if message.severity == crate::shell::notifications::MessageSeverity::Error { "assertive" } else { "polite" },
-                        "{message.text}"
+                        class: "status-bar-message {message.severity().class_name()}",
+                        title: "{message.text()}",
+                        role: if message.severity() == crate::shell::notifications::MessageSeverity::Error { "alert" } else { "status" },
+                        "aria-live": if message.severity() == crate::shell::notifications::MessageSeverity::Error { "assertive" } else { "polite" },
+                        "{message.text()}"
                     }
                 }
                 div { class: "status-bar-group status-bar-group-right",
@@ -316,11 +318,11 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                 }
                 if let Some(message) = latest.clone() {
                     span {
-                        class: "status-bar-message {message.severity.class_name()}",
-                        title: "{message.text}",
-                        role: if message.severity == crate::shell::notifications::MessageSeverity::Error { "alert" } else { "status" },
-                        "aria-live": if message.severity == crate::shell::notifications::MessageSeverity::Error { "assertive" } else { "polite" },
-                        "{message.text}"
+                        class: "status-bar-message {message.severity().class_name()}",
+                        title: "{message.text()}",
+                        role: if message.severity() == crate::shell::notifications::MessageSeverity::Error { "alert" } else { "status" },
+                        "aria-live": if message.severity() == crate::shell::notifications::MessageSeverity::Error { "assertive" } else { "polite" },
+                        "{message.text()}"
                     }
                 }
                 div { class: "status-bar-group status-bar-group-right",
@@ -341,11 +343,11 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                 }
                 if let Some(message) = latest {
                     span {
-                        class: "status-bar-message {message.severity.class_name()}",
-                        title: "{message.text}",
-                        role: if message.severity == crate::shell::notifications::MessageSeverity::Error { "alert" } else { "status" },
-                        "aria-live": if message.severity == crate::shell::notifications::MessageSeverity::Error { "assertive" } else { "polite" },
-                        "{message.text}"
+                        class: "status-bar-message {message.severity().class_name()}",
+                        title: "{message.text()}",
+                        role: if message.severity() == crate::shell::notifications::MessageSeverity::Error { "alert" } else { "status" },
+                        "aria-live": if message.severity() == crate::shell::notifications::MessageSeverity::Error { "assertive" } else { "polite" },
+                        "{message.text()}"
                     }
                 }
                 div { class: "status-bar-group status-bar-group-right",

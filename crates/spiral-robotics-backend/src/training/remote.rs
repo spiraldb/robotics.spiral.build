@@ -38,12 +38,12 @@ impl TrainingBackend for ConfiguredHttpTrainingBackend {
         self.selected().create_job(request)
     }
 
-    fn job(
+    fn job_snapshot(
         &self,
         job_id: &str,
         cursor: TrainingJobCursor,
     ) -> Result<TrainingJobSnapshot, TrainingBackendError> {
-        self.selected().job(job_id, cursor)
+        self.selected().job_snapshot(job_id, cursor)
     }
 
     fn stop_job(

@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ControlMode {
+pub(crate) enum ControlMode {
     Idle,
     Manual { robot: String },
     Teleoperate { leader: String, follower: String },
@@ -40,27 +40,27 @@ impl ControlMode {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CalibrationAdmission {
+pub(crate) enum CalibrationAdmission {
     Missing,
     Invalid(String),
     Ready(BTreeSet<String>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RobotAdmission {
-    pub calibration: CalibrationAdmission,
-    pub calibration_in_progress: bool,
+pub(crate) struct RobotAdmission {
+    pub(crate) calibration: CalibrationAdmission,
+    pub(crate) calibration_in_progress: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ControlState {
-    pub mode: ControlMode,
+pub(crate) struct ControlState {
+    pub(crate) mode: ControlMode,
     /// Connected robots only. Absence is the connection fact.
-    pub robots: BTreeMap<String, RobotAdmission>,
+    pub(crate) robots: BTreeMap<String, RobotAdmission>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Intent {
+pub(crate) enum Intent {
     Select(ControlMode),
     Hold { robot: String },
     Release { robot: String },
@@ -70,7 +70,7 @@ pub enum Intent {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Event {
+pub(crate) enum Event {
     ReplayLost,
     TeleoperationUnavailable,
     ReplayFinished,
@@ -79,7 +79,7 @@ pub enum Event {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum FailureAction {
+pub(crate) enum FailureAction {
     /// A partially applied ownership change is not a truthful control mode.
     /// Surrender ownership and remove queued motion before reporting it.
     AbandonTransition,
@@ -95,7 +95,7 @@ pub enum FailureAction {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Effect {
+pub(crate) enum Effect {
     ClearReplay,
     ResetAllTargets,
     ResetTargets {
@@ -118,12 +118,12 @@ pub enum Effect {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Decision {
-    pub effects: Vec<Effect>,
+pub(crate) struct Decision {
+    pub(crate) effects: Vec<Effect>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum AdmissionError {
+pub(crate) enum AdmissionError {
     CalibrationInProgress(Vec<String>),
     NotConnected(String),
     MissingCalibration(String),
@@ -171,16 +171,13 @@ impl fmt::Display for AdmissionError {
 
 /// Decide one complete control-session transition.
 impl ControlState {
-    pub fn decide(&self, intent: Intent) -> Result<Decision, AdmissionError> {
+    pub(crate) fn decide(&self, intent: Intent) -> Result<Decision, AdmissionError> {
         match intent {
-            Intent::Select(mode) => select(self, mode),
+            Intent::Select(mode) => self.decide_mode_selection(mode),
             Intent::Hold { robot } => {
-                let mut decision = select(
-                    self,
-                    ControlMode::Manual {
-                        robot: robot.clone(),
-                    },
-                )?;
+                let mut decision = self.decide_mode_selection(ControlMode::Manual {
+                    robot: robot.clone(),
+                })?;
                 decision.effects.push(Effect::SetTorque {
                     robot: robot.clone(),
                     engaged: true,
@@ -189,7 +186,7 @@ impl ControlState {
                 Ok(decision)
             }
             Intent::Release { robot } => {
-                let mut decision = select(self, ControlMode::Idle)?;
+                let mut decision = self.decide_mode_selection(ControlMode::Idle)?;
                 decision.effects.push(Effect::SetTorque {
                     robot: robot.clone(),
                     engaged: false,
@@ -219,12 +216,12 @@ impl ControlState {
                     Err(AdmissionError::PolicyCommandNotOwned { robot, session })
                 }
             }
-            Intent::StartCalibration { robot } => Ok(start_calibration(self, robot)),
+            Intent::StartCalibration { robot } => Ok(self.decide_calibration_start(robot)),
         }
     }
 
     /// Decide the ownership consequence of an observed outer-layer event.
-    pub fn decide_event(&self, event: Event) -> Decision {
+    pub(crate) fn decide_event(&self, event: Event) -> Decision {
         match event {
             Event::ReplayLost => Decision {
                 effects: vec![
@@ -270,126 +267,125 @@ impl ControlState {
             },
         }
     }
-}
 
-fn start_calibration(state: &ControlState, robot: String) -> Decision {
-    let mut effects = Vec::new();
-    if state.mode != ControlMode::Idle {
-        effects.extend([
-            Effect::ClearReplay,
-            Effect::ResetAllTargets,
-            Effect::CommitModeWithError {
-                mode: ControlMode::Idle,
-                error: format!("stopped {} to calibrate {robot}", state.mode.label()),
-            },
-        ]);
-    }
-    // Calibration is hand-guided, so verified release follows the ownership
-    // surrender. A driver failure must never restore the previous owner.
-    effects.push(Effect::SetTorque {
-        robot,
-        engaged: false,
-        on_failure: FailureAction::Propagate,
-    });
-    Decision { effects }
-}
-
-fn select(state: &ControlState, mode: ControlMode) -> Result<Decision, AdmissionError> {
-    let sweeping = state
-        .robots
-        .iter()
-        .filter(|(_, robot)| robot.calibration_in_progress)
-        .map(|(id, _)| id.clone())
-        .collect::<Vec<_>>();
-    if !sweeping.is_empty() && mode != ControlMode::Idle {
-        return Err(AdmissionError::CalibrationInProgress(sweeping));
-    }
-
-    match &mode {
-        ControlMode::Idle => {}
-        ControlMode::Manual { robot }
-        | ControlMode::Replay { robot, .. }
-        | ControlMode::Policy { robot, .. } => {
-            ready_joints(state, robot)?;
+    fn decide_calibration_start(&self, robot: String) -> Decision {
+        let mut effects = Vec::new();
+        if self.mode != ControlMode::Idle {
+            effects.extend([
+                Effect::ClearReplay,
+                Effect::ResetAllTargets,
+                Effect::CommitModeWithError {
+                    mode: ControlMode::Idle,
+                    error: format!("stopped {} to calibrate {robot}", self.mode.label()),
+                },
+            ]);
         }
-        ControlMode::Teleoperate { leader, follower } => {
-            if leader == follower {
-                return Err(AdmissionError::SameTeleoperationRobot);
+        // Calibration is hand-guided, so verified release follows the ownership
+        // surrender. A driver failure must never restore the previous owner.
+        effects.push(Effect::SetTorque {
+            robot,
+            engaged: false,
+            on_failure: FailureAction::Propagate,
+        });
+        Decision { effects }
+    }
+
+    fn decide_mode_selection(&self, mode: ControlMode) -> Result<Decision, AdmissionError> {
+        let sweeping = self
+            .robots
+            .iter()
+            .filter(|(_, robot)| robot.calibration_in_progress)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        if !sweeping.is_empty() && mode != ControlMode::Idle {
+            return Err(AdmissionError::CalibrationInProgress(sweeping));
+        }
+
+        match &mode {
+            ControlMode::Idle => {}
+            ControlMode::Manual { robot }
+            | ControlMode::Replay { robot, .. }
+            | ControlMode::Policy { robot, .. } => {
+                self.ready_joints(robot)?;
             }
-            let leader_joints = ready_joints(state, leader)?;
-            let follower_joints = ready_joints(state, follower)?;
-            if leader_joints.is_disjoint(follower_joints) {
-                return Err(AdmissionError::NoSharedCalibratedJoints {
-                    leader: leader.clone(),
-                    follower: follower.clone(),
+            ControlMode::Teleoperate { leader, follower } => {
+                if leader == follower {
+                    return Err(AdmissionError::SameTeleoperationRobot);
+                }
+                let leader_joints = self.ready_joints(leader)?;
+                let follower_joints = self.ready_joints(follower)?;
+                if leader_joints.is_disjoint(follower_joints) {
+                    return Err(AdmissionError::NoSharedCalibratedJoints {
+                        leader: leader.clone(),
+                        follower: follower.clone(),
+                    });
+                }
+            }
+        }
+
+        let mut effects = Vec::new();
+        // A replay plan belongs to one admitted ownership transaction. Even a
+        // replay-to-replay replacement drops the old plan first, so a failed
+        // replacement can never resume stale motion.
+        effects.push(Effect::ClearReplay);
+        effects.push(Effect::ResetAllTargets);
+
+        match &mode {
+            ControlMode::Teleoperate { leader, follower } => {
+                // Fail loose: free the hand-driven arm before energizing the arm
+                // that follows it.
+                effects.push(Effect::SetTorque {
+                    robot: leader.clone(),
+                    engaged: false,
+                    on_failure: FailureAction::AbandonTransition,
+                });
+                effects.push(Effect::SetTorque {
+                    robot: follower.clone(),
+                    engaged: true,
+                    on_failure: FailureAction::AbandonTransition,
                 });
             }
+            ControlMode::Replay { robot, .. } | ControlMode::Policy { robot, .. } => {
+                effects.push(Effect::SetTorque {
+                    robot: robot.clone(),
+                    engaged: true,
+                    on_failure: FailureAction::AbandonTransition,
+                });
+            }
+            ControlMode::Idle | ControlMode::Manual { .. } => {}
         }
+        // Ownership changes only after all required physical transitions succeed.
+        effects.push(Effect::CommitMode(mode));
+        Ok(Decision { effects })
     }
 
-    let mut effects = Vec::new();
-    // A replay plan belongs to one admitted ownership transaction. Even a
-    // replay-to-replay replacement drops the old plan first, so a failed
-    // replacement can never resume stale motion.
-    effects.push(Effect::ClearReplay);
-    effects.push(Effect::ResetAllTargets);
-
-    match &mode {
-        ControlMode::Teleoperate { leader, follower } => {
-            // Fail loose: free the hand-driven arm before energizing the arm
-            // that follows it.
-            effects.push(Effect::SetTorque {
-                robot: leader.clone(),
-                engaged: false,
-                on_failure: FailureAction::AbandonTransition,
-            });
-            effects.push(Effect::SetTorque {
-                robot: follower.clone(),
-                engaged: true,
-                on_failure: FailureAction::AbandonTransition,
-            });
+    fn ready_joints(&self, robot: &str) -> Result<&BTreeSet<String>, AdmissionError> {
+        let robot_facts = self
+            .robots
+            .get(robot)
+            .ok_or_else(|| AdmissionError::NotConnected(robot.to_owned()))?;
+        match &robot_facts.calibration {
+            CalibrationAdmission::Ready(joints) => Ok(joints),
+            CalibrationAdmission::Missing => {
+                Err(AdmissionError::MissingCalibration(robot.to_owned()))
+            }
+            CalibrationAdmission::Invalid(reason) => Err(AdmissionError::InvalidCalibration {
+                robot: robot.to_owned(),
+                reason: reason.clone(),
+            }),
         }
-        ControlMode::Replay { robot, .. } | ControlMode::Policy { robot, .. } => {
-            effects.push(Effect::SetTorque {
-                robot: robot.clone(),
-                engaged: true,
-                on_failure: FailureAction::AbandonTransition,
-            });
-        }
-        ControlMode::Idle | ControlMode::Manual { .. } => {}
-    }
-    // Ownership changes only after all required physical transitions succeed.
-    effects.push(Effect::CommitMode(mode));
-    Ok(Decision { effects })
-}
-
-fn ready_joints<'a>(
-    state: &'a ControlState,
-    robot: &str,
-) -> Result<&'a BTreeSet<String>, AdmissionError> {
-    let robot_facts = state
-        .robots
-        .get(robot)
-        .ok_or_else(|| AdmissionError::NotConnected(robot.to_owned()))?;
-    match &robot_facts.calibration {
-        CalibrationAdmission::Ready(joints) => Ok(joints),
-        CalibrationAdmission::Missing => Err(AdmissionError::MissingCalibration(robot.to_owned())),
-        CalibrationAdmission::Invalid(reason) => Err(AdmissionError::InvalidCalibration {
-            robot: robot.to_owned(),
-            reason: reason.clone(),
-        }),
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FailureDecision {
-    pub effects: Vec<Effect>,
-    pub error: String,
+pub(crate) struct FailureDecision {
+    pub(crate) effects: Vec<Effect>,
+    pub(crate) error: String,
 }
 
 /// Decide the state consequence of a physical effect failure.
 impl FailureAction {
-    pub fn failure_decision(self, cause: String) -> FailureDecision {
+    pub(crate) fn failure_decision(self, cause: String) -> FailureDecision {
         match self {
             FailureAction::AbandonTransition => FailureDecision {
                 effects: idle_effects(),
@@ -424,13 +420,13 @@ fn idle_effects() -> Vec<Effect> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReplayState {
+pub(crate) enum ReplayState {
     Seeking,
     Playing,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ReplayEvent {
+pub(crate) enum ReplayEvent {
     Paused,
     SeekObserved { arrived: bool },
     PlaybackObserved { finished: bool },
@@ -438,7 +434,7 @@ pub enum ReplayEvent {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ReplayDecision {
+pub(crate) enum ReplayDecision {
     Keep,
     EnterPlaying,
     FinishToIdle,
@@ -446,7 +442,7 @@ pub enum ReplayDecision {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReplayTransitionError {
+pub(crate) enum ReplayTransitionError {
     PlaybackObservedWhileSeeking,
     SeekObservedWhilePlaying,
 }
@@ -454,7 +450,10 @@ pub enum ReplayTransitionError {
 /// Own the legal replay lifecycle; clocks, positions, and target conversion
 /// remain observations supplied by the hardware adapter.
 impl ReplayState {
-    pub fn decide(self, event: ReplayEvent) -> Result<ReplayDecision, ReplayTransitionError> {
+    pub(crate) fn decide(
+        self,
+        event: ReplayEvent,
+    ) -> Result<ReplayDecision, ReplayTransitionError> {
         match (self, event) {
             (_, ReplayEvent::Paused) => Ok(ReplayDecision::Keep),
             (_, ReplayEvent::Failed(error)) => Ok(ReplayDecision::FailToIdle(error)),

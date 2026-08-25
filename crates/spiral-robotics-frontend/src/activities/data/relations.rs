@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant, RefreshIcon};
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_api::api::{
+use spiral_robotics_api::relations::{
     ProjectDataRelation, ProjectDataRelationsResponse, SpiralQueryRequest, SpiralQueryResponse,
 };
 
@@ -419,7 +419,7 @@ fn format_count(count: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_api::api::QueryColumn;
+    use spiral_robotics_api::relations::QueryColumn;
 
     use super::*;
 

@@ -6,7 +6,8 @@ use dioxus::prelude::*;
 use dioxus_workbench::{DockZone, Panel, PanelId, PanelLayout, PanelWorkspace};
 #[cfg(test)]
 use dioxus_workbench::{LayoutNode, SplitAxis};
-use spiral_robotics_api::api::{ModeSelection, ReplayPhase, ReplayPurpose};
+use spiral_robotics_api::recording::{ReplayPhase, ReplayPurpose};
+use spiral_robotics_api::robots::ModeSelection;
 
 use crate::activities::data::relations::RelationsPanel;
 use crate::activities::data::workbench::{EpisodesPanel, QueryPanel, QueryResultView, short_id};
@@ -28,7 +29,10 @@ use crate::panels::timeline::panel::{
     RecordedTimelineTraces, SignalSource, StudioTimeline, StudioTimelineState,
     TimelineCapabilities, TimelineGate, TimelinePlayback, signal_lanes_from_store,
 };
-use crate::panels::timeline::state::{TimelineActionContext, dispatch_timeline_action};
+use crate::panels::timeline::state::{
+    RecordedTimelineActionState, TimelineActionContext, TimelineActionSession,
+    TimelinePreviewTargets, dispatch_timeline_action,
+};
 #[cfg(test)]
 use crate::shell::activity::LoadState;
 use crate::shell::activity::{
@@ -41,13 +45,14 @@ use crate::shell::routes::studio_configuration;
 use crate::shell::state::Studio;
 
 use historical::{
-    EpisodeInspectionCache, HistoricalPreview, historical_replay_slot, request_historical_preview,
+    EpisodeInspectionCache, HistoricalPreview, HistoricalPreviewRequest, HistoricalPreviewSignals,
+    historical_replay_slot, request_historical_preview,
 };
 
 #[derive(Clone, PartialEq)]
 pub(crate) struct ScreenWorkspaceDefinition {
     panels: Vec<(Panel, PanelRole)>,
-    pub(crate) initial_layout: PanelLayout,
+    initial_layout: PanelLayout,
     layout_scope: String,
 }
 
@@ -62,6 +67,11 @@ impl ScreenWorkspaceDefinition {
             initial_layout,
             layout_scope: layout_scope.into(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn initial_layout(&self) -> &PanelLayout {
+        &self.initial_layout
     }
 }
 
@@ -120,12 +130,12 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                 sampled_preview_slot.set(Some(target));
                 request_historical_preview(
                     studio,
-                    episode.clone(),
-                    None,
-                    next,
-                    historical_state,
-                    historical_revision,
-                    historical_cache,
+                    HistoricalPreviewRequest::new(episode.clone(), None, next),
+                    HistoricalPreviewSignals::new(
+                        historical_state,
+                        historical_revision,
+                        historical_cache,
+                    ),
                 );
             }
             if next >= duration {
@@ -160,12 +170,8 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
         sampled_replay_slot.set(Some(next));
         request_historical_preview(
             studio,
-            replay.episode,
-            None,
-            replay.elapsed_seconds,
-            historical_state,
-            historical_revision,
-            historical_cache,
+            HistoricalPreviewRequest::new(replay.episode, None, replay.elapsed_seconds),
+            HistoricalPreviewSignals::new(historical_state, historical_revision, historical_cache),
         );
     });
 
@@ -246,12 +252,8 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
         }
         request_historical_preview(
             studio,
-            episode,
-            Some(frames),
-            seconds,
-            historical_state,
-            historical_revision,
-            historical_cache,
+            HistoricalPreviewRequest::new(episode, Some(frames), seconds),
+            HistoricalPreviewSignals::new(historical_state, historical_revision, historical_cache),
         );
     });
 
@@ -281,12 +283,12 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             playhead.set(seconds);
             request_historical_preview(
                 studio,
-                episode,
-                Some(source_frames),
-                seconds,
-                historical_state,
-                historical_revision,
-                historical_cache,
+                HistoricalPreviewRequest::new(episode, Some(source_frames), seconds),
+                HistoricalPreviewSignals::new(
+                    historical_state,
+                    historical_revision,
+                    historical_cache,
+                ),
             );
         },
     ));
@@ -578,18 +580,22 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             signal_source: signal_source.clone(),
             capabilities: capabilities.clone(),
             on_action: move |action| dispatch_timeline_action(
-                TimelineActionContext {
-                    studio,
-                    controller: timeline,
-                    subject: action_subject.clone(),
-                    review_episode: action_review_episode.clone(),
-                    seek_context: seek_context.clone(),
-                    historical_state,
-                    historical_revision,
-                    historical_cache,
-                    automatic_preview_target,
-                    interactive_preview_target,
-                },
+                TimelineActionContext::new(
+                    TimelineActionSession::new(studio, timeline, action_subject.clone()),
+                    RecordedTimelineActionState::new(
+                        action_review_episode.clone(),
+                        seek_context.clone(),
+                        HistoricalPreviewSignals::new(
+                            historical_state,
+                            historical_revision,
+                            historical_cache,
+                        ),
+                    ),
+                    TimelinePreviewTargets::new(
+                        automatic_preview_target,
+                        interactive_preview_target,
+                    ),
+                ),
                 action,
             ),
         }
@@ -611,7 +617,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                 },
             )
             .with_class("workbench-editor");
-            crate::activities::live::screen::compose(workbench, dock_panels, timeline_panel)
+            ScreenWorkspaceDefinition::for_live(workbench, dock_panels, timeline_panel)
         }
         Activity::Data => {
             let episodes = Panel::new(
@@ -642,13 +648,16 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                 rsx! { RelationsPanel { namespace: dataset.clone(), query_available: spiral_query_available } },
             )
             .with_class("relations-editor");
-            crate::activities::data::screen::compose(
-                episodes,
-                query,
-                query_result,
-                relations,
-                dock_panels,
-                timeline_panel,
+            ScreenWorkspaceDefinition::for_data(
+                crate::activities::data::screen::DataWorkbenchPanels::new(episodes, query),
+                crate::activities::data::screen::DataEvidencePanels::new(
+                    query_result,
+                    relations,
+                    crate::activities::data::screen::DataContextPanels::new(
+                        dock_panels,
+                        timeline_panel,
+                    ),
+                ),
             )
         }
         Activity::Rollout => {
@@ -666,7 +675,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                 rsx! { InferencePanel {} },
             )
             .with_class("rollout-inference-editor");
-            crate::activities::rollout::screen::compose(workbench, dock_panels, inference)
+            ScreenWorkspaceDefinition::for_rollout(workbench, dock_panels, inference)
         }
         Activity::Training | Activity::Workflow => {
             unreachable!("Training and Workflow own separate route workspaces")
@@ -703,7 +712,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                             Some(recording) => studio.stop_recording(
                                 &recording.episode,
                                 true,
-                                EventHandler::new(move |_: spiral_robotics_api::api::EpisodeSummary| {
+                                EventHandler::new(move |_: spiral_robotics_api::recording::EpisodeSummary| {
                                     let next_revision = historical_revision.peek().wrapping_add(1);
                                     historical_revision.set(next_revision);
                                     historical_state.set(None);
@@ -776,13 +785,13 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
 
 /// Physical seeks are consequences of the Timeline playhead, not transport
 /// that may replace or reposition it while the arm is travelling to a pose.
-fn replay_owns_timeline_transport(replay: &spiral_robotics_api::api::ReplayProgress) -> bool {
+fn replay_owns_timeline_transport(replay: &spiral_robotics_api::recording::ReplayProgress) -> bool {
     replay.purpose == ReplayPurpose::Timeline
 }
 
 fn replay_matches_timeline_subject(
     subject_episode: Option<&str>,
-    replay: &spiral_robotics_api::api::ReplayProgress,
+    replay: &spiral_robotics_api::recording::ReplayProgress,
 ) -> bool {
     subject_episode == Some(replay.episode.as_str())
 }
@@ -799,7 +808,7 @@ impl Studio {
 }
 
 #[cfg(test)]
-fn replay_drives_recorded_media(replay: &spiral_robotics_api::api::ReplayProgress) -> bool {
+fn replay_drives_recorded_media(replay: &spiral_robotics_api::recording::ReplayProgress) -> bool {
     replay_owns_timeline_transport(replay) && replay.phase == ReplayPhase::Playing && !replay.paused
 }
 
@@ -961,10 +970,10 @@ mod tests {
     use crate::client::http::{
         EpisodeTimelineResponse, TimelineMetadata, TimelineSample, VideoAssetMetadata,
     };
-    use spiral_robotics_api::api::EpisodeSummary;
+    use spiral_robotics_api::recording::EpisodeSummary;
 
     fn preview(at: f64, videos: Vec<VideoAssetMetadata>) -> HistoricalPreview {
-        HistoricalPreview::new(
+        HistoricalPreview::fixture(
             "take-1".to_owned(),
             Arc::new(EpisodeTimelineResponse {
                 episode: EpisodeSummary {
@@ -984,11 +993,13 @@ mod tests {
                 samples: TimelineMetadata::default(),
                 videos,
             }),
-            TimelineSample {
-                seconds: at,
-                ..TimelineSample::default()
-            },
-            Arc::new(RecordedTimelineTraces::default().signal_lanes()),
+            (
+                TimelineSample {
+                    seconds: at,
+                    ..TimelineSample::default()
+                },
+                Arc::new(RecordedTimelineTraces::default().signal_lanes()),
+            ),
         )
     }
 
@@ -1178,7 +1189,7 @@ mod tests {
 
     #[test]
     fn physical_seek_never_takes_ownership_of_timeline_transport() {
-        let mut replay = spiral_robotics_api::api::ReplayProgress {
+        let mut replay = spiral_robotics_api::recording::ReplayProgress {
             episode: "take-1".to_owned(),
             robot: "follower".to_owned(),
             frame: 0,

@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use dioxus::prelude::*;
-use spiral_robotics_api::api::{
+use spiral_robotics_api::recording::{
     EpisodeInspectionArm, EpisodeInspectionSnapshot, EpisodeOptionalFrameMatrix,
 };
 use spiral_robotics_core::arm::SO101_JOINTS;
@@ -43,12 +43,22 @@ pub(crate) struct HistoricalPreview {
 }
 
 impl HistoricalPreview {
-    pub(crate) fn new(
+    fn from_inspection(inspection: &CachedInspection, sample: api::TimelineSample) -> Self {
+        Self {
+            episode: inspection.snapshot.episode.id.clone(),
+            timeline: Arc::clone(&inspection.timeline),
+            sample,
+            signal_lanes: Arc::clone(&inspection.signal_lanes),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(
         episode: String,
         timeline: Arc<api::EpisodeTimelineResponse>,
-        sample: api::TimelineSample,
-        signal_lanes: Arc<[TimelineSignalLane; 6]>,
+        render: (api::TimelineSample, Arc<[TimelineSignalLane; 6]>),
     ) -> Self {
+        let (sample, signal_lanes) = render;
         Self {
             episode,
             timeline,
@@ -108,12 +118,7 @@ impl CachedInspection {
 
     fn preview_at(&self, seconds: f64) -> Result<HistoricalPreview, String> {
         let sample = sample_at(&self.snapshot, seconds)?;
-        Ok(HistoricalPreview::new(
-            self.snapshot.episode.id.clone(),
-            Arc::clone(&self.timeline),
-            sample,
-            Arc::clone(&self.signal_lanes),
-        ))
+        Ok(HistoricalPreview::from_inspection(self, sample))
     }
 }
 
@@ -148,15 +153,68 @@ impl EpisodeInspectionCache {
     }
 }
 
-pub(crate) fn request_historical_preview(
-    studio: Studio,
+pub(crate) struct HistoricalPreviewRequest {
     episode: String,
     expected_frames: Option<u64>,
     seconds: f64,
-    mut state: Signal<Option<RecordedSource<HistoricalPreview>>>,
-    mut revision: Signal<u64>,
-    mut cache: Signal<EpisodeInspectionCache>,
+}
+
+impl HistoricalPreviewRequest {
+    pub(crate) fn new(episode: String, expected_frames: Option<u64>, seconds: f64) -> Self {
+        Self {
+            episode,
+            expected_frames,
+            seconds,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct HistoricalPreviewSignals {
+    state: Signal<Option<RecordedSource<HistoricalPreview>>>,
+    revision: Signal<u64>,
+    cache: Signal<EpisodeInspectionCache>,
+}
+
+impl HistoricalPreviewSignals {
+    pub(crate) const fn new(
+        state: Signal<Option<RecordedSource<HistoricalPreview>>>,
+        revision: Signal<u64>,
+        cache: Signal<EpisodeInspectionCache>,
+    ) -> Self {
+        Self {
+            state,
+            revision,
+            cache,
+        }
+    }
+
+    pub(crate) const fn into_signals(
+        self,
+    ) -> (
+        Signal<Option<RecordedSource<HistoricalPreview>>>,
+        Signal<u64>,
+        Signal<EpisodeInspectionCache>,
+    ) {
+        (self.state, self.revision, self.cache)
+    }
+}
+
+pub(crate) fn request_historical_preview(
+    studio: Studio,
+    request: HistoricalPreviewRequest,
+    signals: HistoricalPreviewSignals,
 ) {
+    let HistoricalPreviewRequest {
+        episode,
+        expected_frames,
+        seconds,
+    } = request;
+    let HistoricalPreviewSignals {
+        mut state,
+        mut revision,
+        mut cache,
+    } = signals;
     // A controller clock may advance while the one snapshot request is in
     // flight. Record the newest requested time without starting another read;
     // the completion below samples that newest time from the loaded snapshot.
@@ -453,7 +511,7 @@ fn signal_lanes(snapshot: &EpisodeInspectionSnapshot, buckets: usize) -> [Timeli
             .arms
             .iter()
             .filter_map(|arm| {
-                let joint_index = arm.joints.iter().position(|name| name == joint.name)?;
+                let joint_index = arm.joints.iter().position(|name| name == joint.name())?;
                 let joint_count = arm.joints.len();
                 let values = arm
                     .normalized
@@ -466,9 +524,9 @@ fn signal_lanes(snapshot: &EpisodeInspectionSnapshot, buckets: usize) -> [Timeli
             })
             .collect();
         TimelineSignalLane {
-            joint: joint.name.to_owned(),
-            label: joint.label.to_owned(),
-            color: signal_color(joint.name).to_owned(),
+            joint: joint.name().to_owned(),
+            label: joint.label().to_owned(),
+            color: signal_color(joint.name()).to_owned(),
             series,
         }
     })
@@ -580,7 +638,7 @@ async fn with_deadline<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_api::api::{EpisodeArm, EpisodeOptionalFrameMatrix, EpisodeSummary};
+    use spiral_robotics_api::recording::{EpisodeArm, EpisodeOptionalFrameMatrix, EpisodeSummary};
 
     fn snapshot() -> EpisodeInspectionSnapshot {
         let absent = EpisodeOptionalFrameMatrix {

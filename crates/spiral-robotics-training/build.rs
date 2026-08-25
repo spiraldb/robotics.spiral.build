@@ -8,10 +8,11 @@ fn main() {
     let crates = manifest
         .parent()
         .expect("training crate lives in the workspace crates directory");
-    protocol_build::generate_protocol_version(
+    protocol_build::ProtocolVersionGenerator::new(
         manifest.join("protocol").as_path(),
         crates
             .join("spiral-robotics-storage/schema/version.json")
             .as_path(),
-    );
+    )
+    .generate();
 }

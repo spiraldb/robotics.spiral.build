@@ -20,14 +20,14 @@ use crate::components::interaction::{Action, ActionPurpose, ActionVariant};
 use dioxus::prelude::*;
 use dioxus_elements::geometry::WheelDelta;
 use dioxus_elements::input_data::MouseButton;
-use spiral_robotics_api::api::{MotorCondition, RobotSummary};
+use spiral_robotics_api::robots::{MotorCondition, RobotSummary};
 use spiral_robotics_core::arm::{JointAngles, counts_to_degrees};
-use spiral_robotics_core::calibration::Direction;
+use spiral_robotics_core::calibration::MotorDirection;
 use spiral_robotics_viewport::glam::Vec3;
-use spiral_robotics_viewport::robot::BENCH_SPACING;
 use spiral_robotics_viewport::{
-    ArmPlacement, Camera, CameraMount, Condition, Drag, Gesture, Interaction, RobotEntity,
-    RobotScene, Viewport as Bench, robot,
+    ArmPlacement, BENCH_SPACING, BenchPosition, Camera, CameraAttachment, CameraMount, Condition,
+    Drag, DragUpdate, Gesture, Interaction, PickRequest, RobotEntity, RobotScene, SceneAppearance,
+    SceneFrame, Urdf, Viewport as Bench,
 };
 #[cfg(feature = "web")]
 use wasm_bindgen::JsCast;
@@ -39,7 +39,9 @@ use crate::client::http::{TimelineArmSample, TimelineSample};
 use crate::shell::activity::RecordedSource;
 use crate::shell::state::{Selection, studio};
 
-pub(crate) use spiral_robotics_viewport::tool_position;
+pub(crate) fn tool_position(urdf: &Urdf, angles: &JointAngles) -> Option<Vec3> {
+    urdf.so101_tool_position(angles)
+}
 
 /// The canvas the viewport draws into. There is exactly one on the page.
 const CANVAS_ID: &str = "robot-viewport";
@@ -165,7 +167,7 @@ pub(crate) fn Viewport(
             let Ok(urdf) = draw_urdf.as_ref() else {
                 return;
             };
-            let scene = compose(
+            let scene = build_robot_scene(
                 urdf,
                 &studio,
                 grid,
@@ -189,7 +191,7 @@ pub(crate) fn Viewport(
                 return;
             };
             let ratio = web_sys::window().map_or(1.0, |window| window.device_pixel_ratio());
-            bench.draw(&camera, &scene.scene, ratio);
+            bench.draw(SceneFrame::new(&camera, scene.scene(), ratio));
         },
     ));
 
@@ -262,7 +264,10 @@ pub(crate) fn Viewport(
                     move |event| {
                         let position = point(&event);
                         if let Some(mut active) = drag() {
-                            active.advance(position, &mut camera.write(), height(&bench));
+                            active.advance(
+                                &mut camera.write(),
+                                DragUpdate::new(position, height(&bench)),
+                            );
                             drag.set(Some(active));
                             return;
                         }
@@ -457,7 +462,7 @@ fn describe(
         RobotEntity::Camera { robot, role } => (format!("{role} camera"), Some(robot.clone())),
         RobotEntity::Joint { robot, joint } => {
             let label = spiral_robotics_core::arm::so101_joint(joint)
-                .map_or_else(|| joint.clone(), |joint| joint.label.to_owned());
+                .map_or_else(|| joint.clone(), |joint| joint.label().to_owned());
             let telemetry = studio.robot_telemetry(robot).and_then(|telemetry| {
                 telemetry
                     .joints
@@ -518,7 +523,7 @@ fn matches_selection(selection: Option<&Selection>, entity: &RobotEntity) -> boo
 /// the operator is doing with a thing, the other what its hardware is saying
 /// about itself. Neither is stored in the scene, because both change far more
 /// often than the geometry does.
-fn compose(
+fn build_robot_scene(
     urdf: &spiral_robotics_viewport::Urdf,
     studio: &crate::shell::state::Studio,
     grid: bool,
@@ -530,32 +535,37 @@ fn compose(
     // Hovering a joint row in the inspector lights the motor on the bench, the
     // same way hovering the motor lights the row: one object, seen twice.
     let pointed = studio.pointed.read().clone();
+    let hovered = hovered.cloned();
     let conditions = if source.is_live() {
         motor_conditions(studio)
     } else {
         Default::default()
     };
 
-    robot::build(
+    RobotScene::compose(
         urdf,
         &placements(studio, source, visible_robot),
-        grid,
-        |entity| {
-            if matches_selection(selected.as_ref(), entity) {
-                Interaction::Selected
-            } else if hovered == Some(entity) || matches_selection(pointed.as_ref(), entity) {
-                Interaction::Hovered
-            } else {
-                Interaction::Resting
-            }
-        },
-        |entity| match entity {
-            RobotEntity::Joint { robot, joint } => conditions
-                .get(&(robot.clone(), joint.clone()))
-                .copied()
-                .unwrap_or_default(),
-            _ => Condition::Nominal,
-        },
+        SceneAppearance::new(
+            grid,
+            |entity: &RobotEntity| {
+                if matches_selection(selected.as_ref(), entity) {
+                    Interaction::Selected
+                } else if hovered.as_ref() == Some(entity)
+                    || matches_selection(pointed.as_ref(), entity)
+                {
+                    Interaction::Hovered
+                } else {
+                    Interaction::Resting
+                }
+            },
+            |entity: &RobotEntity| match entity {
+                RobotEntity::Joint { robot, joint } => conditions
+                    .get(&(robot.clone(), joint.clone()))
+                    .copied()
+                    .unwrap_or_default(),
+                _ => Condition::Nominal,
+            },
+        ),
     )
 }
 
@@ -609,16 +619,15 @@ fn condition_marks(
     let Some(bench) = slot.as_ref() else {
         return Vec::new();
     };
-    let scene = compose(urdf, studio, grid, &SceneSource::Live, None, visible_robot);
+    let scene = build_robot_scene(urdf, studio, grid, &SceneSource::Live, None, visible_robot);
     let rect = canvas().map(|canvas| canvas.get_bounding_client_rect());
     let (left, top) = rect.map_or((0.0, 0.0), |rect| (rect.left(), rect.top()));
 
     scene
-        .scene
-        .entities
-        .iter()
-        .filter(|entity| entity.condition != Condition::Nominal)
-        .map(|entity| entity.key)
+        .scene()
+        .entities()
+        .filter(|entity| entity.condition() != Condition::Nominal)
+        .map(|entity| entity.key())
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .filter_map(|key| {
@@ -626,11 +635,11 @@ fn condition_marks(
             let RobotEntity::Joint { robot, joint } = entity else {
                 return None;
             };
-            let at = bench.anchor(&camera, scene.scene.anchor_point(key)?)?;
+            let at = bench.anchor(&camera, scene.scene().anchor_point(key)?)?;
             let fault = scene
-                .scene
+                .scene()
                 .entity(key)
-                .is_some_and(|entity| entity.condition == Condition::Fault);
+                .is_some_and(|entity| entity.condition() == Condition::Fault);
             Some((format!("{robot}/{joint}"), at.0 - left, at.1 - top, fault))
         })
         .collect()
@@ -654,8 +663,8 @@ fn hovered(
     let urdf = urdf.as_ref().as_ref().ok()?;
     let slot = bench.try_borrow().ok()?;
     let bench = slot.as_ref()?;
-    let scene = compose(urdf, studio, grid, pick.source, None, pick.visible_robot);
-    let key = bench.pick(&camera, &scene.scene, pick.at)?;
+    let scene = build_robot_scene(urdf, studio, grid, pick.source, None, pick.visible_robot);
+    let key = bench.pick(PickRequest::new(&camera, scene.scene(), pick.at))?;
     let rect = canvas()?.get_bounding_client_rect();
     Some(Hover {
         entity: scene.entity(key)?.clone(),
@@ -697,14 +706,15 @@ fn placements(
                     .as_ref()
                     .map(|robot| crate::activities::live::control::measured_angles(&robot.joints))
             });
-            ArmPlacement {
-                id: arm.id.clone(),
-                accent: ACCENTS[studio.position_of(&arm.id) % ACCENTS.len()].0,
-                live: angles.is_some(),
-                angles: angles.unwrap_or_default(),
-                cameras: arm.cameras.iter().filter_map(mount_of).collect(),
-                index,
-                count,
+            let placement = ArmPlacement::new(
+                arm.id.clone(),
+                ACCENTS[studio.position_of(&arm.id) % ACCENTS.len()].0,
+                BenchPosition::new(index, count),
+            )
+            .with_cameras(arm.cameras.iter().filter_map(mount_of).collect());
+            match angles {
+                Some(angles) => placement.with_live_pose(angles),
+                None => placement,
             }
         })
         .collect()
@@ -726,10 +736,10 @@ fn historical_angles(arm: &RobotSummary, sample: &TimelineArmSample) -> Option<J
                 .calibration
                 .as_ref()?;
             let raw = calibration.denormalize(normalized).ok()?;
-            let degrees = counts_to_degrees(raw.saturating_sub(calibration.center));
-            let degrees = match calibration.direction {
-                Direction::Normal => degrees,
-                Direction::Reversed => -degrees,
+            let degrees = counts_to_degrees(raw.saturating_sub(calibration.reading().center()));
+            let degrees = match calibration.direction() {
+                MotorDirection::Normal => degrees,
+                MotorDirection::Reversed => -degrees,
             };
             Some((joint.clone(), degrees))
         })
@@ -740,10 +750,8 @@ fn historical_angles(arm: &RobotSummary, sample: &TimelineArmSample) -> Option<J
         .copied()
         .flatten()
         .filter(|value| value.is_finite());
-    (!degrees.is_empty() || gripper.is_some()).then(|| {
-        JointAngles::from_named_degrees(&degrees)
-            .with_gripper_normalized(gripper.unwrap_or_default())
-    })
+    (!degrees.is_empty() || gripper.is_some())
+        .then(|| JointAngles::from(&degrees).with_gripper_normalized(gripper.unwrap_or_default()))
 }
 
 fn format_history_time(seconds: f64) -> String {
@@ -753,15 +761,17 @@ fn format_history_time(seconds: f64) -> String {
 }
 
 /// Where a bound camera sits, for the ones whose file says.
-fn mount_of(binding: &spiral_robotics_api::api::CameraBinding) -> Option<CameraMount> {
+fn mount_of(binding: &spiral_robotics_api::robots::CameraBinding) -> Option<CameraMount> {
     let mount = binding.mount.as_ref()?;
-    Some(CameraMount {
-        role: binding.name.clone(),
-        frame: mount.frame.clone(),
-        xyz: mount.xyz.map(|value| value as f32),
-        rpy: mount.rpy.map(|value| value as f32),
-        fov_degrees: mount.fov_degrees as f32,
-    })
+    Some(CameraMount::new(
+        binding.name.clone(),
+        CameraAttachment::new(
+            mount.frame.clone(),
+            mount.xyz.map(|value| value as f32),
+            mount.rpy.map(|value| value as f32),
+        ),
+        mount.fov_degrees as f32,
+    ))
 }
 
 /// Which arm is which colour in the scene.
@@ -808,7 +818,7 @@ fn ViewCube(mut camera: Signal<Camera>) -> Element {
             Action {
                 purpose: ActionPurpose::Apply,
                 title: "Top view", aria_label: "Top view",
-                onclick: move |_| camera.set(Camera { yaw: -0.65, pitch: 1.42, ..camera() }),
+                onclick: move |_| camera.set(camera().oriented(-0.65, 1.42)),
                 "Top"
             }
             // Spelled out rather than abbreviated: `F` really is a keyboard
@@ -819,13 +829,13 @@ fn ViewCube(mut camera: Signal<Camera>) -> Element {
                 Action {
                     purpose: ActionPurpose::Apply,
                     title: "Front view", aria_label: "Front view",
-                    onclick: move |_| camera.set(Camera { yaw: -std::f32::consts::FRAC_PI_2, pitch: 0.08, ..camera() }),
+                    onclick: move |_| camera.set(camera().oriented(-std::f32::consts::FRAC_PI_2, 0.08)),
                     "Front"
                 }
                 Action {
                     purpose: ActionPurpose::Apply,
                     title: "Right side view", aria_label: "Right side view",
-                    onclick: move |_| camera.set(Camera { yaw: 0.0, pitch: 0.08, ..camera() }),
+                    onclick: move |_| camera.set(camera().oriented(0.0, 0.08)),
                     "Right"
                 }
             }
@@ -872,11 +882,7 @@ fn frame_selection(
         (index as f32 - count.saturating_sub(1) as f32 / 2.0) * BENCH_SPACING,
         0.0,
     );
-    camera.set(Camera {
-        target: base + Vec3::new(0.03, 0.0, 0.17),
-        distance: 0.68,
-        ..camera()
-    });
+    camera.set(camera().focused_on(base + Vec3::new(0.03, 0.0, 0.17), 0.68));
 }
 
 fn point(event: &Event<PointerData>) -> (f64, f64) {
@@ -948,8 +954,8 @@ impl Drop for WindowListener {
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_api::api::{ConnectionStatus, MotorLimits, MotorSummary};
-    use spiral_robotics_core::calibration::MotorCalibration;
+    use spiral_robotics_api::robots::{ConnectionStatus, MotorLimits, MotorSummary};
+    use spiral_robotics_core::calibration::{MotorCalibration, MotorReading};
 
     use super::*;
 
@@ -961,7 +967,7 @@ mod tests {
             motors: vec![MotorSummary {
                 name: "shoulder_pan".to_owned(),
                 id: 1,
-                direction: calibration.direction,
+                direction: calibration.direction(),
                 model: None,
                 calibration: Some(calibration),
                 limits: MotorLimits::default(),
@@ -975,13 +981,12 @@ mod tests {
 
     #[test]
     fn historical_normalized_pose_uses_the_current_arm_calibration() {
-        let calibration = MotorCalibration {
-            id: 1,
-            direction: Direction::Normal,
-            range_min: 1_000,
-            center: 2_000,
-            range_max: 3_000,
-        };
+        let calibration = MotorCalibration::new(
+            1,
+            MotorDirection::Normal,
+            MotorReading::new(2_000, 1_000, 3_000),
+        )
+        .unwrap();
         let sample = TimelineArmSample {
             arm: "follower".to_owned(),
             normalized: BTreeMap::from([("shoulder_pan".to_owned(), Some(1.0))]),
@@ -989,18 +994,17 @@ mod tests {
         };
 
         let pose = historical_angles(&robot(calibration), &sample).expect("historical pose");
-        assert_eq!(pose.pan_deg, counts_to_degrees(1_000));
+        assert_eq!(pose.pan_degrees(), counts_to_degrees(1_000));
     }
 
     #[test]
     fn historical_pose_does_not_guess_without_calibrated_values() {
-        let calibration = MotorCalibration {
-            id: 1,
-            direction: Direction::Normal,
-            range_min: 1_000,
-            center: 2_000,
-            range_max: 3_000,
-        };
+        let calibration = MotorCalibration::new(
+            1,
+            MotorDirection::Normal,
+            MotorReading::new(2_000, 1_000, 3_000),
+        )
+        .unwrap();
         let sample = TimelineArmSample {
             arm: "follower".to_owned(),
             normalized: BTreeMap::from([("shoulder_pan".to_owned(), None)]),

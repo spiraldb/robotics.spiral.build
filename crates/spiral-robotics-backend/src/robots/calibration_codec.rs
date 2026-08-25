@@ -11,28 +11,29 @@ use std::marker::PhantomData;
 use serde::de::{self, DeserializeOwned, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use spiral_robotics_core::calibration::{
-    Calibration, CalibrationInput, Direction, MotorCalibration, MotorReading,
+    Calibration, CalibrationFormat, CalibrationInput, MotorCalibration, MotorDirection,
+    MotorReading,
 };
 
 /// Serialize a domain direction at a delivery or persistence edge.
-pub fn serialize_direction<S>(direction: &Direction, serializer: S) -> Result<S::Ok, S::Error>
+pub fn serialize_direction<S>(direction: &MotorDirection, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
     serializer.serialize_str(match direction {
-        Direction::Normal => "normal",
-        Direction::Reversed => "reversed",
+        MotorDirection::Normal => "normal",
+        MotorDirection::Reversed => "reversed",
     })
 }
 
 /// Deserialize a persisted or delivered direction into the domain value.
-pub fn deserialize_direction<'de, D>(deserializer: D) -> Result<Direction, D::Error>
+pub fn deserialize_direction<'de, D>(deserializer: D) -> Result<MotorDirection, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     match String::deserialize(deserializer)?.as_str() {
-        "normal" => Ok(Direction::Normal),
-        "reversed" => Ok(Direction::Reversed),
+        "normal" => Ok(MotorDirection::Normal),
+        "reversed" => Ok(MotorDirection::Reversed),
         value => Err(de::Error::unknown_variant(value, &["normal", "reversed"])),
     }
 }
@@ -46,7 +47,7 @@ pub struct MotorCalibrationWire {
         deserialize_with = "deserialize_direction",
         serialize_with = "serialize_direction"
     )]
-    pub direction: Direction,
+    pub direction: MotorDirection,
     pub range_min: i64,
     pub center: i64,
     pub range_max: i64,
@@ -54,25 +55,26 @@ pub struct MotorCalibrationWire {
 
 impl From<MotorCalibration> for MotorCalibrationWire {
     fn from(value: MotorCalibration) -> Self {
+        let reading = value.reading();
         Self {
-            id: value.id,
-            direction: value.direction,
-            range_min: value.range_min,
-            center: value.center,
-            range_max: value.range_max,
+            id: value.id(),
+            direction: value.direction(),
+            range_min: reading.range_min(),
+            center: reading.center(),
+            range_max: reading.range_max(),
         }
     }
 }
 
-impl From<MotorCalibrationWire> for MotorCalibration {
-    fn from(value: MotorCalibrationWire) -> Self {
-        Self {
-            id: value.id,
-            direction: value.direction,
-            range_min: value.range_min,
-            center: value.center,
-            range_max: value.range_max,
-        }
+impl TryFrom<MotorCalibrationWire> for MotorCalibration {
+    type Error = spiral_robotics_core::calibration::CalibrationError;
+
+    fn try_from(value: MotorCalibrationWire) -> Result<Self, Self::Error> {
+        Self::new(
+            value.id,
+            value.direction,
+            MotorReading::new(value.center, value.range_min, value.range_max),
+        )
     }
 }
 
@@ -97,31 +99,31 @@ pub fn decode_calibration_json(json: &str) -> serde_json::Result<Calibration> {
 }
 
 fn calibration_from_wire(wire: CalibrationWire) -> serde_json::Result<Calibration> {
-    let calibration = Calibration {
-        format_version: wire.format_version,
-        units: wire.units,
-        coordinate_space: wire.coordinate_space,
-        motors: wire
-            .motors
-            .0
-            .into_iter()
-            .map(|(name, motor)| (name, motor.into()))
-            .collect(),
-    };
-    calibration.validate().map_err(json_error)?;
-    Ok(calibration)
+    let motors = wire
+        .motors
+        .0
+        .into_iter()
+        .map(|(name, motor)| MotorCalibration::try_from(motor).map(|motor| (name, motor)))
+        .collect::<Result<_, _>>()
+        .map_err(json_error)?;
+    Calibration::from_persisted(
+        CalibrationFormat::new(wire.format_version, wire.units, wire.coordinate_space),
+        motors,
+    )
+    .map_err(json_error)
 }
 
 /// Encode a validated calibration document for a robot file.
 pub fn encode_calibration(calibration: &Calibration) -> serde_json::Result<serde_json::Value> {
     calibration.validate().map_err(json_error)?;
+    let format = calibration.format();
     serde_json::to_value(CalibrationWire {
-        format_version: calibration.format_version,
-        units: calibration.units.clone(),
-        coordinate_space: calibration.coordinate_space.clone(),
+        format_version: format.version(),
+        units: format.units().to_owned(),
+        coordinate_space: format.coordinate_space().to_owned(),
         motors: UniqueMap(
             calibration
-                .motors
+                .motors()
                 .iter()
                 .map(|(name, motor)| (name.clone(), (*motor).into()))
                 .collect(),
@@ -143,11 +145,7 @@ struct MotorReadingWire {
 
 impl From<MotorReadingWire> for MotorReading {
     fn from(reading: MotorReadingWire) -> Self {
-        Self {
-            center: reading.center,
-            range_min: reading.range_min,
-            range_max: reading.range_max,
-        }
+        Self::new(reading.center, reading.range_min, reading.range_max)
     }
 }
 
@@ -271,21 +269,19 @@ mod tests {
 
     #[test]
     fn calibration_codec_round_trips_and_applies_domain_validation() {
-        let calibration = Calibration {
-            format_version: CALIBRATION_FORMAT_VERSION,
-            units: CALIBRATION_UNITS.to_owned(),
-            coordinate_space: CALIBRATION_COORDINATE_SPACE.to_owned(),
-            motors: BTreeMap::from([(
+        let calibration = Calibration::from_persisted(
+            CalibrationFormat::new(
+                CALIBRATION_FORMAT_VERSION,
+                CALIBRATION_UNITS,
+                CALIBRATION_COORDINATE_SPACE,
+            ),
+            BTreeMap::from([(
                 "joint".to_owned(),
-                MotorCalibration {
-                    id: 1,
-                    direction: Direction::Reversed,
-                    range_min: 10,
-                    center: 20,
-                    range_max: 30,
-                },
+                MotorCalibration::new(1, MotorDirection::Reversed, MotorReading::new(20, 10, 30))
+                    .unwrap(),
             )]),
-        };
+        )
+        .unwrap();
 
         let encoded = encode_calibration(&calibration).unwrap();
         assert_eq!(decode_calibration(encoded).unwrap(), calibration);

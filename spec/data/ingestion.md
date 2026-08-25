@@ -129,4 +129,4 @@ prefixes are not supported by this ingestion path.
 - Hugging Face discovery and Spiral materialization:
   [`storage/ingestion.rs`](../../crates/spiral-robotics-storage/src/ingestion.rs)
 - Shared API contracts:
-  [`spiral-robotics-api/src/api.rs`](../../crates/spiral-robotics-api/src/api.rs)
+  [`spiral-robotics-api/src/datasets.rs`](../../crates/spiral-robotics-api/src/datasets.rs)

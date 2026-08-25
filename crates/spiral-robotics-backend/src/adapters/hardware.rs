@@ -2,10 +2,12 @@
 
 use std::collections::BTreeMap;
 
-use spiral_robotics_api::api::ModeSelection;
+use spiral_robotics_api::robots::ModeSelection;
 use spiral_robotics_core::calibration::{Calibration, CalibrationInput, NormalizedPosition};
 use spiral_robotics_core::error::OperationError;
-use spiral_robotics_hardware::HardwareHandle;
+use spiral_robotics_hardware::{
+    HardwareHandle, ReplayRequest, ReplayTrajectory as HardwareReplayTrajectory,
+};
 
 use crate::data::{ReplayTrajectory, SpiralReplayPort, StartSpiralReplayCommand};
 use crate::robots::calibration::CalibrationControlPort;
@@ -20,10 +22,11 @@ impl SpiralReplayPort for HardwareHandle {
     ) -> Result<(), OperationError> {
         HardwareHandle::start_replay(
             self,
-            &command.robot,
-            &command.episode,
-            trajectory.frames,
-            trajectory.sample_hz,
+            ReplayRequest::timeline(
+                command.robot,
+                command.episode,
+                HardwareReplayTrajectory::new(trajectory.frames, trajectory.sample_hz),
+            ),
         )
         .await
         .map_err(OperationError::conflict)

@@ -6,7 +6,8 @@
 //! authorization policy before a database driver sees them.
 
 use crate::schema::{self as spiral, Table, column};
-pub use spiral_robotics_core::query::ReadOnlyMode;
+use crate::video::{VideoAssetKey, VideoByteRange};
+pub use spiral_robotics_core::query::ReadOnlyQueryMode;
 
 pub fn count_rows(relation: &str) -> String {
     format!("SELECT COUNT(*) AS rows FROM {relation}")
@@ -71,14 +72,10 @@ pub fn episode_samples(dataset: &str, episode_id: &str) -> String {
     )
 }
 
-pub fn video_asset_size(
-    dataset: &str,
-    episode_id: &str,
-    stream_id: &str,
-    segment: Option<u32>,
-) -> String {
+pub(crate) fn video_asset_size(dataset: &str, asset: &VideoAssetKey) -> String {
     let assets = Table::VideoAssets.qualified_name(dataset);
-    let segment_filter = segment
+    let segment_filter = asset
+        .segment_index()
         .map(|segment| format!(" AND {} = {segment}", column::SEGMENT_INDEX))
         .unwrap_or_default();
     format!(
@@ -87,23 +84,21 @@ pub fn video_asset_size(
          ORDER BY {segment_index} LIMIT 1",
         byte_size = column::BYTE_SIZE,
         episode_id_column = column::EPISODE_ID,
-        episode_id = string_literal(episode_id),
+        episode_id = string_literal(asset.episode_id()),
         stream_id_column = column::STREAM_ID,
-        stream_id = string_literal(stream_id),
+        stream_id = string_literal(asset.stream_id()),
         segment_index = column::SEGMENT_INDEX,
     )
 }
 
-pub fn video_asset_range(
+pub(crate) fn video_asset_range(
     dataset: &str,
-    episode_id: &str,
-    stream_id: &str,
-    segment: Option<u32>,
-    offset: u64,
-    size: u64,
+    asset: &VideoAssetKey,
+    range: VideoByteRange,
 ) -> String {
     let assets = video_dataset_output(dataset);
-    let segment_filter = segment
+    let segment_filter = asset
+        .segment_index()
         .map(|segment| format!(" AND {} = {segment}", column::SEGMENT_INDEX))
         .unwrap_or_default();
     format!(
@@ -115,9 +110,11 @@ pub fn video_asset_range(
         source = column::SOURCE,
         payload = column::PAYLOAD,
         episode_id_column = column::EPISODE_ID,
-        episode_id = string_literal(episode_id),
+        episode_id = string_literal(asset.episode_id()),
         stream_id_column = column::STREAM_ID,
-        stream_id = string_literal(stream_id),
+        stream_id = string_literal(asset.stream_id()),
+        offset = range.offset(),
+        size = range.size(),
         segment_index = column::SEGMENT_INDEX,
     )
 }
@@ -213,8 +210,10 @@ pub fn drop_video_sources(sources: &str) -> String {
     format!("DROP VIEW IF EXISTS {sources}")
 }
 
-pub fn ensure_read_only(sql: &str, mode: ReadOnlyMode) -> Result<(), String> {
-    spiral_robotics_core::query::ensure_read_only(sql, mode).map_err(|error| error.to_string())
+pub fn ensure_read_only(sql: &str, mode: ReadOnlyQueryMode) -> Result<(), String> {
+    spiral_robotics_core::query::ReadOnlyQuery::new(sql, mode)
+        .authorize()
+        .map_err(|error| error.to_string())
 }
 
 /// Escape a value for the SQL string-literal grammar. ADBC parameters are not
@@ -263,7 +262,14 @@ mod tests {
         assert_single_literal(&trajectory, "episode-'three");
         assert_single_literal(&trajectory, "stream-'three");
 
-        let video = video_asset_size("robot", "episode-'four", "stream-'four", Some(0));
+        let video = video_asset_size(
+            "robot",
+            &VideoAssetKey::new(
+                "episode-'four".to_owned(),
+                "stream-'four".to_owned(),
+                Some(0),
+            ),
+        );
         assert_single_literal(&video, "episode-'four");
         assert_single_literal(&video, "stream-'four");
     }
@@ -282,7 +288,11 @@ mod tests {
             "CREATE OR REPLACE VIEW robot_video_sources AS SELECT assets.episode_id, assets.stream_id, assets.segment_index, assets.timeline_offset_ns, assets.payload AS source FROM robot.video_assets AS assets"
         );
         assert_eq!(
-            video_asset_range("robot", "episode", "camera.main", Some(2), 512, 1024),
+            video_asset_range(
+                "robot",
+                &VideoAssetKey::new("episode".to_owned(), "camera.main".to_owned(), Some(2),),
+                VideoByteRange::new(512, 1024),
+            ),
             "SELECT spql.io.read_bytes(source, CAST(512 AS UINT64), CAST(1024 AS UINT64)) AS payload FROM robot.video.assets WHERE episode_id = 'episode' AND stream_id = 'camera.main' AND segment_index = 2 ORDER BY segment_index LIMIT 1"
         );
     }
@@ -310,22 +320,26 @@ mod tests {
     #[test]
     fn read_only_gate_handles_comments_quotes_and_cte_mutation() {
         assert!(
-            ensure_read_only("SELECT ';' AS punctuation; -- okay", ReadOnlyMode::Preview).is_ok()
+            ensure_read_only(
+                "SELECT ';' AS punctuation; -- okay",
+                ReadOnlyQueryMode::Preview
+            )
+            .is_ok()
         );
         assert!(
             ensure_read_only(
                 "WITH recent AS (SELECT 1) SELECT * FROM recent",
-                ReadOnlyMode::Training
+                ReadOnlyQueryMode::Training
             )
             .is_ok()
         );
         assert!(
             ensure_read_only(
                 "WITH removed AS (DELETE FROM t) SELECT 1",
-                ReadOnlyMode::Training
+                ReadOnlyQueryMode::Training
             )
             .is_err()
         );
-        assert!(ensure_read_only("SELECT 1; DROP TABLE t", ReadOnlyMode::Preview).is_err());
+        assert!(ensure_read_only("SELECT 1; DROP TABLE t", ReadOnlyQueryMode::Preview).is_err());
     }
 }

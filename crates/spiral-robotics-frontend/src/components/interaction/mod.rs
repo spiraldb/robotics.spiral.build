@@ -7,21 +7,21 @@ use dioxus::prelude::*;
 
 mod icons;
 
-pub use icons::{ChevronIcon, CloseIcon, DeleteIcon, RefreshIcon, UnassignIcon};
+pub(crate) use icons::{ChevronIcon, CloseIcon, DeleteIcon, RefreshIcon, UnassignIcon};
 
 const UI_STYLES: Asset = asset!("/assets/ui.css");
 
 /// Install the shared interaction styles. Dioxus deduplicates identical assets,
 /// so reusable workspaces can safely install this beside the product shell.
 #[component]
-pub fn UiStyles() -> Element {
+pub(crate) fn UiStyles() -> Element {
     rsx! { document::Stylesheet { href: UI_STYLES } }
 }
 
 /// The stable verb behind an action. Product code chooses a verb before it
 /// chooses an icon or visual treatment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ActionPurpose {
+pub(crate) enum ActionPurpose {
     Navigate,
     Select,
     Toggle,
@@ -85,7 +85,7 @@ impl ActionPurpose {
 /// whether a dense ledger renders it as an icon or a settings footer spells it
 /// out as text.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ActionVariant {
+pub(crate) enum ActionVariant {
     #[default]
     Quiet,
     Outline,
@@ -113,7 +113,7 @@ impl ActionVariant {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ActionSize {
+pub(crate) enum ActionSize {
     #[default]
     Compact,
     Standard,
@@ -131,7 +131,7 @@ impl ActionSize {
 }
 
 #[derive(Props, Clone, PartialEq)]
-pub struct ActionProps {
+pub(crate) struct ActionProps {
     pub children: Element,
     pub purpose: ActionPurpose,
     #[props(default)]
@@ -181,7 +181,7 @@ pub struct ActionProps {
 /// The only ordinary button primitive. Native button attributes and events are
 /// forwarded, while the purpose remains visible in the DOM and in code review.
 #[component]
-pub fn Action(props: ActionProps) -> Element {
+pub(crate) fn Action(props: ActionProps) -> Element {
     let class = action_class(
         props.variant,
         props.size,
@@ -221,7 +221,7 @@ pub fn Action(props: ActionProps) -> Element {
 }
 
 #[derive(Props, Clone, PartialEq)]
-pub struct ActionLinkProps {
+pub(crate) struct ActionLinkProps {
     pub children: Element,
     pub href: String,
     pub purpose: ActionPurpose,
@@ -235,7 +235,7 @@ pub struct ActionLinkProps {
 
 /// Anchor counterpart to [`Action`], for real downloads and navigation.
 #[component]
-pub fn ActionLink(props: ActionLinkProps) -> Element {
+pub(crate) fn ActionLink(props: ActionLinkProps) -> Element {
     let class = action_class(props.variant, ActionSize::Compact, "");
     rsx! {
         a {
@@ -250,7 +250,7 @@ pub fn ActionLink(props: ActionLinkProps) -> Element {
 }
 
 #[derive(Props, Clone, PartialEq)]
-pub struct FileActionProps {
+pub(crate) struct FileActionProps {
     pub children: Element,
     pub accept: String,
     pub onchange: EventHandler<FormEvent>,
@@ -271,7 +271,7 @@ pub struct FileActionProps {
 
 /// Keyboard-visible file picker styled by the same contract as every action.
 #[component]
-pub fn FileAction(props: FileActionProps) -> Element {
+pub(crate) fn FileAction(props: FileActionProps) -> Element {
     let class = action_class(
         props.variant,
         ActionSize::Compact,
@@ -298,7 +298,7 @@ pub fn FileAction(props: FileActionProps) -> Element {
 }
 
 #[derive(Props, Clone, PartialEq)]
-pub struct ModeGroupProps {
+pub(crate) struct ModeGroupProps {
     pub label: String,
     pub children: Element,
     #[props(default)]
@@ -306,7 +306,7 @@ pub struct ModeGroupProps {
 }
 
 #[component]
-pub fn ModeGroup(props: ModeGroupProps) -> Element {
+pub(crate) fn ModeGroup(props: ModeGroupProps) -> Element {
     let class = class_with("ui-mode-group", props.class.as_deref());
     rsx! {
         div {
@@ -331,7 +331,7 @@ pub fn ModeGroup(props: ModeGroupProps) -> Element {
 }
 
 #[derive(Props, Clone, PartialEq)]
-pub struct ModeActionProps {
+pub(crate) struct ModeActionProps {
     pub children: Element,
     pub checked: bool,
     pub purpose: ActionPurpose,
@@ -349,7 +349,7 @@ pub struct ModeActionProps {
 
 /// A mutually exclusive mode control with native radio semantics.
 #[component]
-pub fn ModeAction(props: ModeActionProps) -> Element {
+pub(crate) fn ModeAction(props: ModeActionProps) -> Element {
     let class = action_class(
         ActionVariant::Segment,
         ActionSize::Compact,
@@ -374,7 +374,7 @@ pub fn ModeAction(props: ModeActionProps) -> Element {
 }
 
 #[derive(Props, Clone, PartialEq)]
-pub struct ToggleProps {
+pub(crate) struct ToggleProps {
     pub label: String,
     pub checked: bool,
     pub onchange: EventHandler<bool>,
@@ -390,7 +390,7 @@ pub struct ToggleProps {
 
 /// A binary option whose label and hit target are always part of the control.
 #[component]
-pub fn Toggle(props: ToggleProps) -> Element {
+pub(crate) fn Toggle(props: ToggleProps) -> Element {
     let class = class_with("ui-toggle", props.class.as_deref());
     rsx! {
         label {
@@ -410,7 +410,7 @@ pub fn Toggle(props: ToggleProps) -> Element {
 }
 
 #[derive(Props, Clone, PartialEq)]
-pub struct InlineConfirmationProps {
+pub(crate) struct InlineConfirmationProps {
     pub id: String,
     pub message: String,
     pub confirm_label: String,
@@ -464,7 +464,7 @@ fn ConfirmationActions(props: ConfirmationActionsProps) -> Element {
 /// Tier-one confirmation for a local destructive action. The safe choice takes
 /// focus, Escape cancels, and cancellation returns to the originating action.
 #[component]
-pub fn InlineConfirmation(props: InlineConfirmationProps) -> Element {
+pub(crate) fn InlineConfirmation(props: InlineConfirmationProps) -> Element {
     let cancel_id = format!("{}-cancel", props.id);
     let class = class_with("ui-inline-confirmation", props.class.as_deref());
     let initial_focus_id = cancel_id.clone();
@@ -501,7 +501,7 @@ pub fn InlineConfirmation(props: InlineConfirmationProps) -> Element {
 }
 
 #[derive(Props, Clone, PartialEq)]
-pub struct BlockingConfirmationProps {
+pub(crate) struct BlockingConfirmationProps {
     pub id: String,
     pub title: String,
     pub message: String,
@@ -518,7 +518,7 @@ pub struct BlockingConfirmationProps {
 
 /// Tier-two confirmation for scope-wide or physical consequences.
 #[component]
-pub fn BlockingConfirmation(props: BlockingConfirmationProps) -> Element {
+pub(crate) fn BlockingConfirmation(props: BlockingConfirmationProps) -> Element {
     let dialog_id = props.id.clone();
     let title_id = format!("{}-title", props.id);
     let description_id = format!("{}-description", props.id);
@@ -598,7 +598,7 @@ fn dismiss_confirmation(on_cancel: EventHandler<()>, return_focus_id: &str) {
 }
 
 /// Move focus after Dioxus has committed a replacement subtree.
-pub fn focus_after_render(id: String) {
+pub(crate) fn focus_after_render(id: String) {
     dioxus::dioxus_core::spawn_forever(async move {
         for attempt in 0..16 {
             let delay_ms = if attempt == 0 { 0 } else { 16 };
@@ -611,7 +611,7 @@ pub fn focus_after_render(id: String) {
 }
 
 #[cfg(feature = "web")]
-pub fn focus_element(id: &str) -> bool {
+pub(crate) fn focus_element(id: &str) -> bool {
     use wasm_bindgen::JsCast as _;
 
     let Some(element) = web_sys::window()
@@ -625,7 +625,7 @@ pub fn focus_element(id: &str) -> bool {
 }
 
 #[cfg(not(feature = "web"))]
-pub fn focus_element(_id: &str) -> bool {
+pub(crate) fn focus_element(_id: &str) -> bool {
     false
 }
 
@@ -667,7 +667,7 @@ fn select_adjacent_mode(direction: isize) {
 fn select_adjacent_mode(_direction: isize) {}
 
 #[cfg(feature = "web")]
-pub fn trap_focus_within(container_id: &str, backwards: bool) -> bool {
+pub(crate) fn trap_focus_within(container_id: &str, backwards: bool) -> bool {
     use wasm_bindgen::JsCast as _;
 
     let Some(document) = web_sys::window().and_then(|window| window.document()) else {
@@ -706,7 +706,7 @@ pub fn trap_focus_within(container_id: &str, backwards: bool) -> bool {
 }
 
 #[cfg(not(feature = "web"))]
-pub fn trap_focus_within(_container_id: &str, _backwards: bool) -> bool {
+pub(crate) fn trap_focus_within(_container_id: &str, _backwards: bool) -> bool {
     false
 }
 

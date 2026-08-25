@@ -51,7 +51,7 @@ plumbing.
 ## Implementation ownership
 
 - Shared response contract:
-  [`spiral-robotics-api/src/api.rs`](../../crates/spiral-robotics-api/src/api.rs)
+  [`spiral-robotics-api/src/relations.rs`](../../crates/spiral-robotics-api/src/relations.rs)
 - Catalog filtering, schemas, and counts:
   [`storage/manager.rs`](../../crates/spiral-robotics-storage/src/manager.rs)
 - Data HTTP route:

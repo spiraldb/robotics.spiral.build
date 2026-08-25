@@ -68,7 +68,7 @@ async fn spiral_relations(
 
 async fn project_data_relations(
     State(state): State<AppState>,
-) -> Result<Json<spiral_robotics_api::api::ProjectDataRelationsResponse>, Failure> {
+) -> Result<Json<spiral_robotics_api::relations::ProjectDataRelationsResponse>, Failure> {
     state
         .storage
         .project_data_relations()
@@ -79,8 +79,8 @@ async fn project_data_relations(
 
 async fn inspect_huggingface_dataset(
     State(state): State<AppState>,
-    Json(request): Json<spiral_robotics_api::api::HuggingFaceDatasetRequest>,
-) -> Result<Json<spiral_robotics_api::api::HuggingFaceDatasetInspection>, Failure> {
+    Json(request): Json<spiral_robotics_api::datasets::HuggingFaceDatasetRequest>,
+) -> Result<Json<spiral_robotics_api::datasets::HuggingFaceDatasetInspection>, Failure> {
     spiral_robotics_storage::ingestion::inspect_huggingface_dataset(
         request,
         state.storage.workflow_model_store().namespace(),
@@ -92,8 +92,8 @@ async fn inspect_huggingface_dataset(
 
 async fn import_huggingface_dataset(
     State(state): State<AppState>,
-    Json(request): Json<spiral_robotics_api::api::HuggingFaceDatasetRequest>,
-) -> Result<Json<spiral_robotics_api::api::HuggingFaceDatasetImportSummary>, Failure> {
+    Json(request): Json<spiral_robotics_api::datasets::HuggingFaceDatasetRequest>,
+) -> Result<Json<spiral_robotics_api::datasets::HuggingFaceDatasetImportSummary>, Failure> {
     let inspection = spiral_robotics_storage::ingestion::inspect_huggingface_dataset(
         request,
         state.storage.workflow_model_store().namespace(),
@@ -162,7 +162,7 @@ async fn export_project(State(state): State<AppState>) -> Result<Response, Failu
 async fn import_project(
     State(state): State<AppState>,
     body: Bytes,
-) -> Result<Json<spiral_robotics_api::api::ProjectImportSummary>, Failure> {
+) -> Result<Json<spiral_robotics_api::datasets::ProjectImportSummary>, Failure> {
     let token = state
         .catalog_lease
         .try_acquire(CatalogLeaseOwner::ProjectImport)
@@ -252,7 +252,7 @@ async fn import_episodes(
     State(state): State<AppState>,
     Query(query): Query<EpisodeTransferQuery>,
     body: Bytes,
-) -> Result<Json<spiral_robotics_api::api::EpisodeImportSummary>, Failure> {
+) -> Result<Json<spiral_robotics_api::datasets::EpisodeImportSummary>, Failure> {
     if !spiral_robotics_storage::schema::is_dataset_id(&query.dataset_id) {
         return Err(Failure::bad_request(
             "dataset ID must contain 1–96 letters, numbers, '.', '_' or '-'",
@@ -385,14 +385,14 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
         let current_credentials = self.state.backend_state.credentials();
         let credentials = match command.client_secret.as_deref() {
             Some("") => None,
-            Some(secret) => Some(spiral_robotics_storage::settings::SpiralCredentials {
-                client_id: command.client_id.clone(),
-                client_secret: secret.to_owned(),
-            }),
+            Some(secret) => Some(spiral_robotics_storage::settings::SpiralCredentials::new(
+                command.client_id.clone(),
+                secret.to_owned(),
+            )),
             None if command.client_id.is_empty() => None,
             None => current_credentials
                 .clone()
-                .filter(|credentials| credentials.client_id == command.client_id)
+                .filter(|credentials| credentials.client_id() == command.client_id)
                 .ok_or_else(|| {
                     OperationError::InvalidInput(
                         "Enter the client secret when changing the Spiral client ID".to_owned(),
@@ -413,7 +413,7 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
             .state
             .preferences
             .stage_update(
-                spiral_robotics_api::api::TrainingRuntimeSettings {
+                spiral_robotics_api::settings::TrainingRuntimeSettings {
                     endpoint: command.training_endpoint,
                 },
                 VideoSettings {
@@ -421,24 +421,21 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
                 },
             )
             .map_err(OperationError::InvalidInput)?;
+        let connection = spiral_robotics_storage::settings::SpiralConnectionSettings::new(
+            command.spiral_endpoint.clone(),
+            command.spiral_spfs_endpoint.clone(),
+        )
+        .and_then(|settings| settings.with_project(&command.project_id))
+        .map(|settings| settings.with_credentials(credentials.clone()))
+        .map_err(OperationError::InvalidInput)?;
         self.state
             .backend_state
-            .save_connection(
-                &command.project_id,
-                &command.spiral_endpoint,
-                &command.spiral_spfs_endpoint,
-                credentials.as_ref(),
-            )
+            .save_connection(&connection)
             .map_err(OperationError::Internal)?;
         if endpoint_changed || project_changed || credentials_changed {
             self.state
                 .storage
-                .configure_connection(
-                    command.spiral_endpoint.clone(),
-                    command.spiral_spfs_endpoint.clone(),
-                    &command.project_id,
-                    credentials,
-                )
+                .configure_connection(connection)
                 .map_err(OperationError::InvalidInput)?;
         }
         self.state
@@ -505,7 +502,11 @@ impl DataCatalogPort for DataHttpAdapter<'_> {
     async fn video_asset(&self, query: VideoAssetQuery) -> Result<Vec<u8>, OperationError> {
         self.state
             .storage
-            .video_asset(&query.episode, &query.stream, query.segment)
+            .video_asset(spiral_robotics_storage::video::VideoAssetKey::new(
+                query.episode,
+                query.stream,
+                query.segment,
+            ))
             .await
             .map_err(OperationError::External)
     }
@@ -559,7 +560,7 @@ pub(super) fn contract_data_settings(settings: DataSettingsSnapshot) -> DataSett
             namespace: settings.spiral.namespace,
             endpoint_restart_required: settings.spiral.endpoint_restart_required,
         },
-        training: spiral_robotics_api::api::TrainingRuntimeSettings {
+        training: spiral_robotics_api::settings::TrainingRuntimeSettings {
             endpoint: settings.training_endpoint,
         },
         video: VideoSettings {
@@ -645,7 +646,7 @@ pub(super) fn contract_query_result(result: CapabilityQueryResult) -> SpiralQuer
         columns: result
             .columns
             .into_iter()
-            .map(|column| spiral_robotics_api::api::QueryColumn {
+            .map(|column| spiral_robotics_api::relations::QueryColumn {
                 name: column.name,
                 data_type: column.data_type,
                 nullable: column.nullable,

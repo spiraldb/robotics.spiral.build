@@ -14,8 +14,8 @@ use arrow_schema::{DataType, Field};
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, de::DeserializeOwned};
 use spiral_robotics_inference::{
-    ActionChunk, ImageFormat, InferenceInput, InferenceStats, ModelArtifact, ModelIdentity, Policy,
-    PolicyLoader, PolicySpecification,
+    ActionChunk, ActionChunkShape, ImageFormat, InferenceInput, InferenceStats, ModelArtifact,
+    ModelIdentity, Policy, PolicyLoader, PolicySpecification,
 };
 use spiral_robotics_training::{
     TrainingBackend, TrainingBackendError, TrainingBackendInfo, TrainingJobCursor,
@@ -83,7 +83,7 @@ impl TrainingBackend for HttpTrainingBackend {
         decode_json_response(response, "creating training job")
     }
 
-    fn job(
+    fn job_snapshot(
         &self,
         job_id: &str,
         cursor: TrainingJobCursor,
@@ -110,7 +110,9 @@ impl TrainingBackend for HttpTrainingBackend {
 fn job_path(job_id: &str, suffix: &str, cursor: TrainingJobCursor) -> String {
     format!(
         "/v1/jobs/{job_id}{suffix}?after_metric_step={}&after_checkpoint_step={}&after_log_offset={}",
-        cursor.metric_step, cursor.checkpoint_step, cursor.log_offset
+        cursor.metric_step(),
+        cursor.checkpoint_step(),
+        cursor.log_offset()
     )
 }
 
@@ -251,12 +253,11 @@ struct InferenceStatsResponse {
 
 impl InferenceStatsResponse {
     fn into_stats(self) -> spiral_robotics_inference::Result<InferenceStats> {
-        Ok(InferenceStats {
-            preprocessing: duration_from_millis(self.preprocessing_ms)?,
-            model: duration_from_millis(self.model_ms)?,
-            postprocessing: duration_from_millis(self.postprocessing_ms)?,
-            total: duration_from_millis(self.total_ms)?,
-        })
+        Ok(InferenceStats::default()
+            .with_preprocessing(duration_from_millis(self.preprocessing_ms)?)
+            .with_model(duration_from_millis(self.model_ms)?)
+            .with_postprocessing(duration_from_millis(self.postprocessing_ms)?)
+            .with_total(duration_from_millis(self.total_ms)?))
     }
 }
 
@@ -272,8 +273,7 @@ impl InferenceResponse {
     fn into_chunk(self) -> spiral_robotics_inference::Result<ActionChunk> {
         ActionChunk::try_new(
             self.values,
-            self.steps,
-            self.action_dimensions,
+            ActionChunkShape::try_new(self.steps, self.action_dimensions)?,
             self.stats.into_stats()?,
         )
     }
@@ -297,55 +297,58 @@ fn encode_inference_input(
     input: InferenceInput<'_>,
     specification: &PolicySpecification,
 ) -> spiral_robotics_inference::Result<Vec<u8>> {
-    if input.state.len() != specification.state_dimensions {
+    if input.state().len() != specification.state_dimensions() {
         return Err(spiral_robotics_inference::Error::Input(format!(
             "policy state has {} values, expected {}",
-            input.state.len(),
-            specification.state_dimensions
+            input.state().len(),
+            specification.state_dimensions()
         )));
     }
-    if input.images.len() != specification.image_inputs.len() {
+    if input.images().len() != specification.image_inputs().len() {
         return Err(spiral_robotics_inference::Error::Input(format!(
             "policy input has {} images, expected {}",
-            input.images.len(),
-            specification.image_inputs.len()
+            input.images().len(),
+            specification.image_inputs().len()
         )));
     }
-    let mut arrays = Vec::<(String, ArrayRef)>::with_capacity(input.images.len() + 1);
+    let mut arrays = Vec::<(String, ArrayRef)>::with_capacity(input.images().len() + 1);
     arrays.push((
         "state".to_owned(),
-        fixed_f32(input.state.to_vec(), 1, "state")
+        fixed_f32(input.state().to_vec(), 1, "state")
             .map_err(|error| inference_error(error.to_string()))?,
     ));
     for (index, (image, expected)) in input
-        .images
+        .images()
         .iter()
-        .zip(&specification.image_inputs)
+        .zip(specification.image_inputs())
         .enumerate()
     {
-        let packed_stride = expected
-            .width
-            .checked_mul(expected.channels)
+        let dimensions = expected.dimensions();
+        let packed_stride = dimensions
+            .width()
+            .checked_mul(expected.channels())
             .ok_or_else(|| inference_error("policy image row stride overflowed"))?;
         let expected_len = packed_stride
-            .checked_mul(expected.height)
+            .checked_mul(dimensions.height())
             .ok_or_else(|| inference_error("policy image size overflowed"))?;
-        if image.name != expected.name
-            || image.width != expected.width
-            || image.height != expected.height
-            || image.format != ImageFormat::Rgb8
-            || expected.channels != 3
-            || image.row_stride != packed_stride
-            || image.data.len() != expected_len
+        if image.name() != expected.name()
+            || image.dimensions() != dimensions
+            || image.format() != ImageFormat::Rgb8
+            || expected.channels() != 3
+            || image.row_stride() != packed_stride
+            || image.data().len() != expected_len
         {
             return Err(spiral_robotics_inference::Error::Input(format!(
                 "image {:?} does not match policy input {:?} ({}x{} RGB8)",
-                image.name, expected.name, expected.width, expected.height
+                image.name(),
+                expected.name(),
+                dimensions.width(),
+                dimensions.height()
             )));
         }
         arrays.push((
             format!("image_{index}"),
-            fixed_u8(image.data.to_vec(), 1, &format!("image_{index}"))
+            fixed_u8(image.data().to_vec(), 1, &format!("image_{index}"))
                 .map_err(|error| inference_error(error.to_string()))?,
         ));
     }
@@ -376,45 +379,51 @@ fn encode_arrow_record(record: &RecordBatch) -> Result<Vec<u8>, String> {
 }
 
 fn fixed_f32(values: Vec<f32>, batch_size: usize, name: &str) -> Result<ArrayRef, String> {
-    fixed_list(
-        Arc::new(Float32Array::from(values)),
-        DataType::Float32,
-        batch_size,
-        name,
-    )
+    FixedListLayout::new(DataType::Float32, batch_size, name)
+        .build(Arc::new(Float32Array::from(values)))
 }
 
 fn fixed_u8(values: Vec<u8>, batch_size: usize, name: &str) -> Result<ArrayRef, String> {
-    fixed_list(
-        Arc::new(UInt8Array::from(values)),
-        DataType::UInt8,
-        batch_size,
-        name,
-    )
+    FixedListLayout::new(DataType::UInt8, batch_size, name)
+        .build(Arc::new(UInt8Array::from(values)))
 }
 
-fn fixed_list(
-    values: ArrayRef,
+struct FixedListLayout<'a> {
     data_type: DataType,
     batch_size: usize,
-    name: &str,
-) -> Result<ArrayRef, String> {
-    if batch_size == 0 || !values.len().is_multiple_of(batch_size) {
-        return Err(format!(
-            "{name} has {} values for batch size {batch_size}",
-            values.len()
-        ));
+    name: &'a str,
+}
+
+impl<'a> FixedListLayout<'a> {
+    fn new(data_type: DataType, batch_size: usize, name: &'a str) -> Self {
+        Self {
+            data_type,
+            batch_size,
+            name,
+        }
     }
-    let width = values.len() / batch_size;
-    let width = i32::try_from(width).map_err(|_| format!("{name} row is too wide for Arrow"))?;
-    FixedSizeListArray::try_new(
-        Arc::new(Field::new("item", data_type, false)),
-        width,
-        values,
-        None,
-    )
-    .map(|array| Arc::new(array) as ArrayRef)
-    .map_err(|error| format!("building {name} Arrow tensor: {error}"))
+
+    fn build(self, values: ArrayRef) -> Result<ArrayRef, String> {
+        if self.batch_size == 0 || !values.len().is_multiple_of(self.batch_size) {
+            return Err(format!(
+                "{} has {} values for batch size {}",
+                self.name,
+                values.len(),
+                self.batch_size
+            ));
+        }
+        let width = values.len() / self.batch_size;
+        let width =
+            i32::try_from(width).map_err(|_| format!("{} row is too wide for Arrow", self.name))?;
+        FixedSizeListArray::try_new(
+            Arc::new(Field::new("item", self.data_type, false)),
+            width,
+            values,
+            None,
+        )
+        .map(|array| Arc::new(array) as ArrayRef)
+        .map_err(|error| format!("building {} Arrow tensor: {error}", self.name))
+    }
 }
 
 fn decode_json_response<T: DeserializeOwned>(

@@ -77,6 +77,35 @@ impl DetectedCamera {
     }
 }
 
+/// Timing for choosing a representative still after a camera warms up.
+#[derive(Clone, Copy, Debug)]
+pub struct CaptureTiming {
+    warmup: Duration,
+    record_time: Duration,
+}
+
+impl CaptureTiming {
+    pub const fn new(warmup: Duration, record_time: Duration) -> Self {
+        Self {
+            warmup,
+            record_time,
+        }
+    }
+}
+
+/// Lifetime and encoding quality for one live JPEG stream.
+#[derive(Clone, Copy, Debug)]
+pub struct JpegStreamConfig<'a> {
+    stop: &'a AtomicBool,
+    quality: u8,
+}
+
+impl<'a> JpegStreamConfig<'a> {
+    pub const fn new(stop: &'a AtomicBool, quality: u8) -> Self {
+        Self { stop, quality }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct CaptureRequest {
     camera: DetectedCamera,
@@ -222,107 +251,99 @@ pub fn discover() -> Result<ProbeOutcome> {
     Ok(outcome)
 }
 
-/// Save one recent frame from `detected` into `output_dir` as a PNG.
-pub fn capture_still(
-    detected: &DetectedCamera,
-    output_dir: &Path,
-    warmup: Duration,
-    record_time: Duration,
-) -> Result<PathBuf> {
-    let identifier = sanitize_camera_identifier(&detected.identifier());
-    let output_path = output_dir.join(format!("opencv_{identifier}.png"));
-    let workspace = private_workspace(Some(output_dir), ".spiral-robotics-camera-capture-")?;
-    let image_path = workspace.path().join("image.png");
-    let request_path = workspace.path().join("request.json");
-    let response_path = workspace.path().join("response.txt");
-    let request = CaptureRequest {
-        camera: detected.clone(),
-        warmup_secs: warmup.as_secs(),
-        record_time_secs: record_time.as_secs(),
-        record_time_nanos: record_time.subsec_nanos(),
-    };
-    let timeout = warmup
-        .saturating_add(record_time)
-        .saturating_add(CAPTURE_GRACE_PERIOD);
-
-    write_json(&request_path, &request)?;
-    invoke_worker(
-        "capture",
-        &request_path,
-        &response_path,
-        timeout,
-        Some(&image_path),
-    )?;
-    if !image_path.is_file() {
-        return Err("camera worker exited without producing an image".into());
-    }
-    promote_capture(&image_path, &output_path)?;
-    Ok(output_path)
-}
-
-/// Stream JPEG frames from `detected` until `stop` is set.
-///
-/// Cameras that already deliver MJPEG are passed through untouched; anything
-/// else is decoded and re-encoded at `quality`. The stop flag is read between
-/// frames, so shutdown waits for at most one frame interval.
-pub fn stream_jpeg_frames<F>(
-    detected: &DetectedCamera,
-    stop: &AtomicBool,
-    quality: u8,
-    mut sink: F,
-) -> Result<()>
-where
-    F: FnMut(JpegFrame),
-{
-    let requested =
-        RequestedFormat::new::<RgbFormat>(RequestedFormatType::Exact(detected.stream_format));
-    let mut camera = Camera::new(camera_open_index(&detected.info), requested)?;
-    camera.open_stream()?;
-
-    let mut sequence = 0_u64;
-    let mut result = Ok(());
-    while !stop.load(Ordering::Relaxed) {
-        let frame = match camera.frame() {
-            Ok(frame) => frame,
-            Err(error) => {
-                result = Err(error.into());
-                break;
-            }
+impl DetectedCamera {
+    /// Save one recent frame into `output_dir` as a PNG.
+    pub fn capture_still(&self, output_dir: &Path, timing: CaptureTiming) -> Result<PathBuf> {
+        let identifier = sanitize_camera_identifier(&self.identifier());
+        let output_path = output_dir.join(format!("opencv_{identifier}.png"));
+        let workspace = private_workspace(Some(output_dir), ".spiral-robotics-camera-capture-")?;
+        let image_path = workspace.path().join("image.png");
+        let request_path = workspace.path().join("request.json");
+        let response_path = workspace.path().join("response.txt");
+        let request = CaptureRequest {
+            camera: self.clone(),
+            warmup_secs: timing.warmup.as_secs(),
+            record_time_secs: timing.record_time.as_secs(),
+            record_time_nanos: timing.record_time.subsec_nanos(),
         };
-        let resolution = frame.resolution();
-        let bytes = match frame.source_frame_format() {
-            FrameFormat::MJPEG => frame.buffer().to_vec(),
-            _ => match frame.decode_image::<RgbFormat>() {
-                Ok(image) => match encode_jpeg(&image, quality) {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        result = Err(error);
-                        break;
-                    }
-                },
+        let timeout = timing
+            .warmup
+            .saturating_add(timing.record_time)
+            .saturating_add(CAPTURE_GRACE_PERIOD);
+
+        write_json(&request_path, &request)?;
+        WorkerInvocation {
+            mode: "capture",
+            request_path: &request_path,
+            response_path: &response_path,
+            image_path: Some(&image_path),
+        }
+        .invoke(timeout)?;
+        if !image_path.is_file() {
+            return Err("camera worker exited without producing an image".into());
+        }
+        promote_capture(&image_path, &output_path)?;
+        Ok(output_path)
+    }
+
+    /// Stream JPEG frames until the configured stop flag is set.
+    ///
+    /// Cameras that already deliver MJPEG are passed through untouched; anything
+    /// else is decoded and re-encoded at the configured quality.
+    pub fn stream_jpeg_frames<F>(&self, config: JpegStreamConfig<'_>, mut sink: F) -> Result<()>
+    where
+        F: FnMut(JpegFrame),
+    {
+        let requested =
+            RequestedFormat::new::<RgbFormat>(RequestedFormatType::Exact(self.stream_format));
+        let mut camera = Camera::new(camera_open_index(&self.info), requested)?;
+        camera.open_stream()?;
+
+        let mut sequence = 0_u64;
+        let mut result = Ok(());
+        while !config.stop.load(Ordering::Relaxed) {
+            let frame = match camera.frame() {
+                Ok(frame) => frame,
                 Err(error) => {
                     result = Err(error.into());
                     break;
                 }
-            },
-        };
+            };
+            let resolution = frame.resolution();
+            let bytes = match frame.source_frame_format() {
+                FrameFormat::MJPEG => frame.buffer().to_vec(),
+                _ => match frame.decode_image::<RgbFormat>() {
+                    Ok(image) => match encode_jpeg(&image, config.quality) {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            result = Err(error);
+                            break;
+                        }
+                    },
+                    Err(error) => {
+                        result = Err(error.into());
+                        break;
+                    }
+                },
+            };
 
-        sequence += 1;
-        sink(JpegFrame {
-            bytes,
-            width: resolution.width(),
-            height: resolution.height(),
-            sequence,
-        });
+            sequence += 1;
+            sink(JpegFrame {
+                bytes,
+                width: resolution.width(),
+                height: resolution.height(),
+                sequence,
+            });
+        }
+
+        // Always release the device, even when the loop failed.
+        let stopped = camera.stop_stream();
+        result.and_then(|()| stopped.map_err(Into::into))
     }
-
-    // Always release the device, even when the loop failed.
-    let stopped = camera.stop_stream();
-    result.and_then(|()| stopped.map_err(Into::into))
 }
 
 /// Build a filesystem-safe suffix from a camera identifier.
-pub fn sanitize_camera_identifier(identifier: &str) -> String {
+fn sanitize_camera_identifier(identifier: &str) -> String {
     let sanitized = identifier
         .chars()
         .map(|character| match character {
@@ -340,7 +361,7 @@ pub fn sanitize_camera_identifier(identifier: &str) -> String {
 }
 
 /// Identifier a camera is known by, matching the names LeRobot prints.
-pub fn camera_identifier(index: &CameraIndex) -> String {
+fn camera_identifier(index: &CameraIndex) -> String {
     #[cfg(target_os = "linux")]
     if let CameraIndex::Index(index) = index {
         return format!("/dev/video{index}");
@@ -366,13 +387,13 @@ fn probe_in_worker(info: CameraInfo) -> Result<ProbeResponse> {
     let response_path = workspace.path().join("response.json");
 
     write_json(&request_path, &info)?;
-    invoke_worker(
-        "probe",
-        &request_path,
-        &response_path,
-        CAMERA_PROBE_TIMEOUT,
-        None,
-    )?;
+    WorkerInvocation {
+        mode: "probe",
+        request_path: &request_path,
+        response_path: &response_path,
+        image_path: None,
+    }
+    .invoke(CAMERA_PROBE_TIMEOUT)?;
     read_json(&response_path)
 }
 
@@ -444,6 +465,13 @@ fn camera_open_index(info: &CameraInfo) -> CameraIndex {
 
 struct WorkerChild(Child);
 
+struct WorkerInvocation<'a> {
+    mode: &'a str,
+    request_path: &'a Path,
+    response_path: &'a Path,
+    image_path: Option<&'a Path>,
+}
+
 impl Drop for WorkerChild {
     fn drop(&mut self) {
         match self.0.try_wait() {
@@ -459,36 +487,32 @@ impl Drop for WorkerChild {
     }
 }
 
-fn invoke_worker(
-    mode: &str,
-    request_path: &Path,
-    response_path: &Path,
-    timeout: Duration,
-    image_path: Option<&Path>,
-) -> Result<()> {
-    let mut command = Command::new(env::current_exe()?);
-    command
-        .env(WORKER_MODE_ENV, mode)
-        .env(WORKER_REQUEST_ENV, request_path)
-        .env(WORKER_RESPONSE_ENV, response_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if let Some(image_path) = image_path {
-        command.env(WORKER_IMAGE_ENV, image_path);
-    }
-    let mut child = WorkerChild(command.spawn()?);
+impl WorkerInvocation<'_> {
+    fn invoke(self, timeout: Duration) -> Result<()> {
+        let mut command = Command::new(env::current_exe()?);
+        command
+            .env(WORKER_MODE_ENV, self.mode)
+            .env(WORKER_REQUEST_ENV, self.request_path)
+            .env(WORKER_RESPONSE_ENV, self.response_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(image_path) = self.image_path {
+            command.env(WORKER_IMAGE_ENV, image_path);
+        }
+        let mut child = WorkerChild(command.spawn()?);
 
-    let status = wait_for_child(&mut child.0, timeout)?;
-    if status.success() {
-        return Ok(());
-    }
+        let status = wait_for_child(&mut child.0, timeout)?;
+        if status.success() {
+            return Ok(());
+        }
 
-    let detail = fs::read_to_string(response_path)
-        .ok()
-        .filter(|message| !message.trim().is_empty())
-        .unwrap_or_else(|| format!("camera worker exited with {status}"));
-    Err(detail.into())
+        let detail = fs::read_to_string(self.response_path)
+            .ok()
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or_else(|| format!("camera worker exited with {status}"));
+        Err(detail.into())
+    }
 }
 
 fn wait_for_child(child: &mut Child, timeout: Duration) -> Result<ExitStatus> {

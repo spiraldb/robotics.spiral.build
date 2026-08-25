@@ -12,29 +12,100 @@ pub const MAX_JOINTS_PER_ARM: usize = 64;
 pub const MAX_EPISODE_DURATION_SECONDS: f64 = 7.0 * 24.0 * 60.0 * 60.0;
 
 pub struct EpisodeArmValidation<'a> {
-    pub id: &'a str,
-    pub joints: &'a [String],
+    id: &'a str,
+    joints: &'a [String],
+}
+
+impl<'a> EpisodeArmValidation<'a> {
+    pub const fn new(id: &'a str, joints: &'a [String]) -> Self {
+        Self { id, joints }
+    }
 }
 
 pub struct EpisodeStartValidation<'a> {
-    pub id: &'a str,
-    pub dataset_id: &'a str,
-    pub sample_hz: f64,
-    pub source: &'a str,
-    pub note: Option<&'a str>,
-    pub arms: &'a [EpisodeArmValidation<'a>],
+    id: &'a str,
+    dataset_id: &'a str,
+    sample_hz: f64,
+    source: &'a str,
+    note: Option<&'a str>,
+    arms: &'a [EpisodeArmValidation<'a>],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RecordingGapValidation {
-    pub after_seconds: f64,
-    pub duration_seconds: f64,
+    after_seconds: f64,
+    duration_seconds: f64,
+}
+
+impl RecordingGapValidation {
+    pub const fn new(after_seconds: f64, duration_seconds: f64) -> Self {
+        Self {
+            after_seconds,
+            duration_seconds,
+        }
+    }
 }
 
 pub struct EpisodeCompletionValidation<'a> {
-    pub frames: u64,
-    pub duration_seconds: f64,
-    pub recording_gaps: &'a [RecordingGapValidation],
-    pub max_follow_error_degrees: Option<f64>,
+    frames: u64,
+    duration_seconds: f64,
+    recording_gaps: &'a [RecordingGapValidation],
+    max_follow_error_degrees: Option<f64>,
+}
+
+impl<'a> EpisodeStartValidation<'a> {
+    pub const fn new(id: &'a str, dataset_id: &'a str, sample_hz: f64) -> Self {
+        Self {
+            id,
+            dataset_id,
+            sample_hz,
+            source: "",
+            note: None,
+            arms: &[],
+        }
+    }
+
+    pub const fn with_source(mut self, source: &'a str) -> Self {
+        self.source = source;
+        self
+    }
+
+    pub const fn with_note(mut self, note: Option<&'a str>) -> Self {
+        self.note = note;
+        self
+    }
+
+    pub const fn with_arms(mut self, arms: &'a [EpisodeArmValidation<'a>]) -> Self {
+        self.arms = arms;
+        self
+    }
+}
+
+impl<'a> EpisodeCompletionValidation<'a> {
+    pub const fn new(frames: u64, duration_seconds: f64) -> Self {
+        Self {
+            frames,
+            duration_seconds,
+            recording_gaps: &[],
+            max_follow_error_degrees: None,
+        }
+    }
+
+    pub const fn with_recording_gaps(
+        mut self,
+        recording_gaps: &'a [RecordingGapValidation],
+    ) -> Self {
+        self.recording_gaps = recording_gaps;
+        self
+    }
+
+    pub const fn with_max_follow_error_degrees(
+        mut self,
+        max_follow_error_degrees: Option<f64>,
+    ) -> Self {
+        self.max_follow_error_degrees = max_follow_error_degrees;
+        self
+    }
 }
 
 impl EpisodeStartValidation<'_> {
@@ -51,7 +122,7 @@ impl EpisodeStartValidation<'_> {
                 "episode id must use 1–96 letters, numbers, '-' or '_' characters".to_owned(),
             );
         }
-        DatasetId::parse(start.dataset_id).map_err(|error| error.to_string())?;
+        DatasetId::try_from(start.dataset_id).map_err(|error| error.to_string())?;
         if !start.sample_hz.is_finite()
             || start.sample_hz <= 0.0
             || start.sample_hz > MAX_EPISODE_SAMPLE_HZ
@@ -138,13 +209,13 @@ pub trait ArmLayout {
 
 /// Borrowed values for one episode sample.
 pub struct EpisodeFrameValidation<'a> {
-    pub seconds: f64,
-    pub normalized: &'a [Vec<Option<f64>>],
-    pub raw: &'a [Vec<i64>],
-    pub follow_error_degrees: Option<f64>,
-    pub velocity: Option<&'a [Vec<Option<f64>>]>,
-    pub effort: Option<&'a [Vec<Option<f64>>]>,
-    pub action: &'a [Option<Vec<Option<f64>>>],
+    seconds: f64,
+    normalized: &'a [Vec<Option<f64>>],
+    raw: &'a [Vec<i64>],
+    follow_error_degrees: Option<f64>,
+    velocity: Option<&'a [Vec<Option<f64>>]>,
+    effort: Option<&'a [Vec<Option<f64>>]>,
+    action: &'a [Option<Vec<Option<f64>>>],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -195,35 +266,40 @@ impl fmt::Display for FrameInvariantError {
 
 impl std::error::Error for FrameInvariantError {}
 
-fn validate_nested_shape<T, A: ArmLayout>(
+struct NestedFieldShape<'a, A> {
     field: &'static str,
-    values: &[Vec<T>],
-    arms: &[A],
+    arms: &'a [A],
     absent_when_empty: bool,
-) -> Result<(), FrameInvariantError> {
-    // Legacy local takes represent a wholly unavailable raw/action field as an
-    // empty outer list. Whole-field absence is valid; partial presence is not.
-    if absent_when_empty && values.is_empty() {
-        return Ok(());
-    }
-    if values.len() != arms.len() {
-        return Err(FrameInvariantError::Shape(format!(
-            "{field} has {} arm rows; the header declares {}",
-            values.len(),
-            arms.len()
-        )));
-    }
-    for (arm_index, (values, arm)) in values.iter().zip(arms).enumerate() {
-        if values.len() != arm.joint_count() {
+}
+
+impl<A: ArmLayout> NestedFieldShape<'_, A> {
+    fn validate<T>(&self, values: &[Vec<T>]) -> Result<(), FrameInvariantError> {
+        // Legacy local takes represent a wholly unavailable raw/action field as an
+        // empty outer list. Whole-field absence is valid; partial presence is not.
+        if self.absent_when_empty && values.is_empty() {
+            return Ok(());
+        }
+        if values.len() != self.arms.len() {
             return Err(FrameInvariantError::Shape(format!(
-                "{field} arm {arm_index} ({:?}) has {} joint values; the header declares {}",
-                arm.id(),
+                "{} has {} arm rows; the header declares {}",
+                self.field,
                 values.len(),
-                arm.joint_count()
+                self.arms.len()
             )));
         }
+        for (arm_index, (values, arm)) in values.iter().zip(self.arms).enumerate() {
+            if values.len() != arm.joint_count() {
+                return Err(FrameInvariantError::Shape(format!(
+                    "{} arm {arm_index} ({:?}) has {} joint values; the header declares {}",
+                    self.field,
+                    arm.id(),
+                    values.len(),
+                    arm.joint_count()
+                )));
+            }
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn validate_optional_numbers(
@@ -280,7 +356,43 @@ fn validate_normalized_row(
 /// actions use the exact closed interval `[-1, 1]`: producers must clamp at
 /// their own boundary rather than relying on a tolerance that would make an
 /// invalid persisted coordinate part of the episode domain.
-impl EpisodeFrameValidation<'_> {
+impl<'a> EpisodeFrameValidation<'a> {
+    pub const fn new(
+        seconds: f64,
+        normalized: &'a [Vec<Option<f64>>],
+        raw: &'a [Vec<i64>],
+    ) -> Self {
+        Self {
+            seconds,
+            normalized,
+            raw,
+            follow_error_degrees: None,
+            velocity: None,
+            effort: None,
+            action: &[],
+        }
+    }
+
+    pub const fn with_follow_error_degrees(mut self, follow_error_degrees: Option<f64>) -> Self {
+        self.follow_error_degrees = follow_error_degrees;
+        self
+    }
+
+    pub const fn with_velocity(mut self, velocity: Option<&'a [Vec<Option<f64>>]>) -> Self {
+        self.velocity = velocity;
+        self
+    }
+
+    pub const fn with_effort(mut self, effort: Option<&'a [Vec<Option<f64>>]>) -> Self {
+        self.effort = effort;
+        self
+    }
+
+    pub const fn with_action(mut self, action: &'a [Option<Vec<Option<f64>>>]) -> Self {
+        self.action = action;
+        self
+    }
+
     pub fn validate<A: ArmLayout>(
         self,
         arms: &[A],
@@ -299,9 +411,19 @@ impl EpisodeFrameValidation<'_> {
             });
         }
 
-        validate_nested_shape("normalized positions", frame.normalized, arms, false)?;
+        NestedFieldShape {
+            field: "normalized positions",
+            arms,
+            absent_when_empty: false,
+        }
+        .validate(frame.normalized)?;
         validate_normalized_numbers("normalized positions", frame.normalized)?;
-        validate_nested_shape("raw positions", frame.raw, arms, true)?;
+        NestedFieldShape {
+            field: "raw positions",
+            arms,
+            absent_when_empty: true,
+        }
+        .validate(frame.raw)?;
 
         if frame
             .follow_error_degrees
@@ -313,7 +435,12 @@ impl EpisodeFrameValidation<'_> {
         }
         for (field, values) in [("velocity", frame.velocity), ("effort", frame.effort)] {
             if let Some(values) = values {
-                validate_nested_shape(field, values, arms, false)?;
+                NestedFieldShape {
+                    field,
+                    arms,
+                    absent_when_empty: false,
+                }
+                .validate(values)?;
                 validate_optional_numbers(field, values)?;
             }
         }
@@ -349,9 +476,9 @@ impl EpisodeFrameValidation<'_> {
 mod tests {
     use super::*;
 
-    struct Arm(&'static str, usize);
+    struct TestArmLayout(&'static str, usize);
 
-    impl ArmLayout for Arm {
+    impl ArmLayout for TestArmLayout {
         fn id(&self) -> &str {
             self.0
         }
@@ -365,20 +492,12 @@ mod tests {
         normalized: &'a [Vec<Option<f64>>],
         raw: &'a [Vec<i64>],
     ) -> EpisodeFrameValidation<'a> {
-        EpisodeFrameValidation {
-            seconds: 1.0,
-            normalized,
-            raw,
-            follow_error_degrees: None,
-            velocity: None,
-            effort: None,
-            action: &[],
-        }
+        EpisodeFrameValidation::new(1.0, normalized, raw)
     }
 
     #[test]
     fn frame_shape_and_time_are_entity_invariants() {
-        let arms = [Arm("arm", 2)];
+        let arms = [TestArmLayout("arm", 2)];
         let normalized = [vec![Some(0.0), Some(0.2)]];
         let raw = [vec![1, 2]];
         assert!(
@@ -393,8 +512,7 @@ mod tests {
             Err(FrameInvariantError::Shape(_))
         ));
 
-        let mut backwards = valid_frame(&normalized, &raw);
-        backwards.seconds = 0.5;
+        let backwards = EpisodeFrameValidation::new(0.5, &normalized, &raw);
         assert!(matches!(
             backwards.validate(&arms, Some(1.0)),
             Err(FrameInvariantError::TimestampMovedBackwards { .. })
@@ -404,79 +522,48 @@ mod tests {
     #[test]
     fn episode_start_and_completion_are_domain_invariants() {
         let joints = vec!["shoulder".to_owned(), "elbow".to_owned()];
-        let arms = [EpisodeArmValidation {
-            id: "follower",
-            joints: &joints,
-        }];
+        let arms = [EpisodeArmValidation::new("follower", &joints)];
         assert!(
-            EpisodeStartValidation {
-                id: "episode_000001",
-                dataset_id: "pick_place",
-                sample_hz: 60.0,
-                source: "Teleoperation",
-                note: None,
-                arms: &arms,
-            }
-            .validate()
-            .is_ok()
+            EpisodeStartValidation::new("episode_000001", "pick_place", 60.0)
+                .with_source("Teleoperation")
+                .with_arms(&arms)
+                .validate()
+                .is_ok()
         );
         let duplicate = vec!["shoulder".to_owned(), "shoulder".to_owned()];
+        let duplicate_arms = [EpisodeArmValidation::new("follower", &duplicate)];
         assert!(
-            EpisodeStartValidation {
-                id: "episode_000001",
-                dataset_id: "pick_place",
-                sample_hz: 60.0,
-                source: "Teleoperation",
-                note: None,
-                arms: &[EpisodeArmValidation {
-                    id: "follower",
-                    joints: &duplicate,
-                }],
-            }
-            .validate()
-            .is_err()
+            EpisodeStartValidation::new("episode_000001", "pick_place", 60.0)
+                .with_source("Teleoperation")
+                .with_arms(&duplicate_arms)
+                .validate()
+                .is_err()
+        );
+        let valid_gaps = [RecordingGapValidation::new(0.5, 0.1)];
+        assert!(
+            EpisodeCompletionValidation::new(1, 1.0)
+                .with_recording_gaps(&valid_gaps)
+                .with_max_follow_error_degrees(Some(2.0))
+                .validate()
+                .is_ok()
         );
         assert!(
-            EpisodeCompletionValidation {
-                frames: 1,
-                duration_seconds: 1.0,
-                recording_gaps: &[RecordingGapValidation {
-                    after_seconds: 0.5,
-                    duration_seconds: 0.1,
-                }],
-                max_follow_error_degrees: Some(2.0),
-            }
-            .validate()
-            .is_ok()
+            EpisodeCompletionValidation::new(MAX_EPISODE_FRAMES + 1, 1.0)
+                .validate()
+                .is_err()
         );
+        let invalid_gaps = [RecordingGapValidation::new(1.1, 0.1)];
         assert!(
-            EpisodeCompletionValidation {
-                frames: MAX_EPISODE_FRAMES + 1,
-                duration_seconds: 1.0,
-                recording_gaps: &[],
-                max_follow_error_degrees: None,
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            EpisodeCompletionValidation {
-                frames: 1,
-                duration_seconds: 1.0,
-                recording_gaps: &[RecordingGapValidation {
-                    after_seconds: 1.1,
-                    duration_seconds: 0.1,
-                }],
-                max_follow_error_degrees: None,
-            }
-            .validate()
-            .is_err()
+            EpisodeCompletionValidation::new(1, 1.0)
+                .with_recording_gaps(&invalid_gaps)
+                .validate()
+                .is_err()
         );
     }
 
     #[test]
     fn normalized_positions_accept_the_exact_closed_interval() {
-        let arms = [Arm("arm", 2)];
+        let arms = [TestArmLayout("arm", 2)];
         let normalized = [vec![Some(-1.0), Some(1.0)]];
         let raw = [vec![1, 2]];
 
@@ -485,7 +572,7 @@ mod tests {
 
     #[test]
     fn normalized_positions_report_the_out_of_range_coordinate() {
-        let arms = [Arm("first", 1), Arm("second", 2)];
+        let arms = [TestArmLayout("first", 1), TestArmLayout("second", 2)];
         let normalized = [vec![Some(0.0)], vec![Some(0.5), Some(1.0 + f64::EPSILON)]];
         let raw = [vec![1], vec![2, 3]];
 
@@ -502,15 +589,14 @@ mod tests {
 
     #[test]
     fn actions_report_the_out_of_range_coordinate() {
-        let arms = [Arm("first", 1), Arm("second", 2)];
+        let arms = [TestArmLayout("first", 1), TestArmLayout("second", 2)];
         let normalized = [vec![Some(0.0)], vec![Some(-1.0), Some(1.0)]];
         let raw = [vec![1], vec![2, 3]];
         let action = [
             Some(vec![Some(0.0)]),
             Some(vec![Some(-1.0 - f64::EPSILON), Some(0.5)]),
         ];
-        let mut frame = valid_frame(&normalized, &raw);
-        frame.action = &action;
+        let frame = valid_frame(&normalized, &raw).with_action(&action);
 
         assert_eq!(
             frame.validate(&arms, None),

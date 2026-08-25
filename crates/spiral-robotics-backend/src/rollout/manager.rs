@@ -8,12 +8,14 @@ use futures_util::FutureExt as _;
 use image::imageops::FilterType;
 use safetensors::SafeTensors;
 use serde::Deserialize;
-use spiral_robotics_api::api::{
-    ModeSelection, ModeStatus, RobotTelemetry, RolloutMetrics as ContractRolloutMetrics,
-    RolloutPhase as ContractRolloutPhase, RolloutSnapshot as ContractRolloutSnapshot,
-    StartRolloutRequest,
+use spiral_robotics_api::robots::{ModeSelection, ModeStatus, RobotTelemetry};
+use spiral_robotics_api::rollout::{
+    RolloutMetrics as ContractRolloutMetrics, RolloutPhase as ContractRolloutPhase,
+    RolloutSnapshot as ContractRolloutSnapshot, StartRolloutRequest,
 };
-use spiral_robotics_inference::{ActionChunk, ImageFrame, InferenceInput, Policy, PolicyLoader};
+use spiral_robotics_inference::{
+    ActionChunk, ImageDimensions, ImageFrame, InferenceInput, Policy, PolicyLoader,
+};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
@@ -33,7 +35,7 @@ use crate::rollout::service::{
     CompletionReason, ControlDecision, ExecutionOutcome, RolloutCoordinator, RolloutEventPort,
     RolloutMetrics, RolloutPhase, RolloutRequest, RolloutSnapshot,
 };
-use spiral_robotics_hardware::{HardwareHandle, HardwareState};
+use spiral_robotics_hardware::{HardwareHandle, HardwareState, PolicyGoals};
 use spiral_robotics_storage::checkpoints::{CheckpointArtifact, CheckpointKey, CheckpointStore};
 use spiral_robotics_storage::manager::StorageManager;
 use spiral_robotics_storage::settings::StudioPreferencesStore;
@@ -50,8 +52,6 @@ const ACTION_BLEND_NEW_WEIGHT: f32 = 0.7;
 /// last processed observation is below one. For an SO-101 those raw units are
 /// degrees for the five arm joints and a 0..100 position for the gripper.
 const OBSERVATION_SIMILARITY_TOLERANCE: f32 = 1.0;
-static SESSION_IDS: StableIdSequence = StableIdSequence::new("rollout", 1);
-
 #[derive(Debug, Deserialize)]
 struct ArtifactManifest {
     format: String,
@@ -82,27 +82,19 @@ struct ActiveRollout {
     task: JoinHandle<()>,
 }
 
-fn publish_active_rollout(
-    active: &mut Option<ActiveRollout>,
-    session: String,
-    stop: watch::Sender<bool>,
-    task: JoinHandle<()>,
-) {
-    debug_assert!(active.is_none(), "rollout admission is exclusive");
-    *active = Some(ActiveRollout {
-        session,
-        stop,
-        task,
-    });
-}
+impl ActiveRollout {
+    fn new(session: String, stop: watch::Sender<bool>, task: JoinHandle<()>) -> Self {
+        Self {
+            session,
+            stop,
+            task,
+        }
+    }
 
-fn take_active_rollout(active: &Mutex<Option<ActiveRollout>>) -> Option<ActiveRollout> {
-    lock(active).take()
-}
-
-async fn stop_and_join_active(active: ActiveRollout) {
-    let _ = active.stop.send(true);
-    let _ = active.task.await;
+    async fn stop_and_join(self) {
+        let _ = self.stop.send(true);
+        let _ = self.task.await;
+    }
 }
 
 struct WatchRolloutEvents {
@@ -307,27 +299,53 @@ fn action_refill_threshold(chunk_steps: usize) -> usize {
     chunk_steps / 2
 }
 
-pub(crate) struct RolloutManager {
-    checkpoints: Arc<dyn CheckpointStore>,
+pub(crate) struct RolloutHardwareResources {
     hardware: Arc<HardwareHandle>,
     cameras: Arc<CameraManager>,
     workspace: Arc<RobotWorkspace>,
-    preferences: Arc<StudioPreferencesStore>,
-    clock: Arc<dyn Clock>,
+}
+
+impl RolloutHardwareResources {
+    pub(crate) fn new(
+        hardware: Arc<HardwareHandle>,
+        cameras: Arc<CameraManager>,
+        workspace: Arc<RobotWorkspace>,
+    ) -> Self {
+        Self {
+            hardware,
+            cameras,
+            workspace,
+        }
+    }
+}
+
+struct RolloutLifecycle {
     state: watch::Sender<ContractRolloutSnapshot>,
-    storage: Arc<StorageManager>,
     coordinator: Mutex<RolloutCoordinator>,
     active: Mutex<Option<ActiveRollout>>,
+    session_ids: StableIdSequence,
+}
+
+impl RolloutLifecycle {
+    fn take_active(&self) -> Option<ActiveRollout> {
+        lock(&self.active).take()
+    }
+}
+
+pub(crate) struct RolloutManager {
+    storage: Arc<StorageManager>,
+    hardware: RolloutHardwareResources,
+    preferences: Arc<StudioPreferencesStore>,
+    clock: Arc<dyn Clock>,
+    lifecycle: RolloutLifecycle,
 }
 
 impl RolloutManager {
     pub(crate) fn new(
         storage: Arc<StorageManager>,
-        hardware: Arc<HardwareHandle>,
-        cameras: Arc<CameraManager>,
-        workspace: Arc<RobotWorkspace>,
+        hardware: RolloutHardwareResources,
         preferences: Arc<StudioPreferencesStore>,
-    ) -> Result<Arc<Self>, String> {
+    ) -> Arc<Self> {
         // Persisted state is hydrated after the listener starts. Constructing
         // the manager must not put Spiral I/O on the server's critical path.
         let initial = ContractRolloutSnapshot::default();
@@ -354,46 +372,49 @@ impl RolloutManager {
             state: state.clone(),
             persistence,
         });
-        Ok(Arc::new(Self {
-            checkpoints: storage.clone(),
+        Arc::new(Self {
+            storage,
             hardware,
-            cameras,
-            workspace,
             preferences,
             clock: Arc::new(SystemClock),
-            state,
-            storage,
-            coordinator: Mutex::new(RolloutCoordinator::new(events)),
-            active: Mutex::new(None),
-        }))
+            lifecycle: RolloutLifecycle {
+                state,
+                coordinator: Mutex::new(RolloutCoordinator::new(events)),
+                active: Mutex::new(None),
+                session_ids: StableIdSequence::new("rollout", 1),
+            },
+        })
     }
 
     pub(crate) fn reload_from_storage(&self) -> Result<(), String> {
-        self.state.send_replace(restored_rollout_snapshot(
+        self.lifecycle.state.send_replace(restored_rollout_snapshot(
             self.storage.load_rollout_snapshot()?,
         ));
         Ok(())
     }
 
     pub(crate) fn snapshot(&self) -> ContractRolloutSnapshot {
-        self.state.borrow().clone()
+        self.lifecycle.state.borrow().clone()
     }
 
     pub(crate) fn subscribe(&self) -> watch::Receiver<ContractRolloutSnapshot> {
-        self.state.subscribe()
+        self.lifecycle.state.subscribe()
     }
 
     pub(crate) async fn start(
         self: &Arc<Self>,
         request: StartRolloutRequest,
     ) -> Result<ContractRolloutSnapshot, String> {
-        let mut active = lock(&self.active);
-        let identity = SESSION_IDS.next(self.clock.as_ref());
-        let session = identity.value;
+        let mut active = lock(&self.lifecycle.active);
+        let (session, created_ms) = self
+            .lifecycle
+            .session_ids
+            .next(self.clock.as_ref())
+            .into_parts();
         let (stop, stop_receiver) = watch::channel(false);
-        lock(&self.coordinator).admit(
+        lock(&self.lifecycle.coordinator).admit(
             session.clone(),
-            identity.created_ms,
+            created_ms,
             rollout_request(&request),
         )?;
         // Spawn and publish the task handle while holding the same mutex used
@@ -407,16 +428,17 @@ impl RolloutManager {
                 .run_and_finish(task_session, request, stop_receiver)
                 .await;
         });
-        publish_active_rollout(&mut active, session, stop, task);
+        debug_assert!(active.is_none(), "rollout admission is exclusive");
+        *active = Some(ActiveRollout::new(session, stop, task));
         Ok(self.snapshot())
     }
 
     pub(crate) async fn stop(&self) -> Result<(), String> {
-        let active = lock(&self.active);
+        let active = lock(&self.lifecycle.active);
         let Some(active) = active.as_ref() else {
             return Err("no policy rollout is active".to_owned());
         };
-        let signal = lock(&self.coordinator).request_stop()?;
+        let signal = lock(&self.lifecycle.coordinator).request_stop()?;
         debug_assert_eq!(signal.session, active.session);
         active
             .stop
@@ -426,13 +448,13 @@ impl RolloutManager {
 
     pub(crate) async fn shutdown(&self) {
         let task = {
-            let Some(active) = take_active_rollout(&self.active) else {
+            let Some(active) = self.lifecycle.take_active() else {
                 return;
             };
-            let _ = lock(&self.coordinator).request_stop();
+            let _ = lock(&self.lifecycle.coordinator).request_stop();
             active
         };
-        stop_and_join_active(task).await;
+        task.stop_and_join().await;
     }
 
     async fn run_and_finish(
@@ -449,16 +471,18 @@ impl RolloutManager {
             Ok(Err(error)) => ExecutionOutcome::Failed(error),
             Err(_) => ExecutionOutcome::Failed("policy executor panicked unexpectedly".to_owned()),
         };
-        let ticket = lock(&self.coordinator).begin_cleanup(&session, outcome);
+        let ticket = lock(&self.lifecycle.coordinator).begin_cleanup(&session, outcome);
         // Hardware cleanup is unconditional. Even an internal lifecycle bug
         // must not strand the arm under policy ownership.
-        let cleanup = self.hardware.stop_policy_session(&session).await;
-        let mut active = lock(&self.active);
+        let cleanup = self.hardware.hardware.stop_policy_session(&session).await;
+        let mut active = lock(&self.lifecycle.active);
         match ticket {
             Ok(ticket) => {
-                if let Err(error) =
-                    lock(&self.coordinator).finish_cleanup(ticket, self.clock.now_ms(), cleanup)
-                {
+                if let Err(error) = lock(&self.lifecycle.coordinator).finish_cleanup(
+                    ticket,
+                    self.clock.now_ms(),
+                    cleanup,
+                ) {
                     tracing::error!(session, "rollout cleanup could not be finalized: {error}");
                 }
             }
@@ -480,9 +504,9 @@ impl RolloutManager {
         request: &StartRolloutRequest,
         mut stop: watch::Receiver<bool>,
     ) -> Result<ExecutionOutcome, String> {
-        let artifact = load_selected_checkpoint(self.checkpoints.as_ref(), request).await;
+        let artifact = load_selected_checkpoint(self.storage.as_ref(), request).await;
         if *stop.borrow() {
-            return lock(&self.coordinator).stopped_outcome(session);
+            return lock(&self.lifecycle.coordinator).stopped_outcome(session);
         }
         let artifact = artifact?;
         let manifest = parse_manifest(&artifact)?;
@@ -498,8 +522,9 @@ impl RolloutManager {
             .map_err(|error| format!("policy loader stopped unexpectedly: {error}"))?
             .map_err(|error| format!("checkpoint could not be loaded remotely: {error}"))?;
         let specification = policy.specification().clone();
-        let hardware_state = self.hardware.state();
+        let hardware_state = self.hardware.hardware.state();
         let record = self
+            .hardware
             .workspace
             .get(&request.robot)
             .map_err(|error| error.to_string())?;
@@ -523,14 +548,14 @@ impl RolloutManager {
                 supported_schema_version: spiral_robotics_storage::schema::SCHEMA_VERSION,
             },
             &PolicyModelContract {
-                state_dimensions: specification.state_dimensions,
-                action_dimensions: specification.action_dimensions,
-                action_chunk_size: specification.action_chunk_size,
-                recommended_action_steps: specification.recommended_action_steps,
+                state_dimensions: specification.state_dimensions(),
+                action_dimensions: specification.action_dimensions(),
+                action_chunk_size: specification.action_chunk_size(),
+                recommended_action_steps: specification.recommended_action_steps(),
                 image_streams: specification
-                    .image_inputs
+                    .image_inputs()
                     .iter()
-                    .map(|image| image.name.clone())
+                    .map(|image| image.name().to_owned())
                     .collect(),
             },
             &TargetRobotContract {
@@ -559,18 +584,18 @@ impl RolloutManager {
         let period = contract.sample_period;
         let sample_hz = contract.sample_hz;
         let reobservation_steps = specification
-            .action_chunk_size
-            .saturating_sub(action_refill_threshold(specification.action_chunk_size));
+            .action_chunk_size()
+            .saturating_sub(action_refill_threshold(specification.action_chunk_size()));
         let mut cameras = Vec::with_capacity(contract.camera_bindings.len());
         for binding in contract.camera_bindings {
             cameras.push(CameraInput {
                 name: binding.stream,
-                receiver: self.cameras.subscribe(&binding.camera_id)?,
+                receiver: self.hardware.cameras.subscribe(&binding.camera_id)?,
             });
         }
 
-        if !lock(&self.coordinator).warming_up(session)? {
-            return lock(&self.coordinator).stopped_outcome(session);
+        if !lock(&self.lifecycle.coordinator).warming_up(session)? {
+            return lock(&self.lifecycle.coordinator).stopped_outcome(session);
         }
         let (policy, warmup) = tokio::task::spawn_blocking(move || {
             let mut policy = policy;
@@ -580,32 +605,33 @@ impl RolloutManager {
         .await
         .map_err(|error| format!("policy warm-up stopped unexpectedly: {error}"))?;
         let warmup = warmup.map_err(|error| format!("policy setup failed: {error}"))?;
-        lock(&self.coordinator).record_warmup(
+        lock(&self.lifecycle.coordinator).record_warmup(
             session,
-            duration_ms(warmup.total),
-            duration_ms(warmup.model),
+            duration_ms(warmup.total()),
+            duration_ms(warmup.model()),
         )?;
         wait_for_camera_frames(&mut cameras, &mut stop).await?;
         if *stop.borrow() {
-            return lock(&self.coordinator).stopped_outcome(session);
+            return lock(&self.lifecycle.coordinator).stopped_outcome(session);
         }
-        if !lock(&self.coordinator).awaiting_control(session)? {
-            return lock(&self.coordinator).stopped_outcome(session);
+        if !lock(&self.lifecycle.coordinator).awaiting_control(session)? {
+            return lock(&self.lifecycle.coordinator).stopped_outcome(session);
         }
 
         self.hardware
+            .hardware
             .set_mode(ModeSelection::Policy {
                 robot: request.robot.clone(),
                 session: session.to_owned(),
             })
             .await?;
-        let mut hardware_updates = self.hardware.subscribe();
+        let mut hardware_updates = self.hardware.hardware.subscribe();
         match wait_for_policy_admission(&mut hardware_updates, &mut stop, &request.robot, session)
             .await?
         {
             PolicyAdmission::Admitted => {}
             PolicyAdmission::Stopped => {
-                return lock(&self.coordinator).stopped_outcome(session);
+                return lock(&self.lifecycle.coordinator).stopped_outcome(session);
             }
             PolicyAdmission::Replaced(mode) => {
                 if let Some(outcome) = self.classify_control(session, &mode)? {
@@ -614,15 +640,15 @@ impl RolloutManager {
                 return Err("policy admission ended without a control transition".to_owned());
             }
         }
-        if !lock(&self.coordinator).running(session, sample_hz, reobservation_steps)? {
-            return lock(&self.coordinator).stopped_outcome(session);
+        if !lock(&self.lifecycle.coordinator).running(session, sample_hz, reobservation_steps)? {
+            return lock(&self.lifecycle.coordinator).stopped_outcome(session);
         }
 
         // The first chunk is prepared after policy admission but before the
         // rollout clock starts. The follower holds its admitted pose during
         // this one-time fill; once actions start, every later inference runs
         // concurrently with dispatch from the current action queue.
-        let initial_hardware = self.hardware.state();
+        let initial_hardware = self.hardware.hardware.state();
         if let Some(outcome) = self.classify_control(session, &initial_hardware.mode)? {
             return Ok(outcome);
         }
@@ -635,7 +661,7 @@ impl RolloutManager {
             initial_state,
             initial_similarity_state,
             &cameras,
-            &specification.image_inputs,
+            specification.image_inputs(),
             0,
             Instant::now(),
         )?;
@@ -645,7 +671,7 @@ impl RolloutManager {
             tokio::select! {
                 changed = stop.changed() => {
                     if changed.is_err() || *stop.borrow() {
-                        return lock(&self.coordinator).stopped_outcome(session);
+                        return lock(&self.lifecycle.coordinator).stopped_outcome(session);
                     }
                 }
                 output = &mut initial_task => break output,
@@ -653,10 +679,10 @@ impl RolloutManager {
         };
         let (initial_policy, initial) = resolve_inference(initial_output)?;
         let initial_latency = completed_inference_age(&initial);
-        lock(&self.coordinator).record_inference(
+        lock(&self.lifecycle.coordinator).record_inference(
             session,
             duration_ms(initial_latency),
-            duration_ms(initial.chunk.stats.model),
+            duration_ms(initial.chunk.stats().model()),
         )?;
 
         let mut policy = Some(initial_policy);
@@ -683,7 +709,7 @@ impl RolloutManager {
             tokio::select! {
                 changed = stop.changed() => {
                     if changed.is_err() || *stop.borrow() {
-                        return lock(&self.coordinator).stopped_outcome(session);
+                        return lock(&self.lifecycle.coordinator).stopped_outcome(session);
                     }
                 }
                 _ = tokio::time::sleep_until(deadline) => {
@@ -694,7 +720,7 @@ impl RolloutManager {
                 _ = ticker.tick() => {}
             }
             let cycle_started = Instant::now();
-            let hardware = self.hardware.state();
+            let hardware = self.hardware.hardware.state();
             if hardware.telemetry.sequence != last_hardware_sequence {
                 last_hardware_sequence = hardware.telemetry.sequence;
                 hardware_changed_at = Instant::now();
@@ -718,10 +744,10 @@ impl RolloutManager {
                     .await;
                 let (returned_policy, completed) = resolve_inference(output)?;
                 let latency = completed_inference_age(&completed);
-                lock(&self.coordinator).record_inference(
+                lock(&self.lifecycle.coordinator).record_inference(
                     session,
                     duration_ms(latency),
-                    duration_ms(completed.chunk.stats.model),
+                    duration_ms(completed.chunk.stats().model()),
                 )?;
                 actions.merge(completed.requested_timestep, &completed.chunk)?;
                 must_go_when_empty = true;
@@ -746,7 +772,9 @@ impl RolloutManager {
                             if additional == 1 { "" } else { "s" }
                         )
                     };
-                    if lock(&self.coordinator).record_action_clamp_warning(session, warning)? {
+                    if lock(&self.lifecycle.coordinator)
+                        .record_action_clamp_warning(session, warning)?
+                    {
                         tracing::warn!(
                             joint = %clamp.joint,
                             index = clamp.index,
@@ -759,9 +787,14 @@ impl RolloutManager {
                 }
 
                 self.hardware
-                    .set_policy_goals(&request.robot, session, prepared.goals)
+                    .hardware
+                    .set_policy_goals(PolicyGoals::new(
+                        request.robot.clone(),
+                        session.to_owned(),
+                        prepared.goals,
+                    ))
                     .await?;
-                lock(&self.coordinator)
+                lock(&self.lifecycle.coordinator)
                     .record_command(session, cycle_started.elapsed() > period)?;
                 true
             } else {
@@ -776,7 +809,7 @@ impl RolloutManager {
             // observation while the remote policy worker is occupied.
             let must_go = actions.remaining() == 0 && must_go_when_empty;
             if must_go || (action_executed && actions.remaining() <= refill_threshold) {
-                let refreshed = self.hardware.state();
+                let refreshed = self.hardware.hardware.state();
                 if let Some(outcome) = self.classify_control(session, &refreshed.mode)? {
                     return Ok(outcome);
                 }
@@ -790,7 +823,7 @@ impl RolloutManager {
                     state,
                     similarity_state,
                     &cameras,
-                    &specification.image_inputs,
+                    specification.image_inputs(),
                     latest_action,
                     Instant::now(),
                 )?;
@@ -823,7 +856,11 @@ impl RolloutManager {
         mode: &ModeStatus,
     ) -> Result<Option<ExecutionOutcome>, String> {
         let owner = control_owner(&mode.selection);
-        match lock(&self.coordinator).observe_control(session, &owner, mode.error.as_deref())? {
+        match lock(&self.lifecycle.coordinator).observe_control(
+            session,
+            &owner,
+            mode.error.as_deref(),
+        )? {
             ControlDecision::Continue => Ok(None),
             ControlDecision::Finish(reason) => Ok(Some(ExecutionOutcome::Completed(reason))),
             ControlDecision::Fail(error) => Ok(Some(ExecutionOutcome::Failed(error))),
@@ -1150,10 +1187,11 @@ fn capture_inference_observation(
         .iter()
         .zip(specifications)
         .map(|(camera, specification)| {
-            if camera.name != specification.name {
+            if camera.name != specification.name() {
                 return Err(format!(
                     "policy camera order changed from {:?} to {:?}",
-                    camera.name, specification.name
+                    camera.name,
+                    specification.name()
                 ));
             }
             let frame = camera
@@ -1167,8 +1205,8 @@ fn capture_inference_observation(
             oldest_input_at = oldest_input_at.min(frame.captured_at);
             Ok(CapturedImage {
                 name: camera.name.clone(),
-                width: specification.width,
-                height: specification.height,
+                width: specification.width(),
+                height: specification.height(),
                 frame,
             })
         })
@@ -1204,14 +1242,17 @@ fn infer_observation(
     let decoded = decode_images(images)?;
     let views = decoded
         .iter()
-        .map(|image| ImageFrame::packed_rgb8(&image.name, image.width, image.height, &image.pixels))
+        .map(|image| {
+            ImageFrame::packed_rgb8(
+                &image.name,
+                ImageDimensions::new(image.width, image.height),
+                &image.pixels,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("preparing camera input: {error}"))?;
     let chunk = policy
-        .infer(InferenceInput {
-            state: &state,
-            images: &views,
-        })
+        .infer(InferenceInput::new(&state, &views))
         .map_err(|error| format!("policy inference failed: {error}"))?;
     Ok(CompletedInference {
         chunk,
@@ -1279,23 +1320,23 @@ fn duration_ms(duration: Duration) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactDataContract, ArtifactManifest, CameraInput, CompletedInference, INPUT_STALE_AFTER,
-        InferenceObservation, LatestObservationSlot, PolicyAdmission, TimedActionQueue,
-        action_refill_threshold, completed_inference_age, load_selected_checkpoint,
-        observations_similar, publish_active_rollout, require_fresh_cameras, resolve_inference,
-        spawn_inference, stop_and_join_active, take_active_rollout, validate_manifest,
-        wait_for_policy_admission,
+        ActiveRollout, ArtifactDataContract, ArtifactManifest, CameraInput, CompletedInference,
+        INPUT_STALE_AFTER, InferenceObservation, LatestObservationSlot, PolicyAdmission,
+        TimedActionQueue, action_refill_threshold, completed_inference_age,
+        load_selected_checkpoint, observations_similar, require_fresh_cameras, resolve_inference,
+        spawn_inference, validate_manifest, wait_for_policy_admission,
     };
     use crate::rollout::policy::{
         ACT_ARTIFACT_FORMAT, ACT_TENSOR_NAMESPACE, CameraBindingContract, PolicyDataContract,
         PolicyModelContract, TargetRobotContract, validate_rollout_contract,
     };
     use bytes::Bytes;
-    use spiral_robotics_api::api::{ModeSelection, ModeStatus, StartRolloutRequest};
+    use spiral_robotics_api::robots::{ModeSelection, ModeStatus};
+    use spiral_robotics_api::rollout::StartRolloutRequest;
     use spiral_robotics_hardware::HardwareState;
     use spiral_robotics_inference::{
-        ActionChunk, InferenceInput, InferenceStats, ModelIdentity, Policy, PolicyKind,
-        PolicySpecification,
+        ActionChunk, ActionChunkShape, ActionChunkSpecification, InferenceInput, InferenceStats,
+        ModelIdentity, ObservationSpecification, Policy, PolicyKind, PolicySpecification,
     };
     use spiral_robotics_storage::checkpoints::{
         CheckpointArtifact, CheckpointFuture, CheckpointKey, CheckpointStore,
@@ -1318,14 +1359,11 @@ mod tests {
         fn new(latency: Duration) -> Self {
             Self {
                 identity: ModelIdentity::local(),
-                specification: PolicySpecification {
-                    kind: PolicyKind::Act,
-                    state_dimensions: 1,
-                    image_inputs: Vec::new(),
-                    action_dimensions: 1,
-                    action_chunk_size: 100,
-                    recommended_action_steps: 20,
-                },
+                specification: PolicySpecification::new(
+                    PolicyKind::Act,
+                    ObservationSpecification::new(1, Vec::new()),
+                    ActionChunkSpecification::new(1, 100, 20),
+                ),
                 latency,
             }
         }
@@ -1350,14 +1388,14 @@ mod tests {
         ) -> spiral_robotics_inference::Result<ActionChunk> {
             std::thread::sleep(self.latency);
             ActionChunk::try_new(
-                vec![0.0; self.specification.action_chunk_size],
-                self.specification.action_chunk_size,
-                self.specification.action_dimensions,
-                InferenceStats {
-                    model: self.latency,
-                    total: self.latency,
-                    ..InferenceStats::default()
-                },
+                vec![0.0; self.specification.action_chunk_size()],
+                ActionChunkShape::try_new(
+                    self.specification.action_chunk_size(),
+                    self.specification.action_dimensions(),
+                )?,
+                InferenceStats::default()
+                    .with_model(self.latency)
+                    .with_total(self.latency),
             )
         }
     }
@@ -1366,8 +1404,7 @@ mod tests {
     fn async_action_queue_discards_stale_prefix_and_blends_overlap() {
         let initial = ActionChunk::try_new(
             (0..100).map(|step| step as f32).collect(),
-            100,
-            1,
+            ActionChunkShape::try_new(100, 1).unwrap(),
             InferenceStats::default(),
         )
         .unwrap();
@@ -1383,8 +1420,7 @@ mod tests {
         // plan and is blended; the tail beyond timestep 99 is appended.
         let incoming = ActionChunk::try_new(
             (0..100).map(|step| 2_000.0 + step as f32).collect(),
-            100,
-            1,
+            ActionChunkShape::try_new(100, 1).unwrap(),
             InferenceStats::default(),
         )
         .unwrap();
@@ -1400,8 +1436,12 @@ mod tests {
 
     #[test]
     fn async_action_queue_accepts_a_stale_chunk_as_empty_for_must_go_recovery() {
-        let chunk =
-            ActionChunk::try_new(vec![0.0; 100], 100, 1, InferenceStats::default()).unwrap();
+        let chunk = ActionChunk::try_new(
+            vec![0.0; 100],
+            ActionChunkShape::try_new(100, 1).unwrap(),
+            InferenceStats::default(),
+        )
+        .unwrap();
         let mut queue = TimedActionQueue::from_initial_chunk(&chunk).unwrap();
         for _ in 0..100 {
             queue.pop().unwrap();
@@ -1448,7 +1488,12 @@ mod tests {
     fn latency_metrics_include_sensor_age_before_model_execution() {
         let now = Instant::now();
         let inference = CompletedInference {
-            chunk: ActionChunk::try_new(vec![0.0; 100], 100, 1, InferenceStats::default()).unwrap(),
+            chunk: ActionChunk::try_new(
+                vec![0.0; 100],
+                ActionChunkShape::try_new(100, 1).unwrap(),
+                InferenceStats::default(),
+            )
+            .unwrap(),
             requested_timestep: 0,
             oldest_input_at: now - INPUT_STALE_AFTER - Duration::from_nanos(1),
         };
@@ -1470,8 +1515,12 @@ mod tests {
         let mut inference = spawn_inference(Box::new(SlowPolicy::new(latency)), observation);
         let mut ticker = tokio::time::interval(Duration::from_millis(10));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let initial =
-            ActionChunk::try_new(vec![0.0; 100], 100, 1, InferenceStats::default()).unwrap();
+        let initial = ActionChunk::try_new(
+            vec![0.0; 100],
+            ActionChunkShape::try_new(100, 1).unwrap(),
+            InferenceStats::default(),
+        )
+        .unwrap();
         let mut actions = TimedActionQueue::from_initial_chunk(&initial).unwrap();
         let mut commands = Vec::new();
 
@@ -1519,7 +1568,8 @@ mod tests {
                     stopped.changed().await.unwrap();
                     cleanup_finished.send(()).unwrap();
                 });
-                publish_active_rollout(&mut guard, "session-1".to_owned(), stop, task);
+                debug_assert!(guard.is_none());
+                *guard = Some(ActiveRollout::new("session-1".to_owned(), stop, task));
             }
         });
 
@@ -1530,8 +1580,8 @@ mod tests {
             let active = active.clone();
             move || {
                 shutdown_attempted.send(()).unwrap();
-                let active = take_active_rollout(&active).expect("published rollout");
-                runtime.block_on(stop_and_join_active(active));
+                let active = active.lock().unwrap().take().expect("published rollout");
+                runtime.block_on(active.stop_and_join());
                 shutdown_finished.send(()).unwrap();
             }
         });

@@ -14,14 +14,19 @@ use js_sys::Uint8Array;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use spiral_robotics_api::api::{ApiError, EpisodeSummary};
-pub(crate) use spiral_robotics_api::api::{
+use spiral_robotics_api::recording::EpisodeSummary;
+pub(crate) use spiral_robotics_api::recording::{
     EpisodeInspectionSnapshot, EpisodeVideoAssetMetadata as VideoAssetMetadata,
 };
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
-use spiral_robotics_api::api::{
-    RolloutSnapshot, StudioSnapshot, TelemetryFrame, TrainingSnapshot, TrainingUpdate,
-};
+use spiral_robotics_api::robots::TelemetryFrame;
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
+use spiral_robotics_api::rollout::RolloutSnapshot;
+use spiral_robotics_api::status::ApiError;
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
+use spiral_robotics_api::status::StudioSnapshot;
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
+use spiral_robotics_api::training::{TrainingSnapshot, TrainingUpdate};
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
 use spiral_robotics_api::workflow::{
     WorkflowAgentStateResponse, WorkflowStateResponse, WorkflowUpdate,

@@ -28,18 +28,28 @@ use bytes::{BufMut, Bytes, BytesMut};
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use spiral_robotics_api::api::{
-    ApiError, BackendReadiness, BackendReadinessState, CalibrationReapplyResponse, CameraStatus,
-    ConnectionStatus, ConnectionTestResponse, CreateRobotRequest, DataSettings,
+use spiral_robotics_api::recording::{
     EpisodeCatalogResponse, EpisodeInspectionArm, EpisodeInspectionSnapshot,
-    EpisodeOptionalFrameMatrix, EpisodeSummary, EpisodeVideoAssetMetadata, GoalRequest,
-    IdentifyPortRequest, IdentifyPortResponse, JudgeEpisodeRequest, ModeSelection, PortSettings,
-    RobotSummary, RolloutSnapshot, SerialPortSummary, SetRecordingPausedRequest,
-    SetReplayPausedRequest, SpiralQueryRequest, SpiralQueryResponse,
-    SpiralSettings as ContractSpiralSettings, StartRecordingRequest, StartReplayRequest,
-    StartRolloutRequest, StartSpiralReplayRequest, StartTrainingRequest, StopRecordingRequest,
-    StudioSnapshot, TrainingPolicy as ContractTrainingPolicy, TrainingRun, TrainingSnapshot,
-    UpdateDataSettingsRequest, UpdateRobotRequest, VideoSettings, default_teleoperation_pair,
+    EpisodeOptionalFrameMatrix, EpisodeSummary, EpisodeVideoAssetMetadata, JudgeEpisodeRequest,
+    SetRecordingPausedRequest, SetReplayPausedRequest, StartRecordingRequest, StartReplayRequest,
+    StartSpiralReplayRequest, StopRecordingRequest,
+};
+use spiral_robotics_api::relations::{SpiralQueryRequest, SpiralQueryResponse};
+use spiral_robotics_api::robots::{
+    CalibrationReapplyResponse, CameraStatus, ConnectionStatus, CreateRobotRequest, GoalRequest,
+    IdentifyPortRequest, IdentifyPortResponse, ModeSelection, PortSettings, RobotSummary,
+    SerialPortSummary, UpdateRobotRequest,
+};
+use spiral_robotics_api::rollout::{RolloutSnapshot, StartRolloutRequest};
+use spiral_robotics_api::settings::{
+    ConnectionTestResponse, DataSettings, SpiralSettings as ContractSpiralSettings,
+    UpdateDataSettingsRequest, VideoSettings,
+};
+use spiral_robotics_api::status::{
+    ApiError, BackendReadiness, BackendReadinessState, StudioSnapshot,
+};
+use spiral_robotics_api::training::{
+    StartTrainingRequest, TrainingPolicy as ContractTrainingPolicy, TrainingRun, TrainingSnapshot,
 };
 use spiral_robotics_core::calibration::{Calibration, MotorSpec};
 use spiral_robotics_hardware::serial_ports::{available_ports, port_description, port_kind};
@@ -74,11 +84,12 @@ use crate::recording::{
 };
 use crate::robotics::cameras::{CameraManager, Frame};
 use crate::robotics::video::{
-    CameraCaptureSpec, VideoAsset, VideoAssetMetadata, VideoCapture, VideoEncoderSettings,
+    CameraCaptureSpec, VideoAsset, VideoAssetMetadata, VideoCapture, VideoCaptureRequest,
+    VideoEncoderSettings,
 };
 use crate::robots::calibration::{
-    self, CalibrationHistoryActivity, CalibrationHistoryPort, ReappliedPositions,
-    RobotCalibrationStore,
+    self, CalibrationHistoryActivity, CalibrationHistoryPort, CalibrationUpdate,
+    ReappliedPositions, RobotCalibrationStore,
 };
 use crate::robots::control::{self as robot_control, RobotControlCommand};
 use crate::robots::discovery::{
@@ -113,12 +124,15 @@ use crate::workflow::manager::WorkflowManager;
 use spiral_robotics_core::error::OperationError;
 use spiral_robotics_hardware::{HardwareHandle, HardwareState, RobotSpec};
 use spiral_robotics_storage::episodes::{
-    ArmCondition, EpisodeError, EpisodeInspection, EpisodeStore, EpisodeWriter, TimelineMetadata,
-    TimelineSample, TimelineTraces, build_arms,
+    ArmCondition, EpisodeError, EpisodeInspection, EpisodeRecordingRequest, EpisodeStore,
+    EpisodeWriter, ReplayRequest, TimelineMetadata, TimelineSample, TimelineTraces, build_arms,
 };
 use spiral_robotics_storage::manager::StorageManager;
 use spiral_robotics_storage::settings::BackendStateStore;
 use spiral_robotics_storage::settings::StudioPreferencesStore;
+use spiral_robotics_storage::video::{
+    VideoAssetKey, VideoByteRange, VideoSegment, VideoSize, VideoTiming,
+};
 
 /// Boundary marker separating parts of an MJPEG response.
 const MJPEG_BOUNDARY: &str = "spiral-robotics-frame";

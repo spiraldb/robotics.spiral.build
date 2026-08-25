@@ -12,12 +12,13 @@ use crate::components::interaction::{
 };
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_api::api::{
-    EpisodeImportSummary, EpisodeSummary, HuggingFaceDatasetFormat,
-    HuggingFaceDatasetImportSummary, HuggingFaceDatasetInspection, HuggingFaceDatasetRequest,
-    QueryColumn, SpiralQueryResponse,
-};
 use spiral_robotics_api::catalog::{ManagedTable as Table, QueryPreset};
+use spiral_robotics_api::datasets::{
+    EpisodeImportSummary, HuggingFaceDatasetFormat, HuggingFaceDatasetImportSummary,
+    HuggingFaceDatasetInspection, HuggingFaceDatasetRequest,
+};
+use spiral_robotics_api::recording::EpisodeSummary;
+use spiral_robotics_api::relations::{QueryColumn, SpiralQueryResponse};
 use spiral_robotics_api::workflow::WorkflowRelationsResponse;
 
 use crate::activities::data::state::data_controller;

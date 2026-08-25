@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use spiral_robotics_core::arm::JointAngles;
 
-use crate::scene::{Condition, Entity, EntityKey, Interaction, Scene};
+use crate::scene::{Condition, Entity, EntityKey, EntityShape, Interaction, Scene};
 use crate::urdf::{Geometry, Urdf};
 
 /// How far apart two arms stand on the bench, in metres.
@@ -40,35 +40,6 @@ const SO101_REST_POSE: RestPose = RestPose {
 /// arm straight up — while a calibration's zero is the middle of whatever
 /// travel the operator happened to sweep. This presentation mapping bridges
 /// those coordinate systems without making the domain depend on the renderer.
-pub fn so101_joint_positions(urdf: &Urdf, angles: &JointAngles) -> BTreeMap<String, f32> {
-    let rest = SO101_REST_POSE;
-    let open = urdf
-        .joint("gripper")
-        .and_then(|joint| joint.limit)
-        .map_or(0.0, |(_, upper)| upper);
-
-    [
-        ("shoulder_pan", angles.pan_deg.to_radians() as f32),
-        (
-            "shoulder_lift",
-            (rest.lift_deg + angles.lift_deg).to_radians() as f32,
-        ),
-        (
-            "elbow_flex",
-            (rest.elbow_deg + angles.elbow_deg).to_radians() as f32,
-        ),
-        (
-            "wrist_flex",
-            (rest.wrist_flex_deg + angles.wrist_flex_deg).to_radians() as f32,
-        ),
-        ("wrist_roll", angles.wrist_roll_deg.to_radians() as f32),
-        ("gripper", angles.gripper.clamp(0.0, 1.0) as f32 * open),
-    ]
-    .into_iter()
-    .map(|(name, position)| (name.to_owned(), position))
-    .collect()
-}
-
 /// One addressable physical thing on the bench.
 ///
 /// The studio maps these onto its own selection type. They are stated here
@@ -102,15 +73,68 @@ impl RobotEntity {
 /// position, and drawing it at the origin would state one it does not have.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CameraMount {
-    pub role: String,
-    /// Link the camera rides, or `None` for one fixed to the world.
-    pub frame: Option<String>,
-    /// Offset from that frame, in metres.
-    pub xyz: [f32; 3],
-    /// Roll, pitch, and yaw from that frame, in radians.
-    pub rpy: [f32; 3],
+    role: String,
+    attachment: CameraAttachment,
     /// Horizontal field of view, in degrees.
-    pub fov_degrees: f32,
+    field_of_view_degrees: f32,
+}
+
+impl CameraMount {
+    pub fn new(
+        role: impl Into<String>,
+        attachment: CameraAttachment,
+        field_of_view_degrees: f32,
+    ) -> Self {
+        Self {
+            role: role.into(),
+            attachment,
+            field_of_view_degrees,
+        }
+    }
+
+    /// Where this camera sits relative to its arm's base.
+    fn transform(&self, urdf: &Urdf, link_transforms: &[Mat4]) -> Option<Mat4> {
+        let attachment_frame = match &self.attachment.frame {
+            Some(link_name) => *link_transforms.get(urdf.link_index(link_name)?)?,
+            // A camera on the bench rather than on the arm still stands in
+            // the arm's own space, so a two-arm workspace does not put both
+            // top cameras in the same place.
+            None => Mat4::IDENTITY,
+        };
+        Some(
+            attachment_frame
+                * Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        self.attachment.roll_pitch_yaw[0],
+                        self.attachment.roll_pitch_yaw[1],
+                        self.attachment.roll_pitch_yaw[2],
+                    ),
+                    Vec3::from_array(self.attachment.translation),
+                ),
+        )
+    }
+}
+
+/// A camera's rigid attachment to an optional robot link.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CameraAttachment {
+    /// Link the camera rides, or `None` for one fixed to the world.
+    frame: Option<String>,
+    /// Offset from that frame, in metres.
+    translation: [f32; 3],
+    /// Roll, pitch, and yaw from that frame, in radians.
+    roll_pitch_yaw: [f32; 3],
+}
+
+impl CameraAttachment {
+    pub fn new(frame: Option<String>, translation: [f32; 3], roll_pitch_yaw: [f32; 3]) -> Self {
+        Self {
+            frame,
+            translation,
+            roll_pitch_yaw,
+        }
+    }
 }
 
 /// How far a drawn camera frustum reaches, in metres.
@@ -123,33 +147,90 @@ const FRUSTUM_DEPTH: f32 = 0.28;
 /// One arm, ready to be turned into shapes.
 #[derive(Clone, Debug)]
 pub struct ArmPlacement {
-    pub id: String,
-    pub accent: [f32; 4],
-    /// False for an arm that is configured but not currently reporting, which
-    /// is drawn at its rest pose and faded rather than left out — an empty
-    /// bench says less than a greyed-out one.
-    pub live: bool,
-    pub angles: JointAngles,
-    pub cameras: Vec<CameraMount>,
-    /// This arm's index and the number of arms, which is how it finds its spot.
-    pub index: usize,
-    pub count: usize,
+    id: String,
+    accent: [f32; 4],
+    pose: ArmPose,
+    cameras: Vec<CameraMount>,
+    bench_position: BenchPosition,
 }
 
 impl ArmPlacement {
+    /// Start an offline arm at rest in its assigned bench position.
+    pub fn new(id: impl Into<String>, accent: [f32; 4], bench_position: BenchPosition) -> Self {
+        Self {
+            id: id.into(),
+            accent,
+            pose: ArmPose::default(),
+            cameras: Vec::new(),
+            bench_position,
+        }
+    }
+
+    pub fn with_live_pose(mut self, angles: JointAngles) -> Self {
+        self.pose = ArmPose { live: true, angles };
+        self
+    }
+
+    pub fn with_cameras(mut self, cameras: Vec<CameraMount>) -> Self {
+        self.cameras = cameras;
+        self
+    }
+
     /// Where this arm stands, centred with the others on the origin.
-    pub fn base(&self) -> Mat4 {
-        Mat4::from_translation(Vec3::new(
+    fn base_transform(&self) -> Mat4 {
+        Mat4::from_translation(self.bench_position.translation())
+    }
+
+    fn display_color(&self, color: [f32; 4]) -> [f32; 4] {
+        if self.pose.live {
+            color
+        } else {
+            const OFFLINE_TINT: [f32; 3] = [0.82, 0.82, 0.80];
+            let mix = |value: f32, target: f32| value + (target - value) * 0.55;
+            [
+                mix(color[0], OFFLINE_TINT[0]),
+                mix(color[1], OFFLINE_TINT[1]),
+                mix(color[2], OFFLINE_TINT[2]),
+                color[3],
+            ]
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ArmPose {
+    live: bool,
+    angles: JointAngles,
+}
+
+/// An arm's validated position in the centered row on the bench.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BenchPosition {
+    index: usize,
+    count: usize,
+}
+
+impl BenchPosition {
+    pub fn new(index: usize, count: usize) -> Self {
+        let count = count.max(1);
+        Self {
+            index: index.min(count - 1),
+            count,
+        }
+    }
+
+    pub fn translation(self) -> Vec3 {
+        Vec3::new(
             0.0,
             (self.index as f32 - self.count.saturating_sub(1) as f32 / 2.0) * BENCH_SPACING,
             0.0,
-        ))
+        )
     }
 }
 
 /// A scene and the table that says what is in it.
 pub struct RobotScene {
-    pub scene: Scene,
+    scene: Scene,
     /// Indexed by [`EntityKey`], so a pick is one lookup.
     entities: Vec<RobotEntity>,
 }
@@ -157,7 +238,32 @@ pub struct RobotScene {
 impl RobotScene {
     /// What a picked key refers to.
     pub fn entity(&self, key: EntityKey) -> Option<&RobotEntity> {
-        self.entities.get(key.0 as usize)
+        self.entities.get(key.index())
+    }
+
+    pub fn scene(&self) -> &Scene {
+        &self.scene
+    }
+}
+
+/// How application state should decorate the otherwise neutral robot scene.
+pub struct SceneAppearance<InteractionFn, ConditionFn> {
+    grid_enabled: bool,
+    interaction_for: InteractionFn,
+    condition_for: ConditionFn,
+}
+
+impl<InteractionFn, ConditionFn> SceneAppearance<InteractionFn, ConditionFn> {
+    pub fn new(
+        grid_enabled: bool,
+        interaction_for: InteractionFn,
+        condition_for: ConditionFn,
+    ) -> Self {
+        Self {
+            grid_enabled,
+            interaction_for,
+            condition_for,
+        }
     }
 }
 
@@ -167,163 +273,195 @@ impl RobotScene {
 /// on it: what is hovered changes every pointer move and what is hot changes
 /// twenty times a second, and neither is something this crate should be told
 /// twice.
-pub fn build(
-    urdf: &Urdf,
-    placements: &[ArmPlacement],
-    grid: bool,
-    mut interaction: impl FnMut(&RobotEntity) -> Interaction,
-    mut condition: impl FnMut(&RobotEntity) -> Condition,
-) -> RobotScene {
-    let mut entities = Vec::new();
-    let mut scene = Scene {
-        entities: Vec::new(),
-        grid,
-    };
+impl RobotScene {
+    pub fn compose<InteractionFn, ConditionFn>(
+        urdf: &Urdf,
+        placements: &[ArmPlacement],
+        mut appearance: SceneAppearance<InteractionFn, ConditionFn>,
+    ) -> Self
+    where
+        InteractionFn: FnMut(&RobotEntity) -> Interaction,
+        ConditionFn: FnMut(&RobotEntity) -> Condition,
+    {
+        let mut entity_catalog = EntityCatalog::default();
+        let mut scene = Scene::new(appearance.grid_enabled);
 
-    for placement in placements {
-        let base = placement.base();
-        let positions = so101_joint_positions(urdf, &placement.angles);
-        let transforms = urdf.pose(&positions);
+        for placement in placements {
+            let base_transform = placement.base_transform();
+            let joint_positions = urdf.so101_joint_positions(&placement.pose.angles);
+            let link_transforms = urdf.pose(&joint_positions);
 
-        for (link_index, link) in urdf.links.iter().enumerate() {
-            let semantic = match controlling_joint(urdf, link_index) {
-                Some(joint) => RobotEntity::Joint {
-                    robot: placement.id.clone(),
-                    joint,
-                },
-                None => RobotEntity::Structure {
-                    robot: placement.id.clone(),
-                },
-            };
-            let key = intern(&mut entities, semantic);
-            let semantic = &entities[key.0 as usize];
-            let (interaction, condition) = (interaction(semantic), condition(semantic));
-
-            for visual in &link.visuals {
-                let color = match visual.material.as_deref() {
-                    Some("accent") => placement.accent,
-                    _ => visual.color,
+            for (link_index, link) in urdf.links().iter().enumerate() {
+                let robot_entity = match urdf.controlling_joint(link_index) {
+                    Some(joint) => RobotEntity::Joint {
+                        robot: placement.id.clone(),
+                        joint,
+                    },
+                    None => RobotEntity::Structure {
+                        robot: placement.id.clone(),
+                    },
                 };
-                scene.entities.push(Entity {
+                let key = entity_catalog.key_for(robot_entity);
+                let robot_entity = entity_catalog.entity(key);
+                let state = (
+                    (appearance.interaction_for)(robot_entity),
+                    (appearance.condition_for)(robot_entity),
+                );
+
+                for visual in link.visuals() {
+                    let color = match visual.material() {
+                        Some("accent") => placement.accent,
+                        _ => visual.color(),
+                    };
+                    scene.push(Entity::new(
+                        key,
+                        EntityShape::solid(
+                            visual.geometry().clone(),
+                            base_transform * link_transforms[link_index] * visual.origin().matrix(),
+                            placement.display_color(color),
+                        ),
+                        state,
+                    ));
+                }
+            }
+
+            for camera_mount in &placement.cameras {
+                let Some(camera_transform) = camera_mount.transform(urdf, &link_transforms) else {
+                    continue;
+                };
+                let robot_entity = RobotEntity::Camera {
+                    robot: placement.id.clone(),
+                    role: camera_mount.role.clone(),
+                };
+                let key = entity_catalog.key_for(robot_entity);
+                let robot_entity = entity_catalog.entity(key);
+                let state = (
+                    (appearance.interaction_for)(robot_entity),
+                    (appearance.condition_for)(robot_entity),
+                );
+                let frustum_radius =
+                    (camera_mount.field_of_view_degrees.to_radians() * 0.5).tan() * FRUSTUM_DEPTH;
+
+                scene.push(Entity::new(
                     key,
-                    geometry: visual.geometry.clone(),
-                    transform: base * transforms[link_index] * visual.origin.matrix(),
-                    color: if placement.live { color } else { faded(color) },
-                    interaction,
-                    condition,
-                    pickable: true,
-                    wireframe: false,
-                });
+                    EntityShape::wireframe(
+                        // A cone standing in for the volume the camera can see. Drawn
+                        // as lines, because what matters is where it points, and a
+                        // solid wedge would be an obstacle through the middle of the
+                        // bench rather than a note about coverage.
+                        Geometry::Cylinder {
+                            radius: frustum_radius.max(0.01),
+                            length: FRUSTUM_DEPTH,
+                        },
+                        base_transform
+                            * camera_transform
+                            * Mat4::from_translation(Vec3::new(0.0, 0.0, FRUSTUM_DEPTH * 0.5)),
+                        placement.display_color(placement.accent),
+                    ),
+                    state,
+                ));
             }
         }
 
-        for mount in &placement.cameras {
-            let Some(frame) = mount_transform(urdf, &transforms, mount) else {
-                continue;
-            };
-            let semantic = RobotEntity::Camera {
-                robot: placement.id.clone(),
-                role: mount.role.clone(),
-            };
-            let key = intern(&mut entities, semantic);
-            let semantic = &entities[key.0 as usize];
-            let (interaction, condition) = (interaction(semantic), condition(semantic));
-            let spread = (mount.fov_degrees.to_radians() * 0.5).tan() * FRUSTUM_DEPTH;
-
-            scene.entities.push(Entity {
-                key,
-                // A cone standing in for the volume the camera can see. Drawn
-                // as lines, because what matters is where it points, and a
-                // solid wedge would be an obstacle through the middle of the
-                // bench rather than a note about coverage.
-                geometry: Geometry::Cylinder {
-                    radius: spread.max(0.01),
-                    length: FRUSTUM_DEPTH,
-                },
-                transform: base
-                    * frame
-                    * Mat4::from_translation(Vec3::new(0.0, 0.0, FRUSTUM_DEPTH * 0.5)),
-                color: if placement.live {
-                    placement.accent
-                } else {
-                    faded(placement.accent)
-                },
-                interaction,
-                condition,
-                pickable: true,
-                wireframe: true,
-            });
+        Self {
+            scene,
+            entities: entity_catalog.entities,
         }
     }
-
-    RobotScene { scene, entities }
 }
 
 /// Give `semantic` a key, reusing the one it already has.
 ///
 /// Every shell of one joint therefore shares a key, which is what makes picking
 /// any of them select the joint without the renderer knowing what a joint is.
-fn intern(entities: &mut Vec<RobotEntity>, semantic: RobotEntity) -> EntityKey {
-    match entities.iter().position(|held| *held == semantic) {
-        Some(index) => EntityKey(index as u32),
-        None => {
-            entities.push(semantic);
-            EntityKey((entities.len() - 1) as u32)
+#[derive(Default)]
+struct EntityCatalog {
+    entities: Vec<RobotEntity>,
+}
+
+impl EntityCatalog {
+    fn key_for(&mut self, robot_entity: RobotEntity) -> EntityKey {
+        match self
+            .entities
+            .iter()
+            .position(|existing_entity| *existing_entity == robot_entity)
+        {
+            Some(index) => EntityKey::from_index(index),
+            None => {
+                self.entities.push(robot_entity);
+                EntityKey::from_index(self.entities.len() - 1)
+            }
         }
+    }
+
+    fn entity(&self, key: EntityKey) -> &RobotEntity {
+        &self.entities[key.index()]
     }
 }
 
-/// Where a mounted camera sits, relative to its arm's base.
-fn mount_transform(urdf: &Urdf, transforms: &[Mat4], mount: &CameraMount) -> Option<Mat4> {
-    let frame = match &mount.frame {
-        Some(link) => *transforms.get(urdf.link_index(link)?)?,
-        // A camera on the bench rather than on the arm still stands in the
-        // arm's own space, so a two-arm workspace does not put both top
-        // cameras in the same place.
-        None => Mat4::IDENTITY,
-    };
-    Some(
-        frame
-            * Mat4::from_rotation_translation(
-                Quat::from_euler(EulerRot::XYZ, mount.rpy[0], mount.rpy[1], mount.rpy[2]),
-                Vec3::from_array(mount.xyz),
+impl Urdf {
+    /// Place this description's joints from measured SO-101 angles.
+    fn so101_joint_positions(&self, angles: &JointAngles) -> BTreeMap<String, f32> {
+        let rest_pose = SO101_REST_POSE;
+        let maximum_gripper_position = self
+            .joint("gripper")
+            .and_then(|joint| joint.limit())
+            .map_or(0.0, |(_, upper)| upper);
+
+        [
+            ("shoulder_pan", angles.pan_degrees().to_radians() as f32),
+            (
+                "shoulder_lift",
+                (rest_pose.lift_deg + angles.lift_degrees()).to_radians() as f32,
             ),
-    )
-}
-
-/// The nearest movable joint above `link`, which is what moves that link.
-fn controlling_joint(urdf: &Urdf, mut link: usize) -> Option<String> {
-    while link != urdf.root() {
-        let joint = urdf.joints.iter().find(|joint| joint.child == link)?;
-        if joint.kind.is_movable() {
-            return Some(joint.name.clone());
-        }
-        link = joint.parent;
+            (
+                "elbow_flex",
+                (rest_pose.elbow_deg + angles.elbow_degrees()).to_radians() as f32,
+            ),
+            (
+                "wrist_flex",
+                (rest_pose.wrist_flex_deg + angles.wrist_flex_degrees()).to_radians() as f32,
+            ),
+            (
+                "wrist_roll",
+                angles.wrist_roll_degrees().to_radians() as f32,
+            ),
+            (
+                "gripper",
+                angles.gripper_opening().clamp(0.0, 1.0) as f32 * maximum_gripper_position,
+            ),
+        ]
+        .into_iter()
+        .map(|(joint_name, position)| (joint_name.to_owned(), position))
+        .collect()
     }
-    None
-}
 
-/// Wash a colour out toward the background, marking an arm that is not
-/// reporting so a stale pose is never mistaken for a live one.
-fn faded(color: [f32; 4]) -> [f32; 4] {
-    const TOWARD: [f32; 3] = [0.82, 0.82, 0.80];
-    let mix = |value: f32, target: f32| value + (target - value) * 0.55;
-    [
-        mix(color[0], TOWARD[0]),
-        mix(color[1], TOWARD[1]),
-        mix(color[2], TOWARD[2]),
-        color[3],
-    ]
-}
+    /// The nearest movable joint above `link_index`, which moves that link.
+    fn controlling_joint(&self, mut link_index: usize) -> Option<String> {
+        while link_index != self.root() {
+            let joint = self
+                .joints()
+                .iter()
+                .find(|joint| joint.child() == link_index)?;
+            if joint.kind().is_movable() {
+                return Some(joint.name().to_owned());
+            }
+            link_index = joint.parent();
+        }
+        None
+    }
 
-/// Where the gripper tip sits for `angles`, in millimetres from the arm's base.
-///
-/// The description carries a tool frame for exactly this, so no length written
-/// here has to agree with one written there.
-pub fn tool_position(urdf: &Urdf, angles: &JointAngles) -> Option<Vec3> {
-    let index = urdf.link_index("tool_link")?;
-    let transforms = urdf.pose(&so101_joint_positions(urdf, angles));
-    Some(transforms.get(index)?.transform_point3(Vec3::ZERO) * 1000.0)
+    /// Where the gripper tip sits, in millimetres from the arm's base.
+    pub fn so101_tool_position(&self, angles: &JointAngles) -> Option<Vec3> {
+        let tool_link_index = self.link_index("tool_link")?;
+        let link_transforms = self.pose(&self.so101_joint_positions(angles));
+        Some(
+            link_transforms
+                .get(tool_link_index)?
+                .transform_point3(Vec3::ZERO)
+                * 1000.0,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -335,38 +473,39 @@ mod tests {
 
     #[test]
     fn every_shell_of_one_joint_shares_its_key() {
-        let mut entities = Vec::new();
+        let mut entity_catalog = EntityCatalog::default();
         let joint = |name: &str| RobotEntity::Joint {
             robot: "follower".to_owned(),
             joint: name.to_owned(),
         };
 
-        let first = intern(&mut entities, joint("elbow_flex"));
-        let again = intern(&mut entities, joint("elbow_flex"));
-        let other = intern(&mut entities, joint("wrist_flex"));
+        let first = entity_catalog.key_for(joint("elbow_flex"));
+        let again = entity_catalog.key_for(joint("elbow_flex"));
+        let other = entity_catalog.key_for(joint("wrist_flex"));
 
         assert_eq!(first, again, "picking any shell selects the one joint");
         assert_ne!(first, other);
-        assert_eq!(entities.len(), 2);
+        assert_eq!(entity_catalog.entities.len(), 2);
     }
 
     #[test]
     fn arms_stand_in_a_row_centred_on_the_origin() {
-        let placement = |index, count| ArmPlacement {
-            id: "arm".to_owned(),
-            accent: [0.0; 4],
-            live: true,
-            angles: JointAngles::default(),
-            cameras: Vec::new(),
-            index,
-            count,
+        let placement = |index, count| {
+            ArmPlacement::new("arm", [0.0; 4], BenchPosition::new(index, count))
+                .with_live_pose(JointAngles::default())
         };
 
-        let alone = placement(0, 1).base().transform_point3(Vec3::ZERO);
+        let alone = placement(0, 1)
+            .base_transform()
+            .transform_point3(Vec3::ZERO);
         assert_eq!(alone, Vec3::ZERO);
 
-        let left = placement(0, 2).base().transform_point3(Vec3::ZERO);
-        let right = placement(1, 2).base().transform_point3(Vec3::ZERO);
+        let left = placement(0, 2)
+            .base_transform()
+            .transform_point3(Vec3::ZERO);
+        let right = placement(1, 2)
+            .base_transform()
+            .transform_point3(Vec3::ZERO);
         assert!(
             (left.y + right.y).abs() < 1e-6,
             "a pair straddles the origin"
@@ -377,7 +516,7 @@ mod tests {
     /// Where each pivot of the shipped description lands for `angles`.
     fn pivots(angles: &JointAngles) -> BTreeMap<&'static str, Vec3> {
         let urdf = Urdf::parse(SO101_URDF).unwrap();
-        let transforms = urdf.pose(&so101_joint_positions(&urdf, angles));
+        let transforms = urdf.pose(&urdf.so101_joint_positions(angles));
         [
             "upper_arm_link",
             "forearm_link",
@@ -404,14 +543,8 @@ mod tests {
 
     #[test]
     fn lifting_the_shoulder_raises_the_tool() {
-        let lowered = pivots(&JointAngles {
-            lift_deg: 20.0,
-            ..JointAngles::default()
-        });
-        let raised = pivots(&JointAngles {
-            lift_deg: -20.0,
-            ..JointAngles::default()
-        });
+        let lowered = pivots(&JointAngles::default().with_lift_degrees(20.0));
+        let raised = pivots(&JointAngles::default().with_lift_degrees(-20.0));
 
         assert!(raised["forearm_link"].z > lowered["forearm_link"].z);
     }
@@ -419,10 +552,7 @@ mod tests {
     #[test]
     fn panning_swings_the_arm_about_the_vertical_axis() {
         let ahead = pivots(&JointAngles::default());
-        let turned = pivots(&JointAngles {
-            pan_deg: 90.0,
-            ..JointAngles::default()
-        });
+        let turned = pivots(&JointAngles::default().with_pan_degrees(90.0));
 
         assert!(turned["gripper_link"].x.abs() < 1e-6);
         assert!((turned["gripper_link"].y - ahead["gripper_link"].x).abs() < 1e-6);
@@ -433,14 +563,15 @@ mod tests {
     fn link_lengths_come_from_the_description_for_every_pose() {
         let urdf = Urdf::parse(SO101_URDF).unwrap();
         let reference = pivots(&JointAngles::default());
-        let bent = pivots(&JointAngles {
-            pan_deg: 45.0,
-            lift_deg: -35.0,
-            elbow_deg: 80.0,
-            wrist_flex_deg: -70.0,
-            wrist_roll_deg: 10.0,
-            gripper: 0.25,
-        });
+        let bent = pivots(
+            &JointAngles::default()
+                .with_pan_degrees(45.0)
+                .with_lift_degrees(-35.0)
+                .with_elbow_degrees(80.0)
+                .with_wrist_flex_degrees(-70.0)
+                .with_wrist_roll_degrees(10.0)
+                .with_gripper_normalized(0.5),
+        );
 
         for (child, parent) in [
             ("forearm_link", "upper_arm_link"),
@@ -450,8 +581,8 @@ mod tests {
             let stated = urdf
                 .joint_between(parent, child)
                 .unwrap()
-                .origin
-                .translation
+                .origin()
+                .translation()
                 .length();
             for placed in [&reference, &bent] {
                 assert!(
@@ -465,14 +596,10 @@ mod tests {
     #[test]
     fn the_gripper_fraction_opens_the_described_jaw() {
         let urdf = Urdf::parse(SO101_URDF).unwrap();
-        let (_, open) = urdf.joint("gripper").unwrap().limit.unwrap();
-        let jaw = |gripper| {
-            so101_joint_positions(
-                &urdf,
-                &JointAngles {
-                    gripper,
-                    ..JointAngles::default()
-                },
+        let (_, open) = urdf.joint("gripper").unwrap().limit().unwrap();
+        let jaw = |gripper_opening: f64| {
+            urdf.so101_joint_positions(
+                &JointAngles::default().with_gripper_normalized(1.0 - 2.0 * gripper_opening),
             )["gripper"]
         };
 
@@ -486,13 +613,13 @@ mod tests {
     #[test]
     fn every_motor_places_a_joint_of_the_description() {
         let urdf = Urdf::parse(SO101_URDF).unwrap();
-        let positions = so101_joint_positions(&urdf, &JointAngles::default());
+        let positions = urdf.so101_joint_positions(&JointAngles::default());
 
         for joint in SO101_JOINTS {
             assert!(
-                positions.contains_key(joint.name),
+                positions.contains_key(joint.name()),
                 "{} places nothing",
-                joint.name
+                joint.name()
             );
         }
         assert_eq!(positions.len(), SO101_JOINTS.len());

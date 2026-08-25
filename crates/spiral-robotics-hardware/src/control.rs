@@ -35,16 +35,19 @@ use crate::control_policy::{
     ReplayDecision as ReplayPolicyDecision, ReplayEvent as ReplayPolicyEvent,
     ReplayState as ReplayPolicyState, RobotAdmission,
 };
-use spiral_robotics_api::api::{
+use spiral_robotics_api::recording::{
+    EpisodeArm, EpisodeSummary, RecordingGap, RecordingProgress, ReplayPhase, ReplayProgress,
+    ReplayPurpose,
+};
+use spiral_robotics_api::robots::{
     CAUTION_FOLLOW_ERROR_DEGREES, CalibrationJointProgress, CalibrationProgress, ConnectionStatus,
-    EpisodeArm, EpisodeSummary, JointRange, JointTelemetry, ModeSelection, ModeStatus, MotorFault,
-    MotorLimits, PortSettings, RecordingGap, RecordingProgress, ReplayPhase, ReplayProgress,
-    ReplayPurpose, RobotTelemetry, TelemetryFrame,
+    JointRange, JointTelemetry, ModeSelection, ModeStatus, MotorFault, MotorLimits, PortSettings,
+    RobotTelemetry, TelemetryFrame,
 };
 use spiral_robotics_core::arm;
 use spiral_robotics_core::calibration::{
-    Calibration, CalibrationError, CalibrationInput, Direction, MotorCalibration, MotorSpec,
-    RangeTracker, validate_motor_specs,
+    Calibration, CalibrationError, CalibrationInput, MotorCalibration, MotorDirection,
+    MotorRangeTracker, MotorSpec, MotorSpecifications,
 };
 use tokio::sync::{oneshot, watch};
 
@@ -55,6 +58,23 @@ pub struct ArmConditionSummary {
     pub min_voltage_volts: Vec<Option<f64>>,
     pub peak_load: Vec<Option<f64>>,
     pub peak_current_amps: Vec<Option<f64>>,
+}
+
+impl ArmConditionSummary {
+    fn observe_motor(&mut self, slot: usize, track: &MotorTrack) {
+        retain_maximum(
+            &mut self.peak_temperature_celsius,
+            slot,
+            track.sample.electrical.temperature_celsius,
+        );
+        retain_minimum(
+            &mut self.min_voltage_volts,
+            slot,
+            track.sample.electrical.voltage_volts,
+        );
+        retain_maximum(&mut self.peak_load, slot, track.load.map(f64::abs));
+        retain_maximum(&mut self.peak_current_amps, slot, track.current);
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -70,6 +90,62 @@ pub struct Sample {
 
 pub type EpisodeCheckpoint = oneshot::Receiver<Result<(), String>>;
 
+/// Final timing and condition facts passed from hardware to episode storage.
+pub struct RecordingCompletion {
+    duration_seconds: f64,
+    recording_gaps: Vec<RecordingGap>,
+    max_follow_error_degrees: Option<f64>,
+    condition: Vec<ArmConditionSummary>,
+    discarded: bool,
+}
+
+impl RecordingCompletion {
+    fn checkpoint(duration_seconds: f64, recording_gaps: Vec<RecordingGap>) -> Self {
+        Self {
+            duration_seconds,
+            recording_gaps,
+            max_follow_error_degrees: None,
+            condition: Vec::new(),
+            discarded: false,
+        }
+    }
+
+    fn with_follow_error(mut self, max_follow_error_degrees: Option<f64>) -> Self {
+        self.max_follow_error_degrees = max_follow_error_degrees;
+        self
+    }
+
+    fn with_condition(mut self, condition: Vec<ArmConditionSummary>) -> Self {
+        self.condition = condition;
+        self
+    }
+
+    fn discard(mut self) -> Self {
+        self.discarded = true;
+        self
+    }
+
+    pub fn duration_seconds(&self) -> f64 {
+        self.duration_seconds
+    }
+
+    pub fn recording_gaps(&self) -> &[RecordingGap] {
+        &self.recording_gaps
+    }
+
+    pub fn max_follow_error_degrees(&self) -> Option<f64> {
+        self.max_follow_error_degrees
+    }
+
+    pub fn condition(&self) -> &[ArmConditionSummary] {
+        &self.condition
+    }
+
+    pub fn discarded(&self) -> bool {
+        self.discarded
+    }
+}
+
 /// Recording boundary consumed by the fixed-rate hardware thread.
 ///
 /// Persistence stays in the storage crate; the control runtime only owns the
@@ -78,22 +154,9 @@ pub trait RecordingWriter: Send {
     fn id(&self) -> &str;
     fn dataset_id(&self) -> &str;
     fn push(&self, sample: Sample) -> bool;
-    fn checkpoint(
-        &self,
-        duration_seconds: f64,
-        recording_gaps: Vec<RecordingGap>,
-        max_follow_error_degrees: Option<f64>,
-        condition: Vec<ArmConditionSummary>,
-    ) -> Result<EpisodeCheckpoint, String>;
+    fn checkpoint(&self, completion: RecordingCompletion) -> Result<EpisodeCheckpoint, String>;
     fn failure(&self) -> Option<String>;
-    fn finish(
-        self: Box<Self>,
-        duration_seconds: f64,
-        recording_gaps: Vec<RecordingGap>,
-        max_follow_error_degrees: Option<f64>,
-        discarded: bool,
-        condition: Vec<ArmConditionSummary>,
-    ) -> Result<EpisodeSummary, String>;
+    fn finish(self: Box<Self>, completion: RecordingCompletion) -> Result<EpisodeSummary, String>;
 }
 
 /// How often the control loop runs.
@@ -134,20 +197,58 @@ type Reply<T> = oneshot::Sender<Result<T, String>>;
 /// Everything the control thread needs to open one arm.
 #[derive(Clone, Debug)]
 pub struct RobotSpec {
-    pub id: String,
-    pub port: PortSettings,
-    pub motors: BTreeMap<String, MotorSpec>,
-    pub calibration: Option<Calibration>,
+    id: String,
+    port: PortSettings,
+    motors: BTreeMap<String, MotorSpec>,
+    calibration: Option<Calibration>,
+}
+
+impl RobotSpec {
+    pub fn new(id: String, port: PortSettings, motors: BTreeMap<String, MotorSpec>) -> Self {
+        Self {
+            id,
+            port,
+            motors,
+            calibration: None,
+        }
+    }
+
+    pub fn with_calibration(mut self, calibration: Option<Calibration>) -> Self {
+        self.calibration = calibration;
+        self
+    }
 }
 
 /// Tuning for the control loop.
 #[derive(Clone, Copy, Debug)]
 pub struct ControlSettings {
-    pub period: Duration,
+    period: Duration,
     /// Largest change in encoder counts applied to a joint in one cycle.
-    pub max_step_counts: i64,
+    max_step_counts: i64,
     /// Largest per-cycle change while an arm is the teleoperation follower.
-    pub teleop_max_step_counts: i64,
+    teleop_max_step_counts: i64,
+}
+
+impl ControlSettings {
+    pub fn with_period(mut self, period: Duration) -> Self {
+        self.period = period;
+        self
+    }
+
+    /// Override the ordinary and teleoperation motion limits while preserving
+    /// the requirement that every control-cycle step is positive.
+    pub fn try_with_motion_limits(
+        mut self,
+        max_step_counts: i64,
+        teleop_max_step_counts: i64,
+    ) -> Option<Self> {
+        if max_step_counts <= 0 || teleop_max_step_counts <= 0 {
+            return None;
+        }
+        self.max_step_counts = max_step_counts;
+        self.teleop_max_step_counts = teleop_max_step_counts;
+        Some(self)
+    }
 }
 
 impl Default for ControlSettings {
@@ -183,12 +284,71 @@ pub struct HardwareState {
     pub recording_issue: Option<String>,
 }
 
-struct ReplayPlan {
+pub struct ReplayTrajectory {
     frames: Vec<BTreeMap<String, f64>>,
     sample_hz: f64,
+}
+
+impl ReplayTrajectory {
+    pub fn new(frames: Vec<BTreeMap<String, f64>>, sample_hz: f64) -> Self {
+        Self { frames, sample_hz }
+    }
+
+    pub fn single_pose(pose: BTreeMap<String, f64>, sample_hz: f64) -> Self {
+        Self::new(vec![pose], sample_hz)
+    }
+}
+
+pub struct ReplayRequest {
+    robot: String,
+    episode: String,
+    trajectory: ReplayTrajectory,
     start_frame: usize,
     resolved_start_seconds: f64,
     purpose: ReplayPurpose,
+}
+
+/// One normalized command admitted under a specific policy session.
+pub struct PolicyGoals {
+    robot: String,
+    session: String,
+    normalized: BTreeMap<String, f64>,
+}
+
+impl PolicyGoals {
+    pub fn new(robot: String, session: String, normalized: BTreeMap<String, f64>) -> Self {
+        Self {
+            robot,
+            session,
+            normalized,
+        }
+    }
+}
+
+impl ReplayRequest {
+    pub fn timeline(robot: String, episode: String, trajectory: ReplayTrajectory) -> Self {
+        Self {
+            robot,
+            episode,
+            trajectory,
+            start_frame: 0,
+            resolved_start_seconds: 0.0,
+            purpose: ReplayPurpose::Timeline,
+        }
+    }
+
+    pub fn physical_seek(robot: String, episode: String, trajectory: ReplayTrajectory) -> Self {
+        Self {
+            purpose: ReplayPurpose::PhysicalSeek,
+            ..Self::timeline(robot, episode, trajectory)
+        }
+    }
+
+    pub fn starting_at(mut self, start_frame: usize, resolved_start_seconds: f64) -> Self {
+        self.start_frame = start_frame;
+        self.resolved_start_seconds = resolved_start_seconds;
+        self
+    }
 }
 
 enum Command {
@@ -214,9 +374,7 @@ enum Command {
         reply: Reply<()>,
     },
     SetPolicyGoals {
-        id: String,
-        session: String,
-        normalized: BTreeMap<String, f64>,
+        goals: Box<PolicyGoals>,
         reply: Reply<()>,
     },
     StopPolicySession {
@@ -266,9 +424,7 @@ enum Command {
         reply: Reply<()>,
     },
     StartReplay {
-        robot: String,
-        episode: String,
-        plan: ReplayPlan,
+        request: Box<ReplayRequest>,
         reply: Reply<()>,
     },
     Shutdown {
@@ -283,6 +439,19 @@ struct Recording {
     arms: Vec<EpisodeArm>,
     /// Control mode suspended for review and restored when capture resumes.
     resume_mode: ModeSelection,
+    clock: RecordingClock,
+    /// Samples handed to the writer.
+    frames: u64,
+    tracking: RecordingTrackingSummary,
+    /// The worst each motor has seen so far, in the arms' joint order.
+    ///
+    /// Accumulated as the take runs so the footer can state it without a second
+    /// pass over a take that may contain a hundred thousand samples.
+    condition: Vec<ArmConditionSummary>,
+}
+
+/// Wall-clock accounting for an active recording, including deliberate gaps.
+struct RecordingClock {
     started: Instant,
     /// Start of the current wall-clock omission, when capture is paused.
     paused_at: Option<Instant>,
@@ -290,8 +459,11 @@ struct Recording {
     paused_duration: Duration,
     /// Deliberate wall-clock omissions, persisted with the finished take.
     gaps: Vec<RecordingGap>,
-    /// Samples handed to the writer.
-    frames: u64,
+}
+
+/// Tracking-quality extrema accumulated while a recording is active.
+#[derive(Default)]
+struct RecordingTrackingSummary {
     /// Largest `Follow Δ` since the arm first caught up, in degrees.
     ///
     /// A recording almost always opens with the arm travelling — to a fresh
@@ -309,14 +481,18 @@ struct Recording {
     /// tracked has no settled period to measure, and saying nothing about it
     /// would make the worst takes look like the ones with no measurement.
     unsettled_peak: Option<f64>,
-    /// The worst each motor has seen so far, in the arms' joint order.
-    ///
-    /// Accumulated as the take runs so the footer can state it without a second
-    /// pass over a take that may contain a hundred thousand samples.
-    condition: Vec<ArmConditionSummary>,
 }
 
-impl Recording {
+impl RecordingClock {
+    fn started_now() -> Self {
+        Self {
+            started: Instant::now(),
+            paused_at: None,
+            paused_duration: Duration::ZERO,
+            gaps: Vec::new(),
+        }
+    }
+
     /// Time represented by samples and media, excluding deliberate pauses.
     fn active_elapsed(&self, now: Instant) -> Duration {
         let current_pause = self
@@ -353,8 +529,22 @@ impl Recording {
         });
     }
 
+    fn pause(&mut self, now: Instant) {
+        self.paused_at.get_or_insert(now);
+    }
+
+    fn is_paused(&self) -> bool {
+        self.paused_at.is_some()
+    }
+
+    fn wall_elapsed(&self, now: Instant) -> Duration {
+        now.duration_since(self.started)
+    }
+}
+
+impl RecordingTrackingSummary {
     /// Fold one instant's tracking error into the take's summary.
-    fn observe(&mut self, error: f64) {
+    fn observe_follow_error(&mut self, error: f64) {
         if !self.settled && error < CAUTION_FOLLOW_ERROR_DEGREES {
             self.settled = true;
         }
@@ -366,47 +556,26 @@ impl Recording {
         *slot = Some(slot.map_or(error, |worst: f64| worst.max(error)));
     }
 
-    /// Fold one arm's motor readings into the take's running extremes.
-    fn observe_condition(&mut self, index: usize, joints: &[String], robot: &ConnectedRobot) {
-        let Some(summary) = self.condition.get_mut(index) else {
-            return;
-        };
-        for (slot, name) in joints.iter().enumerate() {
-            let Some(track) = robot.tracks.get(name) else {
-                continue;
-            };
-            worst(
-                &mut summary.peak_temperature_celsius,
-                slot,
-                track.sample.temperature_celsius,
-                f64::max,
-            );
-            worst(
-                &mut summary.min_voltage_volts,
-                slot,
-                track.sample.voltage_volts,
-                f64::min,
-            );
-            // Effort is signed by which way the motor is pushing; the extreme
-            // worth keeping is how hard, not which way.
-            worst(
-                &mut summary.peak_load,
-                slot,
-                track.load.map(f64::abs),
-                f64::max,
-            );
-            worst(
-                &mut summary.peak_current_amps,
-                slot,
-                track.current,
-                f64::max,
-            );
-        }
-    }
-
-    /// The take's headline tracking error.
     fn follow_error(&self) -> Option<f64> {
         self.max_follow_error.or(self.unsettled_peak)
+    }
+}
+
+impl Recording {
+    fn active_elapsed(&self, now: Instant) -> Duration {
+        self.clock.active_elapsed(now)
+    }
+
+    fn paused_elapsed(&self, now: Instant) -> Duration {
+        self.clock.paused_elapsed(now)
+    }
+
+    fn close_pause(&mut self, now: Instant) {
+        self.clock.close_pause(now);
+    }
+
+    fn follow_error(&self) -> Option<f64> {
+        self.tracking.follow_error()
     }
 }
 
@@ -420,6 +589,11 @@ struct Replay {
     frame_period: f64,
     purpose: ReplayPurpose,
     phase: ReplayPhase,
+    timing: ReplayTiming,
+}
+
+/// Mutable playback clock and pause/seek bookkeeping for one replay.
+struct ReplayTiming {
     /// Fractional index into `frames`, advanced by real elapsed time.
     position: f64,
     /// Frame position and episode time are not interchangeable after frames
@@ -440,7 +614,7 @@ impl Replay {
     }
 
     fn cursor(&self) -> usize {
-        self.position as usize
+        self.timing.position as usize
     }
 
     fn finished(&self) -> bool {
@@ -452,8 +626,8 @@ impl Replay {
     }
 
     fn elapsed_seconds(&self) -> f64 {
-        self.resolved_start_seconds
-            + (self.position - self.start_position).max(0.0) * self.frame_period
+        self.timing.resolved_start_seconds
+            + (self.timing.position - self.timing.start_position).max(0.0) * self.frame_period
     }
 }
 
@@ -543,16 +717,9 @@ impl HardwareHandle {
     }
 
     /// Command normalized targets for the currently admitted policy session.
-    pub async fn set_policy_goals(
-        &self,
-        id: &str,
-        session: &str,
-        normalized: BTreeMap<String, f64>,
-    ) -> Result<(), String> {
+    pub async fn set_policy_goals(&self, goals: PolicyGoals) -> Result<(), String> {
         self.request(|reply| Command::SetPolicyGoals {
-            id: id.to_owned(),
-            session: session.to_owned(),
-            normalized,
+            goals: Box::new(goals),
             reply,
         })
         .await
@@ -650,77 +817,10 @@ impl HardwareHandle {
         Ok(elapsed_seconds)
     }
 
-    /// Play a recorded trajectory onto one arm.
-    ///
-    /// The samples arrive already loaded and already in normalized units, which
-    /// is the only unit anything here can be commanded in.
-    pub async fn start_replay(
-        &self,
-        robot: &str,
-        episode: &str,
-        frames: Vec<BTreeMap<String, f64>>,
-        sample_hz: f64,
-    ) -> Result<(), String> {
-        self.start_replay_at_frame(robot, episode, frames, sample_hz, 0, 0.0)
-            .await
-    }
-
-    /// Play a recorded trajectory beginning at one resolved trajectory frame.
-    pub async fn start_replay_at_frame(
-        &self,
-        robot: &str,
-        episode: &str,
-        frames: Vec<BTreeMap<String, f64>>,
-        sample_hz: f64,
-        start_frame: usize,
-        resolved_start_seconds: f64,
-    ) -> Result<(), String> {
-        self.start_replay_for(
-            robot,
-            episode,
-            ReplayPlan {
-                frames,
-                sample_hz,
-                start_frame,
-                resolved_start_seconds,
-                purpose: ReplayPurpose::Timeline,
-            },
-        )
-        .await
-    }
-
-    /// Move to one committed historical pose without creating Timeline transport.
-    pub async fn start_physical_seek(
-        &self,
-        robot: &str,
-        episode: &str,
-        pose: BTreeMap<String, f64>,
-        sample_hz: f64,
-    ) -> Result<(), String> {
-        self.start_replay_for(
-            robot,
-            episode,
-            ReplayPlan {
-                frames: vec![pose],
-                sample_hz,
-                start_frame: 0,
-                resolved_start_seconds: 0.0,
-                purpose: ReplayPurpose::PhysicalSeek,
-            },
-        )
-        .await
-    }
-
-    async fn start_replay_for(
-        &self,
-        robot: &str,
-        episode: &str,
-        plan: ReplayPlan,
-    ) -> Result<(), String> {
+    /// Play or physically seek through a validated recorded trajectory.
+    pub async fn start_replay(&self, request: ReplayRequest) -> Result<(), String> {
         self.request(|reply| Command::StartReplay {
-            robot: robot.to_owned(),
-            episode: episode.to_owned(),
-            plan,
+            request: Box::new(request),
             reply,
         })
         .await
@@ -826,10 +926,10 @@ impl MotorTrack {
         self.load = hold_peak(self.load, smooth(self.load, sample.load), f64::abs);
         self.current = hold_peak(
             self.current,
-            smooth(self.current, sample.current_amps),
+            smooth(self.current, sample.electrical.current_amps),
             |amps| amps,
         );
-        if let Some(celsius) = sample.temperature_celsius {
+        if let Some(celsius) = sample.electrical.temperature_celsius {
             self.record_temperature(celsius, now);
         }
         self.sample = sample;
@@ -872,12 +972,20 @@ impl MotorTrack {
 /// A slot that has never had a reading stays `None` rather than becoming zero:
 /// a take whose bus reports no temperature must not be readable a week later as
 /// a take that ran at nought degrees.
-fn worst(slots: &mut [Option<f64>], slot: usize, reading: Option<f64>, keep: fn(f64, f64) -> f64) {
+fn retain_maximum(slots: &mut [Option<f64>], slot: usize, reading: Option<f64>) {
     let Some(reading) = reading else { return };
     let Some(held) = slots.get_mut(slot) else {
         return;
     };
-    *held = Some(held.map_or(reading, |held| keep(held, reading)));
+    *held = Some(held.map_or(reading, |held| held.max(reading)));
+}
+
+fn retain_minimum(slots: &mut [Option<f64>], slot: usize, reading: Option<f64>) {
+    let Some(reading) = reading else { return };
+    let Some(held) = slots.get_mut(slot) else {
+        return;
+    };
+    *held = Some(held.map_or(reading, |held| held.min(reading)));
 }
 
 /// Restate a bus-level limit on the wire.
@@ -897,7 +1005,7 @@ fn convert_limits(limits: BusMotorLimits) -> MotorLimits {
 /// Restate the servo's fault byte as the faults the wire names.
 fn convert_faults(faults: BusMotorFaults) -> Vec<MotorFault> {
     let mut named = faults
-        .named()
+        .known_faults()
         .into_iter()
         .map(|fault| match fault {
             BusMotorFault::Overheat => MotorFault::Overheat,
@@ -907,7 +1015,7 @@ fn convert_faults(faults: BusMotorFaults) -> Vec<MotorFault> {
         .collect::<Vec<_>>();
     // A bit this build cannot name is still a motor saying something is wrong,
     // and dropping it would report a faulted arm as healthy.
-    if faults.unnamed() != 0 {
+    if faults.unknown_bits() != 0 {
         named.push(MotorFault::Unrecognized);
     }
     named
@@ -939,19 +1047,30 @@ fn hold_peak(held: Option<f64>, next: Option<f64>, magnitude: impl Fn(f64) -> f6
 struct ConnectedRobot {
     spec: RobotSpec,
     bus: Box<dyn MotorBus>,
-    torque: TorqueState,
-    positions: BTreeMap<String, i64>,
+    motion: MotorMotion,
     /// What each motor reports about itself, smoothed for display.
     tracks: BTreeMap<String, MotorTrack>,
     /// What each motor said it will fault at, read once when it connected.
     limits: BTreeMap<String, MotorLimits>,
+    health: BusHealth,
+    sweep: Option<MotorRangeTracker>,
+}
+
+/// Measured and commanded motor state that must move through the loop together.
+struct MotorMotion {
+    torque: TorqueState,
+    positions: BTreeMap<String, i64>,
     /// Where each joint should end up.
     target: BTreeMap<String, i64>,
     /// The last goal actually written, which ramps toward `target`.
     commanded: BTreeMap<String, i64>,
+}
+
+/// Communication failures accumulated for one open motor bus.
+#[derive(Default)]
+struct BusHealth {
     error: Option<String>,
     failures: u32,
-    sweep: Option<RangeTracker>,
 }
 
 /// What the controller has actually established about physical holding torque.
@@ -973,39 +1092,40 @@ impl TorqueState {
 impl ConnectedRobot {
     /// Pin intent to measured reality, so energizing never causes a jump.
     fn follow_measured_positions(&mut self) {
-        self.target = self.positions.clone();
-        self.commanded = self.positions.clone();
+        self.motion.target = self.motion.positions.clone();
+        self.motion.commanded = self.motion.positions.clone();
     }
 
     /// Step every commanded goal toward its target and write what changed.
     fn drive(&mut self, max_step: i64) {
-        if !self.torque.is_engaged() || self.target.is_empty() {
+        if !self.motion.torque.is_engaged() || self.motion.target.is_empty() {
             return;
         }
 
         let mut writes = BTreeMap::new();
-        for (name, target) in &self.target {
+        for (name, target) in &self.motion.target {
             let current = self
+                .motion
                 .commanded
                 .get(name)
-                .or_else(|| self.positions.get(name))
+                .or_else(|| self.motion.positions.get(name))
                 .copied()
                 .unwrap_or(*target);
             let step = target.saturating_sub(current).clamp(-max_step, max_step);
             writes.insert(name.clone(), current.saturating_add(step));
         }
 
-        if writes == self.commanded {
+        if writes == self.motion.commanded {
             return;
         }
         match self.bus.write_goal_positions(&writes) {
             Ok(()) => {
-                self.commanded = writes;
-                self.failures = 0;
+                self.motion.commanded = writes;
+                self.health.failures = 0;
             }
             Err(error) => {
-                self.failures += 1;
-                self.error = Some(error.to_string());
+                self.health.failures += 1;
+                self.health.error = Some(error.to_string());
             }
         }
     }
@@ -1015,8 +1135,8 @@ impl ConnectedRobot {
     fn ordered_motors(&self) -> Vec<(&String, &MotorSpec)> {
         let mut motors = self.spec.motors.iter().collect::<Vec<_>>();
         motors.sort_by(|(left_name, left), (right_name, right)| {
-            left.id
-                .cmp(&right.id)
+            left.id()
+                .cmp(&right.id())
                 .then_with(|| left_name.cmp(right_name))
         });
         motors
@@ -1033,13 +1153,14 @@ impl ConnectedRobot {
         let mut raw = Vec::with_capacity(joints.len());
         for joint in joints {
             let counts = *self
+                .motion
                 .positions
                 .get(joint)
                 .expect("accepted motor reads contain every configured joint");
             raw.push(counts);
             normalized.push(
                 calibration
-                    .and_then(|calibration| calibration.motors.get(joint))
+                    .and_then(|calibration| calibration.motors().get(joint))
                     .and_then(|motor| motor.normalize_raw(counts).ok()),
             );
         }
@@ -1051,7 +1172,7 @@ impl ConnectedRobot {
     /// A free arm has no action. Returning `None` for the whole arm preserves
     /// the difference between an observed leader pose and a follower command.
     fn sample_action(&self, joints: &[String]) -> Option<Vec<Option<f64>>> {
-        if !self.torque.is_engaged() {
+        if !self.motion.torque.is_engaged() {
             return None;
         }
         let calibration = self.spec.calibration.as_ref()?;
@@ -1059,8 +1180,8 @@ impl ConnectedRobot {
             joints
                 .iter()
                 .map(|joint| {
-                    let counts = self.commanded.get(joint).copied()?;
-                    let motor = calibration.motors.get(joint)?;
+                    let counts = self.motion.commanded.get(joint).copied()?;
+                    let motor = calibration.motors().get(joint)?;
                     motor.normalize_raw(counts).ok()
                 })
                 .collect(),
@@ -1091,15 +1212,16 @@ impl ConnectedRobot {
     /// `None` when nothing is being commanded, because there is no target to be
     /// away from.
     fn follow_error_degrees(&self) -> Option<f64> {
-        if !self.torque.is_engaged() {
+        if !self.motion.torque.is_engaged() {
             return None;
         }
         let calibration = self.spec.calibration.as_ref()?;
-        self.target
+        self.motion
+            .target
             .iter()
             .filter_map(|(name, target)| {
-                let motor = calibration.motors.get(name)?;
-                let measured = self.positions.get(name).copied()?;
+                let motor = calibration.motors().get(name)?;
+                let measured = self.motion.positions.get(name).copied()?;
                 let error = (joint_degrees(motor, measured) - joint_degrees(motor, *target)).abs();
                 error.is_finite().then_some(error)
             })
@@ -1113,41 +1235,45 @@ impl ConnectedRobot {
             .into_iter()
             .map(|(name, spec)| {
                 let raw = *self
+                    .motion
                     .positions
                     .get(name)
                     .expect("accepted motor reads contain every configured joint");
-                let motor = calibration.and_then(|calibration| calibration.motors.get(name));
+                let motor = calibration.and_then(|calibration| calibration.motors().get(name));
                 let track = self.tracks.get(name);
                 let target_raw = self
+                    .motion
                     .torque
                     .is_engaged()
-                    .then(|| self.target.get(name).copied())
+                    .then(|| self.motion.target.get(name).copied())
                     .flatten();
                 JointTelemetry {
                     name: name.clone(),
-                    id: spec.id,
+                    id: spec.id(),
                     raw,
                     degrees: motor.map(|motor| joint_degrees(motor, raw)),
                     normalized: motor.and_then(|motor| motor.normalize_raw(raw).ok()),
                     goal_raw: self
+                        .motion
                         .torque
                         .is_engaged()
-                        .then(|| self.commanded.get(name).copied())
+                        .then(|| self.motion.commanded.get(name).copied())
                         .flatten(),
                     target_raw,
                     target_degrees: target_raw
                         .zip(motor)
                         .map(|(target, motor)| joint_degrees(motor, target)),
                     range: motor.map(|motor| JointRange {
-                        min: motor.range_min,
-                        center: motor.center,
-                        max: motor.range_max,
+                        min: motor.reading().range_min(),
+                        center: motor.reading().center(),
+                        max: motor.reading().range_max(),
                     }),
                     // Everything below is what the motor says about itself, and
                     // none of it depends on calibration: these are the only
                     // readings an arm that has never been calibrated can give.
-                    temperature_celsius: track.and_then(|track| track.sample.temperature_celsius),
-                    voltage_volts: track.and_then(|track| track.sample.voltage_volts),
+                    temperature_celsius: track
+                        .and_then(|track| track.sample.electrical.temperature_celsius),
+                    voltage_volts: track.and_then(|track| track.sample.electrical.voltage_volts),
                     current_amps: track.and_then(|track| track.current),
                     load: track.and_then(|track| track.load),
                     speed_degrees_per_second: track.and_then(|track| track.speed),
@@ -1162,9 +1288,9 @@ impl ConnectedRobot {
 
         RobotTelemetry {
             id: self.spec.id.clone(),
-            torque: self.torque.is_engaged(),
+            torque: self.motion.torque.is_engaged(),
             joints,
-            error: self.error.clone(),
+            error: self.health.error.clone(),
             calibration: self.sweep.as_ref().map(|sweep| CalibrationProgress {
                 joints: self
                     .ordered_motors()
@@ -1172,9 +1298,9 @@ impl ConnectedRobot {
                     .filter_map(|(name, _)| Some((name, sweep.ranges().get(name)?)))
                     .map(|(name, range)| CalibrationJointProgress {
                         name: name.clone(),
-                        min: range.minimum,
-                        position: range.position,
-                        max: range.maximum,
+                        min: range.minimum(),
+                        position: range.position(),
+                        max: range.maximum(),
                     })
                     .collect(),
                 ready: sweep.is_ready(),
@@ -1185,10 +1311,10 @@ impl ConnectedRobot {
 
 /// Degrees from a joint's calibrated center, in the joint's own direction.
 fn joint_degrees(motor: &MotorCalibration, raw: i64) -> f64 {
-    let degrees = arm::counts_to_degrees(raw.saturating_sub(motor.center));
-    match motor.direction {
-        Direction::Normal => degrees,
-        Direction::Reversed => -degrees,
+    let degrees = arm::counts_to_degrees(raw.saturating_sub(motor.reading().center()));
+    match motor.direction() {
+        MotorDirection::Normal => degrees,
+        MotorDirection::Reversed => -degrees,
     }
 }
 
@@ -1237,13 +1363,8 @@ const fn replay_policy_state(phase: ReplayPhase) -> ReplayPolicyState {
 struct Controller {
     settings: ControlSettings,
     robots: BTreeMap<String, ConnectedRobot>,
-    /// Connection state for every robot the thread has been asked about,
-    /// including ones whose bus was lost.
-    connections: BTreeMap<String, ConnectionStatus>,
-    mode: ModeStatus,
+    published: PublishedControllerState,
     state: watch::Sender<HardwareState>,
-    sequence: u64,
-    loop_hz: f64,
     /// The take being captured, if any. Recording is deliberately not a mode:
     /// an operator records *while* teleoperating, and a take of an idle arm
     /// being moved by hand is a legitimate take too.
@@ -1251,9 +1372,20 @@ struct Controller {
     /// The episode being played back, if any. This one *is* a mode, because it
     /// drives motors and only one thing may do that at a time.
     replay: Option<Replay>,
-    recording_issue: Option<String>,
     #[cfg(test)]
     use_test_bus: bool,
+}
+
+/// Controller-owned values copied into each published hardware snapshot.
+#[derive(Default)]
+struct PublishedControllerState {
+    /// Connection state for every robot the thread has been asked about,
+    /// including ones whose bus was lost.
+    connections: BTreeMap<String, ConnectionStatus>,
+    mode: ModeStatus,
+    sequence: u64,
+    loop_hz: f64,
+    recording_issue: Option<String>,
 }
 
 impl Controller {
@@ -1261,14 +1393,10 @@ impl Controller {
         Self {
             settings,
             robots: BTreeMap::new(),
-            connections: BTreeMap::new(),
-            mode: ModeStatus::default(),
+            published: PublishedControllerState::default(),
             state,
-            sequence: 0,
-            loop_hz: 0.0,
             recording: None,
             replay: None,
-            recording_issue: None,
             #[cfg(test)]
             use_test_bus: false,
         }
@@ -1298,10 +1426,10 @@ impl Controller {
                     // instantaneous rates biases the result high when an
                     // absolute schedule alternates a slightly long cycle with
                     // a slightly short one.
-                    self.loop_hz = if self.loop_hz == 0.0 {
+                    self.published.loop_hz = if self.published.loop_hz == 0.0 {
                         1.0 / elapsed
                     } else {
-                        1.0 / (0.9 / self.loop_hz + 0.1 * elapsed)
+                        1.0 / (0.9 / self.published.loop_hz + 0.1 * elapsed)
                     };
                 }
             }
@@ -1329,7 +1457,8 @@ impl Controller {
             // write. Reading every other arm between those two adds visible
             // latency for no control benefit, so service that path first and
             // collect the remaining telemetry immediately afterwards.
-            if let ModeSelection::Teleoperate { leader, .. } = self.mode.selection.clone() {
+            if let ModeSelection::Teleoperate { leader, .. } = self.published.mode.selection.clone()
+            {
                 self.poll_robot(&leader);
                 self.apply_mode();
                 self.drive_robots();
@@ -1366,7 +1495,8 @@ impl Controller {
             Command::Disconnect { id, reply } => {
                 let result = self.detach_robot(&id, "the robot was disconnected");
                 if !self.robots.contains_key(&id) {
-                    self.connections
+                    self.published
+                        .connections
                         .insert(id.clone(), ConnectionStatus::default());
                 }
                 let _ = reply.send(result);
@@ -1384,17 +1514,12 @@ impl Controller {
             } => {
                 let _ = reply.send(self.set_goals(&id, &normalized));
             }
-            Command::SetPolicyGoals {
-                id,
-                session,
-                normalized,
-                reply,
-            } => {
-                let _ = reply.send(self.set_policy_goals(&id, &session, &normalized));
+            Command::SetPolicyGoals { goals, reply } => {
+                let _ = reply.send(self.set_policy_goals(&goals));
             }
             Command::StopPolicySession { session, reply } => {
                 let result = if matches!(
-                    &self.mode.selection,
+                    &self.published.mode.selection,
                     ModeSelection::Policy { session: active, .. } if active == &session
                 ) {
                     self.set_mode(ModeSelection::Idle)
@@ -1419,7 +1544,7 @@ impl Controller {
                     Ok(())
                 };
                 if !self.robots.contains_key(&id) {
-                    self.connections.remove(&id);
+                    self.published.connections.remove(&id);
                 }
                 let _ = reply.send(result);
             }
@@ -1456,13 +1581,8 @@ impl Controller {
             Command::SetReplayPaused { paused, reply } => {
                 let _ = reply.send(self.set_replay_paused(paused));
             }
-            Command::StartReplay {
-                robot,
-                episode,
-                plan,
-                reply,
-            } => {
-                let _ = reply.send(self.start_replay_for(&robot, &episode, plan));
+            Command::StartReplay { request, reply } => {
+                let _ = reply.send(self.start_replay(*request));
             }
             Command::Shutdown { reply } => {
                 // `run` intercepts shutdown so it can leave the control loop.
@@ -1505,19 +1625,14 @@ impl Controller {
             })
             .collect();
 
-        self.recording_issue = None;
+        self.published.recording_issue = None;
         self.recording = Some(Recording {
             writer,
             arms,
-            resume_mode: self.mode.selection.clone(),
-            started: Instant::now(),
-            paused_at: None,
-            paused_duration: Duration::ZERO,
-            gaps: Vec::new(),
+            resume_mode: self.published.mode.selection.clone(),
+            clock: RecordingClock::started_now(),
             frames: 0,
-            max_follow_error: None,
-            settled: false,
-            unsettled_peak: None,
+            tracking: RecordingTrackingSummary::default(),
             condition,
         });
         Ok(())
@@ -1533,9 +1648,17 @@ impl Controller {
         let duration = recording.active_elapsed(now).as_secs_f64();
         let follow_error = recording.follow_error();
         let condition = recording.condition;
+        let completion = RecordingCompletion::checkpoint(duration, recording.clock.gaps)
+            .with_follow_error(follow_error)
+            .with_condition(condition);
+        let completion = if keep {
+            completion
+        } else {
+            completion.discard()
+        };
         recording
             .writer
-            .finish(duration, recording.gaps, follow_error, !keep, condition)
+            .finish(completion)
             .map_err(|error| error.to_string())
     }
 
@@ -1549,19 +1672,16 @@ impl Controller {
                     .recording
                     .as_mut()
                     .ok_or_else(|| "no take is being recorded".to_owned())?;
-                if recording.paused_at.is_none() {
-                    recording.paused_at = Some(Instant::now());
-                }
+                recording.clock.pause(Instant::now());
                 // FIFO ordering means this barrier is processed after every
                 // sample accepted before the pause. The async caller awaits it
                 // without blocking this fixed-rate controller thread.
                 let elapsed_seconds = recording.active_elapsed(Instant::now()).as_secs_f64();
-                let checkpoint = recording.writer.checkpoint(
-                    elapsed_seconds,
-                    recording.gaps.clone(),
-                    recording.follow_error(),
-                    recording.condition.clone(),
-                )?;
+                let completion =
+                    RecordingCompletion::checkpoint(elapsed_seconds, recording.clock.gaps.clone())
+                        .with_follow_error(recording.follow_error())
+                        .with_condition(recording.condition.clone());
+                let checkpoint = recording.writer.checkpoint(completion)?;
                 (checkpoint, elapsed_seconds)
             };
             self.set_mode(ModeSelection::Idle)?;
@@ -1580,7 +1700,7 @@ impl Controller {
             .map(|recording| recording.active_elapsed(Instant::now()).as_secs_f64())
             .unwrap_or_default();
         if let Some(recording) = self.recording.as_mut()
-            && recording.paused_at.is_some()
+            && recording.clock.is_paused()
         {
             recording.close_pause(Instant::now());
         }
@@ -1605,17 +1725,19 @@ impl Controller {
             let reason = format!("stopped recording: robot {missing:?} is no longer connected");
             match self.stop_recording(true) {
                 Ok(summary) => {
-                    self.recording_issue = Some(format!(
+                    self.published.recording_issue = Some(format!(
                         "{reason}. The {} frames captured before that are stored as {}",
                         summary.frames, summary.id
                     ));
                 }
-                Err(error) => self.recording_issue = Some(format!("{reason}. {error}")),
+                Err(error) => {
+                    self.published.recording_issue = Some(format!("{reason}. {error}"));
+                }
             }
             return;
         }
 
-        if recording.paused_at.is_some() {
+        if recording.clock.is_paused() {
             return;
         }
 
@@ -1649,10 +1771,16 @@ impl Controller {
             if let Some(error) = robot.follow_error_degrees() {
                 instant_error = Some(instant_error.map_or(error, |worst: f64| worst.max(error)));
             }
-            recording.observe_condition(index, &arm.joints, robot);
+            if let Some(summary) = recording.condition.get_mut(index) {
+                for (slot, joint) in arm.joints.iter().enumerate() {
+                    if let Some(track) = robot.tracks.get(joint) {
+                        summary.observe_motor(slot, track);
+                    }
+                }
+            }
         }
         if let Some(error) = instant_error {
-            recording.observe(error);
+            recording.tracking.observe_follow_error(error);
         }
 
         if recording.writer.push(Sample {
@@ -1676,48 +1804,25 @@ impl Controller {
             .unwrap_or_else(|| "the take could not be written".to_owned());
         match self.stop_recording(true) {
             Ok(summary) => {
-                self.recording_issue = Some(format!("stopped recording {}: {reason}", summary.id));
+                self.published.recording_issue =
+                    Some(format!("stopped recording {}: {reason}", summary.id));
             }
             Err(error) => {
-                self.recording_issue = Some(format!("stopped recording: {reason}. {error}"));
+                self.published.recording_issue =
+                    Some(format!("stopped recording: {reason}. {error}"));
             }
         }
     }
 
-    #[cfg(test)]
-    fn start_replay(
-        &mut self,
-        robot: &str,
-        episode: &str,
-        frames: Vec<BTreeMap<String, f64>>,
-        sample_hz: f64,
-    ) -> Result<(), String> {
-        self.start_replay_for(
+    fn start_replay(&mut self, request: ReplayRequest) -> Result<(), String> {
+        let ReplayRequest {
             robot,
             episode,
-            ReplayPlan {
-                frames,
-                sample_hz,
-                start_frame: 0,
-                resolved_start_seconds: 0.0,
-                purpose: ReplayPurpose::Timeline,
-            },
-        )
-    }
-
-    fn start_replay_for(
-        &mut self,
-        robot: &str,
-        episode: &str,
-        plan: ReplayPlan,
-    ) -> Result<(), String> {
-        let ReplayPlan {
-            frames,
-            sample_hz,
+            trajectory: ReplayTrajectory { frames, sample_hz },
             start_frame,
             resolved_start_seconds,
             purpose,
-        } = plan;
+        } = request;
         if frames.is_empty() {
             return Err(format!("take {episode:?} has no frames to replay"));
         }
@@ -1736,7 +1841,7 @@ impl Controller {
                 "take {episode:?} resolves to an unusable replay time of {resolved_start_seconds}"
             ));
         }
-        let calibration = self.require_calibrated(robot)?.clone();
+        let calibration = self.require_calibrated(&robot)?.clone();
         let replay_joints = frames[0].keys().cloned().collect::<BTreeSet<_>>();
         // Validate the complete trajectory, not just its first pose. Silently
         // dropping an unknown or non-finite joint in a later frame would make
@@ -1753,7 +1858,7 @@ impl Controller {
                 ));
             }
             for (joint, value) in pose {
-                if !calibration.motors.contains_key(joint) {
+                if !calibration.motors().contains_key(joint) {
                     return Err(format!(
                         "robot {robot:?} has no calibrated joint {joint:?} used by replay frame {frame} of {episode:?}"
                     ));
@@ -1782,11 +1887,13 @@ impl Controller {
             frame_period: 1.0 / sample_hz,
             purpose,
             phase: ReplayPhase::Seeking,
-            position: start_position,
-            start_position,
-            resolved_start_seconds,
-            paused: false,
-            seeking_since: Instant::now(),
+            timing: ReplayTiming {
+                position: start_position,
+                start_position,
+                resolved_start_seconds,
+                paused: false,
+                seeking_since: Instant::now(),
+            },
         });
         Ok(())
     }
@@ -1810,7 +1917,7 @@ impl Controller {
         if self
             .replay
             .as_ref()
-            .is_some_and(|replay| replay.paused == paused)
+            .is_some_and(|replay| replay.timing.paused == paused)
         {
             return Ok(());
         }
@@ -1825,9 +1932,9 @@ impl Controller {
             arm.follow_measured_positions();
         }
         if let Some(replay) = self.replay.as_mut() {
-            replay.paused = paused;
+            replay.timing.paused = paused;
             if !paused && replay.phase == ReplayPhase::Seeking {
-                replay.seeking_since = Instant::now();
+                replay.timing.seeking_since = Instant::now();
             }
         }
         Ok(())
@@ -1837,7 +1944,7 @@ impl Controller {
         if self.robots.contains_key(&spec.id) {
             return Err(format!("robot {:?} is already connected", spec.id));
         }
-        validate_motor_specs(&spec.motors)
+        MotorSpecifications::try_from(&spec.motors)
             .map_err(|error| format!("robot {:?} has invalid motors: {error}", spec.id))?;
         if let Some(calibration) = &spec.calibration {
             calibration
@@ -1879,7 +1986,7 @@ impl Controller {
         };
 
         let mut bus = open(&spec).inspect_err(|error| {
-            self.connections.insert(
+            self.published.connections.insert(
                 spec.id.clone(),
                 ConnectionStatus {
                     connected: false,
@@ -1892,7 +1999,7 @@ impl Controller {
         // before the robot is presented as connected.
         let positions = bus.read_positions().map_err(|error| {
             let message = format!("could not reach all motors on {}: {error}", spec.port.path);
-            self.connections.insert(
+            self.published.connections.insert(
                 spec.id.clone(),
                 ConnectionStatus {
                     connected: false,
@@ -1903,7 +2010,7 @@ impl Controller {
         })?;
         validate_motor_read_keys(&spec.motors, &positions, "initial position read").inspect_err(
             |message| {
-                self.connections.insert(
+                self.published.connections.insert(
                     spec.id.clone(),
                     ConnectionStatus {
                         connected: false,
@@ -1921,7 +2028,7 @@ impl Controller {
                 "could not establish released torque state on {}: {error}",
                 spec.port.path
             );
-            self.connections.insert(
+            self.published.connections.insert(
                 spec.id.clone(),
                 ConnectionStatus {
                     connected: false,
@@ -1946,18 +2053,19 @@ impl Controller {
             ConnectedRobot {
                 spec,
                 bus,
-                torque: TorqueState::Released,
-                target: positions.clone(),
-                commanded: positions.clone(),
+                motion: MotorMotion {
+                    torque: TorqueState::Released,
+                    target: positions.clone(),
+                    commanded: positions.clone(),
+                    positions,
+                },
                 tracks: BTreeMap::new(),
                 limits,
-                positions,
-                error: None,
-                failures: 0,
+                health: BusHealth::default(),
                 sweep: None,
             },
         );
-        self.connections.insert(
+        self.published.connections.insert(
             id,
             ConnectionStatus {
                 connected: true,
@@ -1981,7 +2089,7 @@ impl Controller {
 
         match robot.bus.set_torque(enabled) {
             Ok(()) => {
-                robot.torque = if enabled {
+                robot.motion.torque = if enabled {
                     TorqueState::Engaged
                 } else {
                     TorqueState::Released
@@ -1989,7 +2097,7 @@ impl Controller {
                 // Whichever way torque just moved, start from where the arm
                 // actually is rather than from a stale target.
                 robot.follow_measured_positions();
-                robot.error = None;
+                robot.health.error = None;
                 Ok(())
             }
             Err(transition_error) if enabled => {
@@ -2000,28 +2108,28 @@ impl Controller {
                 robot.follow_measured_positions();
                 let message = match compensation {
                     Ok(()) => {
-                        robot.torque = TorqueState::Released;
+                        robot.motion.torque = TorqueState::Released;
                         format!(
                             "could not enable torque: {transition_error}; controller compensating torque-off was verified"
                         )
                     }
                     Err(release_error) => {
-                        robot.torque = TorqueState::Unknown;
+                        robot.motion.torque = TorqueState::Unknown;
                         format!(
                             "could not enable torque: {transition_error}; controller compensating torque-off also failed: {release_error}; physical torque state is unknown"
                         )
                     }
                 };
-                robot.error = Some(message.clone());
+                robot.health.error = Some(message.clone());
                 Err(message)
             }
             Err(release_error) => {
-                robot.torque = TorqueState::Unknown;
+                robot.motion.torque = TorqueState::Unknown;
                 robot.follow_measured_positions();
                 let message = format!(
                     "could not verify torque-off: {release_error}; physical torque state is unknown"
                 );
-                robot.error = Some(message.clone());
+                robot.health.error = Some(message.clone());
                 Err(message)
             }
         }
@@ -2046,17 +2154,12 @@ impl Controller {
         self.set_normalized_goals(id, normalized)
     }
 
-    fn set_policy_goals(
-        &mut self,
-        id: &str,
-        session: &str,
-        normalized: &BTreeMap<String, f64>,
-    ) -> Result<(), String> {
+    fn set_policy_goals(&mut self, goals: &PolicyGoals) -> Result<(), String> {
         self.authorize(ControlIntent::AuthorizePolicyCommand {
-            robot: id.to_owned(),
-            session: session.to_owned(),
+            robot: goals.robot.clone(),
+            session: goals.session.clone(),
         })?;
-        self.set_normalized_goals(id, normalized)
+        self.set_normalized_goals(&goals.robot, &goals.normalized)
     }
 
     fn set_normalized_goals(
@@ -2068,8 +2171,8 @@ impl Controller {
             .robots
             .get_mut(id)
             .ok_or_else(|| format!("robot {id:?} is not connected"))?;
-        if robot.torque != TorqueState::Engaged {
-            return Err(match robot.torque {
+        if robot.motion.torque != TorqueState::Engaged {
+            return Err(match robot.motion.torque {
                 TorqueState::Released => {
                     format!("enable torque on robot {id:?} before commanding its joints")
                 }
@@ -2092,7 +2195,7 @@ impl Controller {
                 ));
             }
             let motor = calibration
-                .motors
+                .motors()
                 .get(name)
                 .ok_or_else(|| format!("joint {name:?} has no calibration on robot {id:?}"))?;
             let raw = motor
@@ -2100,7 +2203,7 @@ impl Controller {
                 .map_err(|error| format!("joint {name:?}: {error}"))?;
             targets.insert(name.clone(), raw);
         }
-        robot.target.extend(targets);
+        robot.motion.target.extend(targets);
         Ok(())
     }
 
@@ -2137,7 +2240,7 @@ impl Controller {
                     Some(calibration) => {
                         match calibration.validate_for_motor_specs(&robot.spec.motors) {
                             Ok(()) => CalibrationAdmission::Ready(
-                                calibration.motors.keys().cloned().collect(),
+                                calibration.motors().keys().cloned().collect(),
                             ),
                             Err(error) => CalibrationAdmission::Invalid(error.to_string()),
                         }
@@ -2153,7 +2256,7 @@ impl Controller {
             })
             .collect();
         ControlState {
-            mode: control_mode(&self.mode.selection),
+            mode: control_mode(&self.published.mode.selection),
             robots,
         }
     }
@@ -2195,8 +2298,8 @@ impl Controller {
                     self.commit_control_mode_with_error(mode, error);
                 }
                 ControlEffect::SetActivity { active, error } => {
-                    self.mode.active = active;
-                    self.mode.error = error;
+                    self.published.mode.active = active;
+                    self.published.mode.error = error;
                 }
             }
         }
@@ -2221,8 +2324,8 @@ impl Controller {
                 self.commit_control_mode_with_error(mode, error);
             }
             ControlEffect::SetActivity { active, error } => {
-                self.mode.active = active;
-                self.mode.error = error;
+                self.published.mode.active = active;
+                self.published.mode.error = error;
             }
             ControlEffect::SetTorque { .. } => {
                 unreachable!("recovery policy must not contain physical effects")
@@ -2232,7 +2335,7 @@ impl Controller {
 
     fn commit_control_mode(&mut self, mode: ControlMode) {
         let selection = mode_selection(mode);
-        self.mode = ModeStatus {
+        self.published.mode = ModeStatus {
             active: !matches!(selection, ModeSelection::Idle),
             selection,
             error: None,
@@ -2241,7 +2344,7 @@ impl Controller {
 
     fn commit_control_mode_with_error(&mut self, mode: ControlMode, error: String) {
         let selection = mode_selection(mode);
-        self.mode = ModeStatus {
+        self.published.mode = ModeStatus {
             active: !matches!(selection, ModeSelection::Idle),
             selection,
             error: Some(error),
@@ -2282,10 +2385,10 @@ impl Controller {
             .read_positions()
             .map_err(|error| error.to_string())?;
         validate_motor_read_keys(&robot.spec.motors, &positions, "calibration position read")?;
-        robot.positions = positions.clone();
+        robot.motion.positions = positions.clone();
         robot.follow_measured_positions();
-        robot.sweep = Some(RangeTracker::new(positions).map_err(|error| error.to_string())?);
-        robot.error = None;
+        robot.sweep = Some(MotorRangeTracker::new(positions).map_err(|error| error.to_string())?);
+        robot.health.error = None;
         Ok(())
     }
 
@@ -2356,16 +2459,16 @@ impl Controller {
                 if let Err(error) =
                     validate_motor_read_keys(&robot.spec.motors, &samples, "telemetry read")
                 {
-                    robot.failures += 1;
-                    robot.error = Some(error);
+                    robot.health.failures += 1;
+                    robot.health.error = Some(error);
                     return;
                 }
-                robot.failures = 0;
+                robot.health.failures = 0;
                 // A telemetry read says nothing about Torque_Enable. Preserve
                 // the transition evidence until a verified torque operation
                 // resolves an unknown physical state.
-                if robot.torque != TorqueState::Unknown {
-                    robot.error = None;
+                if robot.motion.torque != TorqueState::Unknown {
+                    robot.health.error = None;
                 }
                 let positions = samples
                     .iter()
@@ -2374,21 +2477,21 @@ impl Controller {
                 if let Some(sweep) = robot.sweep.as_mut()
                     && let Err(error) = sweep.observe(&positions)
                 {
-                    robot.error = Some(error.to_string());
+                    robot.health.error = Some(error.to_string());
                     robot.sweep = None;
                 }
                 let now = Instant::now();
                 for (name, sample) in samples {
                     robot.tracks.entry(name).or_default().observe(sample, now);
                 }
-                robot.positions = positions;
-                if !robot.torque.is_engaged() {
+                robot.motion.positions = positions;
+                if !robot.motion.torque.is_engaged() {
                     robot.follow_measured_positions();
                 }
             }
             Err(error) => {
-                robot.failures += 1;
-                robot.error = Some(error.to_string());
+                robot.health.failures += 1;
+                robot.health.error = Some(error.to_string());
             }
         }
     }
@@ -2400,7 +2503,7 @@ impl Controller {
         // replay is still walking to the take's first frame it stays on the
         // gentle manual ramp, because that move is not in the recording and the
         // operator has no way to anticipate it.
-        let quick = match &self.mode.selection {
+        let quick = match &self.published.mode.selection {
             ModeSelection::Teleoperate { follower, .. } => Some(follower.as_str()),
             ModeSelection::Replay { robot, .. } => self
                 .replay
@@ -2421,11 +2524,12 @@ impl Controller {
     }
 
     fn apply_mode(&mut self) {
-        if matches!(self.mode.selection, ModeSelection::Replay { .. }) {
+        if matches!(self.published.mode.selection, ModeSelection::Replay { .. }) {
             self.apply_replay();
             return;
         }
-        let ModeSelection::Teleoperate { leader, follower } = self.mode.selection.clone() else {
+        let ModeSelection::Teleoperate { leader, follower } = self.published.mode.selection.clone()
+        else {
             return;
         };
 
@@ -2451,11 +2555,12 @@ impl Controller {
             };
 
             leader_robot
+                .motion
                 .positions
                 .iter()
                 .filter_map(|(name, raw)| {
-                    let source = leader_calibration.motors.get(name)?;
-                    let destination = follower_calibration.motors.get(name)?;
+                    let source = leader_calibration.motors().get(name)?;
+                    let destination = follower_calibration.motors().get(name)?;
                     let normalized = source.normalize_raw(*raw).ok()?;
                     let target = destination.denormalize(normalized).ok()?;
                     Some((name.clone(), target))
@@ -2464,10 +2569,10 @@ impl Controller {
         };
 
         if let Some(follower_robot) = self.robots.get_mut(&follower) {
-            follower_robot.target.extend(targets);
+            follower_robot.motion.target.extend(targets);
         }
-        self.mode.active = true;
-        self.mode.error = None;
+        self.published.mode.active = true;
+        self.published.mode.error = None;
     }
 
     /// Walk the replay forward one control cycle.
@@ -2487,7 +2592,7 @@ impl Controller {
         };
         let (robot_id, episode) = (replay.robot.clone(), replay.episode.clone());
 
-        if replay.paused {
+        if replay.timing.paused {
             let decision = replay_policy_state(replay.phase)
                 .decide(ReplayPolicyEvent::Paused)
                 .expect("pause is legal in every replay phase");
@@ -2522,20 +2627,20 @@ impl Controller {
                 );
                 return;
             };
-            let arrived = first.iter().try_fold(true, |arrived, (joint, wanted)| {
-                let motor = calibration.motors.get(joint).ok_or_else(|| {
-                    format!("calibration no longer contains replay joint {joint:?}")
-                })?;
-                let measured = robot
-                    .positions
-                    .get(joint)
-                    .copied()
-                    .ok_or_else(|| format!("robot stopped reporting replay joint {joint:?}"))?;
-                let actual = motor.normalize_raw(measured).map_err(|error| {
-                    format!("could not normalize replay joint {joint:?}: {error}")
-                })?;
-                Ok::<bool, String>(arrived && (actual - wanted).abs() <= REPLAY_SEEK_TOLERANCE)
-            });
+            let arrived =
+                first.iter().try_fold(true, |arrived, (joint, wanted)| {
+                    let motor = calibration.motors().get(joint).ok_or_else(|| {
+                        format!("calibration no longer contains replay joint {joint:?}")
+                    })?;
+                    let measured =
+                        robot.motion.positions.get(joint).copied().ok_or_else(|| {
+                            format!("robot stopped reporting replay joint {joint:?}")
+                        })?;
+                    let actual = motor.normalize_raw(measured).map_err(|error| {
+                        format!("could not normalize replay joint {joint:?}: {error}")
+                    })?;
+                    Ok::<bool, String>(arrived && (actual - wanted).abs() <= REPLAY_SEEK_TOLERANCE)
+                });
             let arrived = match arrived {
                 Ok(arrived) => arrived,
                 Err(error) => {
@@ -2549,7 +2654,7 @@ impl Controller {
                 }
             };
 
-            if !arrived && replay.seeking_since.elapsed() >= REPLAY_SEEK_TIMEOUT {
+            if !arrived && replay.timing.seeking_since.elapsed() >= REPLAY_SEEK_TIMEOUT {
                 let waited = REPLAY_SEEK_TIMEOUT.as_secs();
                 let decision = ReplayPolicyState::Seeking.decide(ReplayPolicyEvent::Failed(format!(
                         "stopped Replay: {robot_id} did not reach the requested pose in {episode} within {waited} seconds. Check whether a joint is obstructed."
@@ -2583,7 +2688,7 @@ impl Controller {
                 .replay
                 .as_mut()
                 .expect("keeping playback preserves the replay");
-            replay.position += self.settings.period.as_secs_f64() / replay.frame_period;
+            replay.timing.position += self.settings.period.as_secs_f64() / replay.frame_period;
         }
 
         let Some(replay) = self.replay.as_ref() else {
@@ -2595,7 +2700,7 @@ impl Controller {
         let targets = pose
             .iter()
             .map(|(joint, value)| {
-                let motor = calibration.motors.get(joint).ok_or_else(|| {
+                let motor = calibration.motors().get(joint).ok_or_else(|| {
                     format!("calibration no longer contains replay joint {joint:?}")
                 })?;
                 let target = motor.denormalize(*value).map_err(|error| {
@@ -2622,10 +2727,10 @@ impl Controller {
             }
         };
         if let Some(robot) = self.robots.get_mut(&robot_id) {
-            robot.target.extend(targets);
+            robot.motion.target.extend(targets);
         }
-        self.mode.active = true;
-        self.mode.error = None;
+        self.published.mode.active = true;
+        self.published.mode.error = None;
     }
 
     /// Apply the lifecycle consequence chosen by the application policy.
@@ -2681,11 +2786,12 @@ impl Controller {
         let lost = self
             .robots
             .iter()
-            .filter(|(_, robot)| robot.failures >= MAX_CONSECUTIVE_FAILURES)
+            .filter(|(_, robot)| robot.health.failures >= MAX_CONSECUTIVE_FAILURES)
             .map(|(id, robot)| {
                 (
                     id.clone(),
                     robot
+                        .health
                         .error
                         .clone()
                         .unwrap_or_else(|| "the motor bus stopped responding".to_owned()),
@@ -2699,7 +2805,7 @@ impl Controller {
                 Ok(()) => error,
                 Err(detach) => format!("{error}; {detach}"),
             };
-            self.connections.insert(
+            self.published.connections.insert(
                 id,
                 ConnectionStatus {
                     connected: false,
@@ -2725,7 +2831,7 @@ impl Controller {
             .then(|| self.stop_recording(true).err())
             .flatten();
         if let Some(error) = &recording_error {
-            self.recording_issue = Some(format!(
+            self.published.recording_issue = Some(format!(
                 "stopped recording because robot {id:?} detached, but finalizing the take failed: {error}"
             ));
         }
@@ -2752,7 +2858,7 @@ impl Controller {
         if self.recording.is_some()
             && let Err(error) = self.stop_recording(true)
         {
-            self.recording_issue = Some(format!(
+            self.published.recording_issue = Some(format!(
                 "shutdown could not finalize the active take: {error}"
             ));
             failures.push(format!("could not finalize active recording: {error}"));
@@ -2771,11 +2877,11 @@ impl Controller {
     }
 
     fn publish(&mut self) {
-        self.sequence += 1;
+        self.published.sequence += 1;
         let state = HardwareState {
             telemetry: TelemetryFrame {
-                sequence: self.sequence,
-                loop_hz: self.loop_hz,
+                sequence: self.published.sequence,
+                loop_hz: self.published.loop_hz,
                 target_hz: 1.0 / self.settings.period.as_secs_f64(),
                 robots: self
                     .robots
@@ -2789,9 +2895,9 @@ impl Controller {
                         dataset_id: recording.writer.dataset_id().to_owned(),
                         frames: recording.frames,
                         elapsed_seconds: recording.active_elapsed(now).as_secs_f64(),
-                        wall_elapsed_seconds: now.duration_since(recording.started).as_secs_f64(),
+                        wall_elapsed_seconds: recording.clock.wall_elapsed(now).as_secs_f64(),
                         paused_seconds: recording.paused_elapsed(now).as_secs_f64(),
-                        paused: recording.paused_at.is_some(),
+                        paused: recording.clock.is_paused(),
                         arms: recording.arms.iter().map(|arm| arm.id.clone()).collect(),
                         max_follow_error_degrees: recording.follow_error(),
                         error: recording.writer.failure(),
@@ -2809,17 +2915,17 @@ impl Controller {
                     duration_seconds: replay.duration_seconds(),
                     purpose: replay.purpose,
                     phase: replay.phase,
-                    paused: replay.paused,
+                    paused: replay.timing.paused,
                 }),
             },
-            connections: self.connections.clone(),
-            mode: self.mode.clone(),
+            connections: self.published.connections.clone(),
+            mode: self.published.mode.clone(),
             limits: self
                 .robots
                 .iter()
                 .map(|(id, robot)| (id.clone(), robot.limits.clone()))
                 .collect(),
-            recording_issue: self.recording_issue.clone(),
+            recording_issue: self.published.recording_issue.clone(),
         };
         // `send_replace` rather than `send`: the latest state must be readable
         // through the handle even at moments when nothing is subscribed.
@@ -2848,7 +2954,7 @@ fn validate_motor_read_keys<T>(
 mod tests {
     use std::sync::Arc;
 
-    use crate::bus::BusError;
+    use crate::bus::{BusError, MotorElectricalSample};
     use spiral_robotics_core::calibration::MotorReading;
 
     use super::*;
@@ -2859,22 +2965,26 @@ mod tests {
 
     fn calibration(center: i64, span: i64) -> Calibration {
         let motors = motors();
+        calibration_for(&motors, center, span)
+    }
+
+    fn calibration_for(
+        motors: &BTreeMap<String, MotorSpec>,
+        center: i64,
+        span: i64,
+    ) -> Calibration {
         let input = CalibrationInput::Direct {
             motors: motors
                 .keys()
                 .map(|name| {
                     (
                         name.clone(),
-                        MotorReading {
-                            center,
-                            range_min: center - span,
-                            range_max: center + span,
-                        },
+                        MotorReading::new(center, center - span, center + span),
                     )
                 })
                 .collect(),
         };
-        input.build(&motors).expect("calibration")
+        input.build(motors).expect("calibration")
     }
 
     fn spec(id: &str, calibration: Option<Calibration>) -> RobotSpec {
@@ -2889,6 +2999,18 @@ mod tests {
         }
     }
 
+    fn timeline_replay(
+        robot: &str,
+        frames: Vec<BTreeMap<String, f64>>,
+        sample_hz: f64,
+    ) -> ReplayRequest {
+        ReplayRequest::timeline(
+            robot.to_owned(),
+            "episode_000001".to_owned(),
+            ReplayTrajectory::new(frames, sample_hz),
+        )
+    }
+
     fn controller() -> Controller {
         let (state, _receiver) = watch::channel(HardwareState::default());
         Controller::new_for_test(ControlSettings::default(), state)
@@ -2901,10 +3023,6 @@ mod tests {
     }
 
     impl MotorBus for FailingEnableBus {
-        fn motor_names(&self) -> Vec<String> {
-            self.positions.keys().cloned().collect()
-        }
-
         fn read_positions(&mut self) -> Result<BTreeMap<String, i64>, BusError> {
             Ok(self.positions.clone())
         }
@@ -2952,7 +3070,7 @@ mod tests {
         release_fails: bool,
     ) -> Arc<Mutex<Vec<bool>>> {
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let positions = controller.robots["arm"].positions.clone();
+        let positions = controller.robots["arm"].motion.positions.clone();
         controller.robots.get_mut("arm").unwrap().bus = Box::new(FailingEnableBus {
             calls: Arc::clone(&calls),
             release_fails,
@@ -2992,7 +3110,11 @@ mod tests {
             .map(|step| BTreeMap::from([("gripper".to_owned(), 0.5 + 0.1 * step as f64)]))
             .collect::<Vec<_>>();
         controller
-            .start_replay("arm", "episode_000001", frames, 60.0)
+            .start_replay(ReplayRequest::timeline(
+                "arm".to_owned(),
+                "episode_000001".to_owned(),
+                ReplayTrajectory::new(frames, 60.0),
+            ))
             .expect("start replay");
 
         assert_eq!(
@@ -3001,7 +3123,7 @@ mod tests {
         );
         // Entering replay energizes the arm, the same way entering teleoperation
         // holds its follower.
-        assert_eq!(controller.robots["arm"].torque, TorqueState::Engaged);
+        assert_eq!(controller.robots["arm"].motion.torque, TorqueState::Engaged);
 
         // Seeking uses the gentle manual ramp, so the arm does not lunge at a
         // start pose the operator never saw coming.
@@ -3034,9 +3156,9 @@ mod tests {
             }
         }
         assert!(controller.replay.is_none(), "the replay finished");
-        assert_eq!(controller.mode.selection, ModeSelection::Idle);
+        assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
         assert_eq!(
-            controller.mode.error, None,
+            controller.published.mode.error, None,
             "reaching the end of a take is not a fault"
         );
     }
@@ -3052,7 +3174,11 @@ mod tests {
             .map(|step| BTreeMap::from([("gripper".to_owned(), 0.05 + 0.01 * step as f64)]))
             .collect::<Vec<_>>();
         controller
-            .start_replay("arm", "episode_000001", frames, 60.0)
+            .start_replay(ReplayRequest::timeline(
+                "arm".to_owned(),
+                "episode_000001".to_owned(),
+                ReplayTrajectory::new(frames, 60.0),
+            ))
             .expect("start replay");
 
         for _ in 0..400 {
@@ -3076,6 +3202,7 @@ mod tests {
             .replay
             .as_ref()
             .expect("replay is active")
+            .timing
             .position;
         assert!(paused_at > 0.0, "the replay advanced before pausing");
 
@@ -3090,6 +3217,7 @@ mod tests {
                 .replay
                 .as_ref()
                 .expect("paused replay remains loaded")
+                .timing
                 .position,
             paused_at,
             "pause must retain the exact trajectory position"
@@ -3104,6 +3232,7 @@ mod tests {
                 .replay
                 .as_ref()
                 .expect("replay continues")
+                .timing
                 .position
                 > paused_at,
             "resume continues forward instead of seeking to frame zero"
@@ -3122,21 +3251,11 @@ mod tests {
             .collect::<Vec<_>>();
 
         controller
-            .start_replay_for(
-                "arm",
-                "episode_000001",
-                ReplayPlan {
-                    frames,
-                    sample_hz: 60.0,
-                    start_frame: 60,
-                    resolved_start_seconds: 1.25,
-                    purpose: ReplayPurpose::Timeline,
-                },
-            )
+            .start_replay(timeline_replay("arm", frames, 60.0).starting_at(60, 1.25))
             .expect("start replay at playhead");
 
         let replay = controller.replay.as_ref().expect("replay is active");
-        assert_eq!(replay.position, 60.0);
+        assert_eq!(replay.timing.position, 60.0);
         assert_eq!(replay.cursor(), 60);
         assert_eq!(replay.elapsed_seconds(), 1.25);
         assert_eq!(
@@ -3153,17 +3272,11 @@ mod tests {
             .expect("connect");
         controller.poll_robots();
         controller
-            .start_replay_for(
-                "arm",
-                "episode_000001",
-                ReplayPlan {
-                    frames: vec![BTreeMap::from([("gripper".to_owned(), 0.25)])],
-                    sample_hz: 60.0,
-                    start_frame: 0,
-                    resolved_start_seconds: 0.0,
-                    purpose: ReplayPurpose::PhysicalSeek,
-                },
-            )
+            .start_replay(ReplayRequest::physical_seek(
+                "arm".to_owned(),
+                "episode_000001".to_owned(),
+                ReplayTrajectory::single_pose(BTreeMap::from([("gripper".to_owned(), 0.25)]), 60.0),
+            ))
             .expect("start physical seek");
 
         controller
@@ -3175,6 +3288,7 @@ mod tests {
                 .replay
                 .as_ref()
                 .expect("seek remains active")
+                .timing
                 .paused,
             "one-frame physical motion must finish even if the prior replay's pause arrives late"
         );
@@ -3188,19 +3302,18 @@ mod tests {
             .expect("connect");
         controller.poll_robots();
         controller
-            .start_replay(
+            .start_replay(timeline_replay(
                 "arm",
-                "episode_000001",
                 vec![BTreeMap::from([("gripper".to_owned(), 0.25)])],
                 60.0,
-            )
+            ))
             .expect("start timeline replay");
 
         controller.set_replay_paused(true).expect("pause replay");
 
         let replay = controller.replay.as_ref().expect("replay remains loaded");
         assert_eq!(replay.purpose, ReplayPurpose::Timeline);
-        assert!(replay.paused);
+        assert!(replay.timing.paused);
     }
 
     #[test]
@@ -3214,35 +3327,34 @@ mod tests {
         let pose = vec![BTreeMap::from([("gripper".to_owned(), 0.1)])];
         assert!(
             controller
-                .start_replay("bare", "episode_000001", pose.clone(), 60.0)
+                .start_replay(timeline_replay("bare", pose.clone(), 60.0))
                 .expect_err("uncalibrated")
                 .contains("calibrated")
         );
         assert!(
             controller
-                .start_replay("arm", "episode_000001", Vec::new(), 60.0)
+                .start_replay(timeline_replay("arm", Vec::new(), 60.0))
                 .expect_err("no frames")
                 .contains("no frames")
         );
         assert!(
             controller
-                .start_replay("arm", "episode_000001", pose.clone(), 0.0)
+                .start_replay(timeline_replay("arm", pose.clone(), 0.0))
                 .expect_err("bad rate")
                 .contains("sample rate")
         );
         assert!(
             controller
-                .start_replay(
+                .start_replay(timeline_replay(
                     "arm",
-                    "episode_000001",
                     vec![BTreeMap::from([("sixth_axis".to_owned(), 0.1)])],
                     60.0,
-                )
+                ))
                 .expect_err("unknown joint")
                 .contains("sixth_axis")
         );
         assert!(controller.replay.is_none());
-        assert_eq!(controller.mode.selection, ModeSelection::Idle);
+        assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
     }
 
     #[test]
@@ -3276,14 +3388,14 @@ mod tests {
             ),
         ] {
             let error = controller
-                .start_replay("arm", "episode_000001", frames, 60.0)
+                .start_replay(timeline_replay("arm", frames, 60.0))
                 .expect_err(label);
             assert!(
                 error.contains("frame 1"),
                 "{label} should identify its later frame: {error}"
             );
             assert!(controller.replay.is_none());
-            assert_eq!(controller.mode.selection, ModeSelection::Idle);
+            assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
         }
     }
 
@@ -3295,80 +3407,66 @@ mod tests {
             .expect("connect");
         controller.poll_robots();
         controller
-            .start_replay(
+            .start_replay(timeline_replay(
                 "arm",
-                "episode_000001",
                 vec![BTreeMap::from([("gripper".to_owned(), 0.5)])],
                 60.0,
-            )
+            ))
             .expect("start replay");
         controller
             .robots
             .get_mut("arm")
             .unwrap()
+            .motion
             .positions
             .remove("gripper");
 
         controller.apply_replay();
 
         assert!(controller.replay.is_none());
-        assert_eq!(controller.mode.selection, ModeSelection::Idle);
-        assert!(!controller.mode.active);
+        assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
+        assert!(!controller.published.mode.active);
         assert!(
             controller
+                .published
                 .mode
                 .error
                 .as_deref()
                 .is_some_and(|error| error.contains("stopped reporting"))
         );
         assert!(
-            !controller.robots["arm"].target.contains_key("gripper"),
+            !controller.robots["arm"]
+                .motion
+                .target
+                .contains_key("gripper"),
             "failure pins targets to the remaining measured state"
         );
     }
 
     #[test]
-    fn replay_seek_fails_closed_if_calibration_becomes_missing_or_invalid() {
-        for corruption in ["missing", "invalid range"] {
-            let mut controller = controller();
-            controller
-                .connect(spec("arm", Some(calibration(2048, 500))))
-                .expect("connect");
-            controller.poll_robots();
-            controller
-                .start_replay(
-                    "arm",
-                    "episode_000001",
-                    vec![BTreeMap::from([("gripper".to_owned(), 0.5)])],
-                    60.0,
-                )
-                .expect("start replay");
-            let robot = controller.robots.get_mut("arm").unwrap();
-            match corruption {
-                "missing" => robot.spec.calibration = None,
-                "invalid range" => {
-                    let gripper = robot
-                        .spec
-                        .calibration
-                        .as_mut()
-                        .unwrap()
-                        .motors
-                        .get_mut("gripper")
-                        .unwrap();
-                    gripper.center = gripper.range_min;
-                }
-                _ => unreachable!(),
-            }
+    fn replay_seek_fails_closed_if_calibration_becomes_missing() {
+        let mut controller = controller();
+        controller
+            .connect(spec("arm", Some(calibration(2048, 500))))
+            .expect("connect");
+        controller.poll_robots();
+        controller
+            .start_replay(timeline_replay(
+                "arm",
+                vec![BTreeMap::from([("gripper".to_owned(), 0.5)])],
+                60.0,
+            ))
+            .expect("start replay");
+        controller.robots.get_mut("arm").unwrap().spec.calibration = None;
 
-            controller.apply_replay();
+        controller.apply_replay();
 
-            assert!(controller.replay.is_none(), "{corruption}");
-            assert_eq!(controller.mode.selection, ModeSelection::Idle);
-            assert!(!controller.mode.active);
-            assert!(controller.mode.error.is_some(), "{corruption}");
-            let robot = &controller.robots["arm"];
-            assert_eq!(robot.target, robot.positions, "{corruption}");
-        }
+        assert!(controller.replay.is_none());
+        assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
+        assert!(!controller.published.mode.active);
+        assert!(controller.published.mode.error.is_some());
+        let robot = &controller.robots["arm"];
+        assert_eq!(robot.motion.target, robot.motion.positions);
     }
 
     #[test]
@@ -3379,12 +3477,11 @@ mod tests {
             .expect("connect");
         controller.poll_robots();
         controller
-            .start_replay(
+            .start_replay(timeline_replay(
                 "arm",
-                "episode_000001",
                 vec![BTreeMap::from([("gripper".to_owned(), 0.1)])],
                 60.0,
-            )
+            ))
             .expect("start replay");
         assert!(controller.replay.is_some());
 
@@ -3397,17 +3494,17 @@ mod tests {
         // And losing the arm does the same, with a reason.
         controller.poll_robots();
         controller
-            .start_replay(
+            .start_replay(timeline_replay(
                 "arm",
-                "episode_000001",
                 vec![BTreeMap::from([("gripper".to_owned(), 0.1)])],
                 60.0,
-            )
+            ))
             .expect("start replay again");
         controller.leave_mode_involving("arm", "its motor bus stopped responding");
         assert!(controller.replay.is_none());
         assert!(
             controller
+                .published
                 .mode
                 .error
                 .as_deref()
@@ -3427,7 +3524,7 @@ mod tests {
                 .contains("already connected")
         );
         assert_eq!(controller.robots.len(), 1);
-        assert!(controller.connections["arm"].connected);
+        assert!(controller.published.connections["arm"].connected);
     }
 
     #[test]
@@ -3454,8 +3551,12 @@ mod tests {
     #[test]
     fn hardware_rejects_calibration_for_a_different_motor_definition() {
         let mut controller = controller();
-        let mut stale = calibration(2048, 500);
-        stale.motors.get_mut("gripper").unwrap().id = 99;
+        let mut stale_motors = motors();
+        stale_motors.insert(
+            "gripper".to_owned(),
+            MotorSpec::new(99, MotorDirection::Normal).with_model("sts3215"),
+        );
+        let stale = calibration_for(&stale_motors, 2048, 500);
 
         let error = controller
             .connect(spec("stale", Some(stale.clone())))
@@ -3489,16 +3590,19 @@ mod tests {
 
         controller.hold("arm").expect("hold");
         assert_eq!(
-            controller.mode.selection,
+            controller.published.mode.selection,
             ModeSelection::Manual {
                 robot: "arm".to_owned()
             }
         );
-        assert_eq!(controller.robots["arm"].torque, TorqueState::Engaged);
+        assert_eq!(controller.robots["arm"].motion.torque, TorqueState::Engaged);
 
         controller.release("arm").expect("release");
-        assert_eq!(controller.mode.selection, ModeSelection::Idle);
-        assert_eq!(controller.robots["arm"].torque, TorqueState::Released);
+        assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
+        assert_eq!(
+            controller.robots["arm"].motion.torque,
+            TorqueState::Released
+        );
     }
 
     #[test]
@@ -3517,8 +3621,11 @@ mod tests {
             error.contains("compensating torque-off was verified"),
             "{error}"
         );
-        assert_eq!(controller.mode.selection, ModeSelection::Idle);
-        assert_eq!(controller.robots["arm"].torque, TorqueState::Released);
+        assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
+        assert_eq!(
+            controller.robots["arm"].motion.torque,
+            TorqueState::Released
+        );
 
         let calls = install_failing_enable_bus(&mut controller, true);
         let error = controller
@@ -3529,8 +3636,8 @@ mod tests {
             error.contains("physical torque state is unknown"),
             "{error}"
         );
-        assert_eq!(controller.mode.selection, ModeSelection::Idle);
-        assert_eq!(controller.robots["arm"].torque, TorqueState::Unknown);
+        assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
+        assert_eq!(controller.robots["arm"].motion.torque, TorqueState::Unknown);
         assert!(!controller.robots["arm"].telemetry().torque);
         controller
             .set_mode(ModeSelection::Manual {
@@ -3579,7 +3686,7 @@ mod tests {
         );
         assert_eq!(*calls.lock().unwrap(), [false]);
         assert!(controller.robots.contains_key("arm"));
-        assert_eq!(controller.robots["arm"].torque, TorqueState::Unknown);
+        assert_eq!(controller.robots["arm"].motion.torque, TorqueState::Unknown);
     }
 
     #[test]
@@ -3606,7 +3713,7 @@ mod tests {
             .set_goals("arm", &BTreeMap::from([("gripper".to_owned(), 1.0)]))
             .expect("the exact normalized boundary is valid");
 
-        assert_eq!(controller.robots["arm"].target["gripper"], 2548);
+        assert_eq!(controller.robots["arm"].motion.target["gripper"], 2548);
     }
 
     #[test]
@@ -3616,14 +3723,14 @@ mod tests {
             .connect(spec("arm", Some(calibration(2048, 500))))
             .expect("connect");
         controller.hold("arm").expect("hold");
-        let before = controller.robots["arm"].target.clone();
+        let before = controller.robots["arm"].motion.target.clone();
 
         for value in [-1.000_001, 1.000_001, f64::NAN] {
             let error = controller
                 .set_goals("arm", &BTreeMap::from([("gripper".to_owned(), value)]))
                 .expect_err("invalid normalized goal must fail closed");
             assert!(error.contains("normalized [-1, 1]"), "{error}");
-            assert_eq!(controller.robots["arm"].target, before);
+            assert_eq!(controller.robots["arm"].motion.target, before);
         }
     }
 
@@ -3639,9 +3746,9 @@ mod tests {
                 session: "rollout-1".to_owned(),
             })
             .expect("policy mode");
-        assert_eq!(controller.robots["arm"].torque, TorqueState::Engaged);
+        assert_eq!(controller.robots["arm"].motion.torque, TorqueState::Engaged);
         let robot = controller.robots.get_mut("arm").unwrap();
-        robot.positions = robot
+        robot.motion.positions = robot
             .spec
             .motors
             .keys()
@@ -3652,17 +3759,25 @@ mod tests {
         let goals = BTreeMap::from([("gripper".to_owned(), 0.5)]);
         assert!(
             controller
-                .set_policy_goals("arm", "old-rollout", &goals)
+                .set_policy_goals(&PolicyGoals::new(
+                    "arm".to_owned(),
+                    "old-rollout".to_owned(),
+                    goals.clone(),
+                ))
                 .expect_err("stale session")
                 .contains("not allowed")
         );
         controller
-            .set_policy_goals("arm", "rollout-1", &goals)
+            .set_policy_goals(&PolicyGoals::new(
+                "arm".to_owned(),
+                "rollout-1".to_owned(),
+                goals.clone(),
+            ))
             .expect("active session may command");
-        assert_eq!(controller.robots["arm"].target["gripper"], 2298);
-        let before = controller.robots["arm"].commanded["gripper"];
+        assert_eq!(controller.robots["arm"].motion.target["gripper"], 2298);
+        let before = controller.robots["arm"].motion.commanded["gripper"];
         controller.drive_robots();
-        let after = controller.robots["arm"].commanded["gripper"];
+        let after = controller.robots["arm"].motion.commanded["gripper"];
         assert_ne!(
             after, before,
             "the admitted policy target reaches the motor ramp"
@@ -3677,6 +3792,7 @@ mod tests {
             .robots
             .get_mut("arm")
             .unwrap()
+            .motion
             .positions
             .insert("gripper".to_owned(), measured);
 
@@ -3684,16 +3800,20 @@ mod tests {
             .set_mode(ModeSelection::Idle)
             .expect("stop policy");
         assert!(
-            controller.robots["arm"].torque.is_engaged(),
+            controller.robots["arm"].motion.torque.is_engaged(),
             "stopping policy control must not release the arm"
         );
         assert_eq!(
-            controller.robots["arm"].target["gripper"], measured,
+            controller.robots["arm"].motion.target["gripper"], measured,
             "stopping policy control holds the arm at its measured position"
         );
         assert!(
             controller
-                .set_policy_goals("arm", "rollout-1", &goals)
+                .set_policy_goals(&PolicyGoals::new(
+                    "arm".to_owned(),
+                    "rollout-1".to_owned(),
+                    goals.clone(),
+                ))
                 .expect_err("finished session")
                 .contains("not allowed")
         );
@@ -3713,7 +3833,7 @@ mod tests {
         controller.set_torque("arm", true).expect("torque on");
         // Park the arm at center so the step under test has a known direction.
         let robot = controller.robots.get_mut("arm").unwrap();
-        robot.positions = robot
+        robot.motion.positions = robot
             .spec
             .motors
             .keys()
@@ -3726,13 +3846,13 @@ mod tests {
 
         let max_step = controller.settings.max_step_counts;
         controller.robots.get_mut("arm").unwrap().drive(max_step);
-        let after_one_step = controller.robots["arm"].commanded["gripper"];
+        let after_one_step = controller.robots["arm"].motion.commanded["gripper"];
 
         assert_eq!(after_one_step - 2048, max_step, "one bounded step");
         for _ in 0..200 {
             controller.robots.get_mut("arm").unwrap().drive(max_step);
         }
-        assert_eq!(controller.robots["arm"].commanded["gripper"], 2548);
+        assert_eq!(controller.robots["arm"].motion.commanded["gripper"], 2548);
     }
 
     #[test]
@@ -3752,13 +3872,13 @@ mod tests {
             .expect("teleoperation");
 
         let robot = controller.robots.get_mut("follower").unwrap();
-        robot.positions.insert("gripper".to_owned(), 2048);
-        robot.commanded.insert("gripper".to_owned(), 2048);
-        robot.target.insert("gripper".to_owned(), 3048);
+        robot.motion.positions.insert("gripper".to_owned(), 2048);
+        robot.motion.commanded.insert("gripper".to_owned(), 2048);
+        robot.motion.target.insert("gripper".to_owned(), 3048);
         controller.drive_robots();
 
         assert_eq!(
-            controller.robots["follower"].commanded["gripper"] - 2048,
+            controller.robots["follower"].motion.commanded["gripper"] - 2048,
             controller.settings.teleop_max_step_counts
         );
         assert!(
@@ -3780,8 +3900,8 @@ mod tests {
             controller.poll_robots();
         }
         let robot = &controller.robots["arm"];
-        assert_eq!(robot.target, robot.positions);
-        assert_eq!(robot.commanded, robot.positions);
+        assert_eq!(robot.motion.target, robot.motion.positions);
+        assert_eq!(robot.motion.commanded, robot.motion.positions);
     }
 
     #[test]
@@ -3802,12 +3922,12 @@ mod tests {
 
         // Put the leader at the top of its travel and let the mode map it.
         let leader = controller.robots.get_mut("leader").unwrap();
-        leader.positions.insert("gripper".to_owned(), 2448);
+        leader.motion.positions.insert("gripper".to_owned(), 2448);
         controller.apply_mode();
 
-        assert!(controller.mode.active);
+        assert!(controller.published.mode.active);
         assert_eq!(
-            controller.robots["follower"].target["gripper"], 2300,
+            controller.robots["follower"].motion.target["gripper"], 2300,
             "the follower's own range, not the leader's counts"
         );
     }
@@ -3832,21 +3952,24 @@ mod tests {
             .expect("teleop");
 
         assert!(
-            !controller.robots["leader"].torque.is_engaged(),
+            !controller.robots["leader"].motion.torque.is_engaged(),
             "the leader has to be free to move by hand"
         );
         assert!(
-            controller.robots["follower"].torque.is_engaged(),
+            controller.robots["follower"].motion.torque.is_engaged(),
             "the follower has to hold, or the mode does nothing"
         );
         // Holding means holding where it stands, not where it was last sent.
         let follower = &controller.robots["follower"];
-        assert_eq!(follower.target, follower.positions);
+        assert_eq!(follower.motion.target, follower.motion.positions);
 
         // Leaving the mode does not release the follower: torque is what keeps
         // an arm from falling, so dropping it is always the operator's call.
         controller.set_mode(ModeSelection::Idle).expect("idle");
-        assert_eq!(controller.robots["follower"].torque, TorqueState::Engaged);
+        assert_eq!(
+            controller.robots["follower"].motion.torque,
+            TorqueState::Engaged
+        );
     }
 
     #[test]
@@ -3875,7 +3998,7 @@ mod tests {
                 .expect_err("uncalibrated follower")
                 .contains("calibrated")
         );
-        assert_eq!(controller.mode.selection, ModeSelection::Idle);
+        assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
     }
 
     #[test]
@@ -3894,15 +4017,16 @@ mod tests {
             })
             .expect("teleop");
 
-        controller.robots.get_mut("leader").unwrap().failures = MAX_CONSECUTIVE_FAILURES;
-        controller.robots.get_mut("leader").unwrap().error = Some("bus went away".to_owned());
+        controller.robots.get_mut("leader").unwrap().health.failures = MAX_CONSECUTIVE_FAILURES;
+        controller.robots.get_mut("leader").unwrap().health.error =
+            Some("bus went away".to_owned());
         controller.drop_failed_robots();
 
         assert!(!controller.robots.contains_key("leader"));
-        assert_eq!(controller.mode.selection, ModeSelection::Idle);
-        assert!(!controller.mode.active);
-        assert!(controller.mode.error.unwrap().contains("stopped"));
-        let connection = &controller.connections["leader"];
+        assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
+        assert!(!controller.published.mode.active);
+        assert!(controller.published.mode.error.unwrap().contains("stopped"));
+        let connection = &controller.published.connections["leader"];
         assert!(!connection.connected);
         assert_eq!(connection.error.as_deref(), Some("bus went away"));
     }
@@ -3922,8 +4046,11 @@ mod tests {
 
         controller.start_calibration("arm").expect("start");
 
-        assert_eq!(controller.robots["arm"].torque, TorqueState::Released);
-        assert_eq!(controller.mode.selection, ModeSelection::Idle);
+        assert_eq!(
+            controller.robots["arm"].motion.torque,
+            TorqueState::Released
+        );
+        assert_eq!(controller.published.mode.selection, ModeSelection::Idle);
         assert!(
             controller
                 .set_torque("arm", true)
@@ -3969,7 +4096,7 @@ mod tests {
         assert!(
             motors
                 .values()
-                .all(|reading| reading.range_max > reading.range_min)
+                .all(|reading| reading.range_max() > reading.range_min())
         );
 
         // Reading the ranges must not end the sweep: the caller still has to
@@ -3994,7 +4121,7 @@ mod tests {
         controller.connect(spec("raw", None)).expect("connect");
         // Park both arms at center so the reported angles are exact.
         for robot in controller.robots.values_mut() {
-            robot.positions = robot
+            robot.motion.positions = robot
                 .spec
                 .motors
                 .keys()
@@ -4077,7 +4204,10 @@ mod tests {
         let now = Instant::now();
         let idle = MotorSample {
             load: Some(0.05),
-            current_amps: Some(0.1),
+            electrical: MotorElectricalSample {
+                current_amps: Some(0.1),
+                ..MotorElectricalSample::default()
+            },
             ..MotorSample::default()
         };
         for _ in 0..40 {
@@ -4088,7 +4218,10 @@ mod tests {
         track.observe(
             MotorSample {
                 load: Some(0.9),
-                current_amps: Some(1.3),
+                electrical: MotorElectricalSample {
+                    current_amps: Some(1.3),
+                    ..MotorElectricalSample::default()
+                },
                 ..MotorSample::default()
             },
             now,

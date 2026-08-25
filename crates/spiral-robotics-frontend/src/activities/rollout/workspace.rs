@@ -3,10 +3,12 @@
 use crate::components::interaction::{Action, ActionPurpose, ActionSize, ActionVariant};
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_api::api::{
-    CameraStatus, MAX_ROLLOUT_ACTION_STEPS, MAX_ROLLOUT_DURATION_SECONDS, RobotSummary,
-    RolloutPhase, RolloutSnapshot, StartRolloutRequest, TrainingRun, TrainingSnapshot,
+use spiral_robotics_api::robots::{CameraStatus, RobotSummary};
+use spiral_robotics_api::rollout::{
+    MAX_ROLLOUT_ACTION_STEPS, MAX_ROLLOUT_DURATION_SECONDS, RolloutPhase, RolloutSnapshot,
+    StartRolloutRequest,
 };
+use spiral_robotics_api::training::{TrainingRun, TrainingSnapshot};
 
 use crate::activities::rollout::state::rollout_controller;
 use crate::client::http as api;
@@ -569,10 +571,11 @@ fn format_count(value: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_api::api::{
-        CameraBinding, CameraStatus, ConnectionStatus, MAX_ROLLOUT_ACTION_STEPS, RobotSummary,
-        RolloutPhase, RolloutSnapshot, TrainingCheckpoint, TrainingRun, TrainingRunPhase,
+    use spiral_robotics_api::robots::{
+        CameraBinding, CameraStatus, ConnectionStatus, RobotSummary,
     };
+    use spiral_robotics_api::rollout::{MAX_ROLLOUT_ACTION_STEPS, RolloutPhase, RolloutSnapshot};
+    use spiral_robotics_api::training::{TrainingCheckpoint, TrainingRun, TrainingRunPhase};
 
     use super::{
         RolloutCameraSummary, camera_roles, checkpoints_for_run, follower, rollout_camera_summary,

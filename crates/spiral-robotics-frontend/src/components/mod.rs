@@ -2,4 +2,4 @@
 
 pub(crate) mod charts;
 pub(crate) mod icons;
-pub mod interaction;
+pub(crate) mod interaction;

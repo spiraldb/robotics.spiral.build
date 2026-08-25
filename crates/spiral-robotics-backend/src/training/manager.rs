@@ -5,14 +5,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use spiral_robotics_api::api::{
-    ConnectionTestResponse, MAX_TRAINING_HISTORY_RUNS, StartTrainingRequest, TrainingCheckpoint,
-    TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase, TrainingRuntimeInfo,
-    TrainingSnapshot, TrainingSource, TrainingUpdate,
+use spiral_robotics_api::settings::ConnectionTestResponse;
+use spiral_robotics_api::training::{
+    MAX_TRAINING_HISTORY_RUNS, StartTrainingRequest, TrainingCheckpoint, TrainingMetricPoint,
+    TrainingReadiness, TrainingRun, TrainingRunPhase, TrainingRuntimeInfo, TrainingSnapshot,
+    TrainingSource, TrainingUpdate,
 };
 use spiral_robotics_training::{
-    ActTrainingJobConfig, SpiralJobConnection, TrainingBackend, TrainingInitialization,
-    TrainingJobCursor, TrainingJobPhase, TrainingJobRequest, TrainingJobSnapshot,
+    ActLayerCounts, ActModelDimensions, ActTrainingArchitecture, ActTrainingInput,
+    ActTrainingJobConfig, SpiralJobConnection, SpiralServiceEndpoints, TrainingBackend,
+    TrainingCheckpointSchedule, TrainingDataColumns, TrainingDataQuery, TrainingDataSelection,
+    TrainingImageSize, TrainingInitialization, TrainingJobCursor, TrainingJobIdentity,
+    TrainingJobPhase, TrainingJobPlan, TrainingJobRequest, TrainingJobSnapshot, TrainingOptimizer,
+    TrainingProgress, TrainingRuntimeSelection, TrainingSchedule,
 };
 use tokio::sync::broadcast;
 
@@ -35,8 +40,6 @@ use spiral_robotics_core::error::OperationError;
 use spiral_robotics_storage::checkpoints::CheckpointStore;
 use spiral_robotics_storage::manager::StorageManager;
 
-static RUN_IDS: StableIdSequence = StableIdSequence::new("train", 0);
-
 #[derive(Clone)]
 pub(crate) struct TrainingManager {
     inner: Arc<TrainingManagerInner>,
@@ -46,6 +49,7 @@ struct TrainingManagerInner {
     storage: Arc<StorageManager>,
     training_backend: Arc<dyn TrainingBackend>,
     clock: Arc<dyn Clock>,
+    run_ids: StableIdSequence,
     snapshot: Mutex<TrainingSnapshot>,
     updates: broadcast::Sender<TrainingUpdate>,
     controls: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
@@ -78,6 +82,7 @@ impl TrainingManager {
                 storage,
                 training_backend,
                 clock,
+                run_ids: StableIdSequence::new("train", 0),
                 snapshot: Mutex::new(TrainingSnapshot::default()),
                 updates,
                 controls: Mutex::new(BTreeMap::new()),
@@ -168,7 +173,7 @@ impl TrainingManager {
         match probe_training_backend(&self.inner.training_backend).await {
             Ok(info) => ConnectionTestResponse {
                 ok: true,
-                message: format!("Connected · {}", info.summary()),
+                message: format!("Connected · {}", info.display_summary()),
             },
             Err(error) => ConnectionTestResponse {
                 ok: false,
@@ -253,57 +258,77 @@ impl TrainingManager {
         let run_id = launch.run_id;
         let request = contract_training_request(launch.command);
         let credentials = self.inner.storage.spiral_credentials();
-        let job_request = TrainingJobRequest {
-            job_id: run_id.clone(),
-            run_name: request.run_name.clone(),
-            spiral: SpiralJobConnection {
-                api_url: self.inner.storage.spiral_endpoint(),
-                spfs_url: self.inner.storage.spiral_spfs_endpoint(),
-                project_id: self.inner.storage.project_id(),
-                namespace: self.inner.storage.namespace().to_owned(),
-                client_id: credentials
-                    .as_ref()
-                    .map(|credentials| credentials.client_id.clone()),
-                client_secret: credentials
-                    .as_ref()
-                    .map(|credentials| credentials.client_secret.clone()),
-            },
-            sql: request.sql.clone(),
-            state_column: request.state_column.clone(),
-            action_column: request.action_column.clone(),
-            spiral_schema_version: spiral_robotics_storage::schema::SCHEMA_VERSION,
-            device: request.device.clone(),
-            initialization: if request.act.pretrained_backbone {
-                TrainingInitialization::PretrainedBackbone
-            } else {
-                TrainingInitialization::Random
-            },
-            steps: request.steps,
-            batch_size: request.batch_size,
-            validation_split: request.validation_split,
-            learning_rate: request.learning_rate,
-            checkpoint_every: request.checkpoint_every,
-            chunk_size: request.chunk_size,
-            seed: request.seed,
-            act: ActTrainingJobConfig {
-                camera_streams: request.act.camera_streams.clone(),
-                image_width: request.act.image_width,
-                image_height: request.act.image_height,
-                video_decoder: request.act.video_decoder.clone(),
-                hidden_dimensions: request.act.hidden_dim,
-                latent_dimensions: request.act.latent_dim,
-                attention_heads: request.act.attention_heads,
-                feedforward_dimensions: request.act.feedforward_dim,
-                encoder_layers: request.act.encoder_layers,
-                vae_encoder_layers: request.act.vae_encoder_layers,
-                decoder_layers: request.act.decoder_layers,
-                kl_weight: request.act.kl_weight,
-            },
+        let spiral = SpiralJobConnection::new(
+            SpiralServiceEndpoints::new(
+                self.inner.storage.spiral_endpoint(),
+                self.inner.storage.spiral_spfs_endpoint(),
+            ),
+            self.inner.storage.project_id(),
+            self.inner.storage.namespace(),
+        )
+        .with_credentials(
+            credentials
+                .as_ref()
+                .map(|credentials| credentials.client_id().to_owned()),
+            credentials
+                .as_ref()
+                .map(|credentials| credentials.client_secret().to_owned()),
+        );
+        let data = TrainingDataSelection::new(
+            spiral,
+            TrainingDataQuery::new(
+                request.sql.clone(),
+                TrainingDataColumns::new(
+                    request.state_column.clone(),
+                    request.action_column.clone(),
+                ),
+                spiral_robotics_storage::schema::SCHEMA_VERSION,
+            ),
+        );
+        let initialization = if request.act.pretrained_backbone {
+            TrainingInitialization::PretrainedBackbone
+        } else {
+            TrainingInitialization::Random
         };
+        let schedule = TrainingSchedule::new(
+            TrainingProgress::new(request.steps, request.batch_size, request.validation_split),
+            TrainingOptimizer::new(request.learning_rate, request.seed),
+            TrainingCheckpointSchedule::new(request.checkpoint_every, request.chunk_size),
+        );
+        let act = ActTrainingJobConfig::new(
+            ActTrainingInput::new(
+                request.act.camera_streams.clone(),
+                TrainingImageSize::new(request.act.image_width, request.act.image_height),
+                request.act.video_decoder.clone(),
+            ),
+            ActTrainingArchitecture::new(
+                ActModelDimensions::new(
+                    request.act.hidden_dim,
+                    request.act.latent_dim,
+                    request.act.feedforward_dim,
+                ),
+                request.act.attention_heads,
+                ActLayerCounts::new(
+                    request.act.encoder_layers,
+                    request.act.vae_encoder_layers,
+                    request.act.decoder_layers,
+                ),
+            ),
+            request.act.kl_weight,
+        );
+        let job_request = TrainingJobRequest::new(
+            TrainingJobIdentity::new(run_id.clone(), request.run_name.clone()),
+            data,
+            TrainingJobPlan::new(
+                TrainingRuntimeSelection::new(request.device.clone(), initialization),
+                schedule,
+                act,
+            ),
+        );
         let backend = self.inner.training_backend.clone();
         let existing_run_id = run_id.clone();
         let initial = tokio::task::spawn_blocking(move || {
-            match backend.job(&existing_run_id, TrainingJobCursor::default()) {
+            match backend.job_snapshot(&existing_run_id, TrainingJobCursor::default()) {
                 Ok(snapshot) => Ok(snapshot),
                 Err(_) => backend.create_job(job_request),
             }
@@ -365,30 +390,30 @@ impl TrainingManager {
                 self.finish_remote_job(
                     &run_id,
                     TrainingJobPhase::Failed,
-                    snapshot.current_step,
+                    snapshot.current_step(),
                     error,
                 );
                 return;
             }
-            if snapshot.phase.terminal() {
+            if snapshot.phase().is_terminal() {
                 self.finish_remote_job(
                     &run_id,
-                    snapshot.phase,
-                    snapshot.current_step,
-                    snapshot.message.clone().unwrap_or_default(),
+                    snapshot.phase(),
+                    snapshot.current_step(),
+                    snapshot.message().unwrap_or_default().to_owned(),
                 );
                 return;
             }
             let backend = self.inner.training_backend.clone();
             let next_run_id = run_id.clone();
             let should_stop = cancel.load(Ordering::Acquire) && !stop_sent;
-            let cursor = snapshot.cursor;
+            let cursor = snapshot.cursor();
             tokio::time::sleep(remote_poll_delay(poll_failures)).await;
             let next = tokio::task::spawn_blocking(move || {
                 if should_stop {
                     backend.stop_job(&next_run_id, cursor)
                 } else {
-                    backend.job(&next_run_id, cursor)
+                    backend.job_snapshot(&next_run_id, cursor)
                 }
             })
             .await;
@@ -422,7 +447,7 @@ impl TrainingManager {
                     self.finish_remote_job(
                         &run_id,
                         TrainingJobPhase::Failed,
-                        snapshot.current_step,
+                        snapshot.current_step(),
                         format!("training job poll task stopped: {error}"),
                     );
                     return;
@@ -438,14 +463,14 @@ impl TrainingManager {
         snapshot: &TrainingJobSnapshot,
         replay: &mut RemoteReplayState,
     ) -> Result<(), String> {
-        if snapshot.job_id != run_id {
+        if snapshot.job_id() != run_id {
             return Err("training runtime returned the wrong job ID".to_owned());
         }
         if !replay.configured
-            && let Some(resolved) = &snapshot.resolved
+            && let Some(resolved) = snapshot.resolved()
         {
             let mut resolved_request = request.clone();
-            resolved_request.act.camera_streams = resolved.camera_streams.clone();
+            resolved_request.act.camera_streams = resolved.camera_streams().to_vec();
             self.apply_update(
                 TrainingUpdate::RunConfigured {
                     run_id: run_id.to_owned(),
@@ -455,17 +480,17 @@ impl TrainingManager {
             )?;
             replay.configured = true;
         }
-        if snapshot.phase == TrainingJobPhase::Running
+        if snapshot.phase() == TrainingJobPhase::Running
             && self.phase(run_id) == Some(TrainingRunPhase::Starting)
         {
             self.set_phase(
                 run_id,
                 TrainingRunPhase::Running,
                 None,
-                snapshot.message.clone(),
+                snapshot.message().map(str::to_owned),
             )?;
         }
-        if let Some(gap) = &snapshot.history_gap {
+        if let Some(gap) = snapshot.history_gap() {
             self.push_log(
                 run_id,
                 format!("Training worker history was compacted: {gap}"),
@@ -473,63 +498,63 @@ impl TrainingManager {
         }
         let previous_metric_step = replay.metric_step;
         for metric in snapshot
-            .metrics
+            .metrics()
             .iter()
-            .filter(|metric| metric.step > previous_metric_step)
+            .filter(|metric| metric.step() > previous_metric_step)
         {
             self.apply_update(
                 TrainingUpdate::Metric {
                     run_id: run_id.to_owned(),
                     point: Box::new(TrainingMetricPoint {
-                        step: metric.step,
-                        train_loss: metric.train_loss,
-                        validation_loss: metric.validation_loss,
-                        learning_rate: metric.learning_rate,
+                        step: metric.step(),
+                        train_loss: metric.train_loss(),
+                        validation_loss: metric.validation_loss(),
+                        learning_rate: metric.learning_rate(),
                         transfer_bytes_per_second: 0.0,
-                        examples_per_second: metric.examples_per_second,
-                        cpu_percent: metric.cpu_percent,
-                        gpu_percent: metric.gpu_percent,
-                        memory_bytes: metric.memory_bytes,
-                        loader_ms: metric.loader_ms,
+                        examples_per_second: metric.examples_per_second(),
+                        cpu_percent: metric.cpu_percent(),
+                        gpu_percent: metric.gpu_percent(),
+                        memory_bytes: metric.memory_bytes(),
+                        loader_ms: metric.loader_ms(),
                         arrow_encode_ms: None,
                         upload_ms: None,
-                        device_copy_ms: metric.device_copy_ms,
-                        model_ms: metric.model_ms,
-                        elapsed_seconds: metric.elapsed_seconds,
-                        event: metric.event.clone(),
+                        device_copy_ms: metric.device_copy_ms(),
+                        model_ms: metric.model_ms(),
+                        elapsed_seconds: metric.elapsed_seconds(),
+                        event: metric.event().map(str::to_owned),
                     }),
                 },
                 false,
             )?;
-            replay.metric_step = metric.step;
+            replay.metric_step = metric.step();
         }
         let previous_checkpoint_step = replay.checkpoint_step;
         for checkpoint in snapshot
-            .checkpoints
+            .checkpoints()
             .iter()
-            .filter(|checkpoint| checkpoint.step > previous_checkpoint_step)
+            .filter(|checkpoint| checkpoint.step() > previous_checkpoint_step)
         {
             self.inner.storage.invalidate_idle_connections();
             self.apply_update(
                 TrainingUpdate::Checkpoint {
                     run_id: run_id.to_owned(),
                     checkpoint: TrainingCheckpoint {
-                        step: checkpoint.step,
-                        created_ms: checkpoint.created_ms,
-                        validation_loss: checkpoint.validation_loss,
-                        byte_size: checkpoint.byte_size,
+                        step: checkpoint.step(),
+                        created_ms: checkpoint.created_ms(),
+                        validation_loss: checkpoint.validation_loss(),
+                        byte_size: checkpoint.byte_size(),
                         inference_ready: true,
-                        recommended_action_steps: checkpoint.recommended_action_steps,
-                        sample_hz: checkpoint.sample_hz,
+                        recommended_action_steps: checkpoint.recommended_action_steps(),
+                        sample_hz: checkpoint.sample_hz(),
                     },
                 },
                 true,
             )?;
-            replay.checkpoint_step = checkpoint.step;
+            replay.checkpoint_step = checkpoint.step();
         }
-        for log in &snapshot.logs {
-            if !replay.persisted_logs.contains(&log.line) {
-                self.push_log(run_id, log.line.clone());
+        for log in snapshot.logs() {
+            if !replay.persisted_logs.contains(log.line()) {
+                self.push_log(run_id, log.line().to_owned());
             }
         }
         Ok(())
@@ -699,11 +724,12 @@ impl TrainingCoordinatorPort for TrainingManager {
     }
 
     fn next_training_identity(&self) -> TrainingRunIdentity {
-        let identity = RUN_IDS.next(self.inner.clock.as_ref());
-        TrainingRunIdentity {
-            id: identity.value,
-            created_ms: identity.created_ms,
-        }
+        let (id, created_ms) = self
+            .inner
+            .run_ids
+            .next(self.inner.clock.as_ref())
+            .into_parts();
+        TrainingRunIdentity { id, created_ms }
     }
 
     fn admit_training_run(&self, run: CapabilityTrainingRun) -> Result<(), OperationError> {
@@ -756,10 +782,10 @@ async fn readiness(
     };
     let (backend, connection) = tokio::join!(backend_probe, spiral_probe);
     let runtime = backend.as_ref().ok().map(|info| TrainingRuntimeInfo {
-        id: info.id.clone(),
-        display_name: info.display_name.clone(),
-        runtime: info.runtime.clone(),
-        devices: info.devices.clone(),
+        id: info.id().to_owned(),
+        display_name: info.display_name().to_owned(),
+        runtime: info.runtime().to_owned(),
+        devices: info.devices().to_vec(),
     });
     let spiral_ready = connection.ok;
     let ready = spiral_ready && backend.is_ok();
@@ -772,7 +798,7 @@ async fn readiness(
             "Runtime ready · {probe} · Spiral project {} · namespace {} · query checked at run start",
             storage.project_id(),
             storage.namespace(),
-            probe = backend.summary(),
+            probe = backend.display_summary(),
         ),
     };
     TrainingReadiness {
@@ -818,7 +844,7 @@ fn capability_training_command(request: StartTrainingRequest) -> CapabilityStart
         run_name: request.run_name,
         dataset_id: request.dataset_id,
         policy: match request.policy {
-            spiral_robotics_api::api::TrainingPolicy::Act => CapabilityTrainingPolicy::Act,
+            spiral_robotics_api::training::TrainingPolicy::Act => CapabilityTrainingPolicy::Act,
         },
         query: request.sql,
         state_column: request.state_column,
@@ -854,7 +880,7 @@ fn contract_training_request(command: CapabilityStartTrainingCommand) -> StartTr
         run_name: command.run_name,
         dataset_id: command.dataset_id,
         policy: match command.policy {
-            CapabilityTrainingPolicy::Act => spiral_robotics_api::api::TrainingPolicy::Act,
+            CapabilityTrainingPolicy::Act => spiral_robotics_api::training::TrainingPolicy::Act,
         },
         sql: command.query,
         state_column: command.state_column,
@@ -867,7 +893,7 @@ fn contract_training_request(command: CapabilityStartTrainingCommand) -> StartTr
         checkpoint_every: command.checkpoint_every,
         chunk_size: command.chunk_size,
         seed: command.seed,
-        act: spiral_robotics_api::api::ActTrainingConfig {
+        act: spiral_robotics_api::training::ActTrainingConfig {
             camera_streams: command.act.camera_streams,
             image_width: command.act.image_width,
             image_height: command.act.image_height,

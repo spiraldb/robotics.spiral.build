@@ -1,14 +1,14 @@
 //! Backend-owned Workflow agent, tool loop, durable session, and SSE state.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogMutationLease};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use spiral_robotics_api::api::SpiralQueryResponse;
+use spiral_robotics_api::relations::SpiralQueryResponse;
 use spiral_robotics_api::workflow::{
     DEFAULT_WORKFLOW_ID, MAX_WORKFLOW_AGENT_CONVERSATION_TITLE_CHARS,
     MAX_WORKFLOW_AGENT_CONVERSATIONS, MAX_WORKFLOW_AGENT_INPUT_CHARS,
@@ -44,24 +44,26 @@ const ASSISTANT_READY_DETAIL: &str = "Ready for relation-first Workflow turns.";
 const ASSISTANT_UNAVAILABLE_DETAIL: &str =
     "Assistant is temporarily unavailable. Retry in a moment.";
 
-static AGENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
 #[derive(Clone)]
 pub(crate) struct WorkflowAgentManager {
     inner: Arc<WorkflowAgentInner>,
 }
 
 struct WorkflowAgentInner {
-    storage: Arc<StorageManager>,
-    workflow: Arc<WorkflowManager>,
-    catalog_lease: Arc<CatalogMutationLease>,
-    provider: Option<OpenAiProvider>,
+    services: WorkflowAgentServices,
     readiness: WorkflowAgentReadiness,
     history_error: Mutex<Option<String>>,
     scope_id: Mutex<String>,
     document: Mutex<AgentDocument>,
     active: Mutex<Option<ActiveTurn>>,
     updates: broadcast::Sender<WorkflowAgentUpdate>,
+}
+
+struct WorkflowAgentServices {
+    storage: Arc<StorageManager>,
+    workflow: Arc<WorkflowManager>,
+    catalog_lease: Arc<CatalogMutationLease>,
+    provider: Option<OpenAiProvider>,
 }
 
 struct ActiveTurn {
@@ -227,10 +229,12 @@ impl WorkflowAgentManager {
         let (updates, _) = broadcast::channel(128);
         Self {
             inner: Arc::new(WorkflowAgentInner {
-                storage,
-                workflow,
-                catalog_lease,
-                provider,
+                services: WorkflowAgentServices {
+                    storage,
+                    workflow,
+                    catalog_lease,
+                    provider,
+                },
                 readiness,
                 history_error: Mutex::new(None),
                 scope_id: Mutex::new(next_id("agent-scope")),
@@ -242,7 +246,7 @@ impl WorkflowAgentManager {
     }
 
     pub(crate) async fn hydrate_from_storage(&self) -> Result<(), String> {
-        let storage = self.inner.storage.clone();
+        let storage = self.inner.services.storage.clone();
         let loaded: Result<Option<String>, String> =
             tokio::task::spawn_blocking(move || storage.load_workflow_agent_snapshot_json())
                 .await
@@ -272,7 +276,12 @@ impl WorkflowAgentManager {
     }
 
     pub(crate) fn reload_from_storage(&self) -> Result<(), String> {
-        let raw_snapshot = match self.inner.storage.load_workflow_agent_snapshot_json() {
+        let raw_snapshot = match self
+            .inner
+            .services
+            .storage
+            .load_workflow_agent_snapshot_json()
+        {
             Ok(document) => document,
             Err(error) => {
                 self.install_unavailable_scope(&error);
@@ -316,6 +325,7 @@ impl WorkflowAgentManager {
                 let fresh = fresh_agent_document()?;
                 if let Some(raw_snapshot) = raw_snapshot {
                     self.inner
+                        .services
                         .storage
                         .reset_workflow_agent_document(raw_snapshot, &fresh)?;
                 } else {
@@ -413,7 +423,7 @@ impl WorkflowAgentManager {
         scope_id: &str,
         expected_revision: u64,
     ) -> Result<(), OperationError> {
-        if !self.inner.storage.is_configured() {
+        if !self.inner.services.storage.is_configured() {
             return Err(OperationError::Conflict(
                 "Configure or reconnect Spiral before changing Assistant conversations.".to_owned(),
             ));
@@ -438,7 +448,7 @@ impl WorkflowAgentManager {
                 "Stop the active Assistant turn before changing conversations.".to_owned(),
             ));
         }
-        let workflow = self.inner.workflow.state().snapshot;
+        let workflow = self.inner.services.workflow.state().snapshot;
         if workflow.phase.active()
             && workflow.run_id.as_deref().is_some_and(|run_id| {
                 document
@@ -470,7 +480,7 @@ impl WorkflowAgentManager {
                 "Assistant input is limited to {MAX_WORKFLOW_AGENT_INPUT_CHARS} characters."
             )));
         }
-        if !self.inner.storage.is_configured() {
+        if !self.inner.services.storage.is_configured() {
             return Err(OperationError::Conflict(
                 "Configure or reconnect Spiral before starting an Assistant turn.".to_owned(),
             ));
@@ -480,13 +490,14 @@ impl WorkflowAgentManager {
                 "Assistant history is unavailable for this project: {error}"
             )));
         }
-        if self.inner.provider.is_none() {
+        if self.inner.services.provider.is_none() {
             return Err(OperationError::External(
                 self.inner.readiness.detail.clone(),
             ));
         }
         let lease = self
             .inner
+            .services
             .catalog_lease
             .try_acquire(CatalogLeaseOwner::WorkflowAgentStart)
             .ok_or_else(|| {
@@ -502,7 +513,7 @@ impl WorkflowAgentManager {
                     "One Assistant turn is already active for this Workflow.".to_owned(),
                 ));
             }
-            if self.inner.workflow.is_active() {
+            if self.inner.services.workflow.is_active() {
                 return Err(OperationError::Conflict(
                     "Wait for the active Workflow run to finish before starting an Assistant turn."
                         .to_owned(),
@@ -617,7 +628,7 @@ impl WorkflowAgentManager {
             }
             Ok(response)
         })();
-        let released = self.inner.catalog_lease.release(lease);
+        let released = self.inner.services.catalog_lease.release(lease);
         debug_assert!(released, "agent admission releases its catalog lease once");
         admitted
     }
@@ -682,15 +693,22 @@ impl WorkflowAgentManager {
     fn cancel_owned_run(&self, owned_run_id: &Arc<Mutex<Option<String>>>) {
         let owned_run = lock(owned_run_id).clone();
         if let Some(run_id) = owned_run
-            && self.inner.workflow.state().snapshot.run_id.as_deref() == Some(run_id.as_str())
-            && self.inner.workflow.is_active()
+            && self
+                .inner
+                .services
+                .workflow
+                .state()
+                .snapshot
+                .run_id
+                .as_deref()
+                == Some(run_id.as_str())
+            && self.inner.services.workflow.is_active()
         {
-            let _ =
-                self.inner
-                    .workflow
-                    .cancel(spiral_robotics_api::workflow::CancelWorkflowRequest {
-                        scope_id: self.inner.workflow.scope_id(),
-                    });
+            let _ = self.inner.services.workflow.cancel(
+                spiral_robotics_api::workflow::CancelWorkflowRequest {
+                    scope_id: self.inner.services.workflow.scope_id(),
+                },
+            );
         }
     }
 
@@ -728,7 +746,7 @@ impl WorkflowAgentManager {
         cancel: Arc<AtomicBool>,
         owned_run_id: Arc<Mutex<Option<String>>>,
     ) {
-        let workflow_revision = self.inner.workflow.state().workflow.revision;
+        let workflow_revision = self.inner.services.workflow.state().workflow.revision;
         let mut context = ToolContext {
             conversation_id: conversation_id.clone(),
             workflow_revision,
@@ -757,8 +775,16 @@ impl WorkflowAgentManager {
             }
             if context.deferred_run_id.is_none()
                 && let Some(run_id) = lock(&context.owned_run_id).clone()
-                && self.inner.workflow.state().snapshot.run_id.as_deref() == Some(run_id.as_str())
-                && self.inner.workflow.is_active()
+                && self
+                    .inner
+                    .services
+                    .workflow
+                    .state()
+                    .snapshot
+                    .run_id
+                    .as_deref()
+                    == Some(run_id.as_str())
+                && self.inner.services.workflow.is_active()
             {
                 context.deferred_run_id = Some(run_id);
             }
@@ -801,6 +827,7 @@ impl WorkflowAgentManager {
     ) -> Result<(), String> {
         let provider = self
             .inner
+            .services
             .provider
             .as_ref()
             .ok_or_else(|| ASSISTANT_UNAVAILABLE_DETAIL.to_owned())?;
@@ -874,7 +901,7 @@ impl WorkflowAgentManager {
             .map_err(|error| format!("Tool arguments are malformed: {error}"))?;
         match call.function.name.as_str() {
             "list_relations" => {
-                let response = self.inner.storage.workflow_relations().await?;
+                let response = self.inner.services.storage.workflow_relations().await?;
                 Ok(json!({
                     "relations": response.relations.iter().map(|relation| &relation.name).collect::<Vec<_>>(),
                     "complete": response.complete,
@@ -889,7 +916,7 @@ impl WorkflowAgentManager {
                 if names.len() > 20 {
                     return Err("Describe at most 20 relations per tool call.".to_owned());
                 }
-                let discovered = self.inner.storage.workflow_relations().await?;
+                let discovered = self.inner.services.storage.workflow_relations().await?;
                 let requested = names.iter().filter_map(Value::as_str).collect::<Vec<_>>();
                 let relations = discovered
                     .relations
@@ -899,8 +926,10 @@ impl WorkflowAgentManager {
                 Ok(serde_json::to_string(&json!({"relations": relations}))
                     .map_err(|error| error.to_string())?)
             }
-            "list_model_capabilities" => serde_json::to_string(&self.inner.workflow.capabilities())
-                .map_err(|error| error.to_string()),
+            "list_model_capabilities" => {
+                serde_json::to_string(&self.inner.services.workflow.capabilities())
+                    .map_err(|error| error.to_string())
+            }
             "set_workflow" => {
                 let mut workflow_value = args
                     .get("workflow")
@@ -921,6 +950,7 @@ impl WorkflowAgentManager {
                     .map_err(|error| format!("Workflow shape is invalid: {error}"))?;
                 let (resolved, validation) = self
                     .inner
+                    .services
                     .workflow
                     .prepare_candidate(workflow)
                     .map_err(|error| error.to_string())?;
@@ -934,6 +964,7 @@ impl WorkflowAgentManager {
                 }
                 let lease = self
                     .inner
+                    .services
                     .catalog_lease
                     .try_acquire(CatalogLeaseOwner::WorkflowStart)
                     .ok_or_else(|| {
@@ -942,14 +973,15 @@ impl WorkflowAgentManager {
                     })?;
                 let saved = self
                     .inner
+                    .services
                     .workflow
                     .save(SaveWorkflowRequest {
-                        scope_id: self.inner.workflow.scope_id(),
+                        scope_id: self.inner.services.workflow.scope_id(),
                         expected_revision: context.workflow_revision,
                         workflow: resolved,
                     })
                     .map_err(|error| error.to_string());
-                let released = self.inner.catalog_lease.release(lease);
+                let released = self.inner.services.catalog_lease.release(lease);
                 debug_assert!(released, "agent Workflow save releases its lease once");
                 let saved = saved?;
                 context.workflow_revision = saved.workflow.revision;
@@ -964,6 +996,7 @@ impl WorkflowAgentManager {
             "run_workflow" => {
                 let lease = self
                     .inner
+                    .services
                     .catalog_lease
                     .try_acquire(CatalogLeaseOwner::WorkflowStart)
                     .ok_or_else(|| {
@@ -972,13 +1005,14 @@ impl WorkflowAgentManager {
                     })?;
                 let result = self
                     .inner
+                    .services
                     .workflow
                     .start(RunWorkflowRequest {
-                        scope_id: self.inner.workflow.scope_id(),
+                        scope_id: self.inner.services.workflow.scope_id(),
                         revision: context.workflow_revision,
                     })
                     .map_err(|error| error.to_string());
-                let released = self.inner.catalog_lease.release(lease);
+                let released = self.inner.services.catalog_lease.release(lease);
                 debug_assert!(released, "agent Workflow start releases its lease once");
                 let snapshot = result?;
                 let run_id = snapshot
@@ -989,13 +1023,20 @@ impl WorkflowAgentManager {
                 if let Err(error) =
                     self.record_conversation_owned_run(&context.conversation_id, &run_id)
                 {
-                    if self.inner.workflow.state().snapshot.run_id.as_deref()
+                    if self
+                        .inner
+                        .services
+                        .workflow
+                        .state()
+                        .snapshot
+                        .run_id
+                        .as_deref()
                         == Some(run_id.as_str())
-                        && self.inner.workflow.is_active()
+                        && self.inner.services.workflow.is_active()
                     {
-                        let _ = self.inner.workflow.cancel(
+                        let _ = self.inner.services.workflow.cancel(
                             spiral_robotics_api::workflow::CancelWorkflowRequest {
-                                scope_id: self.inner.workflow.scope_id(),
+                                scope_id: self.inner.services.workflow.scope_id(),
                             },
                         );
                     }
@@ -1004,13 +1045,20 @@ impl WorkflowAgentManager {
                     ));
                 }
                 if cancelled {
-                    if self.inner.workflow.state().snapshot.run_id.as_deref()
+                    if self
+                        .inner
+                        .services
+                        .workflow
+                        .state()
+                        .snapshot
+                        .run_id
+                        .as_deref()
                         == Some(run_id.as_str())
-                        && self.inner.workflow.is_active()
+                        && self.inner.services.workflow.is_active()
                     {
-                        let _ = self.inner.workflow.cancel(
+                        let _ = self.inner.services.workflow.cancel(
                             spiral_robotics_api::workflow::CancelWorkflowRequest {
-                                scope_id: self.inner.workflow.scope_id(),
+                                scope_id: self.inner.services.workflow.scope_id(),
                             },
                         );
                     }
@@ -1028,7 +1076,7 @@ impl WorkflowAgentManager {
                     .clamp(1, 60);
                 let run_id = lock(&context.owned_run_id)
                     .clone()
-                    .or_else(|| self.inner.workflow.state().snapshot.run_id)
+                    .or_else(|| self.inner.services.workflow.state().snapshot.run_id)
                     .ok_or_else(|| "There is no Workflow run to wait for.".to_owned())?;
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(timeout),
@@ -1061,7 +1109,7 @@ impl WorkflowAgentManager {
                         "run_query max_rows must be between 1 and {MAX_WORKFLOW_AGENT_QUERY_ROWS}."
                     ));
                 }
-                let response = self.inner.storage.query(sql, max_rows).await?;
+                let response = self.inner.services.storage.query(sql, max_rows).await?;
                 Ok(serialize_query_for_prompt(response))
             }
             other => Err(format!("Unknown Workflow tool {other:?}.")),
@@ -1073,7 +1121,7 @@ impl WorkflowAgentManager {
         run_id: &str,
         cancel: Arc<AtomicBool>,
     ) -> Result<spiral_robotics_api::workflow::WorkflowRunSnapshot, String> {
-        let (mut state, mut updates) = self.inner.workflow.subscription();
+        let (mut state, mut updates) = self.inner.services.workflow.subscription();
         loop {
             if cancel.load(Ordering::SeqCst) {
                 return Err("Agent turn cancelled.".to_owned());
@@ -1477,7 +1525,10 @@ impl WorkflowAgentManager {
 
     fn persist_document(&self, document: &AgentDocument) -> Result<(), String> {
         validate_agent_document(document)?;
-        self.inner.storage.save_workflow_agent_document(document)
+        self.inner
+            .services
+            .storage
+            .save_workflow_agent_document(document)
     }
 
     fn install_unavailable_scope(&self, error: &str) {
@@ -2535,11 +2586,7 @@ fn next_sequence(session: &WorkflowAgentSession) -> u64 {
 }
 
 fn next_id(prefix: &str) -> String {
-    format!(
-        "{prefix}-{}-{}",
-        now_millis(),
-        AGENT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    )
+    format!("{prefix}-{}", uuid::Uuid::new_v4())
 }
 
 fn now_millis() -> u64 {
@@ -2585,7 +2632,7 @@ mod tests {
     #[test]
     fn serialized_query_prompt_is_hard_bounded_including_schema_and_json_overhead() {
         let columns = (0..40)
-            .map(|index| spiral_robotics_api::api::QueryColumn {
+            .map(|index| spiral_robotics_api::relations::QueryColumn {
                 name: format!("field_{index}_{}", "x".repeat(900)),
                 data_type: format!("Struct<{}>", "y".repeat(900)),
                 nullable: true,

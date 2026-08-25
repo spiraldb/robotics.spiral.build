@@ -65,7 +65,7 @@ impl<'a> RecordingHttpAdapter<'a> {
 
 struct RecordingDraft {
     writer: EpisodeWriter,
-    arms: Vec<spiral_robotics_api::api::EpisodeArm>,
+    arms: Vec<spiral_robotics_api::recording::EpisodeArm>,
     summary: EpisodeSummary,
 }
 
@@ -112,7 +112,8 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     }
 
     fn default_teleoperation_pair(&self) -> Option<TeleoperationPair> {
-        default_teleoperation_pair(&build_snapshot(self.state).robots)
+        build_snapshot(self.state)
+            .default_teleoperation_pair()
             .map(|(leader, follower)| TeleoperationPair { leader, follower })
     }
 
@@ -367,7 +368,7 @@ impl ReplayPort for RecordingHttpAdapter<'_> {
         let episode = episode.to_owned();
         let source_arm = source_arm.to_owned();
         tokio::task::spawn_blocking(move || {
-            episodes.trajectory_at(&episode, &source_arm, start_seconds)
+            episodes.trajectory_at(&episode, ReplayRequest::new(&source_arm, start_seconds))
         })
         .await
         .map_err(|error| OperationError::Internal(error.to_string()))?
@@ -382,13 +383,13 @@ impl ReplayPort for RecordingHttpAdapter<'_> {
     async fn start_replay(&self, plan: ReplayPlan) -> Result<(), OperationError> {
         self.state
             .hardware
-            .start_replay_at_frame(
-                &plan.robot,
-                &plan.episode,
-                plan.frames,
-                plan.sample_hz,
-                plan.start_frame,
-                plan.resolved_start_seconds,
+            .start_replay(
+                spiral_robotics_hardware::ReplayRequest::timeline(
+                    plan.robot,
+                    plan.episode,
+                    spiral_robotics_hardware::ReplayTrajectory::new(plan.frames, plan.sample_hz),
+                )
+                .starting_at(plan.start_frame, plan.resolved_start_seconds),
             )
             .await
             .map_err(OperationError::conflict)
@@ -586,7 +587,7 @@ pub(super) fn contract_episode(episode: EpisodeRecord) -> EpisodeSummary {
         arms: episode
             .arms
             .into_iter()
-            .map(|arm| spiral_robotics_api::api::EpisodeArm {
+            .map(|arm| spiral_robotics_api::recording::EpisodeArm {
                 id: arm.id,
                 robot_type: arm.robot_type,
                 joints: arm.joints,
@@ -597,7 +598,7 @@ pub(super) fn contract_episode(episode: EpisodeRecord) -> EpisodeSummary {
         recording_gaps: episode
             .recording_gaps
             .into_iter()
-            .map(|gap| spiral_robotics_api::api::RecordingGap {
+            .map(|gap| spiral_robotics_api::recording::RecordingGap {
                 after_seconds: gap.after_seconds,
                 duration_seconds: gap.duration_seconds,
             })
@@ -612,16 +613,19 @@ pub(super) fn contract_episode(episode: EpisodeRecord) -> EpisodeSummary {
 }
 
 fn capability_video_asset(video: VideoAssetMetadata) -> VideoAssetRecord {
+    let size = video.size();
+    let timing = video.timing();
+    let segment = video.segment();
     VideoAssetRecord {
-        stream_id: video.stream_id,
-        camera_id: video.camera_id,
-        width: video.width,
-        height: video.height,
-        fps: video.fps,
-        frames: video.frames,
-        duration_seconds: video.duration_seconds,
-        segment_index: video.segment_index,
-        timeline_offset_seconds: video.timeline_offset_seconds,
+        stream_id: video.stream_id().to_owned(),
+        camera_id: video.camera_id().to_owned(),
+        width: size.width(),
+        height: size.height(),
+        fps: timing.fps(),
+        frames: timing.frames(),
+        duration_seconds: video.duration_seconds(),
+        segment_index: segment.index(),
+        timeline_offset_seconds: segment.timeline_offset_seconds(),
     }
 }
 
@@ -729,17 +733,13 @@ fn capability_optional_frame_matrix(
 }
 
 fn contract_video_asset(video: VideoAssetRecord) -> VideoAssetMetadata {
-    VideoAssetMetadata {
-        stream_id: video.stream_id,
-        camera_id: video.camera_id,
-        width: video.width,
-        height: video.height,
-        fps: video.fps,
-        frames: video.frames,
-        duration_seconds: video.duration_seconds,
-        segment_index: video.segment_index,
-        timeline_offset_seconds: video.timeline_offset_seconds,
-    }
+    VideoAssetMetadata::new(video.stream_id, video.camera_id, video.duration_seconds)
+        .with_size(VideoSize::new(video.width, video.height))
+        .with_timing(VideoTiming::new(video.fps, video.frames))
+        .with_segment(VideoSegment::new(
+            video.segment_index,
+            video.timeline_offset_seconds,
+        ))
 }
 
 fn contract_episode_inspection(inspection: EpisodeInspectionRecord) -> EpisodeInspectionSnapshot {
@@ -989,7 +989,11 @@ impl PhysicalSeekPort for SeekHttpAdapter<'_> {
         }
         self.state
             .hardware
-            .start_physical_seek(&plan.robot, &plan.episode, plan.pose, plan.sample_hz)
+            .start_replay(spiral_robotics_hardware::ReplayRequest::physical_seek(
+                plan.robot,
+                plan.episode,
+                spiral_robotics_hardware::ReplayTrajectory::single_pose(plan.pose, plan.sample_hz),
+            ))
             .await
             .map_err(OperationError::conflict)?;
         Ok(true)
@@ -1142,12 +1146,9 @@ fn create_recording_draft(
     let writer = state
         .episodes
         .begin_in_dataset(
-            command.dataset_id.clone(),
-            source.clone(),
-            command.note,
-            sample_hz,
-            arms.clone(),
-            condition,
+            EpisodeRecordingRequest::new(command.dataset_id.clone(), source.clone(), sample_hz)
+                .with_note(command.note)
+                .with_arms(arms.clone(), condition),
         )
         .map_err(episode_capability_error)?;
     let id = writer.id().to_owned();
@@ -1212,10 +1213,8 @@ async fn start_recording_media_at_edge(
         }
         VideoCapture::start(
             state.cameras.clone(),
-            episode,
-            cameras,
-            &state.video_encoder.executable,
-            &state.video_encoder.codec,
+            VideoCaptureRequest::new(episode, cameras),
+            &state.video_encoder,
         )
         .await
         .map_err(|error| OperationError::InvalidInput(error.to_string()))
@@ -1472,9 +1471,10 @@ async fn episode_video(
     // Looking up the episode first prevents an orphaned media row from becoming
     // an independent serving namespace.
     EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state)).authorize_asset(id.clone())?;
+    let asset = VideoAssetKey::new(id, stream, query.segment);
     let length = state
         .storage
-        .video_asset_size(&id, &stream, query.segment)
+        .video_asset_size(&asset)
         .await
         .map_err(|error| Failure(StatusCode::NOT_FOUND, error))?;
     let requested_range = match headers.get(header::RANGE) {
@@ -1502,7 +1502,7 @@ async fn episode_video(
     } else {
         let payload = state
             .storage
-            .video_asset_range(&id, &stream, query.segment, range.start, content_length)
+            .video_asset_range(&asset, VideoByteRange::new(range.start, content_length))
             .await
             .map_err(|error| Failure(StatusCode::NOT_FOUND, error))?;
         if payload.len() as u64 != content_length {

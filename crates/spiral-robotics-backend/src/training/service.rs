@@ -3,8 +3,8 @@
 use std::collections::BTreeSet;
 
 use spiral_robotics_core::identity::DatasetId;
-use spiral_robotics_core::operation::rollout_duration_is_valid;
-use spiral_robotics_core::query::{ReadOnlyMode, ensure_read_only, is_identifier};
+use spiral_robotics_core::operation::RolloutDuration;
+use spiral_robotics_core::query::{ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier};
 
 use crate::rollout::service::RolloutRequest;
 use spiral_robotics_core::error::OperationError;
@@ -281,18 +281,19 @@ fn validate_training_command(
     {
         return invalid("Run name must use 1–80 letters, numbers, '.', '_' or '-' characters.");
     }
-    DatasetId::parse(&command.dataset_id).map_err(|_| {
+    DatasetId::try_from(command.dataset_id.as_str()).map_err(|_| {
         OperationError::InvalidInput(
             "Dataset ID must use 1–96 letters, numbers, '.', '_' or '-' characters.".to_owned(),
         )
     })?;
-    ensure_read_only(&command.query, ReadOnlyMode::Training)
+    ReadOnlyQuery::new(&command.query, ReadOnlyQueryMode::Training)
+        .authorize()
         .map_err(|error| OperationError::InvalidInput(error.to_string()))?;
     for (label, column) in [
         ("State column", command.state_column.as_str()),
         ("Action column", command.action_column.as_str()),
     ] {
-        if !is_identifier(column) {
+        if UnquotedSqlIdentifier::try_from(column).is_err() {
             return invalid(format!("{label} must be a SQL identifier."));
         }
     }
@@ -502,7 +503,7 @@ fn validate_rollout_command(mut command: RolloutRequest) -> Result<RolloutReques
     if command.checkpoint_step == 0 {
         return invalid("checkpoint step must be greater than zero");
     }
-    if !rollout_duration_is_valid(command.duration_seconds) {
+    if RolloutDuration::new(command.duration_seconds).is_none() {
         return invalid(format!(
             "rollout duration_seconds must be between {} and {}",
             spiral_robotics_core::operation::MIN_ROLLOUT_DURATION_SECONDS,

@@ -4,11 +4,13 @@ use std::future::Future;
 use std::rc::Rc;
 
 use dioxus::prelude::*;
-use spiral_robotics_api::api::{
-    DatasetSummary, EpisodeCatalogResponse, EpisodeSummary, ModeSelection, RecordingProgress,
-    ReplayProgress, RobotSummary, RobotTelemetry, RolloutSnapshot, StudioSnapshot, TelemetryFrame,
-    TrainingSnapshot,
+use spiral_robotics_api::recording::{
+    DatasetSummary, EpisodeCatalogResponse, EpisodeSummary, RecordingProgress, ReplayProgress,
 };
+use spiral_robotics_api::robots::{ModeSelection, RobotSummary, RobotTelemetry, TelemetryFrame};
+use spiral_robotics_api::rollout::RolloutSnapshot;
+use spiral_robotics_api::status::StudioSnapshot;
+use spiral_robotics_api::training::TrainingSnapshot;
 use spiral_robotics_api::workflow::{WorkflowAgentStateResponse, WorkflowStateResponse};
 use spiral_robotics_viewport::{SO101_URDF, Urdf, UrdfError};
 
@@ -17,7 +19,7 @@ use crate::client::http as api;
 use crate::client::http::StudioEvent;
 use crate::panels::timeline::signals::SignalStore;
 use crate::shell::notifications::{
-    MessageAction, MessageSeverity, MessageSource, NotificationCenterState,
+    MessageAction, MessageNotice, MessageSeverity, MessageSource, NotificationCenterState,
 };
 
 /// The robot description the studio poses, draws, and measures from.
@@ -590,19 +592,27 @@ impl Studio {
     }
 
     pub(crate) fn report_from(&self, source: MessageSource, message: impl Into<String>) {
-        self.push_message(message, MessageSeverity::Error, source, None);
+        self.notify(MessageNotice::new(message, MessageSeverity::Error, source));
     }
 
     pub(crate) fn report_success_from(&self, source: MessageSource, message: impl Into<String>) {
-        self.push_message(message, MessageSeverity::Success, source, None);
+        self.notify(MessageNotice::new(
+            message,
+            MessageSeverity::Success,
+            source,
+        ));
     }
 
     pub(crate) fn report_info_from(&self, source: MessageSource, message: impl Into<String>) {
-        self.push_message(message, MessageSeverity::Info, source, None);
+        self.notify(MessageNotice::new(message, MessageSeverity::Info, source));
     }
 
     pub(crate) fn report_warning_from(&self, source: MessageSource, message: impl Into<String>) {
-        self.push_message(message, MessageSeverity::Warning, source, None);
+        self.notify(MessageNotice::new(
+            message,
+            MessageSeverity::Warning,
+            source,
+        ));
     }
 
     pub(crate) fn report_episode_success(
@@ -610,25 +620,15 @@ impl Studio {
         message: impl Into<String>,
         episode: impl Into<String>,
     ) {
-        self.push_message(
-            message,
-            MessageSeverity::Success,
-            MessageSource::Live,
-            Some(MessageAction::OpenEpisode(episode.into())),
+        self.notify(
+            MessageNotice::new(message, MessageSeverity::Success, MessageSource::Live)
+                .with_action(MessageAction::OpenEpisode(episode.into())),
         );
     }
 
-    pub(crate) fn push_message(
-        &self,
-        message: impl Into<String>,
-        severity: MessageSeverity,
-        source: MessageSource,
-        action: Option<MessageAction>,
-    ) {
+    fn notify(&self, notice: MessageNotice) {
         let mut notifications = self.notifications;
-        notifications
-            .write()
-            .push(message, severity, source, action, now_ms());
+        notifications.write().push(notice, now_ms());
     }
 }
 
@@ -639,8 +639,8 @@ pub(crate) fn studio() -> Studio {
 
 #[cfg(test)]
 mod tests {
-    use spiral_robotics_api::api::{ConnectionStatus, MotorLimits, MotorSummary, RobotSummary};
-    use spiral_robotics_core::calibration::Direction;
+    use spiral_robotics_api::robots::{ConnectionStatus, MotorLimits, MotorSummary, RobotSummary};
+    use spiral_robotics_core::calibration::MotorDirection;
 
     use super::{Selection, default_joint_selection};
 
@@ -655,7 +655,7 @@ mod tests {
                 .map(|(index, name)| MotorSummary {
                     name: (*name).to_owned(),
                     id: index as u32 + 1,
-                    direction: Direction::Normal,
+                    direction: MotorDirection::Normal,
                     model: None,
                     calibration: None,
                     limits: MotorLimits::default(),

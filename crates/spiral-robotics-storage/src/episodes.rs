@@ -11,10 +11,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::schema::{Table, column as db};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use spiral_robotics_api::api::{EpisodeArm, EpisodeSummary, MotorLimits, RecordingGap};
+use spiral_robotics_api::recording::{EpisodeArm, EpisodeSummary, RecordingGap};
+use spiral_robotics_api::robots::MotorLimits;
 use spiral_robotics_core::arm::SO101_JOINTS;
 use spiral_robotics_core::calibration::Calibration;
 pub use spiral_robotics_core::episode::MAX_EPISODE_FRAMES;
+use spiral_robotics_hardware::RecordingCompletion;
 use spiral_robotics_hardware::RecordingWriter;
 pub use spiral_robotics_hardware::{ArmConditionSummary, EpisodeCheckpoint, Sample};
 
@@ -24,7 +26,7 @@ use crate::manager::{
     execute_update_sql, ingest_batch, replace_episode_blocking, run_query, table_exists,
 };
 use crate::sql;
-use crate::video::VideoAssetMetadata;
+use crate::video::{VideoAssetMetadata, VideoSegment, VideoSize, VideoTiming};
 
 const SAMPLE_QUEUE_DEPTH: usize = 2_048;
 const MAX_EPISODE_ROWS: usize = MAX_EPISODE_FRAMES as usize * 16;
@@ -79,6 +81,52 @@ pub struct EpisodeStart {
     pub note: Option<String>,
     pub arms: Vec<EpisodeArm>,
     pub condition: Vec<ArmCondition>,
+}
+
+/// Inputs supplied by the recording workflow before storage assigns identity
+/// and a durable start time.
+pub struct EpisodeRecordingRequest {
+    dataset_id: String,
+    source: String,
+    note: Option<String>,
+    sample_hz: f64,
+    arms: Vec<EpisodeArm>,
+    condition: Vec<ArmCondition>,
+}
+
+impl EpisodeRecordingRequest {
+    pub fn new(dataset_id: String, source: String, sample_hz: f64) -> Self {
+        Self {
+            dataset_id,
+            source,
+            note: None,
+            sample_hz,
+            arms: Vec::new(),
+            condition: Vec::new(),
+        }
+    }
+
+    pub fn with_note(mut self, note: Option<String>) -> Self {
+        self.note = note;
+        self
+    }
+
+    pub fn with_arms(mut self, arms: Vec<EpisodeArm>, condition: Vec<ArmCondition>) -> Self {
+        self.arms = arms;
+        self.condition = condition;
+        self
+    }
+}
+
+pub struct ReplayRequest<'a> {
+    arm: &'a str,
+    seconds: f64,
+}
+
+impl<'a> ReplayRequest<'a> {
+    pub fn new(arm: &'a str, seconds: f64) -> Self {
+        Self { arm, seconds }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -330,27 +378,22 @@ impl EpisodeStore {
 
     pub fn begin_in_dataset(
         &self,
-        dataset_id: String,
-        source: String,
-        note: Option<String>,
-        sample_hz: f64,
-        arms: Vec<EpisodeArm>,
-        condition: Vec<ArmCondition>,
+        request: EpisodeRecordingRequest,
     ) -> Result<EpisodeWriter, EpisodeError> {
-        if arms.is_empty() {
+        if request.arms.is_empty() {
             return Err(EpisodeError::Invalid(
                 "a take needs at least one connected arm to sample".to_owned(),
             ));
         }
         let start = EpisodeStart {
             id: self.next_id()?,
-            dataset_id,
+            dataset_id: request.dataset_id,
             started_ms: unix_millis(),
-            sample_hz,
-            source,
-            note,
-            arms,
-            condition,
+            sample_hz: request.sample_hz,
+            source: request.source,
+            note: request.note,
+            arms: request.arms,
+            condition: request.condition,
         };
         SpiralEpisodeEncoder::new(start.clone())?;
         EpisodeWriter::start(start, self.project_store.clone())
@@ -387,7 +430,7 @@ impl EpisodeStore {
             let joints = &summary.arms[arm_index].joints;
             let missing = joints
                 .iter()
-                .filter(|joint| !calibration.motors.contains_key(*joint))
+                .filter(|joint| !calibration.motors().contains_key(*joint))
                 .cloned()
                 .collect::<Vec<_>>();
             if !missing.is_empty() {
@@ -403,7 +446,7 @@ impl EpisodeStore {
             let mut changed = false;
             for sample in &mut episode.samples {
                 let normalized = joints.iter().enumerate().map(|(joint_index, joint)| {
-                    calibration.motors[joint].normalize_raw(sample.raw[arm_index][joint_index]).map(Some).map_err(|error| EpisodeError::Invalid(format!("could not reapply calibration to take {:?} joint {joint:?}: {error}", summary.id)))
+                    calibration.motors()[joint].normalize_raw(sample.raw[arm_index][joint_index]).map(Some).map_err(|error| EpisodeError::Invalid(format!("could not reapply calibration to take {:?} joint {joint:?}: {error}", summary.id)))
                 }).collect::<Result<Vec<_>, _>>()?;
                 if sample.normalized[arm_index] != normalized {
                     sample.normalized[arm_index] = normalized;
@@ -424,9 +467,10 @@ impl EpisodeStore {
     pub fn trajectory_at(
         &self,
         id: &str,
-        arm: &str,
-        seconds: f64,
+        request: ReplayRequest<'_>,
     ) -> Result<ReplayTrajectory, EpisodeError> {
+        let arm = request.arm;
+        let seconds = request.seconds;
         if !seconds.is_finite() || seconds < 0.0 {
             return Err(EpisodeError::Invalid(
                 "replay start time must be finite and non-negative".to_owned(),
@@ -563,20 +607,23 @@ impl EpisodeStore {
         let bucket_count = buckets.clamp(1, 512).min(sample_count);
         let start_seconds = episode.samples.first().map(|sample| sample.seconds);
         let end_seconds = episode.samples.last().map(|sample| sample.seconds);
+        let trace_range = TraceRange {
+            start_seconds: start_seconds.unwrap_or_default(),
+            end_seconds: end_seconds.or(start_seconds).unwrap_or_default(),
+            buckets: bucket_count,
+        };
         let mut lanes = Vec::new();
         for joint in SO101_JOINTS {
             let mut series = Vec::new();
             for (arm_index, arm) in episode.start.arms.iter().enumerate() {
-                let Some(joint_index) = arm.joints.iter().position(|name| name == joint.name)
+                let Some(joint_index) = arm.joints.iter().position(|name| name == joint.name())
                 else {
                     continue;
                 };
                 let mut reduced = vec![TraceBucket::default(); bucket_count];
                 if bucket_count > 0 {
-                    let start = start_seconds.unwrap_or_default();
-                    let end = end_seconds.unwrap_or(start);
                     for sample in &episode.samples {
-                        let bucket = trace_bucket(sample.seconds, start, end, bucket_count);
+                        let bucket = trace_range.bucket(sample.seconds);
                         reduced[bucket]
                             .observe(sample.seconds, sample.normalized[arm_index][joint_index]);
                     }
@@ -590,7 +637,7 @@ impl EpisodeStore {
                 });
             }
             lanes.push(TimelineTraceLane {
-                joint: joint.name.to_owned(),
+                joint: joint.name().to_owned(),
                 series,
             });
         }
@@ -764,12 +811,12 @@ impl EpisodeWriter {
         let thread = std::thread::Builder::new()
             .name("spiral-episode-transaction".to_owned())
             .spawn(move || {
-                drain_samples(
-                    receiver,
-                    &validation_start,
-                    &worker_repository,
-                    &worker_shared,
-                )
+                EpisodeDrain {
+                    start: &validation_start,
+                    project_store: &worker_repository,
+                    shared: &worker_shared,
+                }
+                .run(receiver)
             })
             .map_err(|source| {
                 EpisodeError::Invalid(format!(
@@ -797,39 +844,14 @@ impl EpisodeWriter {
     pub fn push(&self, sample: Sample) -> bool {
         self.session.push(sample)
     }
-    pub fn checkpoint(
-        &self,
-        duration_seconds: f64,
-        recording_gaps: Vec<RecordingGap>,
-        max_follow_error_degrees: Option<f64>,
-        condition: Vec<ArmConditionSummary>,
-    ) -> Result<EpisodeCheckpoint, String> {
-        self.session.checkpoint(EpisodeCompletion {
-            duration_seconds,
-            recording_gaps,
-            max_follow_error_degrees,
-            discarded: false,
-            condition,
-        })
+    pub fn checkpoint(&self, completion: EpisodeCompletion) -> Result<EpisodeCheckpoint, String> {
+        self.session.checkpoint(completion)
     }
     pub fn failure(&self) -> Option<String> {
         self.session.failure()
     }
-    pub fn finish(
-        self,
-        duration_seconds: f64,
-        recording_gaps: Vec<RecordingGap>,
-        max_follow_error_degrees: Option<f64>,
-        discarded: bool,
-        condition: Vec<ArmConditionSummary>,
-    ) -> Result<EpisodeSummary, EpisodeError> {
-        self.session.finish(EpisodeCompletion {
-            duration_seconds,
-            recording_gaps,
-            max_follow_error_degrees,
-            discarded,
-            condition,
-        })
+    pub fn finish(self, completion: EpisodeCompletion) -> Result<EpisodeSummary, EpisodeError> {
+        self.session.finish(completion)
     }
 }
 
@@ -846,19 +868,16 @@ impl RecordingWriter for EpisodeWriter {
         EpisodeWriter::push(self, sample)
     }
 
-    fn checkpoint(
-        &self,
-        duration_seconds: f64,
-        recording_gaps: Vec<RecordingGap>,
-        max_follow_error_degrees: Option<f64>,
-        condition: Vec<ArmConditionSummary>,
-    ) -> Result<EpisodeCheckpoint, String> {
+    fn checkpoint(&self, completion: RecordingCompletion) -> Result<EpisodeCheckpoint, String> {
         EpisodeWriter::checkpoint(
             self,
-            duration_seconds,
-            recording_gaps,
-            max_follow_error_degrees,
-            condition,
+            EpisodeCompletion {
+                duration_seconds: completion.duration_seconds(),
+                recording_gaps: completion.recording_gaps().to_vec(),
+                max_follow_error_degrees: completion.max_follow_error_degrees(),
+                discarded: false,
+                condition: completion.condition().to_vec(),
+            },
         )
     }
 
@@ -866,21 +885,16 @@ impl RecordingWriter for EpisodeWriter {
         EpisodeWriter::failure(self)
     }
 
-    fn finish(
-        self: Box<Self>,
-        duration_seconds: f64,
-        recording_gaps: Vec<RecordingGap>,
-        max_follow_error_degrees: Option<f64>,
-        discarded: bool,
-        condition: Vec<ArmConditionSummary>,
-    ) -> Result<EpisodeSummary, String> {
+    fn finish(self: Box<Self>, completion: RecordingCompletion) -> Result<EpisodeSummary, String> {
         EpisodeWriter::finish(
             *self,
-            duration_seconds,
-            recording_gaps,
-            max_follow_error_degrees,
-            discarded,
-            condition,
+            EpisodeCompletion {
+                duration_seconds: completion.duration_seconds(),
+                recording_gaps: completion.recording_gaps().to_vec(),
+                max_follow_error_degrees: completion.max_follow_error_degrees(),
+                discarded: completion.discarded(),
+                condition: completion.condition().to_vec(),
+            },
         )
         .map_err(|error| error.to_string())
     }
@@ -997,54 +1011,57 @@ impl Drop for SpiralEpisodeWriter {
     }
 }
 
-fn drain_samples(
-    receiver: mpsc::Receiver<WriterMessage>,
-    start: &EpisodeStart,
-    project_store: &ProjectStore,
-    shared: &WriterShared,
-) -> Result<Vec<Sample>, String> {
-    let mut encoder =
-        SpiralEpisodeEncoder::new(start.clone()).map_err(|error| error.to_string())?;
-    let mut samples = Vec::new();
-    for message in receiver {
-        match message {
-            WriterMessage::Sample(sample) => {
-                if shared.written.load(Ordering::Relaxed) >= MAX_EPISODE_FRAMES {
-                    let error = format!(
-                        "recording reached the supported {MAX_EPISODE_FRAMES}-sample limit"
-                    );
-                    *lock(&shared.failure) = Some(error.clone());
-                    return Err(error);
+struct EpisodeDrain<'a> {
+    start: &'a EpisodeStart,
+    project_store: &'a ProjectStore,
+    shared: &'a WriterShared,
+}
+
+impl EpisodeDrain<'_> {
+    fn run(self, receiver: mpsc::Receiver<WriterMessage>) -> Result<Vec<Sample>, String> {
+        let mut encoder =
+            SpiralEpisodeEncoder::new(self.start.clone()).map_err(|error| error.to_string())?;
+        let mut samples = Vec::new();
+        for message in receiver {
+            match message {
+                WriterMessage::Sample(sample) => {
+                    if self.shared.written.load(Ordering::Relaxed) >= MAX_EPISODE_FRAMES {
+                        let error = format!(
+                            "recording reached the supported {MAX_EPISODE_FRAMES}-sample limit"
+                        );
+                        *lock(&self.shared.failure) = Some(error.clone());
+                        return Err(error);
+                    }
+                    encoder.encode(&sample).map_err(|error| {
+                        let error = error.to_string();
+                        *lock(&self.shared.failure) = Some(error.clone());
+                        error
+                    })?;
+                    samples.push(sample);
+                    self.shared.written.fetch_add(1, Ordering::Relaxed);
                 }
-                encoder.encode(&sample).map_err(|error| {
-                    let error = error.to_string();
-                    *lock(&shared.failure) = Some(error.clone());
-                    error
-                })?;
-                samples.push(sample);
-                shared.written.fetch_add(1, Ordering::Relaxed);
-            }
-            WriterMessage::Checkpoint {
-                completion,
-                complete,
-            } => {
-                let completed = CompletedEpisode {
-                    start: start.clone(),
-                    samples: samples.clone(),
+                WriterMessage::Checkpoint {
                     completion,
-                };
-                let namespace = project_store.namespace().to_owned();
-                let result = project_store.run_blocking(|connection| {
-                    replace_episode_blocking(connection, &namespace, &completed, &[])
-                });
-                if let Err(error) = &result {
-                    *lock(&shared.failure) = Some(error.clone());
+                    complete,
+                } => {
+                    let completed = CompletedEpisode {
+                        start: self.start.clone(),
+                        samples: samples.clone(),
+                        completion,
+                    };
+                    let namespace = self.project_store.namespace().to_owned();
+                    let result = self.project_store.run_blocking(|connection| {
+                        replace_episode_blocking(connection, &namespace, &completed, &[])
+                    });
+                    if let Err(error) = &result {
+                        *lock(&self.shared.failure) = Some(error.clone());
+                    }
+                    let _ = complete.send(result);
                 }
-                let _ = complete.send(result);
             }
         }
+        Ok(samples)
     }
-    Ok(samples)
 }
 
 #[derive(Default)]
@@ -1114,10 +1131,14 @@ fn decode_samples(
     frames
         .into_iter()
         .map(|(index, frame)| {
-            let normalized = transpose_required(frame.normalized, &start.id, index, "state")?;
-            let raw = transpose_required(frame.raw, &start.id, index, "raw state")?;
-            let velocity = transpose_all_or_none(frame.velocity, &start.id, index, "velocity")?;
-            let effort = transpose_all_or_none(frame.effort, &start.id, index, "effort")?;
+            let location = SampleLocation {
+                episode_id: &start.id,
+                sample_index: index,
+            };
+            let normalized = location.require(frame.normalized, "state")?;
+            let raw = location.require(frame.raw, "raw state")?;
+            let velocity = location.all_or_none(frame.velocity, "velocity")?;
+            let effort = location.all_or_none(frame.effort, "effort")?;
             Ok(Sample {
                 seconds: frame
                     .seconds
@@ -1133,32 +1154,34 @@ fn decode_samples(
         .collect()
 }
 
-fn transpose_required<T>(
-    values: Vec<Option<T>>,
-    episode: &str,
-    index: u64,
-    label: &str,
-) -> Result<Vec<T>, String> {
-    values
-        .into_iter()
-        .enumerate()
-        .map(|(arm, value)| {
-            value.ok_or_else(|| {
-                format!("episode {episode:?} sample {index} arm {arm} has no {label}")
-            })
-        })
-        .collect()
+#[derive(Clone, Copy)]
+struct SampleLocation<'a> {
+    episode_id: &'a str,
+    sample_index: u64,
 }
-fn transpose_all_or_none<T>(
-    values: Vec<Option<T>>,
-    episode: &str,
-    index: u64,
-    label: &str,
-) -> Result<Option<Vec<T>>, String> {
-    if values.iter().all(Option::is_none) {
-        return Ok(None);
+
+impl SampleLocation<'_> {
+    fn require<T>(self, values: Vec<Option<T>>, label: &str) -> Result<Vec<T>, String> {
+        values
+            .into_iter()
+            .enumerate()
+            .map(|(arm, value)| {
+                value.ok_or_else(|| {
+                    format!(
+                        "episode {:?} sample {} arm {arm} has no {label}",
+                        self.episode_id, self.sample_index
+                    )
+                })
+            })
+            .collect()
     }
-    transpose_required(values, episode, index, label).map(Some)
+
+    fn all_or_none<T>(self, values: Vec<Option<T>>, label: &str) -> Result<Option<Vec<T>>, String> {
+        if values.iter().all(Option::is_none) {
+            return Ok(None);
+        }
+        self.require(values, label).map(Some)
+    }
 }
 
 fn summary_row(row: &JsonMap<String, JsonValue>) -> Result<EpisodeSummary, String> {
@@ -1246,24 +1269,23 @@ fn render_timeline_sample(start: &EpisodeStart, sample: &Sample, frame: u64) -> 
 fn video_metadata_row(row: &JsonMap<String, JsonValue>) -> Result<VideoAssetMetadata, String> {
     let fps = json_u64(row, db::FPS)? as u32;
     let frames = json_u64(row, db::FRAMES)?;
-    Ok(VideoAssetMetadata {
-        stream_id: json_str(row, db::STREAM_ID)?.to_owned(),
-        camera_id: json_str(row, db::CAMERA_ID)?.to_owned(),
-        width: json_u64(row, db::WIDTH)? as u32,
-        height: json_u64(row, db::HEIGHT)? as u32,
-        fps,
-        frames,
-        duration_seconds: if fps == 0 {
-            0.0
-        } else {
-            frames as f64 / fps as f64
-        },
-        segment_index: json_u64(row, db::SEGMENT_INDEX)? as u32,
-        timeline_offset_seconds: row
-            .get(db::TIMELINE_OFFSET_NS)
+    let timing = VideoTiming::new(fps, frames);
+    Ok(VideoAssetMetadata::new(
+        json_str(row, db::STREAM_ID)?.to_owned(),
+        json_str(row, db::CAMERA_ID)?.to_owned(),
+        timing.duration_seconds(),
+    )
+    .with_size(VideoSize::new(
+        json_u64(row, db::WIDTH)? as u32,
+        json_u64(row, db::HEIGHT)? as u32,
+    ))
+    .with_timing(timing)
+    .with_segment(VideoSegment::new(
+        json_u64(row, db::SEGMENT_INDEX)? as u32,
+        row.get(db::TIMELINE_OFFSET_NS)
             .and_then(JsonValue::as_u64)
             .map(|value| value as f64 / 1_000_000_000.0),
-    })
+    )))
 }
 
 fn json_str<'a>(row: &'a JsonMap<String, JsonValue>, name: &str) -> Result<&'a str, String> {
@@ -1318,12 +1340,24 @@ fn json_optional_optional_f64s(
     }
 }
 
-fn trace_bucket(seconds: f64, start: f64, end: f64, buckets: usize) -> usize {
-    if buckets <= 1 || end <= start {
-        0
-    } else {
-        ((((seconds - start) / (end - start)).clamp(0.0, 1.0) * buckets as f64).floor() as usize)
-            .min(buckets - 1)
+#[derive(Clone, Copy)]
+struct TraceRange {
+    start_seconds: f64,
+    end_seconds: f64,
+    buckets: usize,
+}
+
+impl TraceRange {
+    fn bucket(self, seconds: f64) -> usize {
+        if self.buckets <= 1 || self.end_seconds <= self.start_seconds {
+            0
+        } else {
+            ((((seconds - self.start_seconds) / (self.end_seconds - self.start_seconds))
+                .clamp(0.0, 1.0)
+                * self.buckets as f64)
+                .floor() as usize)
+                .min(self.buckets - 1)
+        }
     }
 }
 fn episode_number(id: &str) -> Option<u64> {

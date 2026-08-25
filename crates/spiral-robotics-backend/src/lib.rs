@@ -7,7 +7,7 @@
 #![allow(async_fn_in_trait)]
 
 mod adapters;
-pub mod clock;
+mod clock;
 pub mod data;
 mod http;
 pub mod recording;

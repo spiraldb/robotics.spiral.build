@@ -116,7 +116,7 @@ impl RecordedTimelineTraces {
             let series = self
                 .lanes
                 .iter()
-                .find(|lane| lane.joint == definition.name)
+                .find(|lane| lane.joint == definition.name())
                 .map(|lane| {
                     lane.series
                         .iter()
@@ -135,9 +135,9 @@ impl RecordedTimelineTraces {
                 })
                 .unwrap_or_default();
             TimelineSignalLane {
-                joint: definition.name.to_owned(),
-                label: definition.label.to_owned(),
-                color: signal_color(definition.name).to_owned(),
+                joint: definition.name().to_owned(),
+                label: definition.label().to_owned(),
+                color: signal_color(definition.name()).to_owned(),
                 series,
             }
         })
@@ -156,7 +156,7 @@ pub(crate) fn signal_lanes_from_store(store: &SignalStore) -> [TimelineSignalLan
                 let joint = arm
                     .joints
                     .iter()
-                    .find(|joint| joint.name == definition.name)?;
+                    .find(|joint| joint.name == definition.name())?;
                 let points = store
                     .times()
                     .iter()
@@ -174,9 +174,9 @@ pub(crate) fn signal_lanes_from_store(store: &SignalStore) -> [TimelineSignalLan
             .collect();
 
         TimelineSignalLane {
-            joint: definition.name.to_owned(),
-            label: definition.label.to_owned(),
-            color: signal_color(definition.name).to_owned(),
+            joint: definition.name().to_owned(),
+            label: definition.label().to_owned(),
+            color: signal_color(definition.name()).to_owned(),
             series,
         }
     })

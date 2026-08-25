@@ -138,7 +138,7 @@ fn training_request(command: StartTrainingCommand) -> StartTrainingRequest {
         checkpoint_every: command.checkpoint_every,
         chunk_size: command.chunk_size,
         seed: command.seed,
-        act: spiral_robotics_api::api::ActTrainingConfig {
+        act: spiral_robotics_api::training::ActTrainingConfig {
             camera_streams: command.act.camera_streams,
             image_width: command.act.image_width,
             image_height: command.act.image_height,
@@ -175,40 +175,52 @@ fn rollout_request(command: RolloutRequest) -> StartRolloutRequest {
 }
 
 fn capability_training_phase(
-    phase: spiral_robotics_api::api::TrainingRunPhase,
+    phase: spiral_robotics_api::training::TrainingRunPhase,
 ) -> CapabilityTrainingRunPhase {
     match phase {
-        spiral_robotics_api::api::TrainingRunPhase::Starting => {
+        spiral_robotics_api::training::TrainingRunPhase::Starting => {
             CapabilityTrainingRunPhase::Starting
         }
-        spiral_robotics_api::api::TrainingRunPhase::Running => CapabilityTrainingRunPhase::Running,
-        spiral_robotics_api::api::TrainingRunPhase::Stopping => {
+        spiral_robotics_api::training::TrainingRunPhase::Running => {
+            CapabilityTrainingRunPhase::Running
+        }
+        spiral_robotics_api::training::TrainingRunPhase::Stopping => {
             CapabilityTrainingRunPhase::Stopping
         }
-        spiral_robotics_api::api::TrainingRunPhase::Completed => {
+        spiral_robotics_api::training::TrainingRunPhase::Completed => {
             CapabilityTrainingRunPhase::Completed
         }
-        spiral_robotics_api::api::TrainingRunPhase::Stopped => CapabilityTrainingRunPhase::Stopped,
-        spiral_robotics_api::api::TrainingRunPhase::Failed => CapabilityTrainingRunPhase::Failed,
+        spiral_robotics_api::training::TrainingRunPhase::Stopped => {
+            CapabilityTrainingRunPhase::Stopped
+        }
+        spiral_robotics_api::training::TrainingRunPhase::Failed => {
+            CapabilityTrainingRunPhase::Failed
+        }
     }
 }
 
 fn contract_training_phase(
     phase: CapabilityTrainingRunPhase,
-) -> spiral_robotics_api::api::TrainingRunPhase {
+) -> spiral_robotics_api::training::TrainingRunPhase {
     match phase {
         CapabilityTrainingRunPhase::Starting => {
-            spiral_robotics_api::api::TrainingRunPhase::Starting
+            spiral_robotics_api::training::TrainingRunPhase::Starting
         }
-        CapabilityTrainingRunPhase::Running => spiral_robotics_api::api::TrainingRunPhase::Running,
+        CapabilityTrainingRunPhase::Running => {
+            spiral_robotics_api::training::TrainingRunPhase::Running
+        }
         CapabilityTrainingRunPhase::Stopping => {
-            spiral_robotics_api::api::TrainingRunPhase::Stopping
+            spiral_robotics_api::training::TrainingRunPhase::Stopping
         }
         CapabilityTrainingRunPhase::Completed => {
-            spiral_robotics_api::api::TrainingRunPhase::Completed
+            spiral_robotics_api::training::TrainingRunPhase::Completed
         }
-        CapabilityTrainingRunPhase::Stopped => spiral_robotics_api::api::TrainingRunPhase::Stopped,
-        CapabilityTrainingRunPhase::Failed => spiral_robotics_api::api::TrainingRunPhase::Failed,
+        CapabilityTrainingRunPhase::Stopped => {
+            spiral_robotics_api::training::TrainingRunPhase::Stopped
+        }
+        CapabilityTrainingRunPhase::Failed => {
+            spiral_robotics_api::training::TrainingRunPhase::Failed
+        }
     }
 }
 
@@ -267,7 +279,7 @@ pub(super) fn contract_training_run(run: CapabilityTrainingRun) -> TrainingRun {
     TrainingRun {
         id: run.id,
         config: training_request(run.config),
-        source: spiral_robotics_api::api::TrainingSource {
+        source: spiral_robotics_api::training::TrainingSource {
             dataset_id: run.source.dataset_id,
         },
         phase: contract_training_phase(run.phase),
@@ -278,37 +290,41 @@ pub(super) fn contract_training_run(run: CapabilityTrainingRun) -> TrainingRun {
         metrics: run
             .metrics
             .into_iter()
-            .map(|metric| spiral_robotics_api::api::TrainingMetricPoint {
-                step: metric.step,
-                train_loss: metric.train_loss,
-                validation_loss: metric.validation_loss,
-                learning_rate: metric.learning_rate,
-                transfer_bytes_per_second: metric.transfer_bytes_per_second,
-                examples_per_second: metric.examples_per_second,
-                cpu_percent: metric.cpu_percent,
-                gpu_percent: metric.gpu_percent,
-                memory_bytes: metric.memory_bytes,
-                loader_ms: metric.loader_ms,
-                arrow_encode_ms: metric.batch_encode_ms,
-                upload_ms: metric.upload_ms,
-                device_copy_ms: metric.device_copy_ms,
-                model_ms: metric.model_ms,
-                elapsed_seconds: metric.elapsed_seconds,
-                event: metric.event,
-            })
+            .map(
+                |metric| spiral_robotics_api::training::TrainingMetricPoint {
+                    step: metric.step,
+                    train_loss: metric.train_loss,
+                    validation_loss: metric.validation_loss,
+                    learning_rate: metric.learning_rate,
+                    transfer_bytes_per_second: metric.transfer_bytes_per_second,
+                    examples_per_second: metric.examples_per_second,
+                    cpu_percent: metric.cpu_percent,
+                    gpu_percent: metric.gpu_percent,
+                    memory_bytes: metric.memory_bytes,
+                    loader_ms: metric.loader_ms,
+                    arrow_encode_ms: metric.batch_encode_ms,
+                    upload_ms: metric.upload_ms,
+                    device_copy_ms: metric.device_copy_ms,
+                    model_ms: metric.model_ms,
+                    elapsed_seconds: metric.elapsed_seconds,
+                    event: metric.event,
+                },
+            )
             .collect(),
         checkpoints: run
             .checkpoints
             .into_iter()
-            .map(|checkpoint| spiral_robotics_api::api::TrainingCheckpoint {
-                step: checkpoint.step,
-                created_ms: checkpoint.created_ms,
-                validation_loss: checkpoint.validation_loss,
-                byte_size: checkpoint.byte_size,
-                inference_ready: checkpoint.inference_ready,
-                recommended_action_steps: checkpoint.recommended_action_steps,
-                sample_hz: checkpoint.sample_hz,
-            })
+            .map(
+                |checkpoint| spiral_robotics_api::training::TrainingCheckpoint {
+                    step: checkpoint.step,
+                    created_ms: checkpoint.created_ms,
+                    validation_loss: checkpoint.validation_loss,
+                    byte_size: checkpoint.byte_size,
+                    inference_ready: checkpoint.inference_ready,
+                    recommended_action_steps: checkpoint.recommended_action_steps,
+                    sample_hz: checkpoint.sample_hz,
+                },
+            )
             .collect(),
         logs: run.logs,
     }
@@ -341,11 +357,11 @@ pub(super) fn capability_training_snapshot(
 
 pub(super) fn contract_training_snapshot(snapshot: CapabilityTrainingSnapshot) -> TrainingSnapshot {
     TrainingSnapshot {
-        readiness: spiral_robotics_api::api::TrainingReadiness {
+        readiness: spiral_robotics_api::training::TrainingReadiness {
             ready: snapshot.readiness.ready,
             spiral_ready: snapshot.readiness.spiral_ready,
             runtime: snapshot.readiness.runtime.map(|runtime| {
-                spiral_robotics_api::api::TrainingRuntimeInfo {
+                spiral_robotics_api::training::TrainingRuntimeInfo {
                     id: runtime.id,
                     display_name: runtime.display_name,
                     runtime: runtime.runtime,
@@ -365,12 +381,16 @@ pub(super) fn contract_training_snapshot(snapshot: CapabilityTrainingSnapshot) -
 pub(super) fn capability_rollout_snapshot(snapshot: RolloutSnapshot) -> CapabilityRolloutSnapshot {
     CapabilityRolloutSnapshot {
         phase: match snapshot.phase {
-            spiral_robotics_api::api::RolloutPhase::Idle => CapabilityRolloutPhase::Idle,
-            spiral_robotics_api::api::RolloutPhase::Loading => CapabilityRolloutPhase::Loading,
-            spiral_robotics_api::api::RolloutPhase::WarmingUp => CapabilityRolloutPhase::WarmingUp,
-            spiral_robotics_api::api::RolloutPhase::Running => CapabilityRolloutPhase::Running,
-            spiral_robotics_api::api::RolloutPhase::Stopping => CapabilityRolloutPhase::Stopping,
-            spiral_robotics_api::api::RolloutPhase::Failed => CapabilityRolloutPhase::Failed,
+            spiral_robotics_api::rollout::RolloutPhase::Idle => CapabilityRolloutPhase::Idle,
+            spiral_robotics_api::rollout::RolloutPhase::Loading => CapabilityRolloutPhase::Loading,
+            spiral_robotics_api::rollout::RolloutPhase::WarmingUp => {
+                CapabilityRolloutPhase::WarmingUp
+            }
+            spiral_robotics_api::rollout::RolloutPhase::Running => CapabilityRolloutPhase::Running,
+            spiral_robotics_api::rollout::RolloutPhase::Stopping => {
+                CapabilityRolloutPhase::Stopping
+            }
+            spiral_robotics_api::rollout::RolloutPhase::Failed => CapabilityRolloutPhase::Failed,
         },
         session_id: snapshot.session_id,
         run_id: snapshot.run_id,
@@ -396,12 +416,16 @@ pub(super) fn capability_rollout_snapshot(snapshot: RolloutSnapshot) -> Capabili
 pub(super) fn contract_rollout_snapshot(snapshot: CapabilityRolloutSnapshot) -> RolloutSnapshot {
     RolloutSnapshot {
         phase: match snapshot.phase {
-            CapabilityRolloutPhase::Idle => spiral_robotics_api::api::RolloutPhase::Idle,
-            CapabilityRolloutPhase::Loading => spiral_robotics_api::api::RolloutPhase::Loading,
-            CapabilityRolloutPhase::WarmingUp => spiral_robotics_api::api::RolloutPhase::WarmingUp,
-            CapabilityRolloutPhase::Running => spiral_robotics_api::api::RolloutPhase::Running,
-            CapabilityRolloutPhase::Stopping => spiral_robotics_api::api::RolloutPhase::Stopping,
-            CapabilityRolloutPhase::Failed => spiral_robotics_api::api::RolloutPhase::Failed,
+            CapabilityRolloutPhase::Idle => spiral_robotics_api::rollout::RolloutPhase::Idle,
+            CapabilityRolloutPhase::Loading => spiral_robotics_api::rollout::RolloutPhase::Loading,
+            CapabilityRolloutPhase::WarmingUp => {
+                spiral_robotics_api::rollout::RolloutPhase::WarmingUp
+            }
+            CapabilityRolloutPhase::Running => spiral_robotics_api::rollout::RolloutPhase::Running,
+            CapabilityRolloutPhase::Stopping => {
+                spiral_robotics_api::rollout::RolloutPhase::Stopping
+            }
+            CapabilityRolloutPhase::Failed => spiral_robotics_api::rollout::RolloutPhase::Failed,
         },
         session_id: snapshot.session_id,
         run_id: snapshot.run_id,
@@ -412,7 +436,7 @@ pub(super) fn contract_rollout_snapshot(snapshot: CapabilityRolloutSnapshot) -> 
         finished_ms: snapshot.finished_ms,
         message: snapshot.message,
         warning: snapshot.warning,
-        metrics: spiral_robotics_api::api::RolloutMetrics {
+        metrics: spiral_robotics_api::rollout::RolloutMetrics {
             inference_count: snapshot.metrics.inference_count,
             command_count: snapshot.metrics.command_count,
             missed_deadlines: snapshot.metrics.missed_deadlines,

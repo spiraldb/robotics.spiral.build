@@ -333,15 +333,17 @@ impl RobotConnectionPort for RobotHttpAdapter<'_> {
     async fn connect(&self, specification: RobotConnectionSpec) -> Result<(), OperationError> {
         self.state
             .hardware
-            .connect(RobotSpec {
-                id: specification.id,
-                port: PortSettings {
-                    path: specification.port.path,
-                    baud_rate: specification.port.baud_rate,
-                },
-                motors: specification.motors,
-                calibration: specification.calibration,
-            })
+            .connect(
+                RobotSpec::new(
+                    specification.id,
+                    PortSettings {
+                        path: specification.port.path,
+                        baud_rate: specification.port.baud_rate,
+                    },
+                    specification.motors,
+                )
+                .with_calibration(specification.calibration),
+            )
             .await
             .map_err(OperationError::conflict)
     }
@@ -373,10 +375,9 @@ impl RobotCalibrationStore for RobotWorkspace {
     fn save_calibration(
         &self,
         robot: &str,
-        motors: &BTreeMap<String, MotorSpec>,
-        calibration: &Calibration,
+        update: CalibrationUpdate<'_>,
     ) -> Result<(), OperationError> {
-        RobotWorkspace::save_calibration(self, robot, motors, calibration)
+        RobotWorkspace::save_calibration(self, robot, update)
             .map(|_| ())
             .map_err(workspace_capability_error)
     }
@@ -418,9 +419,9 @@ impl CalibrationHistoryPort for CalibrationHistoryHttpAdapter<'_> {
             training_active: self.state.training.snapshot().runs.iter().any(|run| {
                 matches!(
                     run.phase,
-                    spiral_robotics_api::api::TrainingRunPhase::Starting
-                        | spiral_robotics_api::api::TrainingRunPhase::Running
-                        | spiral_robotics_api::api::TrainingRunPhase::Stopping
+                    spiral_robotics_api::training::TrainingRunPhase::Starting
+                        | spiral_robotics_api::training::TrainingRunPhase::Running
+                        | spiral_robotics_api::training::TrainingRunPhase::Stopping
                 )
             }),
         }

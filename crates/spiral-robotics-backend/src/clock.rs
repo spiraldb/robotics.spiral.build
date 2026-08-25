@@ -7,28 +7,32 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Deadline and elapsed-time code intentionally continues to use monotonic
 /// `Instant`s directly; this boundary is for persisted and externally visible
 /// timestamps only.
-pub trait Clock: Send + Sync {
+pub(crate) trait Clock: Send + Sync {
     fn now_ms(&self) -> i64;
 }
 
 /// An identifier and its single authoritative creation timestamp.
 #[derive(Debug, PartialEq, Eq)]
-pub struct TimestampedId {
-    pub value: String,
-    pub created_ms: i64,
+pub(crate) struct TimestampedId {
+    value: String,
+    created_ms: i64,
+}
+
+impl TimestampedId {
+    pub(crate) fn into_parts(self) -> (String, i64) {
+        (self.value, self.created_ms)
+    }
 }
 
 /// Adds process-local collision resistance to timestamp-based identifiers.
 ///
-/// Keep these sequences static at their call sites so reconstructing a manager
-/// in the same process cannot reset its namespace.
-pub struct StableIdSequence {
+pub(crate) struct StableIdSequence {
     prefix: &'static str,
     next: AtomicU64,
 }
 
 impl StableIdSequence {
-    pub const fn new(prefix: &'static str, first: u64) -> Self {
+    pub(crate) const fn new(prefix: &'static str, first: u64) -> Self {
         Self {
             prefix,
             next: AtomicU64::new(first),
@@ -36,7 +40,7 @@ impl StableIdSequence {
     }
 
     /// Generate an ID and timestamp from one clock observation.
-    pub fn next(&self, clock: &dyn Clock) -> TimestampedId {
+    pub(crate) fn next(&self, clock: &dyn Clock) -> TimestampedId {
         let created_ms = clock.now_ms();
         let sequence = self.next.fetch_add(1, Ordering::Relaxed);
         TimestampedId {
@@ -47,19 +51,19 @@ impl StableIdSequence {
 }
 
 #[cfg(test)]
-pub struct FixedClock {
+pub(crate) struct FixedClock {
     now_ms: std::sync::atomic::AtomicI64,
 }
 
 #[cfg(test)]
 impl FixedClock {
-    pub const fn new(now_ms: i64) -> Self {
+    pub(crate) const fn new(now_ms: i64) -> Self {
         Self {
             now_ms: std::sync::atomic::AtomicI64::new(now_ms),
         }
     }
 
-    pub fn set(&self, now_ms: i64) {
+    pub(crate) fn set(&self, now_ms: i64) {
         self.now_ms.store(now_ms, Ordering::Relaxed);
     }
 }
@@ -92,9 +96,13 @@ mod tests {
         let first = ids.next(&clock);
         let second = ids.next(&clock);
 
-        assert_eq!(first.value, "train-1700000000123-0");
-        assert_eq!(first.created_ms, 1_700_000_000_123);
-        assert_eq!(second.value, "train-1700000000123-1");
-        assert_eq!(second.created_ms, 1_700_000_000_123);
+        assert_eq!(
+            first.into_parts(),
+            ("train-1700000000123-0".to_owned(), 1_700_000_000_123)
+        );
+        assert_eq!(
+            second.into_parts(),
+            ("train-1700000000123-1".to_owned(), 1_700_000_000_123)
+        );
     }
 }

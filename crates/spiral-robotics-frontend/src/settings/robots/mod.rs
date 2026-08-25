@@ -12,7 +12,7 @@ use crate::components::interaction::{
 };
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_api::api::{
+use spiral_robotics_api::robots::{
     CameraBinding, CreateRobotRequest, IdentifyPortRequest, IdentifyPortResponse, PortSettings,
     RobotSummary, SerialPortSummary, UpdateRobotRequest,
 };

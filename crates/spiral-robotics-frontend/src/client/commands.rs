@@ -6,10 +6,11 @@
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_api::api::{
-    EpisodeSummary, ModeSelection, SetRecordingPausedRequest, SetReplayPausedRequest,
-    StartRecordingRequest, StartReplayRequest, StopRecordingRequest, default_teleoperation_pair,
+use spiral_robotics_api::recording::{
+    EpisodeSummary, SetRecordingPausedRequest, SetReplayPausedRequest, StartRecordingRequest,
+    StartReplayRequest, StopRecordingRequest,
 };
+use spiral_robotics_api::robots::ModeSelection;
 
 use crate::client::http as api;
 use crate::format::format_clock;
@@ -22,7 +23,12 @@ impl Studio {
             Some("Choose a dataset ID using letters, numbers, '.', '_' or '-'.".to_owned())
         } else if matches!(studio.mode(), ModeSelection::Replay { .. }) {
             Some("Stop replay before recording.".to_owned())
-        } else if default_teleoperation_pair(&studio.snapshot.read().robots).is_none() {
+        } else if studio
+            .snapshot
+            .read()
+            .default_teleoperation_pair()
+            .is_none()
+        {
             Some("Connect and calibrate a compatible leader and follower first.".to_owned())
         } else if !studio.controls_available() {
             Some("Recording is paused while telemetry reconnects.".to_owned())

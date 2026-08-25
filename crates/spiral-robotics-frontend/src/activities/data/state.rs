@@ -6,7 +6,7 @@
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_api::api::SpiralQueryRequest;
+use spiral_robotics_api::relations::SpiralQueryRequest;
 
 use crate::activities::data::sql_draft::rebase_generated_sql;
 use crate::activities::data::workbench::{

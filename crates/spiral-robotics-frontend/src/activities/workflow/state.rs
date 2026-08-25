@@ -2290,7 +2290,7 @@ mod tests {
 
         state.snapshot.run_id = Some("run-4".to_owned());
         state.snapshot.phase = WorkflowRunPhase::Completed;
-        state.snapshot.result = Some(spiral_robotics_api::api::SpiralQueryResponse {
+        state.snapshot.result = Some(spiral_robotics_api::relations::SpiralQueryResponse {
             columns: Vec::new(),
             rows: Vec::new(),
             truncated: false,

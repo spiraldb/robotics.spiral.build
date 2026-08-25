@@ -9,7 +9,7 @@
 
 pub(crate) mod activities;
 pub(crate) mod client;
-pub mod components;
+mod components;
 pub(crate) mod format;
 pub(crate) mod panels;
 pub(crate) mod settings;

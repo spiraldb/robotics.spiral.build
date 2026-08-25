@@ -349,7 +349,7 @@ fn data_presenters_round_trip_transport_values_without_leaking_them_to_policy() 
             namespace: "dataset".to_owned(),
             endpoint_restart_required: false,
         },
-        training: spiral_robotics_api::api::TrainingRuntimeSettings::default(),
+        training: spiral_robotics_api::settings::TrainingRuntimeSettings::default(),
         video: VideoSettings { enabled: true },
     };
     assert_eq!(
@@ -380,7 +380,7 @@ fn data_presenters_round_trip_transport_values_without_leaking_them_to_policy() 
     assert!(pending.spiral.client_secret_configured);
 
     let query = SpiralQueryResponse {
-        columns: vec![spiral_robotics_api::api::QueryColumn {
+        columns: vec![spiral_robotics_api::relations::QueryColumn {
             name: "payload".to_owned(),
             data_type: "json".to_owned(),
             nullable: true,
@@ -404,15 +404,15 @@ fn training_and_rollout_presenters_round_trip_semantic_state() {
     let run = TrainingRun {
         id: "run-1".to_owned(),
         config: StartTrainingRequest::default(),
-        source: spiral_robotics_api::api::TrainingSource {
+        source: spiral_robotics_api::training::TrainingSource {
             dataset_id: "default".to_owned(),
         },
-        phase: spiral_robotics_api::api::TrainingRunPhase::Running,
+        phase: spiral_robotics_api::training::TrainingRunPhase::Running,
         current_step: 4,
         started_ms: 1,
         finished_ms: None,
         message: Some("running".to_owned()),
-        metrics: vec![spiral_robotics_api::api::TrainingMetricPoint {
+        metrics: vec![spiral_robotics_api::training::TrainingMetricPoint {
             step: 4,
             loader_ms: Some(790.0),
             arrow_encode_ms: Some(24.0),
@@ -430,7 +430,7 @@ fn training_and_rollout_presenters_round_trip_semantic_state() {
     );
 
     let rollout = RolloutSnapshot {
-        phase: spiral_robotics_api::api::RolloutPhase::Running,
+        phase: spiral_robotics_api::rollout::RolloutPhase::Running,
         session_id: Some("session-1".to_owned()),
         run_id: Some("run-1".to_owned()),
         checkpoint_step: Some(4),
@@ -440,7 +440,7 @@ fn training_and_rollout_presenters_round_trip_semantic_state() {
         finished_ms: None,
         message: None,
         warning: Some("clamped wrist".to_owned()),
-        metrics: spiral_robotics_api::api::RolloutMetrics {
+        metrics: spiral_robotics_api::rollout::RolloutMetrics {
             inference_count: 2,
             command_count: 1,
             ..Default::default()

@@ -16,7 +16,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use spiral_robotics_api::api::CameraStatus;
+use spiral_robotics_api::robots::CameraStatus;
 use spiral_robotics_hardware::cameras::{self, DEFAULT_JPEG_QUALITY, DetectedCamera};
 use tokio::sync::watch;
 
@@ -261,8 +261,9 @@ fn spawn_stream(camera: DetectedCamera) -> Stream {
             .name(format!("spiral-robotics-camera-{}", camera.identifier()))
             .spawn(move || {
                 let mut idle_since: Option<Instant> = None;
-                let result =
-                    cameras::stream_jpeg_frames(&camera, &stop, DEFAULT_JPEG_QUALITY, |frame| {
+                let result = camera.stream_jpeg_frames(
+                    cameras::JpegStreamConfig::new(&stop, DEFAULT_JPEG_QUALITY),
+                    |frame| {
                         let sequence = frame.sequence;
                         frames.send_replace(Some(Arc::new(Frame {
                             bytes: Bytes::from(frame.bytes),
@@ -279,7 +280,8 @@ fn spawn_stream(camera: DetectedCamera) -> Stream {
                         } else {
                             idle_since = None;
                         }
-                    });
+                    },
+                );
 
                 let mut status = lock(&status);
                 status.running = false;

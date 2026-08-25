@@ -7,12 +7,10 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
-use spiral_robotics_core::query::{ReadOnlyMode, ensure_read_only, is_identifier};
-use spiral_robotics_core::workflow::{
-    is_workflow_node_id, scan_node_placeholders, validate_qualified_relation,
-};
+use spiral_robotics_core::query::{ReadOnlyQuery, ReadOnlyQueryMode, UnquotedSqlIdentifier};
+use spiral_robotics_core::workflow::{QualifiedRelation, WorkflowNodeId, WorkflowSql};
 
-use crate::api::{QueryColumn, SpiralQueryResponse};
+use crate::relations::{QueryColumn, SpiralQueryResponse};
 
 pub const DEFAULT_WORKFLOW_ID: &str = "default";
 pub const MAX_WORKFLOW_QUERY_ROWS: usize = 1_000;
@@ -34,7 +32,7 @@ pub const MAX_WORKFLOW_AGENT_QUERY_ROWS: usize = 50;
 pub fn derived_feature_cache_relation(source_relation: &str) -> String {
     format!(
         "workflow.features_{}",
-        spiral_robotics_core::identity::identifier_component(source_relation)
+        spiral_robotics_core::identity::SqlNameComponent::from(source_relation).as_str()
     )
 }
 
@@ -129,6 +127,15 @@ pub struct WorkflowFeatureDefinition {
     pub applicability: WorkflowFeatureApplicability,
 }
 
+impl WorkflowFeatureDefinition {
+    /// Whether this feature's output column has a safe, descriptive name.
+    pub fn has_valid_name(&self) -> bool {
+        UnquotedSqlIdentifier::try_from(self.name.as_str()).is_ok()
+            && self.name.ends_with("_feature")
+            && self.name.len() <= MAX_WORKFLOW_FEATURE_NAME_LENGTH
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowFeatureApplicability {
     pub source_relation: String,
@@ -170,6 +177,17 @@ impl WorkflowNodeKind {
             Self::Result => "Result",
         }
     }
+
+    const fn allows_transition_to(self, target: Self) -> bool {
+        matches!(
+            (self, target),
+            (Self::Table, Self::Query)
+                | (Self::Query, Self::Model)
+                | (Self::Query, Self::Query)
+                | (Self::Model, Self::Query)
+                | (Self::Query, Self::Result)
+        )
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -199,6 +217,22 @@ pub struct WorkflowValidationIssue {
     pub node_id: Option<String>,
     pub message: String,
     pub recovery: String,
+}
+
+impl WorkflowValidationIssue {
+    fn new(code: &str, message: &str, recovery: &str) -> Self {
+        Self {
+            code: code.to_owned(),
+            node_id: None,
+            message: message.to_owned(),
+            recovery: recovery.to_owned(),
+        }
+    }
+
+    fn with_node_id(mut self, node_id: &str) -> Self {
+        self.node_id = Some(node_id.to_owned());
+        self
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -714,12 +748,6 @@ pub struct WorkflowDocument {
     pub snapshot: WorkflowRunSnapshot,
 }
 
-pub fn is_workflow_feature_name(value: &str) -> bool {
-    spiral_robotics_core::query::is_identifier(value)
-        && value.ends_with("_feature")
-        && value.len() <= MAX_WORKFLOW_FEATURE_NAME_LENGTH
-}
-
 impl Default for WorkflowDocument {
     fn default() -> Self {
         let workflow = WorkflowSpec::default();
@@ -732,18 +760,12 @@ impl WorkflowSpec {
     pub fn validate(&self) -> WorkflowValidationReport {
         let spec = self;
         let mut report = WorkflowValidationReport::default();
-        if !is_workflow_node_id(&spec.id) {
-            report.errors.push(issue(
-            "invalid_workflow_id",
-            None,
-            "Workflow ID must start with a letter or '_' and contain only letters, numbers, '_' or '-'.",
-            "Use a stable identifier such as relation-query.",
-        ));
+        if WorkflowNodeId::try_from(spec.id.as_str()).is_err() {
+            report.errors.push(WorkflowValidationIssue::new("invalid_workflow_id", "Workflow ID must start with a letter or '_' and contain only letters, numbers, '_' or '-'.", "Use a stable identifier such as relation-query."));
         }
         if spec.name.trim().is_empty() {
-            report.errors.push(issue(
+            report.errors.push(WorkflowValidationIssue::new(
                 "missing_workflow_name",
-                None,
                 "Workflow name cannot be empty.",
                 "Name the saved workflow before applying it.",
             ));
@@ -751,38 +773,39 @@ impl WorkflowSpec {
 
         let mut nodes = BTreeMap::new();
         for node in &spec.nodes {
-            if !is_workflow_node_id(&node.id) {
-                report.errors.push(issue(
-                    "invalid_node_id",
-                    Some(&node.id),
-                    "Node IDs may contain letters, numbers, '_' and '-' only.",
-                    "Choose a stable node ID without SQL punctuation.",
-                ));
+            if WorkflowNodeId::try_from(node.id.as_str()).is_err() {
+                report.errors.push(
+                    WorkflowValidationIssue::new(
+                        "invalid_node_id",
+                        "Node IDs may contain letters, numbers, '_' and '-' only.",
+                        "Choose a stable node ID without SQL punctuation.",
+                    )
+                    .with_node_id(&node.id),
+                );
             }
             if nodes.insert(node.id.as_str(), node).is_some() {
-                report.errors.push(issue(
-                    "duplicate_node_id",
-                    Some(&node.id),
-                    "Node IDs must be unique within a workflow.",
-                    "Rename one of the duplicate nodes.",
-                ));
+                report.errors.push(
+                    WorkflowValidationIssue::new(
+                        "duplicate_node_id",
+                        "Node IDs must be unique within a workflow.",
+                        "Rename one of the duplicate nodes.",
+                    )
+                    .with_node_id(&node.id),
+                );
             }
             match &node.config {
                 WorkflowNodeConfig::Table { relation } => {
                     if relation.is_empty() {
-                        report.errors.push(issue(
-                        "table_relation_required",
-                        Some(&node.id),
-                        "Choose an existing Spiral relation for this Table node.",
-                        "Select a qualified relation discovered from the active Spiral project.",
-                    ));
-                    } else if let Err(error) = validate_qualified_relation(relation) {
-                        report.errors.push(issue(
-                            "invalid_relation",
-                            Some(&node.id),
-                            &error.to_string(),
-                            "Choose a relation returned by Workflow relation discovery.",
-                        ));
+                        report.errors.push(WorkflowValidationIssue::new("table_relation_required", "Choose an existing Spiral relation for this Table node.", "Select a qualified relation discovered from the active Spiral project.").with_node_id(&node.id));
+                    } else if let Err(error) = QualifiedRelation::try_from(relation.as_str()) {
+                        report.errors.push(
+                            WorkflowValidationIssue::new(
+                                "invalid_relation",
+                                &error.to_string(),
+                                "Choose a relation returned by Workflow relation discovery.",
+                            )
+                            .with_node_id(&node.id),
+                        );
                     }
                 }
                 WorkflowNodeConfig::Model {
@@ -791,30 +814,29 @@ impl WorkflowSpec {
                     feature_cache_relation,
                 } => {
                     if model_id != SIGLIP_BASE_MODEL_ID {
-                        report.errors.push(issue(
-                            "unsupported_model",
-                            Some(&node.id),
-                            "This Studio build supports only the siglip-base Model capability.",
-                            "Choose SigLIP base from the advertised Workflow capabilities.",
-                        ));
+                        report.errors.push(
+                            WorkflowValidationIssue::new(
+                                "unsupported_model",
+                                "This Studio build supports only the siglip-base Model capability.",
+                                "Choose SigLIP base from the advertised Workflow capabilities.",
+                            )
+                            .with_node_id(&node.id),
+                        );
                     }
                     if features.is_empty() {
-                        report.errors.push(issue(
-                            "model_features_required",
-                            Some(&node.id),
-                            "SigLIP needs at least one typed feature definition.",
-                            "Add a descriptive feature such as is_gripper_open_feature.",
-                        ));
+                        report.errors.push(
+                            WorkflowValidationIssue::new(
+                                "model_features_required",
+                                "SigLIP needs at least one typed feature definition.",
+                                "Add a descriptive feature such as is_gripper_open_feature.",
+                            )
+                            .with_node_id(&node.id),
+                        );
                     }
                     if features.len() > MAX_SIGLIP_FEATURES {
-                        report.errors.push(issue(
-                        "too_many_model_features",
-                        Some(&node.id),
-                        &format!(
+                        report.errors.push(WorkflowValidationIssue::new("too_many_model_features", &format!(
                             "SigLIP supports at most {MAX_SIGLIP_FEATURES} features per Model node."
-                        ),
-                        "Remove features or split the work into sequential Model nodes.",
-                    ));
+                        ), "Remove features or split the work into sequential Model nodes.").with_node_id(&node.id));
                     }
                     let mut feature_names = BTreeSet::new();
                     for (feature_index, feature) in features.iter().enumerate() {
@@ -822,67 +844,59 @@ impl WorkflowSpec {
                             && feature.description.trim().is_empty()
                             && feature.concept.trim().is_empty();
                         if untouched {
-                            report.errors.push(issue(
-                                "incomplete_feature_definition",
-                                Some(&node.id),
-                                &format!("Complete Feature {}.", feature_index + 1),
-                                "Enter a feature name, description, and model concept.",
-                            ));
+                            report.errors.push(
+                                WorkflowValidationIssue::new(
+                                    "incomplete_feature_definition",
+                                    &format!("Complete Feature {}.", feature_index + 1),
+                                    "Enter a feature name, description, and model concept.",
+                                )
+                                .with_node_id(&node.id),
+                            );
                         } else {
-                            if !is_workflow_feature_name(&feature.name) {
-                                report.errors.push(issue(
-                                "invalid_feature_name",
-                                Some(&node.id),
-                                "Feature names must be safe descriptive identifiers ending in _feature.",
-                                "Use a name such as is_raining_feature or is_gripper_open_feature.",
-                            ));
+                            if !feature.has_valid_name() {
+                                report.errors.push(WorkflowValidationIssue::new("invalid_feature_name", "Feature names must be safe descriptive identifiers ending in _feature.", "Use a name such as is_raining_feature or is_gripper_open_feature.").with_node_id(&node.id));
                             } else if !feature_names.insert(feature.name.as_str()) {
-                                report.errors.push(issue(
-                                    "duplicate_feature_name",
-                                    Some(&node.id),
-                                    "Feature names must be unique within one Model node.",
-                                    "Remove the duplicate feature definition.",
-                                ));
+                                report.errors.push(
+                                    WorkflowValidationIssue::new(
+                                        "duplicate_feature_name",
+                                        "Feature names must be unique within one Model node.",
+                                        "Remove the duplicate feature definition.",
+                                    )
+                                    .with_node_id(&node.id),
+                                );
                             }
                             if feature.description.trim().is_empty()
                                 || feature.description.chars().count()
                                     > MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH
                             {
-                                report.errors.push(issue(
-                                "invalid_feature_description",
-                                Some(&node.id),
-                                "Feature descriptions must be present and bounded.",
-                                "Describe what a non-null probability means in 240 characters or fewer.",
-                            ));
+                                report.errors.push(WorkflowValidationIssue::new("invalid_feature_description", "Feature descriptions must be present and bounded.", "Describe what a non-null probability means in 240 characters or fewer.").with_node_id(&node.id));
                             }
                             if feature.concept.trim().is_empty()
                                 || feature.concept.chars().count() > MAX_SIGLIP_CONCEPT_LENGTH
                             {
-                                report.errors.push(issue(
-                                    "invalid_feature_concept",
-                                    Some(&node.id),
-                                    "Feature model text must be present and bounded.",
-                                    "Use a short visual phrase of 80 characters or fewer.",
-                                ));
+                                report.errors.push(
+                                    WorkflowValidationIssue::new(
+                                        "invalid_feature_concept",
+                                        "Feature model text must be present and bounded.",
+                                        "Use a short visual phrase of 80 characters or fewer.",
+                                    )
+                                    .with_node_id(&node.id),
+                                );
                             }
                         }
-                        if validate_qualified_relation(&feature.applicability.source_relation)
-                            .is_err()
+                        if QualifiedRelation::try_from(
+                            feature.applicability.source_relation.as_str(),
+                        )
+                        .is_err()
                         {
-                            report.errors.push(issue(
-                            "invalid_feature_source",
-                            Some(&node.id),
-                            "Feature applicability needs one authoritative qualified source relation.",
-                            "Choose the upstream source Table relation.",
-                        ));
+                            report.errors.push(WorkflowValidationIssue::new("invalid_feature_source", "Feature applicability needs one authoritative qualified source relation.", "Choose the upstream source Table relation.").with_node_id(&node.id));
                         }
-                        if !is_identifier(&feature.applicability.media_field) {
-                            report.errors.push(issue(
-                            "invalid_feature_media_field",
-                            Some(&node.id),
-                            "Feature applicability media_field must be one safe candidate image field.",
-                            "Project a decoded image with a stable field name such as image.",
-                        ));
+                        if UnquotedSqlIdentifier::try_from(
+                            feature.applicability.media_field.as_str(),
+                        )
+                        .is_err()
+                        {
+                            report.errors.push(WorkflowValidationIssue::new("invalid_feature_media_field", "Feature applicability media_field must be one safe candidate image field.", "Project a decoded image with a stable field name such as image.").with_node_id(&node.id));
                         }
                         let streams = &feature.applicability.stream_ids;
                         if streams.len() > MAX_WORKFLOW_FEATURE_STREAMS
@@ -891,52 +905,42 @@ impl WorkflowSpec {
                                 .any(|stream| stream.trim().is_empty() || stream.len() > 128)
                             || streams.iter().collect::<BTreeSet<_>>().len() != streams.len()
                         {
-                            report.errors.push(issue(
-                            "invalid_feature_streams",
-                            Some(&node.id),
-                            "Feature applicability supports up to eight unique non-empty stream IDs.",
-                            "Remove duplicate or unsupported stream filters.",
-                        ));
+                            report.errors.push(WorkflowValidationIssue::new("invalid_feature_streams", "Feature applicability supports up to eight unique non-empty stream IDs.", "Remove duplicate or unsupported stream filters.").with_node_id(&node.id));
                         }
                     }
-                    if feature_cache_relation
-                        .as_ref()
-                        .is_some_and(|relation| validate_qualified_relation(relation).is_err())
-                    {
-                        report.errors.push(issue(
-                            "invalid_model_output",
-                            Some(&node.id),
-                            "The server-derived Model output relation is invalid.",
-                            "Apply the workflow again so the server can derive the relation name.",
-                        ));
+                    if feature_cache_relation.as_ref().is_some_and(|relation| {
+                        QualifiedRelation::try_from(relation.as_str()).is_err()
+                    }) {
+                        report.errors.push(WorkflowValidationIssue::new("invalid_model_output", "The server-derived Model output relation is invalid.", "Apply the workflow again so the server can derive the relation name.").with_node_id(&node.id));
                     }
                 }
                 WorkflowNodeConfig::Query { sql, max_rows } => {
-                    if let Err(error) = ensure_read_only(sql, ReadOnlyMode::Training) {
-                        report.errors.push(issue(
-                            "query_not_read_only",
-                            Some(&node.id),
-                            &error.to_string().replace("Training SQL", "Workflow SQL"),
-                            "Use one read-only SELECT or WITH query.",
-                        ));
+                    if let Err(error) =
+                        ReadOnlyQuery::new(sql, ReadOnlyQueryMode::Training).authorize()
+                    {
+                        report.errors.push(
+                            WorkflowValidationIssue::new(
+                                "query_not_read_only",
+                                &error.to_string().replace("Training SQL", "Workflow SQL"),
+                                "Use one read-only SELECT or WITH query.",
+                            )
+                            .with_node_id(&node.id),
+                        );
                     }
                     if !(1..=MAX_WORKFLOW_QUERY_ROWS).contains(max_rows) {
-                        report.errors.push(issue(
-                        "query_row_limit",
-                        Some(&node.id),
-                        &format!(
+                        report.errors.push(WorkflowValidationIssue::new("query_row_limit", &format!(
                             "Workflow query row limit must be between 1 and {MAX_WORKFLOW_QUERY_ROWS}."
-                        ),
-                        "Choose a bounded row limit.",
-                    ));
+                        ), "Choose a bounded row limit.").with_node_id(&node.id));
                     }
-                    if let Err(error) = scan_node_placeholders(sql) {
-                        report.errors.push(issue(
-                            "malformed_placeholder",
-                            Some(&node.id),
-                            &error.to_string(),
-                            "Use exact placeholders such as {{node:table}}.",
-                        ));
+                    if let Err(error) = WorkflowSql::from(sql.as_str()).node_placeholders() {
+                        report.errors.push(
+                            WorkflowValidationIssue::new(
+                                "malformed_placeholder",
+                                &error.to_string(),
+                                "Use exact placeholders such as {{node:table}}.",
+                            )
+                            .with_node_id(&node.id),
+                        );
                     }
                 }
                 WorkflowNodeConfig::Result => {}
@@ -944,9 +948,8 @@ impl WorkflowSpec {
         }
 
         if spec.nodes.is_empty() {
-            report.errors.push(issue(
+            report.errors.push(WorkflowValidationIssue::new(
                 "empty_workflow",
-                None,
                 "A workflow needs Table, Query, and Result nodes.",
                 "Add at least one Table root and one terminal Result.",
             ));
@@ -958,42 +961,54 @@ impl WorkflowSpec {
         let mut unique_edges = BTreeSet::new();
         for edge in &spec.edges {
             if !unique_edges.insert((edge.source.as_str(), edge.target.as_str())) {
-                report.errors.push(issue(
-                    "duplicate_edge",
-                    Some(&edge.target),
-                    "Workflow edges must be unique.",
-                    "Remove the repeated connection.",
-                ));
+                report.errors.push(
+                    WorkflowValidationIssue::new(
+                        "duplicate_edge",
+                        "Workflow edges must be unique.",
+                        "Remove the repeated connection.",
+                    )
+                    .with_node_id(&edge.target),
+                );
             }
             let Some(source) = nodes.get(edge.source.as_str()) else {
-                report.errors.push(issue(
-                    "unknown_edge_source",
-                    Some(&edge.source),
-                    "A workflow edge references an unknown source node.",
-                    "Reconnect the edge to an existing node.",
-                ));
+                report.errors.push(
+                    WorkflowValidationIssue::new(
+                        "unknown_edge_source",
+                        "A workflow edge references an unknown source node.",
+                        "Reconnect the edge to an existing node.",
+                    )
+                    .with_node_id(&edge.source),
+                );
                 continue;
             };
             let Some(target) = nodes.get(edge.target.as_str()) else {
-                report.errors.push(issue(
-                    "unknown_edge_target",
-                    Some(&edge.target),
-                    "A workflow edge references an unknown target node.",
-                    "Reconnect the edge to an existing node.",
-                ));
+                report.errors.push(
+                    WorkflowValidationIssue::new(
+                        "unknown_edge_target",
+                        "A workflow edge references an unknown target node.",
+                        "Reconnect the edge to an existing node.",
+                    )
+                    .with_node_id(&edge.target),
+                );
                 continue;
             };
-            if !allowed_transition(source.config.kind(), target.config.kind()) {
-                report.errors.push(issue(
-                    "invalid_transition",
-                    Some(&edge.target),
-                    &format!(
-                        "{} cannot feed {} in a relation-first workflow.",
-                        source.config.kind().label(),
-                        target.config.kind().label(),
-                    ),
-                    "Use Table→Query, Query→Model, Query→Query, Model→Query, or Query→Result.",
-                ));
+            if !source
+                .config
+                .kind()
+                .allows_transition_to(target.config.kind())
+            {
+                report.errors.push(
+                    WorkflowValidationIssue::new(
+                        "invalid_transition",
+                        &format!(
+                            "{} cannot feed {} in a relation-first workflow.",
+                            source.config.kind().label(),
+                            target.config.kind().label(),
+                        ),
+                        "Use Table→Query, Query→Model, Query→Query, Model→Query, or Query→Result.",
+                    )
+                    .with_node_id(&edge.target),
+                );
             }
             outgoing
                 .entry(edge.source.as_str())
@@ -1014,9 +1029,8 @@ impl WorkflowSpec {
             })
             .count();
         if table_roots == 0 {
-            report.errors.push(issue(
+            report.errors.push(WorkflowValidationIssue::new(
                 "missing_table_root",
-                None,
                 "A workflow needs at least one Table root.",
                 "Choose an existing Spiral relation as the first node.",
             ));
@@ -1028,16 +1042,14 @@ impl WorkflowSpec {
             .filter(|node| matches!(node.config, WorkflowNodeConfig::Result))
             .count();
         if result_count == 0 {
-            report.errors.push(issue(
+            report.errors.push(WorkflowValidationIssue::new(
                 "missing_result",
-                None,
                 "A Workflow needs exactly one terminal Result node.",
                 "Connect the final Query to one Result node.",
             ));
         } else if result_count > 1 {
-            report.errors.push(issue(
+            report.errors.push(WorkflowValidationIssue::new(
                 "multiple_results",
-                None,
                 "A Workflow supports exactly one terminal Result node.",
                 "Keep one Result node so the run owns one unambiguous payload.",
             ));
@@ -1047,38 +1059,20 @@ impl WorkflowSpec {
             let in_degree = incoming.get(node.id.as_str()).map_or(0, Vec::len);
             let out_degree = outgoing.get(node.id.as_str()).map_or(0, Vec::len);
             if out_degree == 0 && !matches!(node.config, WorkflowNodeConfig::Result) {
-                report.errors.push(issue(
-                    "orphan_terminal",
-                    Some(&node.id),
-                    "Every non-Result node must contribute to the terminal Result.",
-                    "Connect this node downstream or remove the orphan branch.",
-                ));
+                report.errors.push(
+                    WorkflowValidationIssue::new(
+                        "orphan_terminal",
+                        "Every non-Result node must contribute to the terminal Result.",
+                        "Connect this node downstream or remove the orphan branch.",
+                    )
+                    .with_node_id(&node.id),
+                );
             }
             match &node.config {
-            WorkflowNodeConfig::Table { .. } if in_degree != 0 => report.errors.push(issue(
-                "table_not_root",
-                Some(&node.id),
-                "Table nodes must be roots.",
-                "Remove incoming edges from this Table node.",
-            )),
-            WorkflowNodeConfig::Result if out_degree != 0 => report.errors.push(issue(
-                "result_not_terminal",
-                Some(&node.id),
-                "Result nodes must be terminal.",
-                "Remove outgoing edges from this Result node.",
-            )),
-            WorkflowNodeConfig::Result if in_degree != 1 => report.errors.push(issue(
-                "result_input_count",
-                Some(&node.id),
-                "A Result node must have exactly one Query input.",
-                "Connect one Query node to this Result.",
-            )),
-            WorkflowNodeConfig::Model { .. } if in_degree != 1 => report.errors.push(issue(
-                "model_input_count",
-                Some(&node.id),
-                "A SigLIP Model node needs exactly one upstream candidate Query.",
-                "Connect one read-only Query that returns stable frame identity and a decoded image field.",
-            )),
+            WorkflowNodeConfig::Table { .. } if in_degree != 0 => report.errors.push(WorkflowValidationIssue::new("table_not_root", "Table nodes must be roots.", "Remove incoming edges from this Table node.").with_node_id(&node.id)),
+            WorkflowNodeConfig::Result if out_degree != 0 => report.errors.push(WorkflowValidationIssue::new("result_not_terminal", "Result nodes must be terminal.", "Remove outgoing edges from this Result node.").with_node_id(&node.id)),
+            WorkflowNodeConfig::Result if in_degree != 1 => report.errors.push(WorkflowValidationIssue::new("result_input_count", "A Result node must have exactly one Query input.", "Connect one Query node to this Result.").with_node_id(&node.id)),
+            WorkflowNodeConfig::Model { .. } if in_degree != 1 => report.errors.push(WorkflowValidationIssue::new("model_input_count", "A SigLIP Model node needs exactly one upstream candidate Query.", "Connect one read-only Query that returns stable frame identity and a decoded image field.").with_node_id(&node.id)),
             WorkflowNodeConfig::Model { .. }
                 if incoming
                     .get(node.id.as_str())
@@ -1086,15 +1080,10 @@ impl WorkflowSpec {
                     .and_then(|source| nodes.get(*source))
                     .is_some_and(|source| source.config.kind() != WorkflowNodeKind::Query) =>
             {
-                report.errors.push(issue(
-                    "model_input_kind",
-                    Some(&node.id),
-                    "A SigLIP Model enriches the rows selected by an upstream candidate Query.",
-                    "Insert a Query between the source Table and this Model, and project the stable frame keys plus one decoded image field.",
-                ));
+                report.errors.push(WorkflowValidationIssue::new("model_input_kind", "A SigLIP Model enriches the rows selected by an upstream candidate Query.", "Insert a Query between the source Table and this Model, and project the stable frame keys plus one decoded image field.").with_node_id(&node.id));
             }
             WorkflowNodeConfig::Query { sql, .. } => {
-                if let Ok(placeholders) = scan_node_placeholders(sql) {
+                if let Ok(placeholders) = WorkflowSql::from(sql.as_str()).node_placeholders() {
                     let upstream = incoming
                         .get(node.id.as_str())
                         .into_iter()
@@ -1102,42 +1091,22 @@ impl WorkflowSpec {
                         .copied()
                         .collect::<BTreeSet<_>>();
                     if placeholders.is_empty() {
-                        report.errors.push(issue(
-                            "query_placeholder_required",
-                            Some(&node.id),
-                            "Workflow SQL must reference an upstream node placeholder.",
-                            "Use a placeholder such as {{node:table}} in FROM or JOIN.",
-                        ));
+                        report.errors.push(WorkflowValidationIssue::new("query_placeholder_required", "Workflow SQL must reference an upstream node placeholder.", "Use a placeholder such as {{node:table}} in FROM or JOIN.").with_node_id(&node.id));
                     }
                     for placeholder in &placeholders {
                         if !nodes.contains_key(placeholder.as_str()) {
-                            report.errors.push(issue(
-                                "unknown_placeholder",
-                                Some(&node.id),
-                                &format!("Workflow SQL references unknown node {placeholder:?}."),
-                                "Reference an existing connected upstream Table, Query, or Model node.",
-                            ));
+                            report.errors.push(WorkflowValidationIssue::new("unknown_placeholder", &format!("Workflow SQL references unknown node {placeholder:?}."), "Reference an existing connected upstream Table, Query, or Model node.").with_node_id(&node.id));
                         } else if !upstream.contains(placeholder.as_str()) {
-                            report.errors.push(issue(
-                                "non_upstream_placeholder",
-                                Some(&node.id),
-                                &format!(
+                            report.errors.push(WorkflowValidationIssue::new("non_upstream_placeholder", &format!(
                                     "Workflow SQL references {placeholder:?}, which is not connected upstream."
-                                ),
-                                "Connect that node to this Query or remove the placeholder.",
-                            ));
+                                ), "Connect that node to this Query or remove the placeholder.").with_node_id(&node.id));
                         }
                     }
                     for upstream_id in upstream {
                         if !placeholders.iter().any(|id| id == upstream_id) {
-                            report.errors.push(issue(
-                                "unused_upstream_edge",
-                                Some(&node.id),
-                                &format!(
+                            report.errors.push(WorkflowValidationIssue::new("unused_upstream_edge", &format!(
                                     "Upstream node {upstream_id:?} is connected but not referenced by Workflow SQL."
-                                ),
-                                "Use its {{node:<id>}} placeholder or remove the edge.",
-                            ));
+                                ), "Use its {{node:<id>}} placeholder or remove the edge.").with_node_id(&node.id));
                         }
                     }
                 }
@@ -1170,43 +1139,27 @@ impl WorkflowSpec {
                     }
                 }
                 if table_sources.len() != 1 {
-                    report.errors.push(issue(
-                    "model_source_count",
-                    Some(&node.id),
-                    "A Model feature cache must belong to exactly one authoritative source relation.",
-                    "Build the candidate Query from one source Table; join other evidence only after the Model.",
-                ));
+                    report.errors.push(WorkflowValidationIssue::new("model_source_count", "A Model feature cache must belong to exactly one authoritative source relation.", "Build the candidate Query from one source Table; join other evidence only after the Model.").with_node_id(&node.id));
                 } else if let Some(source) = table_sources.first() {
                     if feature_cache_relation
                         .as_ref()
                         .is_some_and(|output| output != &derived_feature_cache_relation(source))
                     {
-                        report.errors.push(issue(
-                        "invalid_model_output",
-                        Some(&node.id),
-                        "The Model feature-cache relation is not derived from its source relation.",
-                        "Apply the workflow again so the server can derive the source-scoped cache.",
-                    ));
+                        report.errors.push(WorkflowValidationIssue::new("invalid_model_output", "The Model feature-cache relation is not derived from its source relation.", "Apply the workflow again so the server can derive the source-scoped cache.").with_node_id(&node.id));
                     }
                     if features
                         .iter()
                         .any(|feature| feature.applicability.source_relation != **source)
                     {
-                        report.errors.push(issue(
-                        "feature_source_mismatch",
-                        Some(&node.id),
-                        "Feature applicability does not match the Model's authoritative source Table.",
-                        "Apply the workflow again so the server can normalize every feature source.",
-                    ));
+                        report.errors.push(WorkflowValidationIssue::new("feature_source_mismatch", "Feature applicability does not match the Model's authoritative source Table.", "Apply the workflow again so the server can normalize every feature source.").with_node_id(&node.id));
                     }
                 }
             }
         }
 
         if self.topological_order().is_err() {
-            report.errors.push(issue(
+            report.errors.push(WorkflowValidationIssue::new(
                 "workflow_cycle",
-                None,
                 "Workflow lineage must be acyclic.",
                 "Remove the connection that feeds a downstream node back upstream.",
             ));
@@ -1263,31 +1216,6 @@ impl WorkflowSpec {
         self.nodes
             .iter()
             .any(|node| matches!(node.config, WorkflowNodeConfig::Model { .. }))
-    }
-}
-
-fn allowed_transition(source: WorkflowNodeKind, target: WorkflowNodeKind) -> bool {
-    matches!(
-        (source, target),
-        (WorkflowNodeKind::Table, WorkflowNodeKind::Query)
-            | (WorkflowNodeKind::Query, WorkflowNodeKind::Model)
-            | (WorkflowNodeKind::Query, WorkflowNodeKind::Query)
-            | (WorkflowNodeKind::Model, WorkflowNodeKind::Query)
-            | (WorkflowNodeKind::Query, WorkflowNodeKind::Result)
-    )
-}
-
-fn issue(
-    code: &str,
-    node_id: Option<&str>,
-    message: &str,
-    recovery: &str,
-) -> WorkflowValidationIssue {
-    WorkflowValidationIssue {
-        code: code.to_owned(),
-        node_id: node_id.map(str::to_owned),
-        message: message.to_owned(),
-        recovery: recovery.to_owned(),
     }
 }
 
@@ -1478,7 +1406,7 @@ mod tests {
             derived_feature_cache_relation("pick/place"),
             format!(
                 "workflow.features_{}",
-                spiral_robotics_core::identity::identifier_component("pick/place")
+                spiral_robotics_core::identity::SqlNameComponent::from("pick/place").as_str()
             )
         );
     }
@@ -1735,10 +1663,13 @@ mod tests {
 
     #[test]
     fn typed_feature_names_are_descriptive_and_safe() {
-        assert!(is_workflow_feature_name("is_raining_feature"));
-        assert!(is_workflow_feature_name("is_gripper_open_feature"));
-        assert!(!is_workflow_feature_name("score_1"));
-        assert!(!is_workflow_feature_name("is-raining-feature"));
+        let source_relation = "weather.camera_frames";
+        assert!(feature(source_relation, "is_raining_feature", "rain").has_valid_name());
+        assert!(
+            feature(source_relation, "is_gripper_open_feature", "open gripper").has_valid_name()
+        );
+        assert!(!feature(source_relation, "score_1", "rain").has_valid_name());
+        assert!(!feature(source_relation, "is-raining-feature", "rain").has_valid_name());
     }
 
     #[test]

@@ -7,7 +7,7 @@
 //! actually operate.
 
 #[cfg(any(test, all(feature = "web", target_arch = "wasm32")))]
-use spiral_robotics_api::api::TelemetryFrame;
+use spiral_robotics_api::robots::TelemetryFrame;
 use spiral_robotics_core::arm;
 
 /// Thirty minutes at the studio's 20 Hz telemetry publish rate.
@@ -31,7 +31,7 @@ const SIGNAL_COLORS: [&str; 6] = [
 pub(crate) fn signal_color(name: &str) -> &'static str {
     let slot = arm::SO101_JOINTS
         .iter()
-        .position(|joint| joint.name == name)
+        .position(|joint| joint.name() == name)
         .unwrap_or_else(|| {
             name.bytes().fold(0usize, |hash, byte| {
                 hash.wrapping_mul(31).wrapping_add(usize::from(byte))
@@ -188,7 +188,8 @@ impl SignalStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spiral_robotics_api::api::{JointTelemetry, RecordingProgress, RobotTelemetry};
+    use spiral_robotics_api::recording::RecordingProgress;
+    use spiral_robotics_api::robots::{JointTelemetry, RobotTelemetry};
 
     fn joint(name: &str, degrees: Option<f64>) -> JointTelemetry {
         JointTelemetry {

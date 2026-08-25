@@ -2,7 +2,7 @@
 
 use crate::components::interaction::focus_after_render;
 use dioxus::prelude::*;
-use spiral_robotics_api::api::DataSettings;
+use spiral_robotics_api::settings::DataSettings;
 
 use crate::activities::data::state::use_data_controller;
 use crate::activities::rollout::state::use_rollout_controller;
@@ -14,8 +14,8 @@ use crate::client::http as api;
 use crate::panels::timeline::state::use_timeline_controller;
 use crate::settings::panel::SettingsPanel;
 use crate::shell::activity::Activity;
+use crate::shell::frame::{ActivityRail, StatusBar};
 use crate::shell::navigation::{ShellAction, use_shell_controller};
-use crate::shell::shell::{ActivityRail, StatusBar};
 use crate::shell::workspace::EpisodeWorkspace;
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");

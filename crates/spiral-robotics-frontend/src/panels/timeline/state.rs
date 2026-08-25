@@ -3,12 +3,13 @@
 use dioxus::prelude::*;
 
 use crate::client::historical::{
-    EpisodeInspectionCache, HistoricalPreview, historical_replay_slot, request_historical_preview,
+    HistoricalPreviewRequest, HistoricalPreviewSignals, historical_replay_slot,
+    request_historical_preview,
 };
 use crate::panels::timeline::panel::{
     TimelineAction, TimelineCaptureAction, TimelinePreviewAction, TimelineRobotSyncAction,
 };
-use crate::shell::activity::{Activity, RecordedSource, TimelineSubject, TimelineTarget};
+use crate::shell::activity::{Activity, TimelineSubject, TimelineTarget};
 use crate::shell::state::Studio;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -89,16 +90,80 @@ impl TimelineController {
 }
 
 pub(crate) struct TimelineActionContext {
-    pub(crate) studio: Studio,
-    pub(crate) controller: TimelineController,
-    pub(crate) subject: TimelineSubject,
-    pub(crate) review_episode: Option<String>,
-    pub(crate) seek_context: Option<(String, String, Option<String>)>,
-    pub(crate) historical_state: Signal<Option<RecordedSource<HistoricalPreview>>>,
-    pub(crate) historical_revision: Signal<u64>,
-    pub(crate) historical_cache: Signal<EpisodeInspectionCache>,
-    pub(crate) automatic_preview_target: Signal<Option<(String, u64)>>,
-    pub(crate) interactive_preview_target: Signal<Option<(String, u64)>>,
+    session: TimelineActionSession,
+    recorded: RecordedTimelineActionState,
+    preview_targets: TimelinePreviewTargets,
+}
+
+impl TimelineActionContext {
+    pub(crate) const fn new(
+        session: TimelineActionSession,
+        recorded: RecordedTimelineActionState,
+        preview_targets: TimelinePreviewTargets,
+    ) -> Self {
+        Self {
+            session,
+            recorded,
+            preview_targets,
+        }
+    }
+}
+
+pub(crate) struct TimelineActionSession {
+    studio: Studio,
+    controller: TimelineController,
+    subject: TimelineSubject,
+}
+
+impl TimelineActionSession {
+    pub(crate) const fn new(
+        studio: Studio,
+        controller: TimelineController,
+        subject: TimelineSubject,
+    ) -> Self {
+        Self {
+            studio,
+            controller,
+            subject,
+        }
+    }
+}
+
+pub(crate) struct RecordedTimelineActionState {
+    review_episode: Option<String>,
+    seek_context: Option<(String, String, Option<String>)>,
+    historical: HistoricalPreviewSignals,
+}
+
+impl RecordedTimelineActionState {
+    pub(crate) const fn new(
+        review_episode: Option<String>,
+        seek_context: Option<(String, String, Option<String>)>,
+        historical: HistoricalPreviewSignals,
+    ) -> Self {
+        Self {
+            review_episode,
+            seek_context,
+            historical,
+        }
+    }
+}
+
+pub(crate) struct TimelinePreviewTargets {
+    automatic: Signal<Option<(String, u64)>>,
+    interactive: Signal<Option<(String, u64)>>,
+}
+
+impl TimelinePreviewTargets {
+    pub(crate) const fn new(
+        automatic: Signal<Option<(String, u64)>>,
+        interactive: Signal<Option<(String, u64)>>,
+    ) -> Self {
+        Self {
+            automatic,
+            interactive,
+        }
+    }
 }
 
 /// Apply a typed Timeline action after validating that it still names the
@@ -106,17 +171,26 @@ pub(crate) struct TimelineActionContext {
 /// transport or calls the backend directly.
 pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: TimelineAction) {
     let TimelineActionContext {
-        studio,
-        controller,
-        subject,
-        review_episode,
-        seek_context,
-        mut historical_state,
-        mut historical_revision,
-        mut historical_cache,
-        mut automatic_preview_target,
-        mut interactive_preview_target,
+        session:
+            TimelineActionSession {
+                studio,
+                controller,
+                subject,
+            },
+        recorded:
+            RecordedTimelineActionState {
+                review_episode,
+                seek_context,
+                historical,
+            },
+        preview_targets:
+            TimelinePreviewTargets {
+                automatic: mut automatic_preview_target,
+                interactive: mut interactive_preview_target,
+            },
     } = context;
+    let (mut historical_state, mut historical_revision, mut historical_cache) =
+        historical.into_signals();
     let mut playhead = controller.playhead;
     let mut follow_live = controller.follow_live;
     let mut robot_sync_target = controller.robot_sync_target;
@@ -144,14 +218,16 @@ pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: T
                     studio.stop_recording(
                         &episode,
                         keep,
-                        EventHandler::new(move |_: spiral_robotics_api::api::EpisodeSummary| {
-                            historical_cache.write().invalidate(&finished_episode);
-                            let next_revision = historical_revision.peek().wrapping_add(1);
-                            historical_revision.set(next_revision);
-                            historical_state.set(None);
-                            automatic_preview_target.set(None);
-                            interactive_preview_target.set(None);
-                        }),
+                        EventHandler::new(
+                            move |_: spiral_robotics_api::recording::EpisodeSummary| {
+                                historical_cache.write().invalidate(&finished_episode);
+                                let next_revision = historical_revision.peek().wrapping_add(1);
+                                historical_revision.set(next_revision);
+                                historical_state.set(None);
+                                automatic_preview_target.set(None);
+                                interactive_preview_target.set(None);
+                            },
+                        ),
                     );
                 }
             }
@@ -195,12 +271,12 @@ pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: T
                     interactive_preview_target.set(Some(target));
                     request_historical_preview(
                         studio,
-                        episode,
-                        None,
-                        request.seconds,
-                        historical_state,
-                        historical_revision,
-                        historical_cache,
+                        HistoricalPreviewRequest::new(episode, None, request.seconds),
+                        HistoricalPreviewSignals::new(
+                            historical_state,
+                            historical_revision,
+                            historical_cache,
+                        ),
                     );
                 }
             }
@@ -242,12 +318,12 @@ pub(crate) fn dispatch_timeline_action(context: TimelineActionContext, action: T
             historical_cache.write().invalidate(&episode);
             request_historical_preview(
                 studio,
-                episode,
-                None,
-                playhead(),
-                historical_state,
-                historical_revision,
-                historical_cache,
+                HistoricalPreviewRequest::new(episode, None, playhead()),
+                HistoricalPreviewSignals::new(
+                    historical_state,
+                    historical_revision,
+                    historical_cache,
+                ),
             );
         }
         _ => studio.report("The Timeline subject changed before the action was applied."),

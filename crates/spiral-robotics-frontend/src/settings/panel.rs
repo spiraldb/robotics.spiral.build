@@ -6,8 +6,9 @@ use crate::components::interaction::{
 };
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_api::api::{
-    ConnectionTestResponse, DataSettings, ProjectImportSummary, UpdateDataSettingsRequest,
+use spiral_robotics_api::datasets::ProjectImportSummary;
+use spiral_robotics_api::settings::{
+    ConnectionTestResponse, DataSettings, UpdateDataSettingsRequest,
 };
 
 use crate::client::http as api;

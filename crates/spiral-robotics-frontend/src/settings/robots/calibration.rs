@@ -1,7 +1,7 @@
 use crate::components::interaction::{Action, ActionPurpose, ActionVariant, BlockingConfirmation};
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_api::api::{CalibrationProgress, CalibrationReapplyResponse, RobotSummary};
+use spiral_robotics_api::robots::{CalibrationProgress, CalibrationReapplyResponse, RobotSummary};
 use spiral_robotics_core::arm;
 use spiral_robotics_core::calibration::MINIMUM_CALIBRATION_TRAVEL;
 
@@ -27,6 +27,23 @@ pub(super) fn CalibrationSection(
         .into_iter()
         .filter(|episode| episode.arms.iter().any(|arm| arm.id == robot.id))
         .count();
+    let reapply_title = if matching_episodes == 0 {
+        "No recorded episodes contain this arm"
+    } else {
+        "Recalculate recorded joint state from raw encoder positions using this calibration"
+    };
+    let calibration_title = if !connected {
+        "Connect the arm first"
+    } else if robot.calibrated {
+        "Every joint already has a recorded range. Recalibrate after rebuilding the arm or moving a horn."
+    } else {
+        ""
+    };
+    let reapply_confirm_label = if reapplying() {
+        "Applying…".to_owned()
+    } else {
+        format!("Apply to {matching_episodes} takes")
+    };
 
     let Some(progress) = progress else {
         return rsx! {
@@ -38,11 +55,7 @@ pub(super) fn CalibrationSection(
                             id: "reapply-calibration-{robot.id}",
                             purpose: ActionPurpose::Apply,
                             disabled: reapplying() || command().is_some() || matching_episodes == 0,
-                            title: if matching_episodes == 0 {
-                                "No recorded episodes contain this arm"
-                            } else {
-                                "Recalculate recorded joint state from raw encoder positions using this calibration"
-                            },
+                            title: reapply_title,
                             onclick: move |_| confirming_reapply.set(true),
                             "Reapply calibration"
                         }
@@ -52,13 +65,7 @@ pub(super) fn CalibrationSection(
                         variant: ActionVariant::Outline,
                         disabled: !connected || reapplying() || command().is_some(),
                         aria_busy: command() == Some("start"),
-                        title: if !connected {
-                            "Connect the arm first"
-                        } else if robot.calibrated {
-                            "Every joint already has a recorded range. Recalibrate after rebuilding the arm or moving a horn."
-                        } else {
-                            ""
-                        },
+                        title: calibration_title,
                         onclick: move |_| {
                             if command.peek().is_some() {
                                 return;
@@ -82,11 +89,7 @@ pub(super) fn CalibrationSection(
                             "Recalculate measured joint state in {matching_episodes} recorded takes using this calibration."
                         ),
                         consequence: "Recorded actions and raw encoder positions are preserved. Measured joint state will be replaced.".to_owned(),
-                        confirm_label: if reapplying() {
-                            "Applying…".to_owned()
-                        } else {
-                            format!("Apply to {matching_episodes} takes")
-                        },
+                        confirm_label: reapply_confirm_label,
                         cancel_label: "Keep recorded data",
                         purpose: ActionPurpose::Apply,
                         pending: reapplying(),
@@ -201,7 +204,7 @@ pub(super) fn CalibrationSection(
                 for joint in progress.joints.clone() {
                     li { key: "{joint.name}", class: "flex min-h-5 items-center gap-1.5",
                         span { class: "w-16 shrink-0 truncate text-[11px]",
-                            {arm::so101_joint(&joint.name).map_or_else(|| joint.name.clone(), |known| known.label.to_owned())}
+                            {arm::so101_joint(&joint.name).map_or_else(|| joint.name.clone(), |known| known.label().to_owned())}
                         }
                         SweepBar { min: joint.min, position: joint.position, max: joint.max }
                         span {

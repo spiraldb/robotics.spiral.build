@@ -7,15 +7,14 @@
 
 mod artifact;
 mod error;
-mod interface;
+mod policy;
 
-pub use artifact::{ModelArtifact, ModelFiles, ModelIdentity};
+pub use artifact::{ModelArtifact, ModelDigests, ModelFiles, ModelIdentity};
 #[cfg(feature = "download")]
-pub use artifact::{
-    RemoteModel, download_remote_model, download_remote_model_to, download_verified_file,
-};
+pub use artifact::{RemoteModel, RemoteModelUrls};
 pub use error::{Error, Result};
-pub use interface::{
-    ActionChunk, ImageFormat, ImageFrame, ImageInputSpecification, InferenceInput, InferenceStats,
+pub use policy::{
+    ActionChunk, ActionChunkShape, ActionChunkSpecification, ImageDimensions, ImageFormat,
+    ImageFrame, ImageInputSpecification, InferenceInput, InferenceStats, ObservationSpecification,
     Policy, PolicyKind, PolicyLoader, PolicySpecification,
 };

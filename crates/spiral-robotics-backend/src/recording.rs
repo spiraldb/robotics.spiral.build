@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use spiral_robotics_core::identity::DatasetId;
 
 use crate::data::catalog_lease::CatalogLeaseToken;
-use crate::data::episode_arms::select_recorded_arm;
+use crate::data::episode_arms::RecordedArms;
 use spiral_robotics_core::error::OperationError;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -396,12 +396,8 @@ pub async fn start_replay<P: ReplayPort + ?Sized>(
         ));
     }
     let summary = port.replay_episode(&command.episode)?;
-    let source = select_recorded_arm(
-        &summary.id,
-        &summary.arms,
-        &command.robot,
-        command.source_arm.as_deref(),
-    )?;
+    let source = RecordedArms::new(&summary.id, &summary.arms, &command.robot)
+        .select(command.source_arm.as_deref())?;
     let trajectory = port
         .load_trajectory(&command.episode, &source, command.start_seconds)
         .await?;
@@ -448,8 +444,8 @@ pub async fn set_replay_paused<P: ReplayPort + ?Sized>(
 }
 
 fn validate_dataset_id(value: &str) -> Result<String, OperationError> {
-    DatasetId::parse(value)
-        .map(DatasetId::into_string)
+    DatasetId::try_from(value)
+        .map(String::from)
         .map_err(|error| OperationError::InvalidInput(error.to_string()))
 }
 

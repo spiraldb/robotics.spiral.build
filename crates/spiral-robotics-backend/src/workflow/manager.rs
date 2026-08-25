@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::workflow::service::{admit_cancel, admit_run, admit_save};
-use spiral_robotics_api::api::SpiralQueryResponse;
+use spiral_robotics_api::relations::SpiralQueryResponse;
 use spiral_robotics_api::workflow::{
     CancelWorkflowRequest, RunWorkflowRequest, SaveWorkflowRequest, WorkflowCapabilities,
     WorkflowDocument, WorkflowNodeConfig, WorkflowNodePhase, WorkflowNodeSnapshot,
@@ -16,16 +16,13 @@ use spiral_robotics_api::workflow::{
     WorkflowStateResponse, WorkflowUpdate, derived_feature_cache_relation,
 };
 use spiral_robotics_core::error::OperationError;
-use spiral_robotics_core::workflow::{scan_node_placeholders, validate_qualified_relation};
+use spiral_robotics_core::workflow::{QualifiedRelation, WorkflowSql};
 use tokio::sync::broadcast;
 
 use crate::workflow::model::{
     ModelRunEvent, ModelRunFailure, ModelRunRequest, ModelRunResult, run_model,
 };
 use spiral_robotics_storage::manager::StorageManager;
-
-static RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-static SCOPE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 pub(crate) struct WorkflowManager {
@@ -34,13 +31,45 @@ pub(crate) struct WorkflowManager {
 
 struct WorkflowManagerInner {
     storage: Arc<StorageManager>,
-    scope_id: Mutex<String>,
+    identity: WorkflowIdentity,
     document: Mutex<WorkflowDocument>,
     updates: broadcast::Sender<WorkflowUpdate>,
     active: Mutex<Option<ActiveRun>>,
     terminal_persistence_error: Mutex<Option<TerminalPersistenceError>>,
     #[cfg(test)]
     persistence_outcomes: Mutex<VecDeque<Result<(), String>>>,
+}
+
+struct WorkflowIdentity {
+    scope_id: Mutex<String>,
+    run_sequence: AtomicU64,
+    scope_sequence: AtomicU64,
+}
+
+impl WorkflowIdentity {
+    fn new() -> Self {
+        Self {
+            scope_id: Mutex::new(format!("workflow-scope-{}-0", now_millis())),
+            run_sequence: AtomicU64::new(0),
+            scope_sequence: AtomicU64::new(1),
+        }
+    }
+
+    fn next_run_id(&self) -> String {
+        format!(
+            "workflow-{}-{}",
+            now_millis(),
+            self.run_sequence.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    fn advance_scope(&self) {
+        *lock(&self.scope_id) = format!(
+            "workflow-scope-{}-{}",
+            now_millis(),
+            self.scope_sequence.fetch_add(1, Ordering::Relaxed)
+        );
+    }
 }
 
 struct ActiveRun {
@@ -69,7 +98,7 @@ impl WorkflowManager {
         Self {
             inner: Arc::new(WorkflowManagerInner {
                 storage,
-                scope_id: Mutex::new(next_scope_id()),
+                identity: WorkflowIdentity::new(),
                 document: Mutex::new(WorkflowDocument::default()),
                 updates,
                 active: Mutex::new(None),
@@ -119,7 +148,7 @@ impl WorkflowManager {
             self.inner.storage.save_workflow_document(&document)?;
         }
         *lock(&self.inner.document) = document;
-        *lock(&self.inner.scope_id) = next_scope_id();
+        self.inner.identity.advance_scope();
         *lock(&self.inner.terminal_persistence_error) = None;
         let update = WorkflowUpdate {
             state: self.state(),
@@ -134,7 +163,7 @@ impl WorkflowManager {
     }
 
     pub(crate) fn scope_id(&self) -> String {
-        lock(&self.inner.scope_id).clone()
+        lock(&self.inner.identity.scope_id).clone()
     }
 
     pub(crate) async fn relations(
@@ -268,7 +297,7 @@ impl WorkflowManager {
             validation.valid(),
         )?;
 
-        let run_id = next_run_id();
+        let run_id = self.inner.identity.next_run_id();
         let cancel = Arc::new(AtomicBool::new(false));
         let publication_gate = Arc::new(Mutex::new(()));
         let snapshot = starting_snapshot(&document.workflow, &document.snapshot, run_id.clone());
@@ -1057,13 +1086,17 @@ fn substitute_outputs(
     outputs: &BTreeMap<String, ResolvedNodeOutput>,
 ) -> Result<String, String> {
     let mut substituted = sql.to_owned();
-    for id in scan_node_placeholders(sql).map_err(|error| error.to_string())? {
+    for id in WorkflowSql::from(sql)
+        .node_placeholders()
+        .map_err(|error| error.to_string())?
+    {
         let output = outputs.get(&id).ok_or_else(|| {
             format!("Workflow query references unresolved node placeholder {id:?}")
         })?;
         let replacement = match output {
             ResolvedNodeOutput::Relation(relation) => {
-                validate_qualified_relation(relation).map_err(|error| error.to_string())?;
+                QualifiedRelation::try_from(relation.as_str())
+                    .map_err(|error| error.to_string())?;
                 relation.clone()
             }
             ResolvedNodeOutput::Query(query) => format!("({query})"),
@@ -1217,22 +1250,6 @@ fn starting_snapshot(
     }
 }
 
-fn next_run_id() -> String {
-    format!(
-        "workflow-{}-{}",
-        now_millis(),
-        RUN_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    )
-}
-
-fn next_scope_id() -> String {
-    format!(
-        "workflow-scope-{}-{}",
-        now_millis(),
-        SCOPE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    )
-}
-
 fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1266,7 +1283,7 @@ mod tests {
 
     use arrow_array::{ArrayRef, Int64Array, RecordBatch};
     use arrow_schema::{DataType, Field, Schema};
-    use spiral_robotics_api::api::SpiralQueryResponse;
+    use spiral_robotics_api::relations::SpiralQueryResponse;
     use spiral_robotics_api::workflow::{
         WorkflowEdgeSpec, WorkflowFeatureApplicability, WorkflowFeatureDefinition,
         WorkflowModelRunMetadata, WorkflowNodeConfig, WorkflowNodeSpec, WorkflowRunPhase,
@@ -1279,9 +1296,11 @@ mod tests {
         replace_batches, table_exists, video_assets_batch,
     };
     use spiral_robotics_storage::settings::{
-        BackendStateStore, environment_spiral_endpoint, environment_spiral_spfs_endpoint,
+        BackendStateStore, SpiralConnectionSettings, environment_spiral_endpoint,
+        environment_spiral_spfs_endpoint,
     };
     use spiral_robotics_storage::sql;
+    use spiral_robotics_storage::video::{VideoSegment, VideoSize, VideoTiming};
 
     #[test]
     fn revision_increment_alone_does_not_stale_a_result() {
@@ -1414,10 +1433,11 @@ mod tests {
     fn terminal_save_failure_keeps_the_run_active_and_cancel_can_retry_finalization() {
         let project_store = Arc::new(
             ProjectStore::new(
-                "https://api.spiraldb.dev".to_owned(),
-                "https://spfs.spiraldb.dev".to_owned(),
-                None,
-                None,
+                SpiralConnectionSettings::new(
+                    "https://api.spiraldb.dev".to_owned(),
+                    "https://spfs.spiraldb.dev".to_owned(),
+                )
+                .expect("the unconfigured test connection is valid"),
                 "workflow_terminal_failure".to_owned(),
             )
             .expect("the unconfigured test project_store is valid"),
@@ -1471,10 +1491,11 @@ mod tests {
     fn authoritative_project_reload_gets_a_new_scope_for_a_lower_revision() {
         let project_store = Arc::new(
             ProjectStore::new(
-                "https://api.spiraldb.dev".to_owned(),
-                "https://spfs.spiraldb.dev".to_owned(),
-                None,
-                None,
+                SpiralConnectionSettings::new(
+                    "https://api.spiraldb.dev".to_owned(),
+                    "https://spfs.spiraldb.dev".to_owned(),
+                )
+                .expect("the unconfigured test connection is valid"),
                 "workflow_scope_reload".to_owned(),
             )
             .expect("the unconfigured test project_store is valid"),
@@ -1642,21 +1663,22 @@ mod tests {
             .or_else(|| stored.as_ref().and_then(BackendStateStore::project_id))
             .expect("SPIRAL_PROJECT_ID or a project saved in Studio Settings is required");
         let namespace = format!("workflow_e2e_{}_{}", std::process::id(), now_millis());
+        let connection = SpiralConnectionSettings::new(
+            stored
+                .as_ref()
+                .and_then(BackendStateStore::spiral_endpoint)
+                .unwrap_or_else(environment_spiral_endpoint),
+            stored
+                .as_ref()
+                .and_then(BackendStateStore::spiral_spfs_endpoint)
+                .unwrap_or_else(environment_spiral_spfs_endpoint),
+        )
+        .and_then(|settings| settings.with_project(&project))
+        .expect("the Workflow E2E connection must be valid")
+        .with_credentials(stored.as_ref().and_then(BackendStateStore::credentials));
         let project_store = Arc::new(
-            ProjectStore::new(
-                stored
-                    .as_ref()
-                    .and_then(BackendStateStore::spiral_endpoint)
-                    .unwrap_or_else(environment_spiral_endpoint),
-                stored
-                    .as_ref()
-                    .and_then(BackendStateStore::spiral_spfs_endpoint)
-                    .unwrap_or_else(environment_spiral_spfs_endpoint),
-                Some(project),
-                stored.as_ref().and_then(BackendStateStore::credentials),
-                namespace.clone(),
-            )
-            .expect("the Workflow E2E project_store must be valid"),
+            ProjectStore::new(connection, namespace.clone())
+                .expect("the Workflow E2E project_store must be valid"),
         );
         let seed_relation = format!("{namespace}.seed_values");
         let mut cleanup = WorkflowTestNamespace::new(
@@ -1777,21 +1799,22 @@ mod tests {
             .or_else(|| stored.as_ref().and_then(BackendStateStore::project_id))
             .expect("SPIRAL_PROJECT_ID or a project saved in Studio Settings is required");
         let namespace = format!("workflow_siglip_{}_{}", std::process::id(), now_millis());
+        let connection = SpiralConnectionSettings::new(
+            stored
+                .as_ref()
+                .and_then(BackendStateStore::spiral_endpoint)
+                .unwrap_or_else(environment_spiral_endpoint),
+            stored
+                .as_ref()
+                .and_then(BackendStateStore::spiral_spfs_endpoint)
+                .unwrap_or_else(environment_spiral_spfs_endpoint),
+        )
+        .and_then(|settings| settings.with_project(&project))
+        .expect("the Workflow SigLIP connection must be valid")
+        .with_credentials(stored.as_ref().and_then(BackendStateStore::credentials));
         let project_store = Arc::new(
-            ProjectStore::new(
-                stored
-                    .as_ref()
-                    .and_then(BackendStateStore::spiral_endpoint)
-                    .unwrap_or_else(environment_spiral_endpoint),
-                stored
-                    .as_ref()
-                    .and_then(BackendStateStore::spiral_spfs_endpoint)
-                    .unwrap_or_else(environment_spiral_spfs_endpoint),
-                Some(project),
-                stored.as_ref().and_then(BackendStateStore::credentials),
-                namespace.clone(),
-            )
-            .expect("the Workflow SigLIP E2E project_store must be valid"),
+            ProjectStore::new(connection, namespace.clone())
+                .expect("the Workflow SigLIP E2E project_store must be valid"),
         );
         let manifest_relation = format!("{namespace}.video_assets");
         let media_relation = format!("{namespace}.video.assets");
@@ -1827,17 +1850,14 @@ mod tests {
             namespace.clone(),
             true,
         );
-        let asset = VideoAsset {
-            stream_id: "camera.main".to_owned(),
-            camera_id: "camera-e2e".to_owned(),
-            payload: tiny_test_mp4(),
-            width: 32,
-            height: 32,
-            fps: 2,
-            frames: 2,
-            segment_index: 0,
-            timeline_offset_seconds: Some(0.0),
-        };
+        let asset = VideoAsset::new(
+            "camera.main".to_owned(),
+            "camera-e2e".to_owned(),
+            tiny_test_mp4(),
+        )
+        .with_size(VideoSize::new(32, 32))
+        .with_timing(VideoTiming::new(2, 2))
+        .with_segment(VideoSegment::new(0, Some(0.0)));
         let media_batch = video_assets_batch("episode-e2e", &[asset], &media_relation)
             .expect("the video fixture batch must be valid");
         let empty_batch = video_assets_batch("episode-empty", &[], &empty_relation)

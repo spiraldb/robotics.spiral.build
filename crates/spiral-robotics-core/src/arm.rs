@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::calibration::{Direction, MotorSpec};
+use crate::calibration::{MotorDirection, MotorSpec};
 
 /// Encoder counts in one full turn of an STS3215 output shaft.
 pub const ENCODER_COUNTS_PER_TURN: i64 = 4096;
@@ -32,13 +32,31 @@ pub enum JointRole {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct JointDefinition {
     /// Motor name as it appears in the robot's JSON file.
-    pub name: &'static str,
+    name: &'static str,
     /// Feetech bus ID assigned by the SO-101 build instructions.
-    pub id: u32,
+    bus_id: u32,
     /// Where the motor sits in the kinematic chain.
-    pub role: JointRole,
+    role: JointRole,
     /// Human-readable name for the UI.
-    pub label: &'static str,
+    label: &'static str,
+}
+
+impl JointDefinition {
+    pub const fn name(self) -> &'static str {
+        self.name
+    }
+
+    pub const fn bus_id(self) -> u32 {
+        self.bus_id
+    }
+
+    pub const fn role(self) -> JointRole {
+        self.role
+    }
+
+    pub const fn label(self) -> &'static str {
+        self.label
+    }
 }
 
 /// The Feetech servo model used throughout a stock SO-101 arm.
@@ -48,37 +66,37 @@ pub const SO101_MOTOR_MODEL: &str = "sts3215";
 pub const SO101_JOINTS: [JointDefinition; 6] = [
     JointDefinition {
         name: "shoulder_pan",
-        id: 1,
+        bus_id: 1,
         role: JointRole::Pan,
         label: "Shoulder pan",
     },
     JointDefinition {
         name: "shoulder_lift",
-        id: 2,
+        bus_id: 2,
         role: JointRole::Lift,
         label: "Shoulder lift",
     },
     JointDefinition {
         name: "elbow_flex",
-        id: 3,
+        bus_id: 3,
         role: JointRole::Elbow,
         label: "Elbow flex",
     },
     JointDefinition {
         name: "wrist_flex",
-        id: 4,
+        bus_id: 4,
         role: JointRole::WristFlex,
         label: "Wrist flex",
     },
     JointDefinition {
         name: "wrist_roll",
-        id: 5,
+        bus_id: 5,
         role: JointRole::WristRoll,
         label: "Wrist roll",
     },
     JointDefinition {
         name: "gripper",
-        id: 6,
+        bus_id: 6,
         role: JointRole::Gripper,
         label: "Gripper",
     },
@@ -96,7 +114,7 @@ pub fn so101_motor_specs() -> BTreeMap<String, MotorSpec> {
         .map(|joint| {
             (
                 joint.name.to_owned(),
-                MotorSpec::new(joint.id, Direction::Normal).with_model(SO101_MOTOR_MODEL),
+                MotorSpec::new(joint.bus_id, MotorDirection::Normal).with_model(SO101_MOTOR_MODEL),
             )
         })
         .collect()
@@ -127,39 +145,63 @@ pub fn degrees_to_counts(degrees: f64) -> Option<i64> {
 /// pose so a stale sensor cannot make the scene renderer fail.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct JointAngles {
-    pub pan_deg: f64,
-    pub lift_deg: f64,
-    pub elbow_deg: f64,
-    pub wrist_flex_deg: f64,
-    pub wrist_roll_deg: f64,
+    pan_degrees: f64,
+    lift_degrees: f64,
+    elbow_degrees: f64,
+    wrist_flex_degrees: f64,
+    wrist_roll_degrees: f64,
     /// Gripper opening from `0.0` (closed) to `1.0` (fully open).
-    pub gripper: f64,
+    gripper_opening: f64,
 }
 
 impl JointAngles {
-    /// Collect the angles of the SO-101 joints present in `degrees`.
-    ///
-    /// Joints that are missing, unknown, or not finite stay at their center, so
-    /// a partially connected or partially calibrated arm remains representable.
-    pub fn from_named_degrees(degrees: &BTreeMap<String, f64>) -> Self {
-        let mut angles = Self::default();
-        for (name, value) in degrees {
-            let Some(joint) = so101_joint(name) else {
-                continue;
-            };
-            if !value.is_finite() {
-                continue;
-            }
-            match joint.role {
-                JointRole::Pan => angles.pan_deg = *value,
-                JointRole::Lift => angles.lift_deg = *value,
-                JointRole::Elbow => angles.elbow_deg = *value,
-                JointRole::WristFlex => angles.wrist_flex_deg = *value,
-                JointRole::WristRoll => angles.wrist_roll_deg = *value,
-                JointRole::Gripper => {}
-            }
-        }
-        angles
+    pub const fn pan_degrees(self) -> f64 {
+        self.pan_degrees
+    }
+
+    pub const fn lift_degrees(self) -> f64 {
+        self.lift_degrees
+    }
+
+    pub const fn elbow_degrees(self) -> f64 {
+        self.elbow_degrees
+    }
+
+    pub const fn wrist_flex_degrees(self) -> f64 {
+        self.wrist_flex_degrees
+    }
+
+    pub const fn wrist_roll_degrees(self) -> f64 {
+        self.wrist_roll_degrees
+    }
+
+    pub const fn gripper_opening(self) -> f64 {
+        self.gripper_opening
+    }
+
+    pub fn with_pan_degrees(mut self, degrees: f64) -> Self {
+        self.pan_degrees = finite_or_neutral(degrees);
+        self
+    }
+
+    pub fn with_lift_degrees(mut self, degrees: f64) -> Self {
+        self.lift_degrees = finite_or_neutral(degrees);
+        self
+    }
+
+    pub fn with_elbow_degrees(mut self, degrees: f64) -> Self {
+        self.elbow_degrees = finite_or_neutral(degrees);
+        self
+    }
+
+    pub fn with_wrist_flex_degrees(mut self, degrees: f64) -> Self {
+        self.wrist_flex_degrees = finite_or_neutral(degrees);
+        self
+    }
+
+    pub fn with_wrist_roll_degrees(mut self, degrees: f64) -> Self {
+        self.wrist_roll_degrees = finite_or_neutral(degrees);
+        self
     }
 
     /// Set the gripper opening from a normalized `[-1.0, 1.0]` reading.
@@ -176,7 +218,7 @@ impl JointAngles {
     /// not authorization to substitute a motor command; command normalization
     /// uses the strict calibration APIs instead.
     pub fn with_gripper_normalized(mut self, normalized: f64) -> Self {
-        self.gripper = if normalized.is_finite() {
+        self.gripper_opening = if normalized.is_finite() {
             (1.0 - normalized) / 2.0
         } else {
             0.5
@@ -184,6 +226,34 @@ impl JointAngles {
         .clamp(0.0, 1.0);
         self
     }
+}
+
+impl From<&BTreeMap<String, f64>> for JointAngles {
+    /// Collect the angles of the SO-101 joints present in a named map.
+    ///
+    /// Joints that are missing, unknown, or not finite stay at their center, so
+    /// a partially connected or partially calibrated arm remains representable.
+    fn from(named_degrees: &BTreeMap<String, f64>) -> Self {
+        let mut angles = Self::default();
+        for (name, degrees) in named_degrees {
+            let Some(joint) = so101_joint(name) else {
+                continue;
+            };
+            match joint.role {
+                JointRole::Pan => angles.pan_degrees = finite_or_neutral(*degrees),
+                JointRole::Lift => angles.lift_degrees = finite_or_neutral(*degrees),
+                JointRole::Elbow => angles.elbow_degrees = finite_or_neutral(*degrees),
+                JointRole::WristFlex => angles.wrist_flex_degrees = finite_or_neutral(*degrees),
+                JointRole::WristRoll => angles.wrist_roll_degrees = finite_or_neutral(*degrees),
+                JointRole::Gripper => {}
+            }
+        }
+        angles
+    }
+}
+
+fn finite_or_neutral(degrees: f64) -> f64 {
+    if degrees.is_finite() { degrees } else { 0.0 }
 }
 
 #[cfg(test)]
@@ -194,7 +264,7 @@ mod tests {
     fn stock_joints_are_unique_and_bus_ordered() {
         let mut ids = SO101_JOINTS
             .iter()
-            .map(|joint| joint.id)
+            .map(|joint| joint.bus_id)
             .collect::<Vec<_>>();
         let sorted = ids.clone();
         ids.sort_unstable();
@@ -204,8 +274,8 @@ mod tests {
 
         let specs = so101_motor_specs();
         assert_eq!(specs.len(), SO101_JOINTS.len());
-        assert_eq!(specs["gripper"].id, 6);
-        assert_eq!(specs["gripper"].model.as_deref(), Some(SO101_MOTOR_MODEL));
+        assert_eq!(specs["gripper"].id(), 6);
+        assert_eq!(specs["gripper"].model(), Some(SO101_MOTOR_MODEL));
     }
 
     #[test]
@@ -225,17 +295,17 @@ mod tests {
 
     #[test]
     fn named_degrees_ignore_unknown_and_non_finite_joints() {
-        let angles = JointAngles::from_named_degrees(&BTreeMap::from([
+        let angles = JointAngles::from(&BTreeMap::from([
             ("shoulder_pan".to_owned(), 15.0),
             ("elbow_flex".to_owned(), -20.0),
             ("wrist_flex".to_owned(), f64::NAN),
             ("some_other_motor".to_owned(), 90.0),
         ]));
 
-        assert_eq!(angles.pan_deg, 15.0);
-        assert_eq!(angles.elbow_deg, -20.0);
-        assert_eq!(angles.wrist_flex_deg, 0.0);
-        assert_eq!(angles.lift_deg, 0.0);
+        assert_eq!(angles.pan_degrees(), 15.0);
+        assert_eq!(angles.elbow_degrees(), -20.0);
+        assert_eq!(angles.wrist_flex_degrees(), 0.0);
+        assert_eq!(angles.lift_degrees(), 0.0);
     }
 
     #[test]
@@ -245,31 +315,41 @@ mod tests {
         // the wrist camera showed the follower's jaws wide open while it read
         // `raw 1590` against a `1551..3030` travel, normalized `-0.947`.
         assert_eq!(
-            JointAngles::default().with_gripper_normalized(-1.0).gripper,
+            JointAngles::default()
+                .with_gripper_normalized(-1.0)
+                .gripper_opening(),
             1.0
         );
         assert_eq!(
-            JointAngles::default().with_gripper_normalized(0.0).gripper,
+            JointAngles::default()
+                .with_gripper_normalized(0.0)
+                .gripper_opening(),
             0.5
         );
         assert_eq!(
-            JointAngles::default().with_gripper_normalized(1.0).gripper,
+            JointAngles::default()
+                .with_gripper_normalized(1.0)
+                .gripper_opening(),
             0.0
         );
         // Readings past the calibrated ends clamp rather than reporting a jaw
         // wider or tighter than the hardware has.
         assert_eq!(
-            JointAngles::default().with_gripper_normalized(9.0).gripper,
+            JointAngles::default()
+                .with_gripper_normalized(9.0)
+                .gripper_opening(),
             0.0
         );
         assert_eq!(
-            JointAngles::default().with_gripper_normalized(-9.0).gripper,
+            JointAngles::default()
+                .with_gripper_normalized(-9.0)
+                .gripper_opening(),
             1.0
         );
         assert_eq!(
             JointAngles::default()
                 .with_gripper_normalized(f64::NAN)
-                .gripper,
+                .gripper_opening(),
             0.5
         );
     }

@@ -59,7 +59,7 @@ pub(crate) fn default_panel_layout_with_workbench(
 /// dividers preserve a useful 16:9 width in the right-hand camera column; the
 /// panel workspace still owns every later tab, dock, and resize mutation.
 fn default_camera_stack(cameras: &[PanelId]) -> Option<LayoutNode> {
-    fn build(cameras: &[PanelId], offset: usize) -> LayoutNode {
+    fn camera_rows(cameras: &[PanelId], offset: usize) -> LayoutNode {
         let tile_id = if offset == 0 {
             "cameras".to_owned()
         } else {
@@ -75,9 +75,9 @@ fn default_camera_stack(cameras: &[PanelId]) -> Option<LayoutNode> {
             SplitAxis::Vertical,
             1.0 / cameras.len() as f64,
             first,
-            build(&cameras[1..], offset + 1),
+            camera_rows(&cameras[1..], offset + 1),
         )
     }
 
-    (!cameras.is_empty()).then(|| build(cameras, 0))
+    (!cameras.is_empty()).then(|| camera_rows(cameras, 0))
 }

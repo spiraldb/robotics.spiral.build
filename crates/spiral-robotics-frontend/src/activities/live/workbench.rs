@@ -6,7 +6,7 @@ use crate::components::interaction::{
     Action, ActionPurpose, ActionVariant, BlockingConfirmation, ModeAction, ModeGroup,
 };
 use dioxus::prelude::*;
-use spiral_robotics_api::api::{ModeSelection, default_teleoperation_pair};
+use spiral_robotics_api::robots::ModeSelection;
 
 use crate::activities::live::actions::LiveAction;
 use crate::activities::live::control::JointPanel;
@@ -89,7 +89,7 @@ fn CaptureSection() -> Element {
 
 #[component]
 fn RobotRoster(
-    robots: Vec<spiral_robotics_api::api::RobotSummary>,
+    robots: Vec<spiral_robotics_api::robots::RobotSummary>,
     on_select: EventHandler<Option<Selection>>,
 ) -> Element {
     let studio = studio();
@@ -167,7 +167,7 @@ fn ControlSection(on_action: EventHandler<LiveAction>) -> Element {
         .and_then(|robot| studio.robot_telemetry(&robot.id));
     let holding = telemetry.as_ref().is_some_and(|robot| robot.torque);
     let teleop = matches!(studio.mode(), ModeSelection::Teleoperate { .. }) && studio.mode_active();
-    let pair = default_teleoperation_pair(&studio.snapshot.read().robots);
+    let pair = studio.snapshot.read().default_teleoperation_pair();
     let mut confirm_release = use_signal(|| false);
 
     rsx! {

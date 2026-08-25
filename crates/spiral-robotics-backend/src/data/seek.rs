@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use super::episode_arms::select_recorded_arm;
+use super::episode_arms::RecordedArms;
 use spiral_robotics_core::error::OperationError;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -182,12 +182,8 @@ pub async fn seek<P: PhysicalSeekPort + ?Sized>(
             command.episode, episode.sample_hz
         )));
     }
-    let source = select_recorded_arm(
-        &episode.id,
-        &episode.arms,
-        &command.robot,
-        command.source_arm.as_deref(),
-    )?;
+    let source = RecordedArms::new(&episode.id, &episode.arms, &command.robot)
+        .select(command.source_arm.as_deref())?;
 
     // Tickets are reserved before slow sample I/O. The adapter makes the last
     // ticket check and hardware handoff atomic under its serialization gate.

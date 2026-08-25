@@ -218,18 +218,18 @@ pub mod column {
 
 /// Whether a value is safe to interpolate as an unquoted SQL identifier.
 pub fn is_identifier(value: &str) -> bool {
-    spiral_robotics_core::query::is_identifier(value)
+    spiral_robotics_core::query::UnquotedSqlIdentifier::try_from(value).is_ok()
 }
 
 /// Whether a value is safe as a logical dataset row identifier.
 pub fn is_dataset_id(value: &str) -> bool {
-    spiral_robotics_core::identity::DatasetId::parse(value)
+    spiral_robotics_core::identity::DatasetId::try_from(value)
         .is_ok_and(|identity| identity.as_str() == value)
 }
 
 /// Convert an external immutable ID into one component of a generated name.
 pub fn identifier_component(value: &str) -> String {
-    spiral_robotics_core::identity::identifier_component(value)
+    spiral_robotics_core::identity::SqlNameComponent::from(value).into_string()
 }
 
 #[cfg(test)]

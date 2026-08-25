@@ -10,15 +10,16 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema};
 use serde_json::{Map, Value};
-use spiral_robotics_api::api::{
+use spiral_robotics_api::robots::{
     CameraBinding, ConnectionStatus, MotorLimits, MotorSummary, PortSettings, RobotSummary,
 };
 use spiral_robotics_core::arm;
-use spiral_robotics_core::calibration::{Calibration, MotorSpec, validate_motor_specs};
+use spiral_robotics_core::calibration::{Calibration, MotorSpec, MotorSpecifications};
 use spiral_robotics_storage::schema::{Table, column as db};
 
+use super::calibration::CalibrationUpdate;
 use super::calibration_codec;
-use super::robot_config::{ConfigError, RobotConfig};
+use super::robot_config::{ConfigError, RobotConfig, RobotConfigUpdate};
 use spiral_robotics_storage::adbc::ProjectStore;
 use spiral_robotics_storage::manager::{
     ensure_dataset_namespace, execute_delete_sql, execute_update_sql, ingest_batch, table_exists,
@@ -126,7 +127,7 @@ impl RobotRecord {
                 WorkspaceError::Invalid(format!("robot {:?} has invalid motors: {source}", self.id))
             })?
             .unwrap_or_default();
-        validate_motor_specs(&motors).map_err(|source| {
+        MotorSpecifications::try_from(&motors).map_err(|source| {
             WorkspaceError::Invalid(format!("robot {:?} has invalid motors: {source}", self.id))
         })?;
         Ok(motors)
@@ -170,12 +171,12 @@ impl RobotRecord {
         let mut motors = motors
             .into_iter()
             .map(|(name, spec)| MotorSummary {
-                id: spec.id,
-                direction: spec.direction,
-                model: spec.model,
+                id: spec.id(),
+                direction: spec.direction(),
+                model: spec.model().map(str::to_owned),
                 calibration: calibration
                     .as_ref()
-                    .and_then(|calibration| calibration.motors.get(&name).copied()),
+                    .and_then(|calibration| calibration.motors().get(&name).copied()),
                 limits: MotorLimits::default(),
                 name,
             })
@@ -322,24 +323,22 @@ impl RobotWorkspace {
     pub(crate) fn save_calibration(
         &self,
         id: &str,
-        motors: &BTreeMap<String, MotorSpec>,
-        calibration: &Calibration,
+        update: CalibrationUpdate<'_>,
     ) -> Result<RobotRecord, WorkspaceError> {
+        let motors = update.motors();
+        let calibration = update.calibration();
         calibration.validate_for_motor_specs(motors).map_err(|source| {
             WorkspaceError::Invalid(format!(
                 "robot {id:?} has calibration that does not match its configured motors: {source}"
             ))
         })?;
         let record = self.get(id)?;
-        let merged = record.config.merged(
-            None,
-            None,
-            None,
+        let merged = record.config.merged(RobotConfigUpdate::new(
             record.config.encode_motor_specs(motors)?,
             calibration_codec::encode_calibration(calibration).map_err(|source| {
                 WorkspaceError::Invalid(format!("calibration could not be serialized: {source}"))
             })?,
-        )?;
+        ))?;
         self.persist(id, merged)
     }
 

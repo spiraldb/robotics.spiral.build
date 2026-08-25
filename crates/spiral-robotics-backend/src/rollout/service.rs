@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use spiral_robotics_core::operation::rollout_duration_is_valid;
+use spiral_robotics_core::operation::RolloutDuration;
 
 use super::policy::{ControlOwner, PolicyOwnership, assess_policy_ownership};
 use spiral_robotics_core::error::OperationError;
@@ -495,7 +495,7 @@ fn validate_request(session: &str, request: &RolloutRequest) -> Result<(), Strin
     if request.checkpoint_step == 0 {
         return Err("rollout checkpoint step must be positive".to_owned());
     }
-    if !rollout_duration_is_valid(request.duration_seconds) {
+    if RolloutDuration::new(request.duration_seconds).is_none() {
         return Err("rollout duration is outside the approved safety window".to_owned());
     }
     Ok(())

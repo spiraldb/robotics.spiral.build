@@ -7,15 +7,39 @@ use spiral_robotics_core::calibration::{Calibration, CalibrationInput, MotorSpec
 use crate::data::catalog_lease::CatalogLeaseToken;
 use spiral_robotics_core::error::OperationError;
 
+pub(crate) struct CalibrationUpdate<'a> {
+    motors: &'a BTreeMap<String, MotorSpec>,
+    calibration: &'a Calibration,
+}
+
+impl<'a> CalibrationUpdate<'a> {
+    pub(crate) fn new(
+        motors: &'a BTreeMap<String, MotorSpec>,
+        calibration: &'a Calibration,
+    ) -> Self {
+        Self {
+            motors,
+            calibration,
+        }
+    }
+
+    pub(crate) fn motors(&self) -> &BTreeMap<String, MotorSpec> {
+        self.motors
+    }
+
+    pub(crate) fn calibration(&self) -> &Calibration {
+        self.calibration
+    }
+}
+
 /// Saved robot configuration required by the calibration action.
-pub trait RobotCalibrationStore {
+pub(crate) trait RobotCalibrationStore {
     fn motor_specs(&self, robot: &str) -> Result<BTreeMap<String, MotorSpec>, OperationError>;
 
     fn save_calibration(
         &self,
         robot: &str,
-        motors: &BTreeMap<String, MotorSpec>,
-        calibration: &Calibration,
+        update: CalibrationUpdate<'_>,
     ) -> Result<(), OperationError>;
 }
 
@@ -116,7 +140,7 @@ pub struct FinishCalibrationOutput {
 /// keeps the sweep alive so the operator does not lose collected motion. Once
 /// persistence succeeds, later adapter failures become warnings because the
 /// next connection can load the already-correct SpiralDB row.
-pub async fn finish<R, C>(
+pub(crate) async fn finish<R, C>(
     store: &R,
     control: &C,
     robot: &str,
@@ -130,7 +154,7 @@ where
     let calibration = input
         .build(&motors)
         .map_err(|error| OperationError::InvalidInput(error.to_string()))?;
-    store.save_calibration(robot, &motors, &calibration)?;
+    store.save_calibration(robot, CalibrationUpdate::new(&motors, &calibration))?;
 
     let cancel_warning = control
         .cancel_calibration(robot)
@@ -211,7 +235,7 @@ where
 mod tests {
     use std::sync::Mutex;
 
-    use spiral_robotics_core::calibration::{CalibrationError, Direction, MotorReading};
+    use spiral_robotics_core::calibration::{CalibrationError, MotorDirection, MotorReading};
 
     use super::*;
     use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogMutationLease};
@@ -219,24 +243,13 @@ mod tests {
     fn motors() -> BTreeMap<String, MotorSpec> {
         BTreeMap::from([(
             "shoulder".to_owned(),
-            MotorSpec {
-                id: 1,
-                direction: Direction::Normal,
-                model: None,
-            },
+            MotorSpec::new(1, MotorDirection::Normal),
         )])
     }
 
     fn input() -> CalibrationInput {
         CalibrationInput::Direct {
-            motors: BTreeMap::from([(
-                "shoulder".to_owned(),
-                MotorReading {
-                    center: 500,
-                    range_min: 100,
-                    range_max: 900,
-                },
-            )]),
+            motors: BTreeMap::from([("shoulder".to_owned(), MotorReading::new(500, 100, 900))]),
         }
     }
 
@@ -254,8 +267,7 @@ mod tests {
         fn save_calibration(
             &self,
             _robot: &str,
-            _motors: &BTreeMap<String, MotorSpec>,
-            _calibration: &Calibration,
+            _update: CalibrationUpdate<'_>,
         ) -> Result<(), OperationError> {
             self.events.lock().unwrap().push("save");
             if self.fail_save {

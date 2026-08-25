@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
-use spiral_robotics_api::api::{StartTrainingRequest, TrainingRun};
+use spiral_robotics_api::training::{StartTrainingRequest, TrainingRun};
 
 use crate::activities::data::sql_draft::rebase_generated_sql;
 use crate::client::http as api;

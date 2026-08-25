@@ -21,25 +21,72 @@ pub const MAX_ROLLOUT_DURATION_SECONDS: u32 = 600;
 /// Maximum predicted-action prefix consumed before rollout observes and replans.
 pub const MAX_ROLLOUT_ACTION_STEPS: usize = 20;
 
-/// Whether a requested policy rollout stays within the product safety window.
-pub const fn rollout_duration_is_valid(seconds: u32) -> bool {
-    seconds >= MIN_ROLLOUT_DURATION_SECONDS && seconds <= MAX_ROLLOUT_DURATION_SECONDS
+/// A policy rollout duration admitted by the product safety window.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct RolloutDuration(u32);
+
+impl RolloutDuration {
+    pub const fn new(seconds: u32) -> Option<Self> {
+        if seconds >= MIN_ROLLOUT_DURATION_SECONDS && seconds <= MAX_ROLLOUT_DURATION_SECONDS {
+            Some(Self(seconds))
+        } else {
+            None
+        }
+    }
+
+    pub const fn seconds(self) -> u32 {
+        self.0
+    }
 }
 
 /// Plain robot facts required to select a teleoperation pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RobotCandidate {
-    pub id: String,
-    pub robot_type: Option<String>,
-    pub connected: bool,
-    pub calibrated: bool,
-    pub valid: bool,
-    pub joints: Vec<String>,
+pub struct TeleoperationCandidate {
+    id: String,
+    robot_type: Option<String>,
+    readiness: RobotReadiness,
+    joints: Vec<String>,
 }
 
-impl RobotCandidate {
+/// The independent conditions required before a robot may teleoperate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RobotReadiness {
+    connected: bool,
+    calibrated: bool,
+    configuration_valid: bool,
+}
+
+impl RobotReadiness {
+    pub const fn new(connected: bool, calibrated: bool, configuration_valid: bool) -> Self {
+        Self {
+            connected,
+            calibrated,
+            configuration_valid,
+        }
+    }
+
+    const fn ready(self) -> bool {
+        self.connected && self.calibrated && self.configuration_valid
+    }
+}
+
+impl TeleoperationCandidate {
+    pub fn new(id: impl Into<String>, readiness: RobotReadiness, joints: Vec<String>) -> Self {
+        Self {
+            id: id.into(),
+            robot_type: None,
+            readiness,
+            joints,
+        }
+    }
+
+    pub fn with_robot_type(mut self, robot_type: Option<String>) -> Self {
+        self.robot_type = robot_type;
+        self
+    }
+
     fn ready(&self) -> bool {
-        self.connected && self.calibrated && self.valid
+        self.readiness.ready()
     }
 
     fn has_role(&self, role: &str) -> bool {
@@ -53,55 +100,68 @@ impl RobotCandidate {
     }
 }
 
+/// Candidate robots considered together for deterministic pair selection.
+#[derive(Clone, Copy, Debug)]
+pub struct TeleoperationCandidates<'a>(&'a [TeleoperationCandidate]);
+
+impl<'a> From<&'a [TeleoperationCandidate]> for TeleoperationCandidates<'a> {
+    fn from(candidates: &'a [TeleoperationCandidate]) -> Self {
+        Self(candidates)
+    }
+}
+
 /// Choose the best ready, compatible leader/follower pair.
 ///
 /// Saved roles are preferences. Workspace order is the deterministic fallback
 /// when otherwise compatible arms have no role metadata.
-pub fn choose_teleoperation_pair(robots: &[RobotCandidate]) -> Option<(String, String)> {
-    let ready = robots
-        .iter()
-        .filter(|robot| robot.ready())
-        .collect::<Vec<_>>();
+impl TeleoperationCandidates<'_> {
+    pub fn best_pair(self) -> Option<(String, String)> {
+        let ready = self
+            .0
+            .iter()
+            .filter(|robot| robot.ready())
+            .collect::<Vec<_>>();
 
-    ready
-        .iter()
-        .enumerate()
-        .flat_map(|(leader_index, leader)| {
-            ready
-                .iter()
-                .enumerate()
-                .filter(move |(follower_index, follower)| {
-                    leader_index != *follower_index && leader.compatible_with(follower)
-                })
-                .map(move |(follower_index, follower)| {
-                    let role_penalty = u8::from(!leader.has_role("leader"))
-                        + u8::from(!follower.has_role("follower"));
-                    (
-                        (role_penalty, leader_index, follower_index),
-                        (leader.id.clone(), follower.id.clone()),
-                    )
-                })
-        })
-        .min_by_key(|(rank, _)| *rank)
-        .map(|(_, pair)| pair)
+        ready
+            .iter()
+            .enumerate()
+            .flat_map(|(leader_index, leader)| {
+                ready
+                    .iter()
+                    .enumerate()
+                    .filter(move |(follower_index, follower)| {
+                        leader_index != *follower_index && leader.compatible_with(follower)
+                    })
+                    .map(move |(follower_index, follower)| {
+                        let role_penalty = u8::from(!leader.has_role("leader"))
+                            + u8::from(!follower.has_role("follower"));
+                        (
+                            (role_penalty, leader_index, follower_index),
+                            (leader.id.clone(), follower.id.clone()),
+                        )
+                    })
+            })
+            .min_by_key(|(rank, _)| *rank)
+            .map(|(_, pair)| pair)
+    }
 }
 
 /// Plain motor readings used by the health rule.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MotorHealthReadings {
-    pub faulted: bool,
-    pub temperature_celsius: Option<f64>,
-    pub voltage_volts: Option<f64>,
-    pub load: Option<f64>,
+    faulted: bool,
+    temperature_celsius: Option<f64>,
+    voltage_volts: Option<f64>,
+    load: Option<f64>,
 }
 
 /// Hardware-declared limits used by the health rule.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MotorHealthLimits {
-    pub max_temperature_celsius: Option<f64>,
-    pub min_voltage_volts: Option<f64>,
-    pub max_voltage_volts: Option<f64>,
-    pub max_load: Option<f64>,
+    max_temperature_celsius: Option<f64>,
+    min_voltage_volts: Option<f64>,
+    max_voltage_volts: Option<f64>,
+    max_load: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
@@ -119,84 +179,150 @@ pub enum MotorHealth {
 /// boundary's physical-unit contract, so the existing fail-safe `Fault` state
 /// is used rather than reporting a motor with unusable health evidence as
 /// nominal.
-pub fn assess_motor_health(
-    readings: MotorHealthReadings,
-    limits: MotorHealthLimits,
-) -> MotorHealth {
-    let readings_are_invalid = [
-        readings.temperature_celsius,
-        readings.voltage_volts,
-        readings.load,
-    ]
-    .into_iter()
-    .flatten()
-    .any(|value| !value.is_finite());
-    let limits_are_invalid = [
-        limits.max_temperature_celsius,
-        limits.min_voltage_volts,
-        limits.max_voltage_volts,
-        limits.max_load,
-    ]
-    .into_iter()
-    .flatten()
-    .any(|value| !value.is_finite());
-    let limits_are_physically_invalid = limits
-        .max_temperature_celsius
-        .is_some_and(|value| value <= 0.0)
-        || limits.min_voltage_volts.is_some_and(|value| value <= 0.0)
-        || limits.max_voltage_volts.is_some_and(|value| value <= 0.0)
-        || limits.max_load.is_some_and(|value| value <= 0.0)
-        || matches!(
-            (limits.min_voltage_volts, limits.max_voltage_volts),
-            (Some(minimum), Some(maximum)) if minimum >= maximum
-        );
-    if readings.faulted
-        || readings_are_invalid
-        || limits_are_invalid
-        || limits_are_physically_invalid
-    {
-        return MotorHealth::Fault;
+impl MotorHealthReadings {
+    pub const fn new(faulted: bool) -> Self {
+        Self {
+            faulted,
+            temperature_celsius: None,
+            voltage_volts: None,
+            load: None,
+        }
     }
 
-    let hot = match (readings.temperature_celsius, limits.max_temperature_celsius) {
-        (Some(celsius), Some(limit)) => celsius >= limit * CAUTION_LIMIT_FRACTION,
-        _ => false,
-    };
-    let strained = match (readings.load, limits.max_load) {
-        (Some(load), Some(limit)) => load.abs() >= limit * CAUTION_LIMIT_FRACTION,
-        _ => false,
-    };
-    let supply = readings.voltage_volts.is_some_and(|volts| {
-        limits
-            .min_voltage_volts
-            .is_some_and(|min| volts <= min + CAUTION_VOLTAGE_MARGIN_VOLTS)
-            || limits
-                .max_voltage_volts
-                .is_some_and(|max| volts >= max - CAUTION_VOLTAGE_MARGIN_VOLTS)
-    });
+    pub fn with_temperature_celsius(mut self, temperature_celsius: Option<f64>) -> Self {
+        self.temperature_celsius = temperature_celsius;
+        self
+    }
 
-    if hot || strained || supply {
-        MotorHealth::Caution
-    } else {
-        MotorHealth::Nominal
+    pub fn with_voltage_volts(mut self, voltage_volts: Option<f64>) -> Self {
+        self.voltage_volts = voltage_volts;
+        self
+    }
+
+    pub fn with_load(mut self, load: Option<f64>) -> Self {
+        self.load = load;
+        self
+    }
+
+    pub fn assess(self, limits: MotorHealthLimits) -> MotorHealth {
+        let readings = self;
+        let readings_are_invalid = [
+            readings.temperature_celsius,
+            readings.voltage_volts,
+            readings.load,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.is_finite());
+        let limits_are_invalid = [
+            limits.max_temperature_celsius,
+            limits.min_voltage_volts,
+            limits.max_voltage_volts,
+            limits.max_load,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.is_finite());
+        let limits_are_physically_invalid = limits
+            .max_temperature_celsius
+            .is_some_and(|value| value <= 0.0)
+            || limits.min_voltage_volts.is_some_and(|value| value <= 0.0)
+            || limits.max_voltage_volts.is_some_and(|value| value <= 0.0)
+            || limits.max_load.is_some_and(|value| value <= 0.0)
+            || matches!(
+                (limits.min_voltage_volts, limits.max_voltage_volts),
+                (Some(minimum), Some(maximum)) if minimum >= maximum
+            );
+        if readings.faulted
+            || readings_are_invalid
+            || limits_are_invalid
+            || limits_are_physically_invalid
+        {
+            return MotorHealth::Fault;
+        }
+
+        let hot = match (readings.temperature_celsius, limits.max_temperature_celsius) {
+            (Some(celsius), Some(limit)) => celsius >= limit * CAUTION_LIMIT_FRACTION,
+            _ => false,
+        };
+        let strained = match (readings.load, limits.max_load) {
+            (Some(load), Some(limit)) => load.abs() >= limit * CAUTION_LIMIT_FRACTION,
+            _ => false,
+        };
+        let supply = readings.voltage_volts.is_some_and(|volts| {
+            limits
+                .min_voltage_volts
+                .is_some_and(|min| volts <= min + CAUTION_VOLTAGE_MARGIN_VOLTS)
+                || limits
+                    .max_voltage_volts
+                    .is_some_and(|max| volts >= max - CAUTION_VOLTAGE_MARGIN_VOLTS)
+        });
+
+        if hot || strained || supply {
+            MotorHealth::Caution
+        } else {
+            MotorHealth::Nominal
+        }
+    }
+}
+
+impl MotorHealthLimits {
+    pub fn with_max_temperature_celsius(mut self, max_temperature_celsius: Option<f64>) -> Self {
+        self.max_temperature_celsius = max_temperature_celsius;
+        self
+    }
+
+    pub fn with_voltage_range(mut self, voltage_range: Option<(f64, f64)>) -> Self {
+        (self.min_voltage_volts, self.max_voltage_volts) = voltage_range.unzip();
+        self
+    }
+
+    pub fn with_min_voltage_volts(mut self, min_voltage_volts: Option<f64>) -> Self {
+        self.min_voltage_volts = min_voltage_volts;
+        self
+    }
+
+    pub fn with_max_voltage_volts(mut self, max_voltage_volts: Option<f64>) -> Self {
+        self.max_voltage_volts = max_voltage_volts;
+        self
+    }
+
+    pub fn with_max_load(mut self, max_load: Option<f64>) -> Self {
+        self.max_load = max_load;
+        self
     }
 }
 
 /// A completed take needs both a valid footer and at least one frame.
-pub const fn episode_is_usable(frames: u64, has_problem: bool) -> bool {
-    !has_problem && frames > 0
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EpisodeOutcome {
+    frames: u64,
+    has_problem: bool,
+}
+
+impl EpisodeOutcome {
+    pub const fn new(frames: u64, has_problem: bool) -> Self {
+        Self {
+            frames,
+            has_problem,
+        }
+    }
+
+    pub const fn is_usable(self) -> bool {
+        !self.has_problem && self.frames > 0
+    }
 }
 
 /// Lifecycle activity shared by training and rollout entities.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Lifecycle {
+pub enum OperationLifecycle {
     Pending,
     Running,
     Stopping,
     Finished,
 }
 
-impl Lifecycle {
+impl OperationLifecycle {
     pub const fn active(self) -> bool {
         matches!(self, Self::Pending | Self::Running | Self::Stopping)
     }
@@ -206,30 +332,36 @@ impl Lifecycle {
 mod tests {
     use super::*;
 
-    fn robot(id: &str, role: Option<&str>) -> RobotCandidate {
-        RobotCandidate {
-            id: id.to_owned(),
-            robot_type: role.map(str::to_owned),
-            connected: true,
-            calibrated: true,
-            valid: true,
-            joints: vec!["shoulder".to_owned()],
-        }
+    fn teleoperation_candidate(id: &str, role: Option<&str>) -> TeleoperationCandidate {
+        TeleoperationCandidate::new(
+            id,
+            RobotReadiness::new(true, true, true),
+            vec!["shoulder".to_owned()],
+        )
+        .with_robot_type(role.map(str::to_owned))
     }
 
     #[test]
     fn pairing_prefers_roles_and_requires_readiness_and_compatibility() {
-        let fallback = robot("first", None);
-        let follower = robot("follower", Some("so101_follower"));
-        let leader = robot("leader", Some("so101_leader"));
+        let fallback = teleoperation_candidate("first", None);
+        let follower = teleoperation_candidate("follower", Some("so101_follower"));
+        let leader = teleoperation_candidate("leader", Some("so101_leader"));
+        let candidates = [fallback, follower, leader];
         assert_eq!(
-            choose_teleoperation_pair(&[fallback, follower, leader]),
+            TeleoperationCandidates::from(candidates.as_slice()).best_pair(),
             Some(("leader".to_owned(), "follower".to_owned()))
         );
 
-        let mut invalid = robot("invalid", Some("leader"));
-        invalid.valid = false;
-        assert_eq!(choose_teleoperation_pair(&[invalid]), None);
+        let invalid = TeleoperationCandidate::new(
+            "invalid",
+            RobotReadiness::new(true, true, false),
+            vec!["shoulder".to_owned()],
+        )
+        .with_robot_type(Some("leader".to_owned()));
+        assert_eq!(
+            TeleoperationCandidates::from([invalid].as_slice()).best_pair(),
+            None
+        );
     }
 
     #[test]
@@ -239,23 +371,19 @@ mod tests {
             ..MotorHealthLimits::default()
         };
         assert_eq!(
-            assess_motor_health(
-                MotorHealthReadings {
-                    temperature_celsius: Some(70.0 * CAUTION_LIMIT_FRACTION),
-                    ..MotorHealthReadings::default()
-                },
-                limits
-            ),
+            MotorHealthReadings {
+                temperature_celsius: Some(70.0 * CAUTION_LIMIT_FRACTION),
+                ..MotorHealthReadings::default()
+            }
+            .assess(limits),
             MotorHealth::Caution
         );
         assert_eq!(
-            assess_motor_health(
-                MotorHealthReadings {
-                    faulted: true,
-                    ..MotorHealthReadings::default()
-                },
-                MotorHealthLimits::default()
-            ),
+            MotorHealthReadings {
+                faulted: true,
+                ..MotorHealthReadings::default()
+            }
+            .assess(MotorHealthLimits::default()),
             MotorHealth::Fault
         );
     }
@@ -278,7 +406,7 @@ mod tests {
         ];
         for readings in reading_cases {
             assert_eq!(
-                assess_motor_health(readings, MotorHealthLimits::default()),
+                readings.assess(MotorHealthLimits::default()),
                 MotorHealth::Fault
             );
         }
@@ -303,13 +431,13 @@ mod tests {
         ];
         for limits in limit_cases {
             assert_eq!(
-                assess_motor_health(MotorHealthReadings::default(), limits),
+                MotorHealthReadings::default().assess(limits),
                 MotorHealth::Fault
             );
         }
 
         assert_eq!(
-            assess_motor_health(MotorHealthReadings::default(), MotorHealthLimits::default()),
+            MotorHealthReadings::default().assess(MotorHealthLimits::default()),
             MotorHealth::Nominal,
             "absence remains distinct from an invalid present value"
         );
@@ -347,7 +475,7 @@ mod tests {
         ];
         for limits in invalid {
             assert_eq!(
-                assess_motor_health(MotorHealthReadings::default(), limits),
+                MotorHealthReadings::default().assess(limits),
                 MotorHealth::Fault
             );
         }
@@ -355,10 +483,10 @@ mod tests {
 
     #[test]
     fn rollout_duration_is_bounded_policy() {
-        assert!(rollout_duration_is_valid(MIN_ROLLOUT_DURATION_SECONDS));
-        assert!(rollout_duration_is_valid(DEFAULT_ROLLOUT_DURATION_SECONDS));
-        assert!(rollout_duration_is_valid(MAX_ROLLOUT_DURATION_SECONDS));
-        assert!(!rollout_duration_is_valid(0));
-        assert!(!rollout_duration_is_valid(MAX_ROLLOUT_DURATION_SECONDS + 1));
+        assert!(RolloutDuration::new(MIN_ROLLOUT_DURATION_SECONDS).is_some());
+        assert!(RolloutDuration::new(DEFAULT_ROLLOUT_DURATION_SECONDS).is_some());
+        assert!(RolloutDuration::new(MAX_ROLLOUT_DURATION_SECONDS).is_some());
+        assert!(RolloutDuration::new(0).is_none());
+        assert!(RolloutDuration::new(MAX_ROLLOUT_DURATION_SECONDS + 1).is_none());
     }
 }

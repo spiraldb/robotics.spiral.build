@@ -2,7 +2,7 @@
 
 use dioxus::prelude::WritableExt;
 use gloo_net::http::Method;
-use spiral_robotics_api::api::ModeSelection;
+use spiral_robotics_api::robots::ModeSelection;
 
 use crate::client::http as api;
 use crate::shell::state::{Selection, Studio};

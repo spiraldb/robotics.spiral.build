@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) use spiral_robotics_storage::video::{VideoAsset, VideoAssetMetadata};
+use spiral_robotics_storage::video::{VideoSegment, VideoSize, VideoTiming};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::watch;
 
@@ -26,14 +27,36 @@ const MAX_VIDEO_SEGMENT_BYTES: usize = 512 * 1024 * 1024;
 const MAX_VIDEO_TRANSACTION_BYTES: usize = 1024 * 1024 * 1024;
 
 pub(crate) struct VideoCapture {
+    source: VideoCaptureSource,
+    progress: VideoCaptureProgress,
+}
+
+struct VideoCaptureSource {
     episode_id: String,
     cameras: Arc<CameraManager>,
     specs: Vec<CameraCaptureSpec>,
     ffmpeg: String,
     codec: String,
+}
+
+struct VideoCaptureProgress {
     next_segment: u32,
     active: Option<VideoCaptureRun>,
     completed: Vec<VideoAsset>,
+}
+
+pub(crate) struct VideoCaptureRequest {
+    episode_id: String,
+    cameras: Vec<CameraCaptureSpec>,
+}
+
+impl VideoCaptureRequest {
+    pub(crate) fn new(episode_id: &str, cameras: Vec<CameraCaptureSpec>) -> Self {
+        Self {
+            episode_id: episode_id.to_owned(),
+            cameras,
+        }
+    }
 }
 
 struct VideoCaptureRun {
@@ -63,50 +86,59 @@ enum CaptureState {
 
 #[derive(Clone, Debug)]
 pub(crate) struct VideoEncoderSettings {
-    pub(crate) executable: String,
-    pub(crate) codec: String,
+    executable: String,
+    codec: String,
+}
+
+impl VideoEncoderSettings {
+    pub(crate) fn new(executable: String, codec: String) -> Self {
+        Self { executable, codec }
+    }
 }
 
 impl VideoCapture {
     pub(crate) async fn start(
         cameras: Arc<CameraManager>,
-        episode_id: &str,
-        specs: Vec<CameraCaptureSpec>,
-        ffmpeg: &str,
-        codec: &str,
+        request: VideoCaptureRequest,
+        encoder: &VideoEncoderSettings,
     ) -> Result<Option<Self>, String> {
-        if specs.is_empty() {
+        if request.cameras.is_empty() {
             return Ok(None);
         }
-        if !safe_path_component(episode_id) {
+        if !safe_path_component(&request.episode_id) {
             return Err(format!(
-                "episode id {episode_id:?} cannot be used as a video asset key"
+                "episode id {:?} cannot be used as a video asset key",
+                request.episode_id
             ));
         }
         let mut capture = Self {
-            episode_id: episode_id.to_owned(),
-            cameras,
-            specs,
-            ffmpeg: ffmpeg.to_owned(),
-            codec: codec.to_owned(),
-            next_segment: 0,
-            active: None,
-            completed: Vec::new(),
+            source: VideoCaptureSource {
+                episode_id: request.episode_id,
+                cameras,
+                specs: request.cameras,
+                ffmpeg: encoder.executable.clone(),
+                codec: encoder.codec.clone(),
+            },
+            progress: VideoCaptureProgress {
+                next_segment: 0,
+                active: None,
+                completed: Vec::new(),
+            },
         };
         capture.start_segment(0.0)?;
         Ok(Some(capture))
     }
 
     pub(crate) fn episode_id(&self) -> &str {
-        &self.episode_id
+        &self.source.episode_id
     }
 
     pub(crate) fn completed_assets(&self) -> Vec<VideoAsset> {
-        self.completed.clone()
+        self.progress.completed.clone()
     }
 
     fn start_segment(&mut self, timeline_offset_seconds: f64) -> Result<(), String> {
-        let cameras = self.cameras.clone();
+        let cameras = self.source.cameras.clone();
         self.start_segment_with(timeline_offset_seconds, move |camera_id| {
             cameras.subscribe(camera_id)
         })
@@ -117,21 +149,21 @@ impl VideoCapture {
         timeline_offset_seconds: f64,
         mut subscribe: impl FnMut(&str) -> Result<watch::Receiver<Option<Arc<Frame>>>, String>,
     ) -> Result<(), String> {
-        if self.active.is_some() {
+        if self.progress.active.is_some() {
             return Ok(());
         }
         if !timeline_offset_seconds.is_finite() || timeline_offset_seconds < 0.0 {
             return Err("video segment timeline offset must be finite and non-negative".to_owned());
         }
-        if self.ffmpeg.trim().is_empty() {
+        if self.source.ffmpeg.trim().is_empty() {
             return Err("video encoder executable cannot be empty".to_owned());
         }
-        if self.codec.trim().is_empty() {
+        if self.source.codec.trim().is_empty() {
             return Err("video encoder codec cannot be empty".to_owned());
         }
-        let index = self.next_segment;
-        let mut pending = Vec::with_capacity(self.specs.len());
-        for spec in self.specs.iter().cloned() {
+        let index = self.progress.next_segment;
+        let mut pending = Vec::with_capacity(self.source.specs.len());
+        for spec in self.source.specs.iter().cloned() {
             if spec.stream_id.trim().is_empty() {
                 return Err("video camera stream id cannot be empty".to_owned());
             }
@@ -161,8 +193,8 @@ impl VideoCapture {
                 spec,
                 frames,
                 segment: CameraSegment {
-                    ffmpeg: self.ffmpeg.clone(),
-                    codec: self.codec.clone(),
+                    ffmpeg: self.source.ffmpeg.clone(),
+                    codec: self.source.codec.clone(),
                     index,
                     timeline_offset_seconds,
                 },
@@ -179,15 +211,15 @@ impl VideoCapture {
                 prepared.segment,
             )));
         }
-        self.next_segment += 1;
-        self.active = Some(VideoCaptureRun { control, tasks });
+        self.progress.next_segment += 1;
+        self.progress.active = Some(VideoCaptureRun { control, tasks });
         Ok(())
     }
 
     /// Stop feeding the current encoders immediately. Their finalized MP4s are
     /// collected after the joint-writer pause barrier has completed.
     pub(crate) fn request_pause(&self) {
-        if let Some(active) = &self.active {
+        if let Some(active) = &self.progress.active {
             active.control.send_replace(CaptureState::Finish);
         }
     }
@@ -205,7 +237,7 @@ impl VideoCapture {
     async fn finish_active(&mut self) -> Vec<String> {
         let mut assets = Vec::new();
         let mut failures = Vec::new();
-        let Some(active) = self.active.take() else {
+        let Some(active) = self.progress.active.take() else {
             return failures;
         };
         active.control.send_replace(CaptureState::Finish);
@@ -217,12 +249,13 @@ impl VideoCapture {
             }
         }
         let mut total = self
+            .progress
             .completed
             .iter()
-            .map(|asset| asset.payload.len())
+            .map(|asset| asset.payload().len())
             .sum::<usize>();
         for asset in assets {
-            let next = total.saturating_add(asset.payload.len());
+            let next = total.saturating_add(asset.payload().len());
             if next > MAX_VIDEO_TRANSACTION_BYTES {
                 failures.push(format!(
                     "episode video exceeded the {} MiB in-memory transaction limit",
@@ -231,14 +264,14 @@ impl VideoCapture {
                 continue;
             }
             total = next;
-            self.completed.push(asset);
+            self.progress.completed.push(asset);
         }
         failures
     }
 
     pub(crate) async fn finish(mut self) -> (Vec<VideoAsset>, Vec<String>) {
         let failures = self.finish_active().await;
-        (self.completed, failures)
+        (self.progress.completed, failures)
     }
 }
 
@@ -386,17 +419,13 @@ async fn record_camera(
             spec.stream_id
         ));
     }
-    Ok(VideoAsset {
-        stream_id: spec.stream_id,
-        camera_id: spec.camera_id,
-        payload,
-        width: spec.width,
-        height: spec.height,
-        fps: encoder_fps,
-        frames: written,
-        segment_index: segment.index,
-        timeline_offset_seconds: Some(segment.timeline_offset_seconds),
-    })
+    Ok(VideoAsset::new(spec.stream_id, spec.camera_id, payload)
+        .with_size(VideoSize::new(spec.width, spec.height))
+        .with_timing(VideoTiming::new(encoder_fps, written))
+        .with_segment(VideoSegment::new(
+            segment.index,
+            Some(segment.timeline_offset_seconds),
+        )))
 }
 
 fn safe_path_component(value: &str) -> bool {
@@ -413,14 +442,18 @@ mod tests {
 
     fn capture(specs: Vec<CameraCaptureSpec>) -> VideoCapture {
         VideoCapture {
-            episode_id: "episode_000001".to_owned(),
-            cameras: Arc::new(CameraManager::new()),
-            specs,
-            ffmpeg: "ffmpeg".to_owned(),
-            codec: "libx264".to_owned(),
-            next_segment: 0,
-            active: None,
-            completed: Vec::new(),
+            source: VideoCaptureSource {
+                episode_id: "episode_000001".to_owned(),
+                cameras: Arc::new(CameraManager::new()),
+                specs,
+                ffmpeg: "ffmpeg".to_owned(),
+                codec: "libx264".to_owned(),
+            },
+            progress: VideoCaptureProgress {
+                next_segment: 0,
+                active: None,
+                completed: Vec::new(),
+            },
         }
     }
 
@@ -462,25 +495,22 @@ mod tests {
             })
             .unwrap_err();
         assert!(error.contains("second camera disappeared"));
-        assert!(capture.active.is_none());
-        assert_eq!(capture.next_segment, 0);
+        assert!(capture.progress.active.is_none());
+        assert_eq!(capture.progress.next_segment, 0);
     }
 
     #[test]
     fn video_metadata_is_derived_without_a_filesystem_path() {
-        let asset = VideoAsset {
-            stream_id: "follower.camera.wrist".to_owned(),
-            camera_id: "camera-1".to_owned(),
-            payload: b"mp4".to_vec(),
-            width: 640,
-            height: 480,
-            fps: 30,
-            frames: 15,
-            segment_index: 2,
-            timeline_offset_seconds: Some(4.5),
-        };
-        assert_eq!(asset.metadata().duration_seconds, 0.5);
-        assert_eq!(asset.metadata().segment_index, 2);
-        assert_eq!(asset.payload, b"mp4");
+        let asset = VideoAsset::new(
+            "follower.camera.wrist".to_owned(),
+            "camera-1".to_owned(),
+            b"mp4".to_vec(),
+        )
+        .with_size(VideoSize::new(640, 480))
+        .with_timing(VideoTiming::new(30, 15))
+        .with_segment(VideoSegment::new(2, Some(4.5)));
+        assert_eq!(asset.metadata().duration_seconds(), 0.5);
+        assert_eq!(asset.metadata().segment().index(), 2);
+        assert_eq!(asset.payload(), b"mp4");
     }
 }

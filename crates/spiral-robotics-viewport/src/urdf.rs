@@ -28,20 +28,25 @@ pub const SO101_URDF: &str = include_str!("../assets/so101.urdf");
 
 /// A rigid transform, as written in a URDF `<origin>` element.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Pose {
-    pub translation: Vec3,
-    pub rotation: Quat,
+pub(crate) struct Pose {
+    translation: Vec3,
+    rotation: Quat,
 }
 
 impl Pose {
-    pub const IDENTITY: Self = Self {
+    pub(crate) const IDENTITY: Self = Self {
         translation: Vec3::ZERO,
         rotation: Quat::IDENTITY,
     };
 
     /// The equivalent homogeneous matrix.
-    pub fn matrix(&self) -> Mat4 {
+    pub(crate) fn matrix(&self) -> Mat4 {
         Mat4::from_rotation_translation(self.rotation, self.translation)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn translation(&self) -> Vec3 {
+        self.translation
     }
 }
 
@@ -53,7 +58,7 @@ impl Default for Pose {
 
 /// A shape attached to a link.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Geometry {
+pub(crate) enum Geometry {
     /// Full extents along each axis, centered on the visual's origin.
     Box {
         size: Vec3,
@@ -75,26 +80,50 @@ pub enum Geometry {
 
 /// One drawable shape on a link.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Visual {
+pub(crate) struct Visual {
     /// Placement relative to the link's own frame.
-    pub origin: Pose,
-    pub geometry: Geometry,
+    origin: Pose,
+    geometry: Geometry,
     /// The material's name, kept so a renderer can substitute its own colour.
-    pub material: Option<String>,
+    material: Option<String>,
     /// Resolved colour, from the visual itself or the named material.
-    pub color: [f32; 4],
+    color: [f32; 4],
+}
+
+impl Visual {
+    pub(crate) fn origin(&self) -> Pose {
+        self.origin
+    }
+
+    pub(crate) fn geometry(&self) -> &Geometry {
+        &self.geometry
+    }
+
+    pub(crate) fn material(&self) -> Option<&str> {
+        self.material.as_deref()
+    }
+
+    pub(crate) fn color(&self) -> [f32; 4] {
+        self.color
+    }
 }
 
 /// A rigid body in the kinematic tree.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Link {
-    pub name: String,
-    pub visuals: Vec<Visual>,
+pub(crate) struct Link {
+    name: String,
+    visuals: Vec<Visual>,
+}
+
+impl Link {
+    pub(crate) fn visuals(&self) -> &[Visual] {
+        &self.visuals
+    }
 }
 
 /// How a joint moves its child link.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum JointKind {
+pub(crate) enum JointKind {
     /// Turns about its axis, between limits.
     Revolute,
     /// Turns about its axis without limits.
@@ -108,31 +137,31 @@ pub enum JointKind {
 
 impl JointKind {
     /// True when a position value moves this joint.
-    pub fn is_movable(self) -> bool {
+    pub(crate) fn is_movable(self) -> bool {
         !matches!(self, Self::Fixed)
     }
 }
 
 /// A connection between two links.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Joint {
-    pub name: String,
-    pub kind: JointKind,
+pub(crate) struct Joint {
+    name: String,
+    kind: JointKind,
     /// Index into [`Urdf::links`].
-    pub parent: usize,
+    parent: usize,
     /// Index into [`Urdf::links`].
-    pub child: usize,
+    child: usize,
     /// Placement of the child's frame in the parent's, before any motion.
-    pub origin: Pose,
-    pub axis: Vec3,
+    origin: Pose,
+    axis: Vec3,
     /// Viewer travel limits in radians or metres, when the description states them.
     /// These are drawing bounds, never hardware command limits.
-    pub limit: Option<(f32, f32)>,
+    limit: Option<(f32, f32)>,
 }
 
 impl Joint {
     /// Clamp `position` to this joint's limits, if it has any.
-    pub fn clamp(&self, position: f32) -> f32 {
+    fn clamp(&self, position: f32) -> f32 {
         match self.limit {
             Some((lower, upper)) if self.kind != JointKind::Continuous => {
                 position.clamp(lower, upper)
@@ -151,14 +180,39 @@ impl Joint {
             JointKind::Fixed => Mat4::IDENTITY,
         }
     }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn kind(&self) -> JointKind {
+        self.kind
+    }
+
+    pub(crate) fn parent(&self) -> usize {
+        self.parent
+    }
+
+    pub(crate) fn child(&self) -> usize {
+        self.child
+    }
+
+    #[cfg(test)]
+    pub(crate) fn origin(&self) -> Pose {
+        self.origin
+    }
+
+    pub(crate) fn limit(&self) -> Option<(f32, f32)> {
+        self.limit
+    }
 }
 
 /// A parsed robot description.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Urdf {
-    pub name: String,
-    pub links: Vec<Link>,
-    pub joints: Vec<Joint>,
+    name: String,
+    links: Vec<Link>,
+    joints: Vec<Joint>,
     /// Index of the only link no joint has as a child.
     root: usize,
     /// Joint indices leaving each link, so posing the tree is one walk down.
@@ -168,24 +222,25 @@ pub struct Urdf {
 impl Urdf {
     /// Parse a URDF document.
     pub fn parse(text: &str) -> Result<Self, UrdfError> {
-        parse(text)
+        UrdfParser::parse(text)
     }
 
     /// The link every other link hangs from.
-    pub fn root(&self) -> usize {
+    pub(crate) fn root(&self) -> usize {
         self.root
     }
 
-    pub fn link_index(&self, name: &str) -> Option<usize> {
+    pub(crate) fn link_index(&self, name: &str) -> Option<usize> {
         self.links.iter().position(|link| link.name == name)
     }
 
-    pub fn joint(&self, name: &str) -> Option<&Joint> {
+    pub(crate) fn joint(&self, name: &str) -> Option<&Joint> {
         self.joints.iter().find(|joint| joint.name == name)
     }
 
     /// The joint connecting two links, named rather than indexed.
-    pub fn joint_between(&self, parent: &str, child: &str) -> Option<&Joint> {
+    #[cfg(test)]
+    pub(crate) fn joint_between(&self, parent: &str, child: &str) -> Option<&Joint> {
         let (parent, child) = (self.link_index(parent)?, self.link_index(child)?);
         self.joints
             .iter()
@@ -193,7 +248,8 @@ impl Urdf {
     }
 
     /// Every joint a caller can supply a position for.
-    pub fn movable_joints(&self) -> impl Iterator<Item = &Joint> {
+    #[cfg(test)]
+    fn movable_joints(&self) -> impl Iterator<Item = &Joint> {
         self.joints.iter().filter(|joint| joint.kind.is_movable())
     }
 
@@ -205,7 +261,7 @@ impl Urdf {
     /// Positions outside a joint's stated viewer limits are clamped, because a
     /// mismeasured angle should bend the drawing no further than the hardware
     /// could bend.
-    pub fn pose(&self, positions: &BTreeMap<String, f32>) -> Vec<Mat4> {
+    pub(crate) fn pose(&self, positions: &BTreeMap<String, f32>) -> Vec<Mat4> {
         let mut world = vec![Mat4::IDENTITY; self.links.len()];
         let mut stack = vec![self.root];
         while let Some(link) = stack.pop() {
@@ -229,10 +285,8 @@ impl Urdf {
     /// `transforms` comes from [`Urdf::pose`]; a shorter slice simply yields
     /// fewer visuals rather than panicking, so a stale pose cannot crash a
     /// renderer mid-frame.
-    pub fn visuals<'a>(
-        &'a self,
-        transforms: &'a [Mat4],
-    ) -> impl Iterator<Item = (&'a Visual, Mat4)> {
+    #[cfg(test)]
+    fn visuals<'a>(&'a self, transforms: &'a [Mat4]) -> impl Iterator<Item = (&'a Visual, Mat4)> {
         self.links
             .iter()
             .zip(transforms)
@@ -241,6 +295,14 @@ impl Urdf {
                     .iter()
                     .map(move |visual| (visual, transform * visual.origin.matrix()))
             })
+    }
+
+    pub(crate) fn links(&self) -> &[Link] {
+        &self.links
+    }
+
+    pub(crate) fn joints(&self) -> &[Joint] {
+        &self.joints
     }
 }
 
@@ -328,313 +390,321 @@ impl fmt::Display for UrdfError {
 
 impl std::error::Error for UrdfError {}
 
-fn parse(text: &str) -> Result<Urdf, UrdfError> {
-    let document = Document::parse(text).map_err(|error| UrdfError::Xml(error.to_string()))?;
-    let robot = document.root_element();
-    if robot.tag_name().name() != "robot" {
-        return Err(UrdfError::NotRobot(robot.tag_name().name().to_owned()));
-    }
+struct UrdfParser;
 
-    // Materials declared at robot level are referenced by name from visuals
-    // further down, so they are collected before any link is read.
-    let mut palette = BTreeMap::new();
-    for node in children(robot, "material") {
-        if let (Some(name), Some(color)) = (node.attribute("name"), color_of(node)?) {
-            palette.insert(name.to_owned(), color);
+impl UrdfParser {
+    fn parse(text: &str) -> Result<Urdf, UrdfError> {
+        let document = Document::parse(text).map_err(|error| UrdfError::Xml(error.to_string()))?;
+        let robot = document.root_element();
+        if robot.tag_name().name() != "robot" {
+            return Err(UrdfError::NotRobot(robot.tag_name().name().to_owned()));
         }
-    }
 
-    let mut links = Vec::new();
-    for node in children(robot, "link") {
-        let name = required(node, "name")?.to_owned();
-        if links.iter().any(|link: &Link| link.name == name) {
-            return Err(UrdfError::DuplicateLink(name));
-        }
-        let mut visuals = Vec::new();
-        for visual in children(node, "visual") {
-            visuals.push(parse_visual(visual, &name, &palette)?);
-        }
-        links.push(Link { name, visuals });
-    }
-
-    let index_of = |joint: &str, link: &str| {
-        links
-            .iter()
-            .position(|candidate| candidate.name == link)
-            .ok_or_else(|| UrdfError::UnknownLink {
-                joint: joint.to_owned(),
-                link: link.to_owned(),
-            })
-    };
-
-    let mut joints = Vec::new();
-    for node in children(robot, "joint") {
-        let name = required(node, "name")?.to_owned();
-        let kind = match required(node, "type")? {
-            "revolute" => JointKind::Revolute,
-            "continuous" => JointKind::Continuous,
-            "prismatic" => JointKind::Prismatic,
-            "fixed" | "floating" | "planar" => JointKind::Fixed,
-            other => {
-                return Err(UrdfError::UnknownJointType {
-                    joint: name,
-                    kind: other.to_owned(),
-                });
+        // Materials declared at robot level are referenced by name from visuals
+        // further down, so they are collected before any link is read.
+        let mut palette = BTreeMap::new();
+        for node in Self::children(robot, "material") {
+            if let (Some(name), Some(color)) = (node.attribute("name"), Self::color_of(node)?) {
+                palette.insert(name.to_owned(), color);
             }
+        }
+
+        let mut links = Vec::new();
+        for node in Self::children(robot, "link") {
+            let name = Self::required(node, "name")?.to_owned();
+            if links.iter().any(|link: &Link| link.name == name) {
+                return Err(UrdfError::DuplicateLink(name));
+            }
+            let mut visuals = Vec::new();
+            for visual in Self::children(node, "visual") {
+                visuals.push(Self::parse_visual(visual, &name, &palette)?);
+            }
+            links.push(Link { name, visuals });
+        }
+
+        let index_of = |joint: &str, link: &str| {
+            links
+                .iter()
+                .position(|candidate| candidate.name == link)
+                .ok_or_else(|| UrdfError::UnknownLink {
+                    joint: joint.to_owned(),
+                    link: link.to_owned(),
+                })
         };
-        let parent = index_of(&name, required(child(node, "parent")?, "link")?)?;
-        let child_link = index_of(&name, required(child(node, "child")?, "link")?)?;
-        // A zero axis would make `Mat4::from_axis_angle` produce garbage, and a
-        // description that omits the axis means the URDF default of +X.
-        let axis = match children(node, "axis").next() {
-            Some(node) => vec3(node, "xyz")?.normalize_or(Vec3::X),
-            None => Vec3::X,
-        };
-        // Missing endpoints collapse this viewer-only joint to rest. Hardware
-        // command limits come from validated motor configuration, not URDF.
-        let limit = children(node, "limit")
-            .next()
-            .map(|node| Ok::<_, UrdfError>((number(node, "lower")?, number(node, "upper")?)))
-            .transpose()?
-            .map(|(lower, upper)| (lower.unwrap_or(0.0), upper.unwrap_or(0.0)));
 
-        joints.push(Joint {
-            name,
-            kind,
-            parent,
-            child: child_link,
-            origin: origin_of(node)?,
-            axis,
-            limit,
-        });
-    }
+        let mut joints = Vec::new();
+        for node in Self::children(robot, "joint") {
+            let name = Self::required(node, "name")?.to_owned();
+            let kind = match Self::required(node, "type")? {
+                "revolute" => JointKind::Revolute,
+                "continuous" => JointKind::Continuous,
+                "prismatic" => JointKind::Prismatic,
+                "fixed" | "floating" | "planar" => JointKind::Fixed,
+                other => {
+                    return Err(UrdfError::UnknownJointType {
+                        joint: name,
+                        kind: other.to_owned(),
+                    });
+                }
+            };
+            let parent = index_of(&name, Self::required(Self::child(node, "parent")?, "link")?)?;
+            let child_link = index_of(&name, Self::required(Self::child(node, "child")?, "link")?)?;
+            // A zero axis would make `Mat4::from_axis_angle` produce garbage, and a
+            // description that omits the axis means the URDF default of +X.
+            let axis = match Self::children(node, "axis").next() {
+                Some(node) => Self::vec3(node, "xyz")?.normalize_or(Vec3::X),
+                None => Vec3::X,
+            };
+            // Missing endpoints collapse this viewer-only joint to rest. Hardware
+            // command limits come from validated motor configuration, not URDF.
+            let limit = Self::children(node, "limit")
+                .next()
+                .map(|node| {
+                    Ok::<_, UrdfError>((Self::number(node, "lower")?, Self::number(node, "upper")?))
+                })
+                .transpose()?
+                .map(|(lower, upper)| (lower.unwrap_or(0.0), upper.unwrap_or(0.0)));
 
-    let name = robot.attribute("name").unwrap_or("robot").to_owned();
-    assemble(name, links, joints)
-}
-
-/// Turn a flat list of links and joints into a tree, or say why it is not one.
-fn assemble(name: String, links: Vec<Link>, joints: Vec<Joint>) -> Result<Urdf, UrdfError> {
-    let mut parent_joint = vec![None; links.len()];
-    let mut children = vec![Vec::new(); links.len()];
-    for (index, joint) in joints.iter().enumerate() {
-        if parent_joint[joint.child].is_some() {
-            return Err(UrdfError::RepeatedChild {
-                link: links[joint.child].name.clone(),
-                joint: joint.name.clone(),
+            joints.push(Joint {
+                name,
+                kind,
+                parent,
+                child: child_link,
+                origin: Self::origin_of(node)?,
+                axis,
+                limit,
             });
         }
-        parent_joint[joint.child] = Some(index);
-        children[joint.parent].push(index);
+
+        let name = robot.attribute("name").unwrap_or("robot").to_owned();
+        Urdf::assemble(name, links, joints)
     }
 
-    let roots = (0..links.len())
-        .filter(|&index| parent_joint[index].is_none())
-        .collect::<Vec<_>>();
-    let root = match roots.as_slice() {
-        [] => return Err(UrdfError::NoRoot),
-        [only] => *only,
-        many => {
-            return Err(UrdfError::MultipleRoots(
-                many.iter()
-                    .map(|&index| links[index].name.clone())
-                    .collect(),
-            ));
+    /// Turn a flat list of links and joints into a tree, or say why it is not one.
+    fn parse_visual(
+        node: Node<'_, '_>,
+        link: &str,
+        palette: &BTreeMap<String, [f32; 4]>,
+    ) -> Result<Visual, UrdfError> {
+        let shape = Self::child(node, "geometry").map_err(|_| UrdfError::UnknownGeometry {
+            link: link.to_owned(),
+        })?;
+        let geometry = Self::parse_geometry(shape, link)?;
+
+        // A visual may name a material, restate one inline, or do both; an inline
+        // colour is the more specific statement and wins.
+        let material = Self::children(node, "material").next();
+        let named = material.and_then(|node| node.attribute("name"));
+        let color = match material.map(Self::color_of).transpose()?.flatten() {
+            Some(color) => color,
+            None => named
+                .and_then(|name| palette.get(name).copied())
+                .unwrap_or(DEFAULT_COLOR),
+        };
+
+        Ok(Visual {
+            origin: Self::origin_of(node)?,
+            geometry,
+            material: named.map(str::to_owned),
+            color,
+        })
+    }
+
+    fn parse_geometry(node: Node<'_, '_>, link: &str) -> Result<Geometry, UrdfError> {
+        // A missing visual dimension becomes zero so optional decoration cannot
+        // break the scene. This tolerance is intentionally not configuration policy.
+        for shape in node.children().filter(Node::is_element) {
+            return match shape.tag_name().name() {
+                "box" => Ok(Geometry::Box {
+                    size: Self::vec3(shape, "size")?,
+                }),
+                "cylinder" => Ok(Geometry::Cylinder {
+                    radius: Self::number(shape, "radius")?.unwrap_or(0.0),
+                    length: Self::number(shape, "length")?.unwrap_or(0.0),
+                }),
+                "sphere" => Ok(Geometry::Sphere {
+                    radius: Self::number(shape, "radius")?.unwrap_or(0.0),
+                }),
+                "mesh" => Ok(Geometry::Mesh {
+                    filename: Self::required(shape, "filename")?.to_owned(),
+                    scale: match shape.attribute("scale") {
+                        Some(_) => Self::vec3(shape, "scale")?,
+                        None => Vec3::ONE,
+                    },
+                }),
+                _ => continue,
+            };
         }
-    };
+        Err(UrdfError::UnknownGeometry {
+            link: link.to_owned(),
+        })
+    }
 
-    // One root and one parent apiece still allows a separate cycle off to the
-    // side, which would silently never be drawn. Walking the tree proves every
-    // link is actually reachable.
-    let mut reached = vec![false; links.len()];
-    let mut stack = vec![root];
-    reached[root] = true;
-    while let Some(link) = stack.pop() {
-        for &index in &children[link] {
-            let child = joints[index].child;
-            if !reached[child] {
-                reached[child] = true;
-                stack.push(child);
-            }
+    /// The `<origin>` of an element, defaulting to no offset and no rotation.
+    fn origin_of(node: Node<'_, '_>) -> Result<Pose, UrdfError> {
+        let Some(origin) = Self::children(node, "origin").next() else {
+            return Ok(Pose::IDENTITY);
+        };
+        let translation = match origin.attribute("xyz") {
+            Some(_) => Self::vec3(origin, "xyz")?,
+            None => Vec3::ZERO,
+        };
+        let angles = match origin.attribute("rpy") {
+            Some(_) => Self::vec3(origin, "rpy")?,
+            None => Vec3::ZERO,
+        };
+        Ok(Pose {
+            translation,
+            // URDF states fixed-axis roll, pitch, and yaw, which compose as
+            // Rz(yaw) * Ry(pitch) * Rx(roll).
+            rotation: Quat::from_rotation_z(angles.z)
+                * Quat::from_rotation_y(angles.y)
+                * Quat::from_rotation_x(angles.x),
+        })
+    }
+
+    fn color_of(node: Node<'_, '_>) -> Result<Option<[f32; 4]>, UrdfError> {
+        let Some(color) = Self::children(node, "color").next() else {
+            return Ok(None);
+        };
+        let Some(text) = color.attribute("rgba") else {
+            return Ok(None);
+        };
+        let parts = Self::numbers(text).ok_or_else(|| UrdfError::BadNumbers {
+            element: "color".to_owned(),
+            value: text.to_owned(),
+        })?;
+        match parts.as_slice() {
+            [r, g, b, a] => Ok(Some([*r, *g, *b, *a])),
+            [r, g, b] => Ok(Some([*r, *g, *b, 1.0])),
+            _ => Err(UrdfError::BadNumbers {
+                element: "color".to_owned(),
+                value: text.to_owned(),
+            }),
         }
     }
-    let detached = links
-        .iter()
-        .zip(&reached)
-        .filter(|&(_, &seen)| !seen)
-        .map(|(link, _)| link.name.clone())
-        .collect::<Vec<_>>();
-    if !detached.is_empty() {
-        return Err(UrdfError::Detached(detached));
+
+    fn children<'a>(node: Node<'a, 'a>, name: &'a str) -> impl Iterator<Item = Node<'a, 'a>> {
+        node.children()
+            .filter(move |child| child.is_element() && child.tag_name().name() == name)
     }
 
-    Ok(Urdf {
-        name,
-        links,
-        joints,
-        root,
-        children,
-    })
+    fn child<'a>(node: Node<'a, 'a>, name: &'a str) -> Result<Node<'a, 'a>, UrdfError> {
+        Self::children(node, name)
+            .next()
+            .ok_or_else(|| UrdfError::MissingAttribute {
+                element: node.tag_name().name().to_owned(),
+                attribute: format!("<{name}> child"),
+            })
+    }
+
+    fn required<'a>(node: Node<'a, 'a>, attribute: &str) -> Result<&'a str, UrdfError> {
+        node.attribute(attribute)
+            .ok_or_else(|| UrdfError::MissingAttribute {
+                element: node.tag_name().name().to_owned(),
+                attribute: attribute.to_owned(),
+            })
+    }
+
+    fn vec3(node: Node<'_, '_>, attribute: &str) -> Result<Vec3, UrdfError> {
+        let text = Self::required(node, attribute)?;
+        match Self::numbers(text).as_deref() {
+            Some([x, y, z]) => Ok(Vec3::new(*x, *y, *z)),
+            _ => Err(UrdfError::BadNumbers {
+                element: node.tag_name().name().to_owned(),
+                value: text.to_owned(),
+            }),
+        }
+    }
+
+    fn number(node: Node<'_, '_>, attribute: &str) -> Result<Option<f32>, UrdfError> {
+        let Some(text) = node.attribute(attribute) else {
+            return Ok(None);
+        };
+        text.trim()
+            .parse()
+            .map(Some)
+            .map_err(|_| UrdfError::BadNumbers {
+                element: node.tag_name().name().to_owned(),
+                value: text.to_owned(),
+            })
+    }
+
+    /// Split a whitespace-separated list of numbers, or nothing if any is unreadable.
+    fn numbers(text: &str) -> Option<Vec<f32>> {
+        text.split_whitespace()
+            .map(|part| part.parse().ok())
+            .collect()
+    }
 }
 
-fn parse_visual(
-    node: Node<'_, '_>,
-    link: &str,
-    palette: &BTreeMap<String, [f32; 4]>,
-) -> Result<Visual, UrdfError> {
-    let shape = child(node, "geometry").map_err(|_| UrdfError::UnknownGeometry {
-        link: link.to_owned(),
-    })?;
-    let geometry = parse_geometry(shape, link)?;
+impl Urdf {
+    fn assemble(name: String, links: Vec<Link>, joints: Vec<Joint>) -> Result<Self, UrdfError> {
+        let mut parent_joint = vec![None; links.len()];
+        let mut children = vec![Vec::new(); links.len()];
+        for (index, joint) in joints.iter().enumerate() {
+            if parent_joint[joint.child].is_some() {
+                return Err(UrdfError::RepeatedChild {
+                    link: links[joint.child].name.clone(),
+                    joint: joint.name.clone(),
+                });
+            }
+            parent_joint[joint.child] = Some(index);
+            children[joint.parent].push(index);
+        }
 
-    // A visual may name a material, restate one inline, or do both; an inline
-    // colour is the more specific statement and wins.
-    let material = children(node, "material").next();
-    let named = material.and_then(|node| node.attribute("name"));
-    let color = match material.map(color_of).transpose()?.flatten() {
-        Some(color) => color,
-        None => named
-            .and_then(|name| palette.get(name).copied())
-            .unwrap_or(DEFAULT_COLOR),
-    };
+        let roots = (0..links.len())
+            .filter(|&index| parent_joint[index].is_none())
+            .collect::<Vec<_>>();
+        let root = match roots.as_slice() {
+            [] => return Err(UrdfError::NoRoot),
+            [only] => *only,
+            many => {
+                return Err(UrdfError::MultipleRoots(
+                    many.iter()
+                        .map(|&index| links[index].name.clone())
+                        .collect(),
+                ));
+            }
+        };
 
-    Ok(Visual {
-        origin: origin_of(node)?,
-        geometry,
-        material: named.map(str::to_owned),
-        color,
-    })
+        // One root and one parent apiece still allows a separate cycle off to the
+        // side, which would silently never be drawn. Walking the tree proves every
+        // link is actually reachable.
+        let mut reached = vec![false; links.len()];
+        let mut stack = vec![root];
+        reached[root] = true;
+        while let Some(link) = stack.pop() {
+            for &index in &children[link] {
+                let child = joints[index].child;
+                if !reached[child] {
+                    reached[child] = true;
+                    stack.push(child);
+                }
+            }
+        }
+        let detached = links
+            .iter()
+            .zip(&reached)
+            .filter(|&(_, &seen)| !seen)
+            .map(|(link, _)| link.name.clone())
+            .collect::<Vec<_>>();
+        if !detached.is_empty() {
+            return Err(UrdfError::Detached(detached));
+        }
+
+        Ok(Self {
+            name,
+            links,
+            joints,
+            root,
+            children,
+        })
+    }
 }
 
 /// What a visual is drawn in when the description never says.
 const DEFAULT_COLOR: [f32; 4] = [0.7, 0.72, 0.75, 1.0];
-
-fn parse_geometry(node: Node<'_, '_>, link: &str) -> Result<Geometry, UrdfError> {
-    // A missing visual dimension becomes zero so optional decoration cannot
-    // break the scene. This tolerance is intentionally not configuration policy.
-    for shape in node.children().filter(Node::is_element) {
-        return match shape.tag_name().name() {
-            "box" => Ok(Geometry::Box {
-                size: vec3(shape, "size")?,
-            }),
-            "cylinder" => Ok(Geometry::Cylinder {
-                radius: number(shape, "radius")?.unwrap_or(0.0),
-                length: number(shape, "length")?.unwrap_or(0.0),
-            }),
-            "sphere" => Ok(Geometry::Sphere {
-                radius: number(shape, "radius")?.unwrap_or(0.0),
-            }),
-            "mesh" => Ok(Geometry::Mesh {
-                filename: required(shape, "filename")?.to_owned(),
-                scale: match shape.attribute("scale") {
-                    Some(_) => vec3(shape, "scale")?,
-                    None => Vec3::ONE,
-                },
-            }),
-            _ => continue,
-        };
-    }
-    Err(UrdfError::UnknownGeometry {
-        link: link.to_owned(),
-    })
-}
-
-/// The `<origin>` of an element, defaulting to no offset and no rotation.
-fn origin_of(node: Node<'_, '_>) -> Result<Pose, UrdfError> {
-    let Some(origin) = children(node, "origin").next() else {
-        return Ok(Pose::IDENTITY);
-    };
-    let translation = match origin.attribute("xyz") {
-        Some(_) => vec3(origin, "xyz")?,
-        None => Vec3::ZERO,
-    };
-    let angles = match origin.attribute("rpy") {
-        Some(_) => vec3(origin, "rpy")?,
-        None => Vec3::ZERO,
-    };
-    Ok(Pose {
-        translation,
-        // URDF states fixed-axis roll, pitch, and yaw, which compose as
-        // Rz(yaw) * Ry(pitch) * Rx(roll).
-        rotation: Quat::from_rotation_z(angles.z)
-            * Quat::from_rotation_y(angles.y)
-            * Quat::from_rotation_x(angles.x),
-    })
-}
-
-fn color_of(node: Node<'_, '_>) -> Result<Option<[f32; 4]>, UrdfError> {
-    let Some(color) = children(node, "color").next() else {
-        return Ok(None);
-    };
-    let Some(text) = color.attribute("rgba") else {
-        return Ok(None);
-    };
-    let parts = numbers(text).ok_or_else(|| UrdfError::BadNumbers {
-        element: "color".to_owned(),
-        value: text.to_owned(),
-    })?;
-    match parts.as_slice() {
-        [r, g, b, a] => Ok(Some([*r, *g, *b, *a])),
-        [r, g, b] => Ok(Some([*r, *g, *b, 1.0])),
-        _ => Err(UrdfError::BadNumbers {
-            element: "color".to_owned(),
-            value: text.to_owned(),
-        }),
-    }
-}
-
-fn children<'a>(node: Node<'a, 'a>, name: &'a str) -> impl Iterator<Item = Node<'a, 'a>> {
-    node.children()
-        .filter(move |child| child.is_element() && child.tag_name().name() == name)
-}
-
-fn child<'a>(node: Node<'a, 'a>, name: &'a str) -> Result<Node<'a, 'a>, UrdfError> {
-    children(node, name)
-        .next()
-        .ok_or_else(|| UrdfError::MissingAttribute {
-            element: node.tag_name().name().to_owned(),
-            attribute: format!("<{name}> child"),
-        })
-}
-
-fn required<'a>(node: Node<'a, 'a>, attribute: &str) -> Result<&'a str, UrdfError> {
-    node.attribute(attribute)
-        .ok_or_else(|| UrdfError::MissingAttribute {
-            element: node.tag_name().name().to_owned(),
-            attribute: attribute.to_owned(),
-        })
-}
-
-fn vec3(node: Node<'_, '_>, attribute: &str) -> Result<Vec3, UrdfError> {
-    let text = required(node, attribute)?;
-    match numbers(text).as_deref() {
-        Some([x, y, z]) => Ok(Vec3::new(*x, *y, *z)),
-        _ => Err(UrdfError::BadNumbers {
-            element: node.tag_name().name().to_owned(),
-            value: text.to_owned(),
-        }),
-    }
-}
-
-fn number(node: Node<'_, '_>, attribute: &str) -> Result<Option<f32>, UrdfError> {
-    let Some(text) = node.attribute(attribute) else {
-        return Ok(None);
-    };
-    text.trim()
-        .parse()
-        .map(Some)
-        .map_err(|_| UrdfError::BadNumbers {
-            element: node.tag_name().name().to_owned(),
-            value: text.to_owned(),
-        })
-}
-
-/// Split a whitespace-separated list of numbers, or nothing if any is unreadable.
-fn numbers(text: &str) -> Option<Vec<f32>> {
-    text.split_whitespace()
-        .map(|part| part.parse().ok())
-        .collect()
-}
 
 #[cfg(test)]
 mod tests {
@@ -952,13 +1022,13 @@ mod tests {
         // or a measured angle would have nothing to move.
         for joint in SO101_JOINTS {
             let found = urdf
-                .joint(joint.name)
-                .unwrap_or_else(|| panic!("{} is missing from the description", joint.name));
-            assert!(found.kind.is_movable(), "{} should move", joint.name);
+                .joint(joint.name())
+                .unwrap_or_else(|| panic!("{} is missing from the description", joint.name()));
+            assert!(found.kind.is_movable(), "{} should move", joint.name());
             assert!(
                 found.limit.is_some(),
                 "{} should state its limits",
-                joint.name
+                joint.name()
             );
         }
         assert_eq!(urdf.movable_joints().count(), SO101_JOINTS.len());

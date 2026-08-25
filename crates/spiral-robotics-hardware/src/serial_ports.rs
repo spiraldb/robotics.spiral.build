@@ -1,6 +1,8 @@
 //! Serial-port discovery helpers.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::BTreeSet;
 
 use serialport::{SerialPortInfo, SerialPortType};
 
@@ -23,7 +25,7 @@ pub fn available_ports() -> Result<Vec<SerialPortInfo>, serialport::Error> {
 }
 
 /// Collect just the device paths from a port listing.
-pub fn port_names(ports: &[SerialPortInfo]) -> Vec<String> {
+fn port_names(ports: &[SerialPortInfo]) -> Vec<String> {
     ports.iter().map(|port| port.port_name.clone()).collect()
 }
 
@@ -61,7 +63,8 @@ pub fn port_description(port_type: &SerialPortType) -> Option<String> {
 /// Results are sorted and duplicate input entries are ignored. This keeps the
 /// unplug-and-diff workflow deterministic and makes the hardware-facing CLI
 /// straightforward to test.
-pub fn disconnected_ports(before: &[String], after: &[String]) -> Vec<String> {
+#[cfg(test)]
+fn disconnected_ports(before: &[String], after: &[String]) -> Vec<String> {
     let before = before.iter().collect::<BTreeSet<_>>();
     let after = after.iter().collect::<BTreeSet<_>>();
 
@@ -75,7 +78,7 @@ pub fn disconnected_ports(before: &[String], after: &[String]) -> Vec<String> {
 ///
 /// `serialport` reports both names for a physical serial device. LeRobot uses
 /// the `/dev/tty.*` namespace, so prefer it whenever both aliases are present.
-pub fn collapse_macos_aliases(ports: Vec<String>) -> Vec<String> {
+fn collapse_macos_aliases(ports: Vec<String>) -> Vec<String> {
     let mut by_device = BTreeMap::<String, String>::new();
 
     for port in ports {

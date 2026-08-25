@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde::de::{self, DeserializeOwned, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
-use spiral_robotics_core::calibration::{Direction, MotorSpec};
+use spiral_robotics_core::calibration::{MotorDirection, MotorSpec};
 use tempfile::NamedTempFile;
 
 /// The newest robot-configuration schema understood by this crate.
@@ -28,6 +28,39 @@ pub const SCHEMA_VERSION: u64 = 1;
 #[derive(Clone, Debug, PartialEq)]
 pub struct RobotConfig {
     root: Map<String, Value>,
+}
+
+pub(crate) struct RobotConfigUpdate {
+    robot_id: Option<String>,
+    robot_type: Option<String>,
+    port: Option<Value>,
+    motors: Value,
+    calibration: Value,
+}
+
+impl RobotConfigUpdate {
+    pub(crate) fn new(motors: Value, calibration: Value) -> Self {
+        Self {
+            robot_id: None,
+            robot_type: None,
+            port: None,
+            motors,
+            calibration,
+        }
+    }
+
+    #[cfg(test)]
+    fn identity(mut self, robot_id: Option<&str>, robot_type: Option<&str>) -> Self {
+        self.robot_id = robot_id.map(str::to_owned);
+        self.robot_type = robot_type.map(str::to_owned);
+        self
+    }
+
+    #[cfg(test)]
+    fn port(mut self, port: Option<Value>) -> Self {
+        self.port = port;
+        self
+    }
 }
 
 /// An error encountered while loading, updating, or saving a robot config.
@@ -252,10 +285,12 @@ impl RobotConfig {
                         source: json_error("motor id must be a non-negative 32-bit integer"),
                     })?;
                 let direction = match fields.get("direction") {
-                    None => Direction::Normal,
-                    Some(Value::String(direction)) if direction == "normal" => Direction::Normal,
+                    None => MotorDirection::Normal,
+                    Some(Value::String(direction)) if direction == "normal" => {
+                        MotorDirection::Normal
+                    }
                     Some(Value::String(direction)) if direction == "reversed" => {
-                        Direction::Reversed
+                        MotorDirection::Reversed
                     }
                     Some(_) => {
                         return Err(ConfigError::Json {
@@ -274,14 +309,11 @@ impl RobotConfig {
                         });
                     }
                 };
-                Ok((
-                    name.clone(),
-                    MotorSpec {
-                        id,
-                        direction,
-                        model,
-                    },
-                ))
+                let specification = model.map_or_else(
+                    || MotorSpec::new(id, direction),
+                    |model| MotorSpec::new(id, direction).with_model(model),
+                );
+                Ok((name.clone(), specification))
             })
             .collect::<Result<_, _>>()
             .map(Some)
@@ -308,20 +340,20 @@ impl RobotConfig {
                     .and_then(Value::as_object)
                     .cloned()
                     .unwrap_or_default();
-                fields.insert("id".to_owned(), Value::from(spec.id));
+                fields.insert("id".to_owned(), Value::from(spec.id()));
                 fields.insert(
                     "direction".to_owned(),
                     Value::String(
-                        match spec.direction {
-                            Direction::Normal => "normal",
-                            Direction::Reversed => "reversed",
+                        match spec.direction() {
+                            MotorDirection::Normal => "normal",
+                            MotorDirection::Reversed => "reversed",
                         }
                         .to_owned(),
                     ),
                 );
-                match &spec.model {
+                match spec.model() {
                     Some(model) => {
-                        fields.insert("model".to_owned(), Value::String(model.clone()));
+                        fields.insert("model".to_owned(), Value::String(model.to_owned()));
                     }
                     None => {
                         fields.remove("model");
@@ -338,15 +370,8 @@ impl RobotConfig {
     /// `robot_id`, `robot_type`, and `port` are replaced only when supplied;
     /// omitting one preserves an existing value.  A supplied port must be a
     /// JSON object.  `motors` and `calibration` are always replaced.
-    pub fn merged(
-        &self,
-        robot_id: Option<&str>,
-        robot_type: Option<&str>,
-        port: Option<Value>,
-        motors: Value,
-        calibration: Value,
-    ) -> Result<Self, ConfigError> {
-        if port.as_ref().is_some_and(|value| !value.is_object()) {
+    pub(crate) fn merged(&self, update: RobotConfigUpdate) -> Result<Self, ConfigError> {
+        if update.port.as_ref().is_some_and(|value| !value.is_object()) {
             return Err(ConfigError::PortMustBeObject);
         }
 
@@ -356,20 +381,17 @@ impl RobotConfig {
             Value::Number(Number::from(SCHEMA_VERSION)),
         );
 
-        if let Some(robot_id) = robot_id {
-            root.insert("robot_id".to_owned(), Value::String(robot_id.to_owned()));
+        if let Some(robot_id) = update.robot_id {
+            root.insert("robot_id".to_owned(), Value::String(robot_id));
         }
-        if let Some(robot_type) = robot_type {
-            root.insert(
-                "robot_type".to_owned(),
-                Value::String(robot_type.to_owned()),
-            );
+        if let Some(robot_type) = update.robot_type {
+            root.insert("robot_type".to_owned(), Value::String(robot_type));
         }
-        if let Some(port) = port {
+        if let Some(port) = update.port {
             root.insert("port".to_owned(), port);
         }
-        root.insert("motors".to_owned(), motors);
-        root.insert("calibration".to_owned(), calibration);
+        root.insert("motors".to_owned(), update.motors);
+        root.insert("calibration".to_owned(), update.calibration);
 
         Self::from_value(Value::Object(root))
     }
@@ -797,9 +819,10 @@ mod tests {
     use std::{fs, io};
 
     use serde_json::{Value, json};
+    use spiral_robotics_core::calibration::{MotorDirection, MotorSpec};
     use tempfile::tempdir;
 
-    use super::{ConfigError, RobotConfig, SCHEMA_VERSION};
+    use super::{ConfigError, RobotConfig, RobotConfigUpdate, SCHEMA_VERSION};
 
     #[test]
     fn missing_file_creates_a_default_document() {
@@ -832,11 +855,11 @@ mod tests {
 
         let merged = config
             .merged(
-                None,
-                Some("follower"),
-                None,
-                json!([{"id": 1, "name": "shoulder"}]),
-                json!({"joints": [{"name": "shoulder"}]}),
+                RobotConfigUpdate::new(
+                    json!([{"id": 1, "name": "shoulder"}]),
+                    json!({"joints": [{"name": "shoulder"}]}),
+                )
+                .identity(None, Some("follower")),
             )
             .expect("merge config");
 
@@ -919,7 +942,10 @@ mod tests {
         }))
         .unwrap();
         let mut motors = config.motor_specs().unwrap().unwrap();
-        motors.get_mut("joint").unwrap().id = 4;
+        motors.insert(
+            "joint".to_owned(),
+            MotorSpec::new(4, MotorDirection::Reversed).with_model("sts3215"),
+        );
 
         let encoded = config.encode_motor_specs(&motors).unwrap();
         assert_eq!(encoded["joint"]["id"], 4);
@@ -965,7 +991,7 @@ mod tests {
     #[test]
     fn supplied_port_must_be_an_object() {
         let error = RobotConfig::default()
-            .merged(None, None, Some(json!("/dev/tty0")), json!([]), json!({}))
+            .merged(RobotConfigUpdate::new(json!([]), json!({})).port(Some(json!("/dev/tty0"))))
             .expect_err("string port must fail");
 
         assert!(matches!(error, ConfigError::PortMustBeObject));
@@ -1139,11 +1165,9 @@ mod tests {
         let path = directory.path().join("robot.json");
         let config = RobotConfig::default()
             .merged(
-                Some("arm-1"),
-                None,
-                Some(json!({"path": "/dev/ttyACM0"})),
-                json!([]),
-                json!({"format_version": 1}),
+                RobotConfigUpdate::new(json!([]), json!({"format_version": 1}))
+                    .identity(Some("arm-1"), None)
+                    .port(Some(json!({"path": "/dev/ttyACM0"}))),
             )
             .expect("merge config");
 

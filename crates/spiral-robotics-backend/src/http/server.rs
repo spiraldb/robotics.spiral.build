@@ -10,7 +10,7 @@ use crate::http::routes::{self, AppState, BootstrapState};
 use crate::robotics::cameras::CameraManager;
 use crate::robotics::video::VideoEncoderSettings;
 use crate::robots::workspace::RobotWorkspace;
-use crate::rollout::manager::RolloutManager;
+use crate::rollout::manager::{RolloutHardwareResources, RolloutManager};
 use crate::training::manager::TrainingManager;
 use crate::training::remote::ConfiguredHttpTrainingBackend;
 use crate::workflow::agent::WorkflowAgentManager;
@@ -24,8 +24,9 @@ use spiral_robotics_storage::adbc::ProjectStore;
 use spiral_robotics_storage::episodes::EpisodeStore;
 use spiral_robotics_storage::manager::StorageManager;
 use spiral_robotics_storage::settings::{
-    BackendStateStore, StudioPreferencesStore, environment_spiral_endpoint,
-    environment_spiral_spfs_endpoint, normalize_spiral_endpoint, normalize_spiral_spfs_endpoint,
+    BackendStateStore, SpiralConnectionSettings, StudioPreferencesStore,
+    environment_spiral_endpoint, environment_spiral_spfs_endpoint, normalize_spiral_endpoint,
+    normalize_spiral_spfs_endpoint,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -46,7 +47,19 @@ const RESOURCE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from
     about = "Set up, calibrate, and drive SO-ARM101 arms from a browser",
     long_about = "Serves the Spiral Robotics Studio web UI, owns the hardware behind it, and stores all durable Studio data directly in SpiralDB."
 )]
-struct Args {
+struct StudioServerArguments {
+    #[command(flatten)]
+    access: ServerAccessArguments,
+    #[command(flatten)]
+    video: VideoArguments,
+    #[command(flatten)]
+    spiral: SpiralArguments,
+    #[command(flatten)]
+    motion: MotionArguments,
+}
+
+#[derive(Debug, clap::Args)]
+struct ServerAccessArguments {
     /// Address the web UI is served on.
     #[arg(long, value_name = "ADDR:PORT")]
     bind: Option<SocketAddr>,
@@ -54,7 +67,10 @@ struct Args {
     /// Permit the unauthenticated Studio control API to listen beyond loopback.
     #[arg(long, requires = "bind")]
     allow_remote_access: bool,
+}
 
+#[derive(Debug, clap::Args)]
+struct VideoArguments {
     /// Skip camera discovery entirely.
     #[arg(long)]
     no_cameras: bool,
@@ -66,7 +82,10 @@ struct Args {
     /// FFmpeg video codec used for browser-playable episode MP4s.
     #[arg(long, default_value = "libx264", value_name = "CODEC")]
     video_codec: String,
+}
 
+#[derive(Debug, clap::Args)]
+struct SpiralArguments {
     /// Optional initial Spiral project. Settings and the backend state file are
     /// used when this and SPIRAL_PROJECT_ID are omitted.
     #[arg(long, value_name = "PROJECT")]
@@ -75,7 +94,10 @@ struct Args {
     /// Namespace containing every Studio-owned relation.
     #[arg(long, default_value = "spiral_robotics", value_name = "NAMESPACE")]
     spiral_namespace: String,
+}
 
+#[derive(Debug, clap::Args)]
+struct MotionArguments {
     /// Largest change, in encoder counts, applied to a joint per control cycle.
     #[arg(long, default_value_t = DEFAULT_MAX_STEP_COUNTS, value_name = "COUNTS")]
     max_step: i64,
@@ -83,6 +105,32 @@ struct Args {
     /// Largest per-cycle change used by the teleoperation follower.
     #[arg(long, default_value_t = DEFAULT_TELEOP_MAX_STEP_COUNTS, value_name = "COUNTS")]
     teleop_max_step: i64,
+}
+
+impl MotionArguments {
+    fn control_settings(&self) -> Result<ControlSettings> {
+        if self.max_step <= 0 {
+            return Err(std::io::Error::other("--max-step must be greater than zero").into());
+        }
+        if self.teleop_max_step <= 0 {
+            return Err(
+                std::io::Error::other("--teleop-max-step must be greater than zero").into(),
+            );
+        }
+        ControlSettings::default()
+            .try_with_motion_limits(self.max_step, self.teleop_max_step)
+            .ok_or_else(|| std::io::Error::other("invalid control motion limits").into())
+    }
+}
+
+struct ServerStartup {
+    arguments: StudioServerArguments,
+    camera_access_error: Option<String>,
+    backend_state: Arc<BackendStateStore>,
+    spiral_endpoint: String,
+    spiral_spfs_endpoint: String,
+    control_settings: ControlSettings,
+    app: fn() -> dioxus::prelude::Element,
 }
 
 pub fn run(app: fn() -> dioxus::prelude::Element) -> ExitCode {
@@ -105,7 +153,7 @@ pub fn run(app: fn() -> dioxus::prelude::Element) -> ExitCode {
         }
     }
 
-    let args = Args::parse();
+    let arguments = StudioServerArguments::parse();
     let Some(public) = dioxus_public_directory().filter(|path| path.is_dir()) else {
         eprintln!(
             "error: the Dioxus client bundle is missing; run `dx serve` for development or launch the server produced by `dx bundle`"
@@ -120,15 +168,13 @@ pub fn run(app: fn() -> dioxus::prelude::Element) -> ExitCode {
         .init();
     tracing::debug!("Dioxus public directory: {}", public.display());
 
-    if args.max_step <= 0 {
-        eprintln!("error: --max-step must be greater than zero");
-        return ExitCode::FAILURE;
-    }
-    if args.teleop_max_step <= 0 {
-        eprintln!("error: --teleop-max-step must be greater than zero");
-        return ExitCode::FAILURE;
-    }
-
+    let control_settings = match arguments.motion.control_settings() {
+        Ok(settings) => settings,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let backend_state = match BackendStateStore::open_default() {
         Ok(state) => Arc::new(state),
         Err(error) => {
@@ -160,7 +206,7 @@ pub fn run(app: fn() -> dioxus::prelude::Element) -> ExitCode {
     };
     // On macOS this puts up the system camera prompt, which has to happen on
     // the main thread before any runtime starts.
-    let camera_access = if args.no_cameras {
+    let camera_access = if arguments.video.no_cameras {
         Ok(())
     } else {
         cameras::initialize_camera_access().map_err(|error| error.to_string())
@@ -180,14 +226,15 @@ pub fn run(app: fn() -> dioxus::prelude::Element) -> ExitCode {
         }
     };
 
-    match runtime.block_on(serve(
-        args,
-        camera_access.err(),
+    match runtime.block_on(serve(ServerStartup {
+        arguments,
+        camera_access_error: camera_access.err(),
         backend_state,
         spiral_endpoint,
         spiral_spfs_endpoint,
+        control_settings,
         app,
-    )) {
+    })) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
@@ -196,43 +243,47 @@ pub fn run(app: fn() -> dioxus::prelude::Element) -> ExitCode {
     }
 }
 
-async fn serve(
-    args: Args,
-    camera_access_error: Option<String>,
-    backend_state: Arc<BackendStateStore>,
-    spiral_endpoint: String,
-    spiral_spfs_endpoint: String,
-    app: fn() -> dioxus::prelude::Element,
-) -> Result<()> {
+async fn serve(startup: ServerStartup) -> Result<()> {
+    let ServerStartup {
+        arguments,
+        camera_access_error,
+        backend_state,
+        spiral_endpoint,
+        spiral_spfs_endpoint,
+        control_settings,
+        app,
+    } = startup;
     // `dx serve` publishes its chosen address through the standard fullstack
     // environment. An explicit CLI value still wins for standalone launches.
-    let bind = args
+    let bind = arguments
+        .access
         .bind
         .unwrap_or_else(dioxus::cli_config::fullstack_address_or_localhost);
-    validate_bind_address(bind, args.allow_remote_access)?;
-    let spiral_project = args
+    validate_bind_address(bind, arguments.access.allow_remote_access)?;
+    let spiral_project = arguments
+        .spiral
         .spiral_project
         .clone()
         .or_else(|| std::env::var("SPIRAL_PROJECT_ID").ok())
         .filter(|project| !project.trim().is_empty())
         .or_else(|| backend_state.project_id());
-    if !spiral_robotics_storage::schema::is_identifier(args.spiral_namespace.trim()) {
+    if !spiral_robotics_storage::schema::is_identifier(arguments.spiral.spiral_namespace.trim()) {
         return Err(std::io::Error::other(
             "Spiral namespace must start with a letter or '_' and contain only letters, numbers, or '_'",
         )
         .into());
     }
-    let namespace = args.spiral_namespace.trim().to_owned();
-    let project_store = Arc::new(
-        ProjectStore::new(
-            spiral_endpoint,
-            spiral_spfs_endpoint,
-            spiral_project,
-            backend_state.credentials(),
-            namespace,
-        )
-        .map_err(std::io::Error::other)?,
-    );
+    let namespace = arguments.spiral.spiral_namespace.trim().to_owned();
+    let mut connection = SpiralConnectionSettings::new(spiral_endpoint, spiral_spfs_endpoint)
+        .map_err(std::io::Error::other)?;
+    if let Some(project) = spiral_project {
+        connection = connection
+            .with_project(&project)
+            .map_err(std::io::Error::other)?;
+    }
+    connection = connection.with_credentials(backend_state.credentials());
+    let project_store =
+        Arc::new(ProjectStore::new(connection, namespace).map_err(std::io::Error::other)?);
     let workspace = Arc::new(RobotWorkspace::new(project_store.clone()));
     let episodes = Arc::new(EpisodeStore::new(project_store.clone()));
     let storage = Arc::new(StorageManager::new(project_store));
@@ -248,20 +299,13 @@ async fn serve(
         workflow.clone(),
         catalog_lease.clone(),
     ));
-    let hardware = Arc::new(HardwareHandle::spawn(ControlSettings {
-        max_step_counts: args.max_step,
-        teleop_max_step_counts: args.teleop_max_step,
-        ..ControlSettings::default()
-    }));
+    let hardware = Arc::new(HardwareHandle::spawn(control_settings));
     let cameras = Arc::new(CameraManager::new());
     let rollout = RolloutManager::new(
         storage.clone(),
-        hardware.clone(),
-        cameras.clone(),
-        workspace.clone(),
+        RolloutHardwareResources::new(hardware.clone(), cameras.clone(), workspace.clone()),
         preferences.clone(),
-    )
-    .map_err(std::io::Error::other)?;
+    );
 
     // Without permission a camera still enumerates and its stream still opens;
     // it just never delivers a frame. Say so instead of showing a blank box.
@@ -284,10 +328,10 @@ async fn serve(
         bootstrap: BootstrapState::new(),
         catalog_lease,
         recording_video: Arc::new(tokio::sync::Mutex::new(None)),
-        video_encoder: VideoEncoderSettings {
-            executable: args.ffmpeg.clone(),
-            codec: args.video_codec.clone(),
-        },
+        video_encoder: VideoEncoderSettings::new(
+            arguments.video.ffmpeg.clone(),
+            arguments.video.video_codec.clone(),
+        ),
     };
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let address = listener.local_addr()?;
@@ -296,7 +340,10 @@ async fn serve(
         std::env::var("SPIRAL_ROBOTICS_PUBLIC_URL").unwrap_or_else(|_| format!("http://{address}"));
     println!("Spiral Robotics Studio is running at {public_url}");
 
-    let bootstrap = tokio::spawn(bootstrap_services(state.clone(), !args.no_cameras));
+    let bootstrap = tokio::spawn(bootstrap_services(
+        state.clone(),
+        !arguments.video.no_cameras,
+    ));
     let video_monitor = tokio::spawn(routes::monitor_video_recording(state.clone()));
     let cleanup_state = state.clone();
     let app = dioxus::server::router(app)

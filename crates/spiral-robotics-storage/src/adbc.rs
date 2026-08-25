@@ -19,7 +19,7 @@ use arrow_array::{Array as _, ListArray, RecordBatchReader, StringArray, StructA
 use arrow_schema::Schema;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::settings::SpiralCredentials;
+use crate::settings::{SpiralConnectionSettings, SpiralCredentials};
 
 const HOSTED_ADBC_CONNECTIONS: usize = 4;
 const SPIRAL_UNAVAILABLE_PREFIX: &str = "SpiralDB is unavailable at ";
@@ -32,7 +32,7 @@ const TRANSPORT_FAILURE_MARKERS: [&str; 5] = [
 ];
 
 #[derive(Clone)]
-struct ConnectionConfig {
+struct RuntimeConnectionConfig {
     project_id: String,
     endpoint: String,
     spfs_endpoint: String,
@@ -242,7 +242,7 @@ struct ConnectionPool {
 }
 
 impl ConnectionPool {
-    fn checkout(&mut self, config: &ConnectionConfig) -> Result<SpiralConnection, String> {
+    fn checkout(&mut self, config: &RuntimeConnectionConfig) -> Result<SpiralConnection, String> {
         if let Some(connection) = self.available.pop() {
             return Ok(connection);
         }
@@ -274,10 +274,7 @@ impl ConnectionPool {
 }
 
 pub struct ProjectStore {
-    endpoint: Arc<RwLock<String>>,
-    spfs_endpoint: Arc<RwLock<String>>,
-    credentials: Arc<RwLock<Option<SpiralCredentials>>>,
-    project_id: Arc<RwLock<Option<String>>>,
+    connection_settings: Arc<RwLock<SpiralConnectionSettings>>,
     namespace: String,
     hosted: Arc<Mutex<ConnectionPool>>,
     hosted_slots: Arc<Semaphore>,
@@ -286,23 +283,14 @@ pub struct ProjectStore {
 
 impl ProjectStore {
     pub fn new(
-        endpoint: String,
-        spfs_endpoint: String,
-        project_id: Option<String>,
-        credentials: Option<SpiralCredentials>,
+        connection_settings: SpiralConnectionSettings,
         namespace: String,
     ) -> Result<Self, String> {
-        let project_id = project_id
-            .map(|value| validate_project_id(&value))
-            .transpose()?;
         if !crate::schema::is_identifier(&namespace) {
             return Err("Spiral namespace is not a safe SQL identifier".to_owned());
         }
         Ok(Self {
-            endpoint: Arc::new(RwLock::new(endpoint)),
-            spfs_endpoint: Arc::new(RwLock::new(spfs_endpoint)),
-            credentials: Arc::new(RwLock::new(credentials)),
-            project_id: Arc::new(RwLock::new(project_id)),
+            connection_settings: Arc::new(RwLock::new(connection_settings)),
             namespace,
             hosted: Arc::new(Mutex::new(ConnectionPool::default())),
             hosted_slots: Arc::new(Semaphore::new(HOSTED_ADBC_CONNECTIONS)),
@@ -311,23 +299,26 @@ impl ProjectStore {
     }
 
     pub fn project_id(&self) -> String {
-        read(&self.project_id).clone().unwrap_or_default()
+        read(&self.connection_settings)
+            .project_id()
+            .unwrap_or_default()
+            .to_owned()
     }
 
     pub fn endpoint(&self) -> String {
-        read(&self.endpoint).clone()
+        read(&self.connection_settings).endpoint().to_owned()
     }
 
     pub fn spfs_endpoint(&self) -> String {
-        read(&self.spfs_endpoint).clone()
+        read(&self.connection_settings).spfs_endpoint().to_owned()
     }
 
     pub fn credentials(&self) -> Option<SpiralCredentials> {
-        read(&self.credentials).clone()
+        read(&self.connection_settings).credentials().cloned()
     }
 
     pub fn is_configured(&self) -> bool {
-        read(&self.project_id).is_some()
+        read(&self.connection_settings).project_id().is_some()
     }
 
     /// Initialize the shared driver/database and force one authenticated
@@ -346,9 +337,11 @@ impl ProjectStore {
     /// connections are discarded.
     #[cfg(test)]
     pub fn configure_project(&self, project_id: &str) -> Result<(), String> {
-        let project_id = validate_project_id(project_id)?;
         let _operation = write(&self.operation_gate);
-        *write(&self.project_id) = Some(project_id);
+        let settings = read(&self.connection_settings)
+            .clone()
+            .with_project(project_id)?;
+        *write(&self.connection_settings) = settings;
         lock(&self.hosted).reset();
         Ok(())
     }
@@ -358,17 +351,16 @@ impl ProjectStore {
     /// database with the new scoped endpoint and credential options.
     pub fn configure_connection(
         &self,
-        endpoint: String,
-        spfs_endpoint: String,
-        project_id: &str,
-        credentials: Option<SpiralCredentials>,
+        connection_settings: SpiralConnectionSettings,
     ) -> Result<(), String> {
-        let project_id = validate_project_id(project_id)?;
+        if connection_settings.project_id().is_none() {
+            return Err(
+                "Spiral project is not configured. Choose a project in Settings → SpiralDB."
+                    .to_owned(),
+            );
+        }
         let _operation = write(&self.operation_gate);
-        *write(&self.endpoint) = endpoint;
-        *write(&self.spfs_endpoint) = spfs_endpoint;
-        *write(&self.project_id) = Some(project_id);
-        *write(&self.credentials) = credentials;
+        *write(&self.connection_settings) = connection_settings;
         lock(&self.hosted).reset();
         Ok(())
     }
@@ -398,14 +390,10 @@ impl ProjectStore {
             .map_err(|_| "Spiral ADBC connection pool is shutting down".to_owned())?;
         let hosted = self.hosted.clone();
         let operation_gate = self.operation_gate.clone();
-        let project_id = self.project_id.clone();
-        let endpoint = self.endpoint.clone();
-        let spfs_endpoint = self.spfs_endpoint.clone();
-        let credentials = self.credentials.clone();
+        let connection_settings = self.connection_settings.clone();
         tokio::task::spawn_blocking(move || {
             let _operation = read(&operation_gate);
-            let connection =
-                connection_config(&project_id, &endpoint, &spfs_endpoint, &credentials)?;
+            let connection = connection_config(&connection_settings)?;
             let display_endpoint = connection.endpoint.clone();
             let connection = lock(&hosted)
                 .checkout(&connection)
@@ -435,12 +423,7 @@ impl ProjectStore {
     ) -> Result<T, String> {
         let _permit = acquire_blocking(self.hosted_slots.clone())?;
         let _operation = read(&self.operation_gate);
-        let connection = connection_config(
-            &self.project_id,
-            &self.endpoint,
-            &self.spfs_endpoint,
-            &self.credentials,
-        )?;
+        let connection = connection_config(&self.connection_settings)?;
         let endpoint = connection.endpoint.clone();
         let connection = lock(&self.hosted)
             .checkout(&connection)
@@ -473,12 +456,7 @@ impl ProjectStore {
     ) -> Result<T, String> {
         let _permit = acquire_blocking(self.hosted_slots.clone())?;
         let _operation = write(&self.operation_gate);
-        let connection = connection_config(
-            &self.project_id,
-            &self.endpoint,
-            &self.spfs_endpoint,
-            &self.credentials,
-        )?;
+        let connection = connection_config(&self.connection_settings)?;
         let endpoint = connection.endpoint.clone();
         lock(&self.hosted).available.clear();
         let connection = lock(&self.hosted)
@@ -500,12 +478,7 @@ impl ProjectStore {
     ) -> Result<T, String> {
         let _permit = acquire_blocking(self.hosted_slots.clone())?;
         let _operation = write(&self.operation_gate);
-        let connection = connection_config(
-            &self.project_id,
-            &self.endpoint,
-            &self.spfs_endpoint,
-            &self.credentials,
-        )?;
+        let connection = connection_config(&self.connection_settings)?;
         let endpoint = connection.endpoint.clone();
         let connection = {
             let mut hosted = lock(&self.hosted);
@@ -555,36 +528,22 @@ fn present_error(endpoint: &str, error: String) -> String {
     )
 }
 
-fn validate_project_id(project_id: &str) -> Result<String, String> {
-    let project_id = project_id.trim();
-    if project_id.is_empty()
-        || !project_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
-        return Err("Spiral project must contain only letters, numbers, '_' or '-'".to_owned());
-    }
-    Ok(project_id.to_owned())
-}
-
 fn connection_config(
-    project_id: &RwLock<Option<String>>,
-    endpoint: &RwLock<String>,
-    spfs_endpoint: &RwLock<String>,
-    credentials: &RwLock<Option<SpiralCredentials>>,
-) -> Result<ConnectionConfig, String> {
-    let project_id = read(project_id).clone().ok_or_else(|| {
+    settings: &RwLock<SpiralConnectionSettings>,
+) -> Result<RuntimeConnectionConfig, String> {
+    let settings = read(settings);
+    let project_id = settings.project_id().ok_or_else(|| {
         "Spiral project is not configured. Choose a project in Settings → SpiralDB.".to_owned()
     })?;
-    Ok(ConnectionConfig {
-        project_id,
-        endpoint: read(endpoint).clone(),
-        spfs_endpoint: read(spfs_endpoint).clone(),
-        credentials: read(credentials).clone(),
+    Ok(RuntimeConnectionConfig {
+        project_id: project_id.to_owned(),
+        endpoint: settings.endpoint().to_owned(),
+        spfs_endpoint: settings.spfs_endpoint().to_owned(),
+        credentials: settings.credentials().cloned(),
     })
 }
 
-fn open_database(config: &ConnectionConfig) -> Result<SpiralDatabase, String> {
+fn open_database(config: &RuntimeConnectionConfig) -> Result<SpiralDatabase, String> {
     let mut driver = SpiralDriver;
     let database_uri = format!("spiraldb://?project={}", config.project_id);
     let mut options = vec![
@@ -601,11 +560,11 @@ fn open_database(config: &ConnectionConfig) -> Result<SpiralDatabase, String> {
     if let Some(credentials) = &config.credentials {
         options.push((
             OptionDatabase::Username,
-            credentials.client_id.clone().into(),
+            credentials.client_id().to_owned().into(),
         ));
         options.push((
             OptionDatabase::Password,
-            credentials.client_secret.clone().into(),
+            credentials.client_secret().to_owned().into(),
         ));
     }
     let database = driver
@@ -642,10 +601,11 @@ mod tests {
     #[test]
     fn project_store_can_start_unconfigured_then_select_one_project() {
         let project_store = ProjectStore::new(
-            "https://api.spiraldb.dev".to_owned(),
-            "https://spfs.spiraldb.dev".to_owned(),
-            None,
-            None,
+            SpiralConnectionSettings::new(
+                "https://api.spiraldb.dev".to_owned(),
+                "https://spfs.spiraldb.dev".to_owned(),
+            )
+            .unwrap(),
             "spiral_robotics".to_owned(),
         )
         .unwrap();
@@ -665,10 +625,11 @@ mod tests {
     #[test]
     fn invalid_project_selection_does_not_configure_the_project_store() {
         let project_store = ProjectStore::new(
-            "https://api.spiraldb.dev".to_owned(),
-            "https://spfs.spiraldb.dev".to_owned(),
-            None,
-            None,
+            SpiralConnectionSettings::new(
+                "https://api.spiraldb.dev".to_owned(),
+                "https://spfs.spiraldb.dev".to_owned(),
+            )
+            .unwrap(),
             "spiral_robotics".to_owned(),
         )
         .unwrap();
