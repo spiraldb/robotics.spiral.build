@@ -71,6 +71,22 @@ impl MotorSpec {
     }
 }
 
+impl MotorCalibration {
+    fn validate_name(&self, name: &str) -> Result<(), CalibrationError> {
+        if name.is_empty()
+            || name
+                .chars()
+                .any(|character| character.is_whitespace() || character.is_control())
+        {
+            Err(CalibrationError::InvalidMotorName {
+                name: name.to_owned(),
+            })
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// Raw readings for one motor after a completed range sweep.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MotorReading {
@@ -349,7 +365,21 @@ impl<'a> TryFrom<&'a BTreeMap<String, MotorSpec>> for MotorSpecifications<'a> {
     type Error = CalibrationError;
 
     fn try_from(specifications: &'a BTreeMap<String, MotorSpec>) -> Result<Self, Self::Error> {
-        validate_motor_specs(specifications)?;
+        if specifications.is_empty() {
+            return Err(CalibrationError::NoMotors);
+        }
+
+        let mut ids = BTreeMap::<u32, &str>::new();
+        for (name, specification) in specifications {
+            specification.validate_name(name)?;
+            if let Some(first) = ids.insert(specification.id, name) {
+                return Err(CalibrationError::DuplicateMotorId {
+                    id: specification.id,
+                    first: first.to_owned(),
+                    second: name.clone(),
+                });
+            }
+        }
         Ok(Self(specifications))
     }
 }
@@ -358,29 +388,39 @@ impl<'a> MotorSpecifications<'a> {
     const fn as_map(self) -> &'a BTreeMap<String, MotorSpec> {
         self.0
     }
+
+    fn validate_keys<T>(
+        self,
+        values: &BTreeMap<String, T>,
+        context: &str,
+    ) -> Result<(), CalibrationError> {
+        let expected = self.0.keys().cloned().collect::<BTreeSet<_>>();
+        let actual = values.keys().cloned().collect::<BTreeSet<_>>();
+        if expected == actual {
+            return Ok(());
+        }
+        Err(CalibrationError::KeyMismatch {
+            context: context.to_owned(),
+            missing: expected.difference(&actual).cloned().collect(),
+            unexpected: actual.difference(&expected).cloned().collect(),
+        })
+    }
 }
 
-fn validate_motor_specs(
-    specifications: &BTreeMap<String, MotorSpec>,
-) -> Result<(), CalibrationError> {
-    if specifications.is_empty() {
-        return Err(CalibrationError::NoMotors);
-    }
-
-    let mut ids = BTreeMap::<u32, &str>::new();
-    for (name, specification) in specifications {
-        validate_motor_name(name)?;
-
-        if let Some(first) = ids.insert(specification.id, name) {
-            return Err(CalibrationError::DuplicateMotorId {
-                id: specification.id,
-                first: first.to_owned(),
-                second: name.clone(),
-            });
+impl MotorSpec {
+    fn validate_name(&self, name: &str) -> Result<(), CalibrationError> {
+        if name.is_empty()
+            || name
+                .chars()
+                .any(|character| character.is_whitespace() || character.is_control())
+        {
+            Err(CalibrationError::InvalidMotorName {
+                name: name.to_owned(),
+            })
+        } else {
+            Ok(())
         }
     }
-
-    Ok(())
 }
 
 impl Calibration {
@@ -432,7 +472,7 @@ impl Calibration {
 
         let mut ids = BTreeMap::<u32, &str>::new();
         for (name, motor) in &calibration.motors {
-            validate_motor_name(name)?;
+            motor.validate_name(name)?;
             if let Some(first) = ids.insert(motor.id, name) {
                 return Err(CalibrationError::DuplicateMotorId {
                     id: motor.id,
@@ -440,7 +480,7 @@ impl Calibration {
                     second: name.clone(),
                 });
             }
-            validate_range(name, motor.reading)?;
+            motor.reading.validate_for(name)?;
         }
         Ok(())
     }
@@ -458,7 +498,7 @@ impl Calibration {
         let calibration = self;
         let specifications = MotorSpecifications::try_from(specs)?;
         calibration.validate()?;
-        validate_keys(specifications.as_map(), &calibration.motors, "calibration")?;
+        specifications.validate_keys(&calibration.motors, "calibration")?;
 
         for (name, specification) in specifications.as_map() {
             let motor = calibration
@@ -491,11 +531,11 @@ impl CalibrationInput {
 
         let readings = match input {
             CalibrationInput::Direct { motors } => {
-                validate_keys(specs, motors, "direct readings")?;
+                specifications.validate_keys(motors, "direct readings")?;
                 motors.clone()
             }
             CalibrationInput::Sweep { center, samples } => {
-                validate_keys(specs, center, "center readings")?;
+                specifications.validate_keys(center, "center readings")?;
                 if samples.is_empty() {
                     return Err(CalibrationError::EmptySamples);
                 }
@@ -505,7 +545,7 @@ impl CalibrationInput {
                     .map(|name| (name.clone(), (i64::MAX, i64::MIN)))
                     .collect::<BTreeMap<_, _>>();
                 for (index, sample) in samples.iter().enumerate() {
-                    validate_keys(specs, sample, &format!("sweep sample {index}"))?;
+                    specifications.validate_keys(sample, &format!("sweep sample {index}"))?;
                     for (name, value) in sample {
                         let (minimum, maximum) = extrema
                             .get_mut(name)
@@ -539,7 +579,7 @@ impl CalibrationInput {
                 let reading = *readings
                     .get(name)
                     .expect("validated input must contain every motor");
-                validate_range(name, reading)?;
+                reading.validate_for(name)?;
                 Ok((
                     name.clone(),
                     MotorCalibration::new(spec.id, spec.direction, reading)?,
@@ -563,7 +603,7 @@ impl MotorCalibration {
         direction: MotorDirection,
         reading: MotorReading,
     ) -> Result<Self, CalibrationError> {
-        validate_range(&format!("id {id}"), reading)?;
+        reading.validate_for(&format!("id {id}"))?;
         Ok(Self {
             id,
             direction,
@@ -607,7 +647,9 @@ impl MotorCalibration {
     /// Convert a raw reading to degrees from this motor's calibrated center,
     /// preserving its configured joint direction.
     pub fn degrees_from_center(&self, raw: i64) -> f64 {
-        let degrees = crate::arm::counts_to_degrees(raw.saturating_sub(self.reading.center));
+        let degrees = crate::arm::JointDefinition::degrees_from_encoder_counts(
+            raw.saturating_sub(self.reading.center),
+        );
         match self.direction {
             MotorDirection::Normal => degrees,
             MotorDirection::Reversed => -degrees,
@@ -794,47 +836,18 @@ impl MotorCalibration {
     }
 }
 
-fn validate_motor_name(name: &str) -> Result<(), CalibrationError> {
-    if name.is_empty()
-        || name
-            .chars()
-            .any(|character| character.is_whitespace() || character.is_control())
-    {
-        Err(CalibrationError::InvalidMotorName {
-            name: name.to_owned(),
-        })
-    } else {
-        Ok(())
-    }
-}
-
-fn validate_keys<T>(
-    specs: &BTreeMap<String, MotorSpec>,
-    values: &BTreeMap<String, T>,
-    context: &str,
-) -> Result<(), CalibrationError> {
-    let expected = specs.keys().cloned().collect::<BTreeSet<_>>();
-    let actual = values.keys().cloned().collect::<BTreeSet<_>>();
-    if expected == actual {
-        return Ok(());
-    }
-    Err(CalibrationError::KeyMismatch {
-        context: context.to_owned(),
-        missing: expected.difference(&actual).cloned().collect(),
-        unexpected: actual.difference(&expected).cloned().collect(),
-    })
-}
-
-fn validate_range(name: &str, reading: MotorReading) -> Result<(), CalibrationError> {
-    if reading.range_min < reading.center && reading.center < reading.range_max {
-        Ok(())
-    } else {
-        Err(CalibrationError::InvalidRange {
-            motor: name.to_owned(),
-            range_min: reading.range_min,
-            center: reading.center,
-            range_max: reading.range_max,
-        })
+impl MotorReading {
+    fn validate_for(self, name: &str) -> Result<(), CalibrationError> {
+        if self.range_min < self.center && self.center < self.range_max {
+            Ok(())
+        } else {
+            Err(CalibrationError::InvalidRange {
+                motor: name.to_owned(),
+                range_min: self.range_min,
+                center: self.center,
+                range_max: self.range_max,
+            })
+        }
     }
 }
 
@@ -905,21 +918,21 @@ mod tests {
     #[test]
     fn validates_motor_specs() {
         assert_eq!(
-            validate_motor_specs(&BTreeMap::new()),
+            MotorSpecifications::try_from(&BTreeMap::<String, MotorSpec>::new()).map(|_| ()),
             Err(CalibrationError::NoMotors)
         );
 
         let mut specs = two_specs();
         specs.insert("bad name".to_owned(), motor_spec(3));
         assert!(matches!(
-            validate_motor_specs(&specs),
+            MotorSpecifications::try_from(&specs).map(|_| ()),
             Err(CalibrationError::InvalidMotorName { .. })
         ));
 
         let mut specs = two_specs();
         specs.get_mut("elbow").unwrap().id = 1;
         assert!(matches!(
-            validate_motor_specs(&specs),
+            MotorSpecifications::try_from(&specs).map(|_| ()),
             Err(CalibrationError::DuplicateMotorId { .. })
         ));
     }

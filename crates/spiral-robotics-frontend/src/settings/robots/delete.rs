@@ -8,7 +8,7 @@ use spiral_robotics_api::robots::RobotSummary;
 
 use crate::client::http as api;
 use crate::shell::state::studio;
-use crate::tasks::single_flight;
+use crate::tasks::SingleFlight;
 
 /// Deleting an arm destroys its calibration, so it takes a specific second click.
 #[component]
@@ -54,9 +54,9 @@ pub(super) fn DeleteRobotAction(robot: RobotSummary) -> Element {
                     }
                     let id = id.clone();
                     studio.run(format!("Deleted {id}."), async move {
-                        let Some(result) = single_flight(
+                        let Some(result) = SingleFlight::run(
                             deleting,
-                            api::send::<()>(Method::DELETE, &format!("/api/robots/{id}"), None),
+                            api::Http::send::<()>(Method::DELETE, &format!("/api/robots/{id}"), None),
                         )
                         .await
                         else {

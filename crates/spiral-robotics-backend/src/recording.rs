@@ -244,185 +244,200 @@ impl<P: RecordingPort + ?Sized> Drop for RecordingStopReservation<'_, P> {
     }
 }
 
-/// Enter the configured teleoperation session, then open one take.
-///
-/// If any edge assembly fails after the mode transition, returning to idle is
-/// mandatory compensation. A failed rollback is retained in the operator
-/// error because an unnoticed live teleoperation session is safety-relevant.
-pub(crate) async fn start_recording<P: RecordingPort + ?Sized>(
-    port: &P,
-    command: StartRecordingCommand,
-) -> Result<RecordingResult, OperationError> {
-    let Some(token) = port.reserve_recording_start()? else {
-        return Err(OperationError::Conflict(
-            "another recording is already opening; wait for it to finish".to_owned(),
-        ));
-    };
-    let mut reservation = RecordingStartReservation::new(port, token);
-    let result = start_reserved(port, command).await;
-    if let Ok(recording) = &result {
-        reservation.retain_for_recording(recording.episode.clone());
-    }
-    result
+pub(crate) struct RecordingActions<'a, P: RecordingPort + ?Sized> {
+    port: &'a P,
 }
 
-async fn start_reserved<P: RecordingPort + ?Sized>(
-    port: &P,
-    mut command: StartRecordingCommand,
-) -> Result<RecordingResult, OperationError> {
-    if port.recording_active() {
-        return Err(OperationError::Conflict(
-            "a take is already recording; stop it first".to_owned(),
-        ));
+impl<'a, P: RecordingPort + ?Sized> RecordingActions<'a, P> {
+    pub(crate) const fn new(port: &'a P) -> Self {
+        Self { port }
     }
-    command.dataset_id = validate_dataset_id(&command.dataset_id)?;
-    command.note = command
-        .note
-        .as_deref()
-        .map(str::trim)
-        .filter(|note| !note.is_empty())
-        .map(str::to_owned);
 
-    let pair = port.default_teleoperation_pair().ok_or_else(|| {
-        OperationError::InvalidInput(
-            "connect and calibrate two compatible arms before recording".to_owned(),
-        )
-    })?;
-    let context = port.recording_context();
-    if context.media_finalizing {
-        return Err(OperationError::Conflict(
-            "the previous episode's video is still being finalized; try again shortly".to_owned(),
-        ));
-    }
-    if !context.sample_hz.is_finite() || context.sample_hz <= 0.0 {
-        return Err(OperationError::Internal(
-            "the control loop reported an invalid sample rate".to_owned(),
-        ));
-    }
-    let arms = if command.arms.is_empty() {
-        vec![pair.leader.clone(), pair.follower.clone()]
-    } else {
-        command.arms.clone()
-    };
-    if arms.is_empty() {
-        return Err(OperationError::InvalidInput(
-            "connect at least one arm before recording a take".to_owned(),
-        ));
-    }
-    for arm in &arms {
-        if !context
-            .connected_arms
-            .iter()
-            .any(|connected| connected == arm)
-        {
-            return Err(OperationError::InvalidInput(format!(
-                "robot {arm:?} is not connected, so it cannot be recorded"
-            )));
+    /// Enter the configured teleoperation session, then open one take.
+    ///
+    /// If any edge assembly fails after the mode transition, returning to idle is
+    /// mandatory compensation. A failed rollback is retained in the operator
+    /// error because an unnoticed live teleoperation session is safety-relevant.
+    pub(crate) async fn start(
+        &self,
+        command: StartRecordingCommand,
+    ) -> Result<RecordingResult, OperationError> {
+        let Some(token) = self.port.reserve_recording_start()? else {
+            return Err(OperationError::Conflict(
+                "another recording is already opening; wait for it to finish".to_owned(),
+            ));
+        };
+        let mut reservation = RecordingStartReservation::new(self.port, token);
+        let result = self.start_reserved(command).await;
+        if let Ok(recording) = &result {
+            reservation.retain_for_recording(recording.episode.clone());
         }
+        result
     }
-    command.arms = arms.clone();
-    let source = format!("Teleoperation — {} → {}", pair.leader, pair.follower);
 
-    port.enter_teleoperation(&pair).await?;
-    let open = async {
-        let request = RecordingDraftRequest::new(command, source)
-            .with_capture(arms.clone(), context.sample_hz);
-        let draft = port.create_recording_draft(request)?;
-        let episode = port.draft_episode(&draft);
-        let media = port.start_recording_media(&episode, &arms).await?;
-        match port.begin_recording(draft).await {
-            Ok(recording) => {
-                port.retain_recording_media(media).await;
-                Ok(recording)
+    async fn start_reserved(
+        &self,
+        mut command: StartRecordingCommand,
+    ) -> Result<RecordingResult, OperationError> {
+        let port = self.port;
+        if port.recording_active() {
+            return Err(OperationError::Conflict(
+                "a take is already recording; stop it first".to_owned(),
+            ));
+        }
+        command.dataset_id = DatasetId::try_from(command.dataset_id.as_str())
+            .map(String::from)
+            .map_err(|error| OperationError::invalid_input(error.to_string()))?;
+        command.note = command
+            .note
+            .as_deref()
+            .map(str::trim)
+            .filter(|note| !note.is_empty())
+            .map(str::to_owned);
+
+        let pair = port.default_teleoperation_pair().ok_or_else(|| {
+            OperationError::InvalidInput(
+                "connect and calibrate two compatible arms before recording".to_owned(),
+            )
+        })?;
+        let context = port.recording_context();
+        if context.media_finalizing {
+            return Err(OperationError::Conflict(
+                "the previous episode's video is still being finalized; try again shortly"
+                    .to_owned(),
+            ));
+        }
+        if !context.sample_hz.is_finite() || context.sample_hz <= 0.0 {
+            return Err(OperationError::Internal(
+                "the control loop reported an invalid sample rate".to_owned(),
+            ));
+        }
+        let arms = if command.arms.is_empty() {
+            vec![pair.leader.clone(), pair.follower.clone()]
+        } else {
+            command.arms.clone()
+        };
+        if arms.is_empty() {
+            return Err(OperationError::InvalidInput(
+                "connect at least one arm before recording a take".to_owned(),
+            ));
+        }
+        for arm in &arms {
+            if !context
+                .connected_arms
+                .iter()
+                .any(|connected| connected == arm)
+            {
+                return Err(OperationError::InvalidInput(format!(
+                    "robot {arm:?} is not connected, so it cannot be recorded"
+                )));
             }
-            Err(error) => {
-                if let Some(capture) = media {
-                    port.abandon_recording_media(capture).await;
+        }
+        command.arms = arms.clone();
+        let source = format!("Teleoperation — {} → {}", pair.leader, pair.follower);
+
+        port.enter_teleoperation(&pair).await?;
+        let open = async {
+            let request = RecordingDraftRequest::new(command, source)
+                .with_capture(arms.clone(), context.sample_hz);
+            let draft = port.create_recording_draft(request)?;
+            let episode = port.draft_episode(&draft);
+            let media = port.start_recording_media(&episode, &arms).await?;
+            match port.begin_recording(draft).await {
+                Ok(recording) => {
+                    port.retain_recording_media(media).await;
+                    Ok(recording)
                 }
-                Err(error)
+                Err(error) => {
+                    if let Some(capture) = media {
+                        port.abandon_recording_media(capture).await;
+                    }
+                    Err(error)
+                }
+            }
+        }
+        .await;
+        match open {
+            Ok(summary) => Ok(summary),
+            Err(error) => match port.enter_idle().await {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(OperationError::Conflict(format!(
+                    "{error} Teleoperation also could not stop: {rollback}"
+                ))),
+            },
+        }
+    }
+
+    /// Finish a take and independently attempt the safety transition to idle.
+    ///
+    /// Media is claimed before the hardware stop so an automatic-stop observer
+    /// cannot race this explicit action. The idle transition is attempted even if
+    /// finalizing the recording fails.
+    pub(crate) async fn stop(
+        &self,
+        command: StopRecordingCommand,
+    ) -> Result<RecordingResult, OperationError> {
+        let port = self.port;
+        // The recording acquired this lease before allocating its episode ID. Hold
+        // it until the take and media manifest are both finalized, and release it
+        // on every success or failure path.
+        let _reservation = RecordingStopReservation {
+            port,
+            token: port.claim_recording_lease()?,
+        };
+        let capture = port.take_recording_media().await;
+        let capture_episode = capture.as_ref().map(|capture| port.media_episode(capture));
+        let recording = port.stop_recording(command).await;
+        let idle = port.enter_idle().await;
+        let media = match capture {
+            Some(capture) => port.finish_recording_media(capture).await,
+            None => port.empty_media_output(),
+        };
+
+        match (recording, idle) {
+            (Ok(summary), Ok(())) => {
+                port.commit_recording(summary.episode.clone(), media)?;
+                Ok(summary)
+            }
+            (Ok(summary), Err(mode_error)) => {
+                port.commit_recording(summary.episode, media)?;
+                Err(OperationError::Conflict(format!(
+                    "the recording ended, but teleoperation could not stop: {mode_error}"
+                )))
+            }
+            (Err(recording_error), Ok(())) => {
+                if let Some(episode) = capture_episode {
+                    port.commit_recording(episode, media)?;
+                }
+                Err(recording_error)
+            }
+            (Err(recording_error), Err(mode_error)) => {
+                if let Some(episode) = capture_episode {
+                    port.commit_recording(episode, media)?;
+                }
+                Err(OperationError::Conflict(format!(
+                    "{recording_error}; teleoperation also could not stop: {mode_error}"
+                )))
             }
         }
     }
-    .await;
-    match open {
-        Ok(summary) => Ok(summary),
-        Err(error) => match port.enter_idle().await {
-            Ok(()) => Err(error),
-            Err(rollback) => Err(OperationError::Conflict(format!(
-                "{error} Teleoperation also could not stop: {rollback}"
-            ))),
-        },
-    }
-}
 
-/// Finish a take and independently attempt the safety transition to idle.
-///
-/// Media is claimed before the hardware stop so an automatic-stop observer
-/// cannot race this explicit action. The idle transition is attempted even if
-/// finalizing the recording fails.
-pub(crate) async fn stop_recording<P: RecordingPort + ?Sized>(
-    port: &P,
-    command: StopRecordingCommand,
-) -> Result<RecordingResult, OperationError> {
-    // The recording acquired this lease before allocating its episode ID. Hold
-    // it until the take and media manifest are both finalized, and release it
-    // on every success or failure path.
-    let _reservation = RecordingStopReservation {
-        port,
-        token: port.claim_recording_lease()?,
-    };
-    let capture = port.take_recording_media().await;
-    let capture_episode = capture.as_ref().map(|capture| port.media_episode(capture));
-    let recording = port.stop_recording(command).await;
-    let idle = port.enter_idle().await;
-    let media = match capture {
-        Some(capture) => port.finish_recording_media(capture).await,
-        None => port.empty_media_output(),
-    };
-
-    match (recording, idle) {
-        (Ok(summary), Ok(())) => {
-            port.commit_recording(summary.episode.clone(), media)?;
-            Ok(summary)
+    /// Pause/resume joint and media capture in a fail-safe order.
+    pub(crate) async fn set_paused(
+        &self,
+        command: SetRecordingPausedCommand,
+    ) -> Result<(), OperationError> {
+        if command.paused {
+            self.port.request_media_pause().await;
+            let paused = self.port.set_recording_paused(true).await;
+            self.port.finish_media_pause().await;
+            paused?;
+        } else {
+            let active_seconds = self.port.set_recording_paused(false).await?;
+            self.port.resume_media(active_seconds).await;
         }
-        (Ok(summary), Err(mode_error)) => {
-            port.commit_recording(summary.episode, media)?;
-            Err(OperationError::Conflict(format!(
-                "the recording ended, but teleoperation could not stop: {mode_error}"
-            )))
-        }
-        (Err(recording_error), Ok(())) => {
-            if let Some(episode) = capture_episode {
-                port.commit_recording(episode, media)?;
-            }
-            Err(recording_error)
-        }
-        (Err(recording_error), Err(mode_error)) => {
-            if let Some(episode) = capture_episode {
-                port.commit_recording(episode, media)?;
-            }
-            Err(OperationError::Conflict(format!(
-                "{recording_error}; teleoperation also could not stop: {mode_error}"
-            )))
-        }
+        Ok(())
     }
-}
-
-/// Pause/resume joint and media capture in a fail-safe order.
-pub(crate) async fn set_recording_paused<P: RecordingPort + ?Sized>(
-    port: &P,
-    command: SetRecordingPausedCommand,
-) -> Result<(), OperationError> {
-    if command.paused {
-        port.request_media_pause().await;
-        let paused = port.set_recording_paused(true).await;
-        port.finish_media_pause().await;
-        paused?;
-    } else {
-        let active_seconds = port.set_recording_paused(false).await?;
-        port.resume_media(active_seconds).await;
-    }
-    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -564,77 +579,80 @@ impl<'a> ReplayTrajectoryRequest<'a> {
     }
 }
 
-/// Resolve the recorded arm, load the validated trajectory, then admit replay.
-pub(crate) async fn start_replay<P: ReplayPort + ?Sized>(
-    port: &P,
-    command: StartReplayCommand,
-) -> Result<(), OperationError> {
-    if command.episode.trim().is_empty() || command.robot.trim().is_empty() {
-        return Err(OperationError::InvalidInput(
-            "replay requires an episode and target robot".to_owned(),
-        ));
-    }
-    if !command.start_seconds.is_finite() || command.start_seconds < 0.0 {
-        return Err(OperationError::InvalidInput(
-            "replay start time must be a finite, non-negative number of seconds".to_owned(),
-        ));
-    }
-    let summary = port.replay_episode(&command.episode)?;
-    let source = RecordedArms::new(&summary.id, &summary.arms, &command.robot)
-        .select(command.source_arm.as_deref())?;
-    let trajectory = port
-        .load_trajectory(ReplayTrajectoryRequest::new(
-            &command.episode,
-            &source,
-            command.start_seconds,
-        ))
-        .await?;
-    if !summary.sample_hz.is_finite() || summary.sample_hz <= 0.0 {
-        return Err(OperationError::InvalidInput(format!(
-            "take {:?} has an invalid sample rate",
-            command.episode
-        )));
-    }
-    if trajectory.frames.is_empty() || trajectory.start_frame >= trajectory.frames.len() {
-        return Err(OperationError::InvalidInput(format!(
-            "take {:?} has no replayable frames at the requested start time",
-            command.episode
-        )));
-    }
-    if !trajectory.resolved_start_seconds.is_finite()
-        || trajectory.resolved_start_seconds < 0.0
-        || trajectory
-            .frames
-            .iter()
-            .any(|frame| frame.is_empty() || frame.values().any(|value| !value.is_finite()))
-    {
-        return Err(OperationError::InvalidInput(format!(
-            "take {:?} contains an invalid replay trajectory",
-            command.episode
-        )));
-    }
-    port.start_replay(ReplayPlan {
-        robot: command.robot,
-        episode: command.episode,
-        frames: trajectory.frames,
-        sample_hz: summary.sample_hz,
-        start_frame: trajectory.start_frame,
-        resolved_start_seconds: trajectory.resolved_start_seconds,
-    })
-    .await
+pub(crate) struct ReplayActions<'a, P: ReplayPort + ?Sized> {
+    port: &'a P,
 }
 
-pub(crate) async fn set_replay_paused<P: ReplayPort + ?Sized>(
-    port: &P,
-    command: SetReplayPausedCommand,
-) -> Result<(), OperationError> {
-    port.set_replay_paused(command.paused).await
-}
+impl<'a, P: ReplayPort + ?Sized> ReplayActions<'a, P> {
+    pub(crate) const fn new(port: &'a P) -> Self {
+        Self { port }
+    }
 
-fn validate_dataset_id(value: &str) -> Result<String, OperationError> {
-    DatasetId::try_from(value)
-        .map(String::from)
-        .map_err(|error| OperationError::InvalidInput(error.to_string()))
+    /// Resolve the recorded arm, load the validated trajectory, then admit replay.
+    pub(crate) async fn start(&self, command: StartReplayCommand) -> Result<(), OperationError> {
+        if command.episode.trim().is_empty() || command.robot.trim().is_empty() {
+            return Err(OperationError::InvalidInput(
+                "replay requires an episode and target robot".to_owned(),
+            ));
+        }
+        if !command.start_seconds.is_finite() || command.start_seconds < 0.0 {
+            return Err(OperationError::InvalidInput(
+                "replay start time must be a finite, non-negative number of seconds".to_owned(),
+            ));
+        }
+        let summary = self.port.replay_episode(&command.episode)?;
+        let source = RecordedArms::new(&summary.id, &summary.arms, &command.robot)
+            .select(command.source_arm.as_deref())?;
+        let trajectory = self
+            .port
+            .load_trajectory(ReplayTrajectoryRequest::new(
+                &command.episode,
+                &source,
+                command.start_seconds,
+            ))
+            .await?;
+        if !summary.sample_hz.is_finite() || summary.sample_hz <= 0.0 {
+            return Err(OperationError::InvalidInput(format!(
+                "take {:?} has an invalid sample rate",
+                command.episode
+            )));
+        }
+        if trajectory.frames.is_empty() || trajectory.start_frame >= trajectory.frames.len() {
+            return Err(OperationError::InvalidInput(format!(
+                "take {:?} has no replayable frames at the requested start time",
+                command.episode
+            )));
+        }
+        if !trajectory.resolved_start_seconds.is_finite()
+            || trajectory.resolved_start_seconds < 0.0
+            || trajectory
+                .frames
+                .iter()
+                .any(|frame| frame.is_empty() || frame.values().any(|value| !value.is_finite()))
+        {
+            return Err(OperationError::InvalidInput(format!(
+                "take {:?} contains an invalid replay trajectory",
+                command.episode
+            )));
+        }
+        self.port
+            .start_replay(ReplayPlan {
+                robot: command.robot,
+                episode: command.episode,
+                frames: trajectory.frames,
+                sample_hz: summary.sample_hz,
+                start_frame: trajectory.start_frame,
+                resolved_start_seconds: trajectory.resolved_start_seconds,
+            })
+            .await
+    }
+
+    pub(crate) async fn set_paused(
+        &self,
+        command: SetReplayPausedCommand,
+    ) -> Result<(), OperationError> {
+        self.port.set_replay_paused(command.paused).await
+    }
 }
 
 #[cfg(test)]
@@ -926,7 +944,10 @@ mod tests {
     #[tokio::test]
     async fn start_enters_teleoperation_before_opening_the_resolved_pair() {
         let port = FakePort::default();
-        start_recording(&port, start_command()).await.unwrap();
+        RecordingActions::new(&port)
+            .start(start_command())
+            .await
+            .unwrap();
         assert_eq!(
             *port.events.lock().unwrap(),
             [
@@ -947,7 +968,10 @@ mod tests {
             idle_error: Some(OperationError::Conflict("control stopped".to_owned())),
             ..FakePort::default()
         };
-        let error = start_recording(&port, start_command()).await.unwrap_err();
+        let error = RecordingActions::new(&port)
+            .start(start_command())
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("Spiral unavailable"));
         assert!(error.to_string().contains("control stopped"));
         assert_eq!(
@@ -969,7 +993,7 @@ mod tests {
             ..FakePort::default()
         };
         assert!(matches!(
-            start_recording(&port, start_command()).await,
+            RecordingActions::new(&port).start(start_command()).await,
             Err(OperationError::Conflict(_))
         ));
         assert_eq!(*port.events.lock().unwrap(), ["reserve-start"]);
@@ -981,7 +1005,10 @@ mod tests {
             begin_error: Some(OperationError::Conflict("robot disconnected".to_owned())),
             ..FakePort::default()
         };
-        start_recording(&port, start_command()).await.unwrap_err();
+        RecordingActions::new(&port)
+            .start(start_command())
+            .await
+            .unwrap_err();
         assert_eq!(
             *port.events.lock().unwrap(),
             [
@@ -1004,7 +1031,8 @@ mod tests {
             ..FakePort::default()
         };
         port.seed_recording_lease();
-        stop_recording(&port, StopRecordingCommand { keep: true })
+        RecordingActions::new(&port)
+            .stop(StopRecordingCommand { keep: true })
             .await
             .unwrap_err();
         assert_eq!(
@@ -1029,7 +1057,8 @@ mod tests {
             ..FakePort::default()
         };
         port.seed_recording_lease();
-        let error = stop_recording(&port, StopRecordingCommand { keep: true })
+        let error = RecordingActions::new(&port)
+            .stop(StopRecordingCommand { keep: true })
             .await
             .unwrap_err();
         assert!(error.message().contains("committed"));
@@ -1052,7 +1081,8 @@ mod tests {
             pause_error: Some(OperationError::Internal("flush failed".to_owned())),
             ..FakePort::default()
         };
-        set_recording_paused(&port, SetRecordingPausedCommand { paused: true })
+        RecordingActions::new(&port)
+            .set_paused(SetRecordingPausedCommand { paused: true })
             .await
             .unwrap_err();
         assert_eq!(
@@ -1064,7 +1094,8 @@ mod tests {
     #[tokio::test]
     async fn resume_restarts_hardware_before_media_at_the_active_clock() {
         let port = FakePort::default();
-        set_recording_paused(&port, SetRecordingPausedCommand { paused: false })
+        RecordingActions::new(&port)
+            .set_paused(SetRecordingPausedCommand { paused: false })
             .await
             .unwrap();
         assert_eq!(
@@ -1076,17 +1107,15 @@ mod tests {
     #[tokio::test]
     async fn replay_resolves_the_source_before_loading_or_driving() {
         let port = FakePort::default();
-        start_replay(
-            &port,
-            StartReplayCommand {
+        ReplayActions::new(&port)
+            .start(StartReplayCommand {
                 episode: "episode_000001".to_owned(),
                 robot: "follower".to_owned(),
                 source_arm: None,
                 start_seconds: 0.2,
-            },
-        )
-        .await
-        .unwrap();
+            })
+            .await
+            .unwrap();
         assert_eq!(
             *port.events.lock().unwrap(),
             ["episode", "load:follower", "replay:follower:2"]
@@ -1097,17 +1126,15 @@ mod tests {
     async fn invalid_replay_time_never_reads_or_drives_the_episode() {
         let port = FakePort::default();
         for start_seconds in [-0.1, f64::NAN, f64::INFINITY] {
-            let error = start_replay(
-                &port,
-                StartReplayCommand {
+            let error = ReplayActions::new(&port)
+                .start(StartReplayCommand {
                     episode: "episode_000001".to_owned(),
                     robot: "follower".to_owned(),
                     source_arm: None,
                     start_seconds,
-                },
-            )
-            .await
-            .unwrap_err();
+                })
+                .await
+                .unwrap_err();
             assert!(matches!(error, OperationError::InvalidInput(_)));
         }
         assert!(port.events.lock().unwrap().is_empty());
@@ -1118,17 +1145,15 @@ mod tests {
         for sample_hz in [0.0, f64::NAN, f64::INFINITY] {
             let mut port = FakePort::default();
             port.episode.sample_hz = sample_hz;
-            let error = start_replay(
-                &port,
-                StartReplayCommand {
+            let error = ReplayActions::new(&port)
+                .start(StartReplayCommand {
                     episode: "episode_000001".to_owned(),
                     robot: "follower".to_owned(),
                     source_arm: None,
                     start_seconds: 0.2,
-                },
-            )
-            .await
-            .unwrap_err();
+                })
+                .await
+                .unwrap_err();
             assert!(matches!(error, OperationError::InvalidInput(_)));
             assert!(
                 !port
@@ -1144,7 +1169,8 @@ mod tests {
     #[tokio::test]
     async fn replay_pause_is_one_transport_neutral_action() {
         let port = FakePort::default();
-        set_replay_paused(&port, SetReplayPausedCommand { paused: true })
+        ReplayActions::new(&port)
+            .set_paused(SetReplayPausedCommand { paused: true })
             .await
             .unwrap();
         assert_eq!(*port.events.lock().unwrap(), ["replay-pause:true"]);

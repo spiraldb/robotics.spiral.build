@@ -101,7 +101,7 @@ impl VideoAsset {
         assets: &[Self],
         media_relation: &str,
     ) -> Result<RecordBatch, String> {
-        crate::manager::video_assets_batch(episode_id, assets, media_relation)
+        Self::storage_publication_batch(episode_id, assets, media_relation)
     }
 
     pub fn with_size(mut self, size: VideoSize) -> Self {

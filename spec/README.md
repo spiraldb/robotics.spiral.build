@@ -150,9 +150,18 @@ These rules apply to every feature:
 - Names must describe domain purpose; placeholder type or module names such as
   `Built`, `Common`, or `View` are not acceptable substitutes for the artifact,
   responsibility, summary, record, or validation input being modeled.
-- Behavior with a natural owner must be implemented as a member method. Use
-  `From` or `TryFrom` for type-owned conversions; reserve free functions for
-  genuinely stateless operations without a meaningful receiver.
+- Behavior with a natural owner must be implemented as a member or associated
+  method. Construction, discovery, parsing, decoding, validation, formatting,
+  defaults, and error construction belong to the type they produce or inspect;
+  use `From` or `TryFrom` for type-owned conversions when those traits express
+  the contract cleanly.
+- `AppState` owns HTTP routing, backend bootstrap, and cross-capability
+  orchestration. Capability action types own their use cases. Do not add free
+  facade functions that merely forward state or ports into those owners.
+- Reserve free functions for required language or framework entry points and
+  callbacks, such as process `main`, Dioxus components and hooks, and browser
+  event boundaries. A merely stateless implementation is not enough when its
+  result or responsibility provides a meaningful owner.
 - Every item must use the narrowest useful visibility. Named struct fields are
   private and exposed through narrow constructors, builders, getters, and
   domain operations. Serialized contracts preserve their flat wire shape with
@@ -173,8 +182,9 @@ These rules apply to every feature:
 - A struct or enum variant has at most seven fields; group related internal
   state into private capability values. Stable serialized and wire contracts
   use `serde` flattening when their external shape must remain flat.
-- A recursive syntax-level architecture test enforces the field, parameter,
-  visibility, and no-static bounds across every first-party production crate.
+- A recursive syntax-level architecture test enforces the ownership, field,
+  parameter, visibility, and no-static bounds across every first-party
+  production crate, including build support and examples.
 - Critical invariants must be enforced by core, backend capability policy, or
   hardware control policy, not only by UI controls.
 - Pure feature tests must run without hardware, HTTP, SpiralDB, or a compute

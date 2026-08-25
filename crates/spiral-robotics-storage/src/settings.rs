@@ -69,15 +69,15 @@ pub struct SpiralConnectionSettings {
 impl SpiralConnectionSettings {
     pub fn new(endpoint: String, spfs_endpoint: String) -> Result<Self, String> {
         Ok(Self {
-            endpoint: normalize_spiral_endpoint(&endpoint)?,
-            spfs_endpoint: normalize_spiral_spfs_endpoint(&spfs_endpoint)?,
+            endpoint: ServiceEndpoint::spiral(&endpoint)?.into_string(),
+            spfs_endpoint: ServiceEndpoint::spiral_spfs(&spfs_endpoint)?.into_string(),
             project_id: None,
             credentials: None,
         })
     }
 
     pub fn with_project(mut self, project_id: &str) -> Result<Self, String> {
-        self.project_id = Some(validate_project_id(project_id)?);
+        self.project_id = Some(Self::validated_project_id(project_id)?);
         Ok(self)
     }
 
@@ -100,6 +100,79 @@ impl SpiralConnectionSettings {
 
     pub(crate) fn credentials(&self) -> Option<&SpiralCredentials> {
         self.credentials.as_ref()
+    }
+
+    fn validated_project_id(project_id: &str) -> Result<String, String> {
+        let project_id = project_id.trim();
+        if project_id.is_empty()
+            || !project_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err("Spiral project must contain only letters, numbers, '_' or '-'".to_owned());
+        }
+        Ok(project_id.to_owned())
+    }
+}
+
+/// A validated HTTP service destination used by Spiral Robotics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServiceEndpoint(String);
+
+impl ServiceEndpoint {
+    pub fn spiral(endpoint: &str) -> Result<Self, String> {
+        Self::parse(endpoint, "Spiral API endpoint")
+    }
+
+    pub fn spiral_spfs(endpoint: &str) -> Result<Self, String> {
+        Self::parse(endpoint, "Spiral SpFS endpoint")
+    }
+
+    pub fn training_runtime(endpoint: &str) -> Result<Self, String> {
+        Self::parse(endpoint, "Training runtime endpoint")
+    }
+
+    pub fn environment_spiral() -> Self {
+        Self(
+            std::env::var("SPIRAL__SERVER__URL")
+                .or_else(|_| std::env::var("SPIRALDB_API_URL"))
+                .unwrap_or_else(|_| DEFAULT_SPIRAL_ENDPOINT.to_owned()),
+        )
+    }
+
+    pub fn environment_spiral_spfs() -> Self {
+        Self(
+            std::env::var("SPIRAL__SPFS__URL")
+                .unwrap_or_else(|_| DEFAULT_SPIRAL_SPFS_ENDPOINT.to_owned()),
+        )
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+
+    fn parse(endpoint: &str, label: &str) -> Result<Self, String> {
+        let endpoint = endpoint.trim();
+        let parsed = Url::parse(endpoint)
+            .map_err(|error| format!("{label} must be an http:// or https:// URL: {error}"))?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            return Err(format!(
+                "{label} must be an http:// or https:// URL with a host"
+            ));
+        }
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(format!("{label} must not contain embedded credentials"));
+        }
+        if parsed.query().is_some() || parsed.fragment().is_some() {
+            return Err(format!(
+                "{label} must not contain a query string or fragment"
+            ));
+        }
+        Ok(Self(parsed.as_str().trim_end_matches('/').to_owned()))
     }
 }
 
@@ -141,22 +214,32 @@ impl BackendStateStore {
     }
 
     pub fn project_id(&self) -> Option<String> {
-        let project_id = lock(&self.current).project_id.trim().to_owned();
+        let project_id = self.current.lock_unpoisoned().project_id.trim().to_owned();
         (!project_id.is_empty()).then_some(project_id)
     }
 
     pub fn spiral_endpoint(&self) -> Option<String> {
-        let endpoint = lock(&self.current).spiral_endpoint.trim().to_owned();
+        let endpoint = self
+            .current
+            .lock_unpoisoned()
+            .spiral_endpoint
+            .trim()
+            .to_owned();
         (!endpoint.is_empty()).then_some(endpoint)
     }
 
     pub fn spiral_spfs_endpoint(&self) -> Option<String> {
-        let endpoint = lock(&self.current).spiral_spfs_endpoint.trim().to_owned();
+        let endpoint = self
+            .current
+            .lock_unpoisoned()
+            .spiral_spfs_endpoint
+            .trim()
+            .to_owned();
         (!endpoint.is_empty()).then_some(endpoint)
     }
 
     pub fn credentials(&self) -> Option<SpiralCredentials> {
-        let current = lock(&self.current);
+        let current = self.current.lock_unpoisoned();
         let client_id = current.client_id.trim().to_owned();
         let client_secret = current.client_secret.clone();
         (!client_id.is_empty() && !client_secret.is_empty())
@@ -164,7 +247,7 @@ impl BackendStateStore {
     }
 
     pub fn client_id(&self) -> String {
-        lock(&self.current).client_id.trim().to_owned()
+        self.current.lock_unpoisoned().client_id.trim().to_owned()
     }
 
     pub fn save_connection(&self, settings: &SpiralConnectionSettings) -> Result<(), String> {
@@ -184,64 +267,10 @@ impl BackendStateStore {
                 .map(|credentials| credentials.client_secret().to_owned())
                 .unwrap_or_default(),
         };
-        write_private_json(&self.path, &next)?;
-        *lock(&self.current) = next;
+        next.write_private(&self.path)?;
+        *self.current.lock_unpoisoned() = next;
         Ok(())
     }
-}
-
-pub fn normalize_spiral_endpoint(endpoint: &str) -> Result<String, String> {
-    normalize_service_endpoint(endpoint, "Spiral API endpoint")
-}
-
-pub fn normalize_spiral_spfs_endpoint(endpoint: &str) -> Result<String, String> {
-    normalize_service_endpoint(endpoint, "Spiral SpFS endpoint")
-}
-
-pub fn normalize_training_runtime_endpoint(endpoint: &str) -> Result<String, String> {
-    normalize_service_endpoint(endpoint, "Training runtime endpoint")
-}
-
-fn normalize_service_endpoint(endpoint: &str, label: &str) -> Result<String, String> {
-    let endpoint = endpoint.trim();
-    let parsed = Url::parse(endpoint)
-        .map_err(|error| format!("{label} must be an http:// or https:// URL: {error}"))?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
-        return Err(format!(
-            "{label} must be an http:// or https:// URL with a host"
-        ));
-    }
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err(format!("{label} must not contain embedded credentials"));
-    }
-    if parsed.query().is_some() || parsed.fragment().is_some() {
-        return Err(format!(
-            "{label} must not contain a query string or fragment"
-        ));
-    }
-    Ok(parsed.as_str().trim_end_matches('/').to_owned())
-}
-
-fn validate_project_id(project_id: &str) -> Result<String, String> {
-    let project_id = project_id.trim();
-    if project_id.is_empty()
-        || !project_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
-        return Err("Spiral project must contain only letters, numbers, '_' or '-'".to_owned());
-    }
-    Ok(project_id.to_owned())
-}
-
-pub fn environment_spiral_endpoint() -> String {
-    std::env::var("SPIRAL__SERVER__URL")
-        .or_else(|_| std::env::var("SPIRALDB_API_URL"))
-        .unwrap_or_else(|_| DEFAULT_SPIRAL_ENDPOINT.to_owned())
-}
-
-pub fn environment_spiral_spfs_endpoint() -> String {
-    std::env::var("SPIRAL__SPFS__URL").unwrap_or_else(|_| DEFAULT_SPIRAL_SPFS_ENDPOINT.to_owned())
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -277,7 +306,7 @@ impl StudioPreferencesStore {
     }
 
     pub fn get(&self) -> StoredStudioPreferences {
-        lock(&self.current).clone()
+        self.current.lock_unpoisoned().clone()
     }
 
     pub fn stage_update(
@@ -286,61 +315,68 @@ impl StudioPreferencesStore {
         video: VideoSettings,
     ) -> Result<StoredStudioPreferences, String> {
         let endpoint = training.endpoint().trim().to_owned();
-        training.set_endpoint(normalize_training_runtime_endpoint(&endpoint)?);
+        training.set_endpoint(ServiceEndpoint::training_runtime(&endpoint)?.into_string());
         Ok(StoredStudioPreferences::new(training, video))
     }
 
     pub fn replace(&self, preferences: StoredStudioPreferences) -> StoredStudioPreferences {
-        let mut current = lock(&self.current);
+        let mut current = self.current.lock_unpoisoned();
         *current = preferences;
         current.clone()
     }
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+trait UnpoisonedMutex<T> {
+    fn lock_unpoisoned(&self) -> MutexGuard<'_, T>;
 }
 
-fn write_private_json(path: &Path, value: &BackendState) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("backend state path {} has no parent", path.display()))?;
-    let mut directory = fs::DirBuilder::new();
-    directory.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt as _;
-        directory.mode(0o700);
+impl<T> UnpoisonedMutex<T> for Mutex<T> {
+    fn lock_unpoisoned(&self) -> MutexGuard<'_, T> {
+        self.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-    directory
-        .create(parent)
-        .map_err(|error| format!("creating {}: {error}", parent.display()))?;
+}
 
-    let temporary = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(value)
-        .map_err(|error| format!("encoding backend state: {error}"))?;
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
+impl BackendState {
+    fn write_private(&self, path: &Path) -> Result<(), String> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("backend state path {} has no parent", path.display()))?;
+        let mut directory = fs::DirBuilder::new();
+        directory.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            directory.mode(0o700);
+        }
+        directory
+            .create(parent)
+            .map_err(|error| format!("creating {}: {error}", parent.display()))?;
+
+        let temporary = path.with_extension("json.tmp");
+        let bytes = serde_json::to_vec_pretty(self)
+            .map_err(|error| format!("encoding backend state: {error}"))?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temporary)
+            .map_err(|error| format!("opening {}: {error}", temporary.display()))?;
+        file.write_all(&bytes)
+            .and_then(|()| file.write_all(b"\n"))
+            .and_then(|()| file.sync_all())
+            .map_err(|error| format!("writing {}: {error}", temporary.display()))?;
+        fs::rename(&temporary, path)
+            .map_err(|error| format!("publishing {}: {error}", path.display()))?;
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("syncing {}: {error}", parent.display()))?;
+        Ok(())
     }
-    let mut file = options
-        .open(&temporary)
-        .map_err(|error| format!("opening {}: {error}", temporary.display()))?;
-    file.write_all(&bytes)
-        .and_then(|()| file.write_all(b"\n"))
-        .and_then(|()| file.sync_all())
-        .map_err(|error| format!("writing {}: {error}", temporary.display()))?;
-    fs::rename(&temporary, path)
-        .map_err(|error| format!("publishing {}: {error}", path.display()))?;
-    fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| format!("syncing {}: {error}", parent.display()))?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -397,11 +433,11 @@ mod tests {
 
     #[test]
     fn spiral_endpoint_rejects_non_http_and_embedded_credentials() {
-        assert!(normalize_spiral_endpoint("file:///tmp/spiral").is_err());
-        assert!(normalize_spiral_endpoint("https://user:secret@example.com").is_err());
-        assert!(normalize_spiral_endpoint("http://127.0.0.1:4279?debug=1").is_err());
-        assert!(normalize_spiral_spfs_endpoint("file:///tmp/spfs").is_err());
-        assert!(normalize_spiral_spfs_endpoint("https://user:secret@example.com").is_err());
+        assert!(ServiceEndpoint::spiral("file:///tmp/spiral").is_err());
+        assert!(ServiceEndpoint::spiral("https://user:secret@example.com").is_err());
+        assert!(ServiceEndpoint::spiral("http://127.0.0.1:4279?debug=1").is_err());
+        assert!(ServiceEndpoint::spiral_spfs("file:///tmp/spfs").is_err());
+        assert!(ServiceEndpoint::spiral_spfs("https://user:secret@example.com").is_err());
     }
 
     #[test]

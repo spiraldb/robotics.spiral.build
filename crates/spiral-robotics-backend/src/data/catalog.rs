@@ -4,6 +4,7 @@
 //! delivery response types remain opaque behind [`EpisodeCatalogPort`].
 
 use spiral_robotics_core::OperationError;
+use spiral_robotics_core::identity::EpisodeId;
 
 /// Current episode use that makes deletion unsafe.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -34,6 +35,17 @@ impl JudgeEpisodeCommand {
             discarded,
         }
     }
+
+    fn validated(mut self) -> Result<Self, OperationError> {
+        self.episode = EpisodeId::try_from(self.episode.as_str())
+            .map(String::from)
+            .map_err(|_| {
+                OperationError::invalid_input(
+                    "an episode ID must be 1 to 64 characters of letters, digits, '-' or '_'",
+                )
+            })?;
+        Ok(self)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -46,6 +58,17 @@ impl DeleteEpisodeCommand {
         Self {
             episode: episode.into(),
         }
+    }
+
+    fn validated(mut self) -> Result<Self, OperationError> {
+        self.episode = EpisodeId::try_from(self.episode.as_str())
+            .map(String::from)
+            .map_err(|_| {
+                OperationError::invalid_input(
+                    "an episode ID must be 1 to 64 characters of letters, digits, '-' or '_'",
+                )
+            })?;
+        Ok(self)
     }
 }
 
@@ -79,51 +102,40 @@ pub(crate) trait EpisodeCatalogPort {
     async fn delete_episode(&self, episode: String) -> Result<(), OperationError>;
 }
 
-pub(crate) async fn judge<P: EpisodeCatalogPort + ?Sized>(
-    port: &P,
-    command: JudgeEpisodeCommand,
-) -> Result<EpisodeMutationResult, OperationError> {
-    let episode = validate_episode_id(command.episode)?;
-    port.judge_episode(episode, command.discarded).await
+pub(crate) struct EpisodeCatalogActions<'a, P: ?Sized> {
+    port: &'a P,
 }
 
-/// Delete one inactive episode.
-///
-/// The activity checks deliberately precede the deletion boundary call. A
-/// storage adapter therefore cannot remove a recording or a trajectory that is
-/// currently driving an arm. Related-row cleanup belongs inside the store
-/// transaction.
-pub(crate) async fn delete<P: EpisodeCatalogPort + ?Sized>(
-    port: &P,
-    command: DeleteEpisodeCommand,
-) -> Result<(), OperationError> {
-    let episode = validate_episode_id(command.episode)?;
-    let activity = port.activity();
-    if activity.recording.as_deref() == Some(&episode) {
-        return Err(OperationError::Conflict(format!(
-            "take {episode:?} is still recording; stop it first"
-        )));
+impl<'a, P: EpisodeCatalogPort + ?Sized> EpisodeCatalogActions<'a, P> {
+    pub(crate) fn new(port: &'a P) -> Self {
+        Self { port }
     }
-    if activity.replaying.as_deref() == Some(&episode) {
-        return Err(OperationError::Conflict(format!(
-            "take {episode:?} is driving an arm; stop replay before deleting it"
-        )));
-    }
-    port.delete_episode(episode).await
-}
 
-fn validate_episode_id(episode: String) -> Result<String, OperationError> {
-    if episode.is_empty()
-        || episode.len() > 64
-        || !episode
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        return Err(OperationError::InvalidInput(
-            "an episode ID must be 1 to 64 characters of letters, digits, '-' or '_'".to_owned(),
-        ));
+    pub(crate) async fn judge(
+        &self,
+        command: JudgeEpisodeCommand,
+    ) -> Result<EpisodeMutationResult, OperationError> {
+        let command = command.validated()?;
+        self.port
+            .judge_episode(command.episode, command.discarded)
+            .await
     }
-    Ok(episode)
+
+    pub(crate) async fn delete(&self, command: DeleteEpisodeCommand) -> Result<(), OperationError> {
+        let episode = command.validated()?.episode;
+        let activity = self.port.activity();
+        if activity.recording.as_deref() == Some(&episode) {
+            return Err(OperationError::Conflict(format!(
+                "take {episode:?} is still recording; stop it first"
+            )));
+        }
+        if activity.replaying.as_deref() == Some(&episode) {
+            return Err(OperationError::Conflict(format!(
+                "take {episode:?} is driving an arm; stop replay before deleting it"
+            )));
+        }
+        self.port.delete_episode(episode).await
+    }
 }
 
 #[cfg(test)]
@@ -172,14 +184,12 @@ mod tests {
             ..FakeCatalog::default()
         };
 
-        let error = delete(
-            &catalog,
-            DeleteEpisodeCommand {
+        let error = EpisodeCatalogActions::new(&catalog)
+            .delete(DeleteEpisodeCommand {
                 episode: "episode_000001".to_owned(),
-            },
-        )
-        .await
-        .expect_err("recording must block deletion");
+            })
+            .await
+            .expect_err("recording must block deletion");
 
         assert!(matches!(error, OperationError::Conflict(_)));
         assert!(catalog.deleted.lock().unwrap().is_empty());
@@ -195,14 +205,12 @@ mod tests {
             ..FakeCatalog::default()
         };
 
-        let error = delete(
-            &catalog,
-            DeleteEpisodeCommand {
+        let error = EpisodeCatalogActions::new(&catalog)
+            .delete(DeleteEpisodeCommand {
                 episode: "episode_000002".to_owned(),
-            },
-        )
-        .await
-        .expect_err("replay must block deletion");
+            })
+            .await
+            .expect_err("replay must block deletion");
 
         assert!(matches!(error, OperationError::Conflict(_)));
         assert!(catalog.deleted.lock().unwrap().is_empty());
@@ -212,14 +220,12 @@ mod tests {
     async fn an_inactive_episode_crosses_the_delete_boundary_once() {
         let catalog = FakeCatalog::default();
 
-        delete(
-            &catalog,
-            DeleteEpisodeCommand {
+        EpisodeCatalogActions::new(&catalog)
+            .delete(DeleteEpisodeCommand {
                 episode: "episode_000003".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+            })
+            .await
+            .unwrap();
 
         assert_eq!(
             catalog.deleted.lock().unwrap().as_slice(),
@@ -230,15 +236,13 @@ mod tests {
     #[tokio::test]
     async fn judging_returns_the_adapter_output() {
         let catalog = FakeCatalog::default();
-        let output = judge(
-            &catalog,
-            JudgeEpisodeCommand {
+        let output = EpisodeCatalogActions::new(&catalog)
+            .judge(JudgeEpisodeCommand {
                 episode: "episode_000004".to_owned(),
                 discarded: true,
-            },
-        )
-        .await
-        .unwrap();
+            })
+            .await
+            .unwrap();
 
         assert_eq!(output.episode, "episode_000004");
         assert_eq!(

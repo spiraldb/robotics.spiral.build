@@ -31,19 +31,20 @@ impl Studio {
 
     fn hold_robot(self, id: String) {
         self.run("", async move {
-            api::post(&format!("/api/robots/{id}/hold")).await
+            api::Http::post(&format!("/api/robots/{id}/hold")).await
         });
     }
 
     fn release_robot(self, id: String) {
         self.run_safety("Motors released.", async move {
-            api::post(&format!("/api/robots/{id}/release")).await
+            api::Http::post(&format!("/api/robots/{id}/release")).await
         });
     }
 
     fn set_mode(self, selection: ModeSelection) {
         let request = selection.clone();
-        let future = async move { api::send(Method::POST, "/api/mode", Some(&request)).await };
+        let future =
+            async move { api::Http::send(Method::POST, "/api/mode", Some(&request)).await };
         if matches!(selection, ModeSelection::Idle) {
             self.run_safety(
                 "Motion commands stopped. Motors may still be holding position.",

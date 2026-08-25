@@ -4,8 +4,7 @@ use dioxus::prelude::*;
 
 use crate::client::commands::{RecordingCompletion, TimelineSeekBody};
 use crate::client::historical::{
-    HistoricalPreviewRequest, HistoricalPreviewSignals, historical_replay_slot,
-    request_historical_preview,
+    HistoricalPreviewRequest, HistoricalPreviewSignals, HistoricalReplayTime,
 };
 use crate::panels::timeline::panel::{
     TimelineAction, TimelineCaptureAction, TimelinePreviewAction, TimelineRobotSyncAction,
@@ -289,13 +288,12 @@ impl TimelineActionContext {
                 controller.stop_preview();
                 playhead.set(request.seconds());
                 if let Some(episode) = review_episode.clone() {
-                    let target = (episode.clone(), historical_replay_slot(request.seconds()));
+                    let target = (episode.clone(), request.seconds().replay_slot());
                     if request.committed()
                         || interactive_preview_target.peek().as_ref() != Some(&target)
                     {
                         interactive_preview_target.set(Some(target));
-                        request_historical_preview(
-                            studio,
+                        studio.request_historical_preview(
                             HistoricalPreviewRequest::new(episode, None, request.seconds()),
                             HistoricalPreviewSignals::new(
                                 historical_state,
@@ -344,8 +342,7 @@ impl TimelineActionContext {
             {
                 historical_state.set(None);
                 historical_cache.write().invalidate(&episode);
-                request_historical_preview(
-                    studio,
+                studio.request_historical_preview(
                     HistoricalPreviewRequest::new(episode, None, playhead()),
                     HistoricalPreviewSignals::new(
                         historical_state,

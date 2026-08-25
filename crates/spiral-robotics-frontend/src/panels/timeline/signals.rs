@@ -27,17 +27,23 @@ const SIGNAL_COLORS: [&str; 6] = [
     "#008300", // gripper
 ];
 
-/// Stable joint colour keyed by the canonical SO-101 joint name.
-pub(crate) fn signal_color(name: &str) -> &'static str {
-    let slot = arm::SO101_JOINTS
-        .iter()
-        .position(|joint| joint.name() == name)
-        .unwrap_or_else(|| {
-            name.bytes().fold(0usize, |hash, byte| {
-                hash.wrapping_mul(31).wrapping_add(usize::from(byte))
-            }) % SIGNAL_COLORS.len()
-        });
-    SIGNAL_COLORS[slot % SIGNAL_COLORS.len()]
+pub(crate) trait SignalNamePresentation {
+    /// Stable joint colour keyed by the canonical SO-101 joint name.
+    fn signal_color(&self) -> &'static str;
+}
+
+impl SignalNamePresentation for str {
+    fn signal_color(&self) -> &'static str {
+        let slot = arm::SO101_JOINTS
+            .iter()
+            .position(|joint| joint.name() == self)
+            .unwrap_or_else(|| {
+                self.bytes().fold(0usize, |hash, byte| {
+                    hash.wrapping_mul(31).wrapping_add(usize::from(byte))
+                }) % SIGNAL_COLORS.len()
+            });
+        SIGNAL_COLORS[slot % SIGNAL_COLORS.len()]
+    }
 }
 
 /// One joint's measured angle at every sample in a take.
@@ -407,9 +413,9 @@ mod tests {
 
     #[test]
     fn joint_colours_are_stable_when_a_motor_is_missing() {
-        assert_eq!(signal_color("shoulder_pan"), SIGNAL_COLORS[0]);
-        assert_eq!(signal_color("elbow_flex"), SIGNAL_COLORS[2]);
-        assert_eq!(signal_color("gripper"), SIGNAL_COLORS[5]);
-        assert_eq!(signal_color("extra_axis"), signal_color("extra_axis"));
+        assert_eq!("shoulder_pan".signal_color(), SIGNAL_COLORS[0]);
+        assert_eq!("elbow_flex".signal_color(), SIGNAL_COLORS[2]);
+        assert_eq!("gripper".signal_color(), SIGNAL_COLORS[5]);
+        assert_eq!("extra_axis".signal_color(), "extra_axis".signal_color());
     }
 }

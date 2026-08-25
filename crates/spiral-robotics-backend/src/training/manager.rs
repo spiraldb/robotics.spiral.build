@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use spiral_robotics_api::settings::ConnectionTestResponse;
@@ -25,9 +25,9 @@ use tokio::sync::broadcast;
 
 use crate::adapters::clock::SystemClock;
 use crate::clock::{Clock, StableIdSequence};
+use crate::sync::MutexRecovery;
 use crate::training::execution::{
-    self as training_execution, RunStateChange, TrainingCoordinatorPort, TrainingLaunch,
-    TrainingRunIdentity, TrainingRunPort,
+    RunStateChange, TrainingCoordinatorPort, TrainingLaunch, TrainingRunIdentity, TrainingRunPort,
 };
 use crate::training::runs::{RunPhase as CapabilityRunPhase, RunRecord, TrainingRunRegistry};
 use crate::training::service::{
@@ -218,10 +218,11 @@ impl TrainingManager {
     /// Restore persisted history after the HTTP listener is already serving.
     pub(crate) async fn hydrate_from_storage(&self) -> Result<(), String> {
         let storage = self.inner.storage.clone();
-        let mut snapshot = tokio::task::spawn_blocking(move || storage.load_training_snapshot())
-            .await
-            .map_err(|error| format!("training history task stopped: {error}"))??;
-        let run_registry = registry(&snapshot)?;
+        let mut snapshot: TrainingSnapshot =
+            tokio::task::spawn_blocking(move || storage.load_training_snapshot())
+                .await
+                .map_err(|error| format!("training history task stopped: {error}"))??;
+        let run_registry = snapshot.run_registry()?;
         let retained = run_registry
             .retained_ids()
             .map(str::to_owned)
@@ -234,7 +235,7 @@ impl TrainingManager {
             .collect();
         // Readiness is live service state, not durable history. Preserve the
         // concurrently computed value if probes finish before hydration.
-        let mut current = lock(&self.inner.snapshot);
+        let mut current = self.inner.snapshot.recover_lock();
         snapshot = TrainingSnapshot::new(current.readiness().clone(), retained_runs);
         *current = snapshot.clone();
         drop(current);
@@ -247,7 +248,10 @@ impl TrainingManager {
         for run in snapshot.runs().iter().filter(|run| run.phase().active()) {
             let run = run.clone();
             let cancel = Arc::new(AtomicBool::new(false));
-            lock(&self.inner.controls).insert(run.id().to_owned(), cancel.clone());
+            self.inner
+                .controls
+                .recover_lock()
+                .insert(run.id().to_owned(), cancel.clone());
             let manager = self.clone();
             tokio::spawn(async move {
                 manager
@@ -262,16 +266,16 @@ impl TrainingManager {
     }
 
     pub(crate) fn snapshot(&self) -> TrainingSnapshot {
-        lock(&self.inner.snapshot).clone()
+        self.inner.snapshot.recover_lock().clone()
     }
 
     pub(crate) fn reload_from_storage(&self) -> Result<(), String> {
-        if !lock(&self.inner.controls).is_empty() {
+        if !self.inner.controls.recover_lock().is_empty() {
             return Err("cannot reload training history while a run is active".to_owned());
         }
-        let snapshot = self.inner.storage.load_training_snapshot()?;
-        registry(&snapshot)?;
-        *lock(&self.inner.snapshot) = snapshot;
+        let snapshot: TrainingSnapshot = self.inner.storage.load_training_snapshot()?;
+        snapshot.run_registry()?;
+        *self.inner.snapshot.recover_lock() = snapshot;
         Ok(())
     }
 
@@ -279,14 +283,14 @@ impl TrainingManager {
     /// operation. Publishers send while holding the same snapshot lock, so an
     /// update can appear in the snapshot or the receiver, never both.
     pub(crate) fn subscription(&self) -> (TrainingSnapshot, broadcast::Receiver<TrainingUpdate>) {
-        let snapshot = lock(&self.inner.snapshot);
+        let snapshot = self.inner.snapshot.recover_lock();
         let updates = self.inner.updates.subscribe();
         (snapshot.clone(), updates)
     }
 
     pub(crate) async fn refresh_readiness(&self) -> TrainingReadiness {
-        let next = readiness(&self.inner.storage, &self.inner.training_backend).await;
-        if lock(&self.inner.snapshot).readiness() != &next {
+        let next = self.readiness().await;
+        if self.inner.snapshot.recover_lock().readiness() != &next {
             let _ = self.apply_update(
                 TrainingUpdate::Readiness {
                     readiness: next.clone(),
@@ -298,7 +302,7 @@ impl TrainingManager {
     }
 
     pub(crate) async fn test_runtime(&self) -> ConnectionTestResponse {
-        match probe_training_backend(&self.inner.training_backend).await {
+        match self.probe_backend().await {
             Ok(info) => {
                 ConnectionTestResponse::new(true, format!("Connected · {}", info.display_summary()))
             }
@@ -307,14 +311,14 @@ impl TrainingManager {
     }
 
     pub(crate) async fn start(&self, request: StartTrainingRequest) -> Result<TrainingRun, String> {
-        training_execution::coordinate_training_start(self, request.into())
+        self.coordinate_training_start(request.into())
             .await
             .map(Into::into)
             .map_err(|error| error.to_string())
     }
 
     pub(crate) fn stop(&self, run_id: &str) -> Result<(), String> {
-        training_execution::coordinate_training_stop(self, run_id)
+        self.coordinate_training_stop(run_id)
             .map_err(|error| error.to_string())
     }
 
@@ -322,12 +326,15 @@ impl TrainingManager {
     /// removal. A failed checkpoint deletion therefore leaves the complete run
     /// visible and retryable instead of hiding orphaned model artifacts.
     pub(crate) async fn delete(&self, run_id: &str) -> Result<(), String> {
-        if lock(&self.inner.controls).contains_key(run_id) {
+        if self.inner.controls.recover_lock().contains_key(run_id) {
             return Err(format!(
                 "training run {run_id:?} is still active; stop it before deleting it"
             ));
         }
-        let run = lock(&self.inner.snapshot)
+        let run = self
+            .inner
+            .snapshot
+            .recover_lock()
             .runs()
             .iter()
             .find(|run| run.id() == run_id)
@@ -344,7 +351,7 @@ impl TrainingManager {
             .delete_run_checkpoints(run_id.to_owned())
             .await?;
 
-        if lock(&self.inner.controls).contains_key(run_id) {
+        if self.inner.controls.recover_lock().contains_key(run_id) {
             return Err(format!(
                 "training run {run_id:?} became active while deletion was in progress"
             ));
@@ -352,7 +359,7 @@ impl TrainingManager {
         let update = TrainingUpdate::RunRemoved {
             run_id: run_id.to_owned(),
         };
-        let mut snapshot = lock(&self.inner.snapshot);
+        let mut snapshot = self.inner.snapshot.recover_lock();
         let current = snapshot
             .runs()
             .iter()
@@ -375,7 +382,7 @@ impl TrainingManager {
     pub(crate) async fn shutdown(&self) {
         // A Studio shutdown only detaches the orchestration client. The remote worker owns
         // the job and must keep running so a restarted Studio process can reattach to it.
-        lock(&self.inner.controls).clear();
+        self.inner.controls.recover_lock().clear();
     }
 
     async fn run_backend(&self, launch: TrainingLaunch, cancel: Arc<AtomicBool>) {
@@ -479,7 +486,10 @@ impl TrainingManager {
                 return;
             }
         };
-        let persisted_run = lock(&self.inner.snapshot)
+        let persisted_run = self
+            .inner
+            .snapshot
+            .recover_lock()
             .runs()
             .iter()
             .find(|run| run.id() == run_id)
@@ -543,7 +553,7 @@ impl TrainingManager {
             let next_run_id = run_id.clone();
             let should_stop = cancel.load(Ordering::Acquire) && !stop_sent;
             let cursor = snapshot.cursor();
-            tokio::time::sleep(remote_poll_delay(poll_failures)).await;
+            tokio::time::sleep(RemotePollBackoff::for_failures(poll_failures)).await;
             let next = tokio::task::spawn_blocking(move || {
                 if should_stop {
                     backend.stop_job(&next_run_id, cursor)
@@ -711,11 +721,16 @@ impl TrainingManager {
             message: (!completion.message.is_empty()).then_some(completion.message),
         };
         let _ = self.apply_update(update, true);
-        lock(&self.inner.controls).remove(&completion.run_id);
+        self.inner
+            .controls
+            .recover_lock()
+            .remove(&completion.run_id);
     }
 
     fn phase(&self, run_id: &str) -> Option<TrainingRunPhase> {
-        lock(&self.inner.snapshot)
+        self.inner
+            .snapshot
+            .recover_lock()
             .runs()
             .iter()
             .find(|run| run.id() == run_id)
@@ -730,13 +745,13 @@ impl TrainingManager {
             message,
         } = update;
         let run_id = run_id.as_str();
-        let mut snapshot = lock(&self.inner.snapshot);
+        let mut snapshot = self.inner.snapshot.recover_lock();
         let current_step = snapshot
             .runs()
             .iter()
             .find(|run| run.id() == run_id)
             .map_or(0, |run| run.current_step());
-        let mut registry = registry(&snapshot)?;
+        let mut registry = snapshot.run_registry()?;
         registry.transition(run_id, phase.into())?;
         let update = TrainingUpdate::RunState {
             run_id: run_id.to_owned(),
@@ -754,10 +769,10 @@ impl TrainingManager {
     }
 
     fn mark_persistence_failure(&self, run_id: &str, error: &str) {
-        if let Some(cancel) = lock(&self.inner.controls).get(run_id).cloned() {
+        if let Some(cancel) = self.inner.controls.recover_lock().get(run_id).cloned() {
             cancel.store(true, Ordering::Release);
         }
-        let mut snapshot = lock(&self.inner.snapshot);
+        let mut snapshot = self.inner.snapshot.recover_lock();
         let Ok((log_update, state_update)) =
             PersistenceFailure::new(run_id, self.inner.clock.now_ms(), error).updates(&snapshot)
         else {
@@ -783,7 +798,7 @@ impl TrainingManager {
     }
 
     fn apply_update(&self, update: TrainingUpdate, persist: bool) -> Result<(), String> {
-        let mut snapshot = lock(&self.inner.snapshot);
+        let mut snapshot = self.inner.snapshot.recover_lock();
         let mut candidate = snapshot.clone();
         candidate.apply(update.clone());
         if persist {
@@ -797,7 +812,7 @@ impl TrainingManager {
 
 impl TrainingRunPort for TrainingManager {
     fn runtime_is_active(&self, run_id: &str) -> bool {
-        lock(&self.inner.controls).contains_key(run_id)
+        self.inner.controls.recover_lock().contains_key(run_id)
     }
 
     fn transition_run(&self, run_id: &str, change: RunStateChange) -> Result<(), String> {
@@ -808,7 +823,7 @@ impl TrainingRunPort for TrainingManager {
     }
 
     fn signal_runtime_stop(&self, run_id: &str) {
-        if let Some(cancel) = lock(&self.inner.controls).get(run_id).cloned() {
+        if let Some(cancel) = self.inner.controls.recover_lock().get(run_id).cloned() {
             cancel.store(true, Ordering::Release);
         }
     }
@@ -818,7 +833,7 @@ impl TrainingRunPort for TrainingManager {
     }
 
     fn cleanup_runtime(&self, run_id: &str) {
-        lock(&self.inner.controls).remove(run_id);
+        self.inner.controls.recover_lock().remove(run_id);
     }
 
     fn now_ms(&self) -> i64 {
@@ -860,10 +875,10 @@ impl TrainingCoordinatorPort for TrainingManager {
     fn admit_training_run(&self, run: CapabilityTrainingRun) -> Result<(), OperationError> {
         // Registry admission, durable snapshot replacement, and event delivery
         // share one lock, so concurrent starts cannot both become active.
-        let mut snapshot = lock(&self.inner.snapshot);
-        let (candidate, update) =
-            admitted_snapshot(self.inner.storage.as_ref(), &snapshot, run.into())
-                .map_err(OperationError::conflict)?;
+        let mut snapshot = self.inner.snapshot.recover_lock();
+        let (candidate, update) = self
+            .admitted_snapshot(&snapshot, run.into())
+            .map_err(OperationError::conflict)?;
         *snapshot = candidate;
         let _ = self.inner.updates.send(update);
         Ok(())
@@ -872,7 +887,7 @@ impl TrainingCoordinatorPort for TrainingManager {
     fn launch_training_runtime(&self, launch: TrainingLaunch) -> Result<(), OperationError> {
         let cancel = Arc::new(AtomicBool::new(false));
         {
-            let mut controls = lock(&self.inner.controls);
+            let mut controls = self.inner.controls.recover_lock();
             if controls.contains_key(launch.run_id()) {
                 return Err(OperationError::Internal(format!(
                     "training runtime {:?} was already launched",
@@ -889,68 +904,99 @@ impl TrainingCoordinatorPort for TrainingManager {
     }
 }
 
-async fn readiness(
-    storage: &StorageManager,
-    training_backend: &Arc<dyn TrainingBackend>,
-) -> TrainingReadiness {
-    let backend_probe = probe_training_backend(training_backend);
-    let spiral_probe = async {
-        tokio::time::timeout(Duration::from_secs(8), storage.test_spiral())
-            .await
-            .unwrap_or_else(|_| {
-                ConnectionTestResponse::new(false, "the connection probe timed out after 8 seconds")
-            })
-    };
-    let (backend, connection) = tokio::join!(backend_probe, spiral_probe);
-    let runtime = backend.as_ref().ok().map(|info| {
-        TrainingRuntimeInfo::new(info.id(), info.display_name(), info.runtime())
-            .with_devices(info.devices().to_vec())
-    });
-    let spiral_ready = connection.ok();
-    let ready = spiral_ready && backend.is_ok();
-    let summary = match (connection, backend) {
-        (result, _) if !result.ok() => {
-            format!("Spiral is not ready for training: {}", result.message())
-        }
-        (_, Err(error)) => format!("Training runtime is not ready: {error}"),
-        (_, Ok(backend)) => format!(
-            "Runtime ready · {probe} · Spiral project {} · namespace {} · query checked at run start",
-            storage.project_id(),
-            storage.namespace(),
-            probe = backend.display_summary(),
-        ),
-    };
-    TrainingReadiness::new(ready, spiral_ready, summary).with_runtime(runtime)
-}
-
-fn remote_poll_delay(consecutive_failures: u64) -> Duration {
-    if consecutive_failures == 0 {
-        return Duration::from_millis(500);
+impl TrainingManager {
+    async fn readiness(&self) -> TrainingReadiness {
+        let backend_probe = self.probe_backend();
+        let spiral_probe = async {
+            tokio::time::timeout(Duration::from_secs(8), self.inner.storage.test_spiral())
+                .await
+                .unwrap_or_else(|_| {
+                    ConnectionTestResponse::new(
+                        false,
+                        "the connection probe timed out after 8 seconds",
+                    )
+                })
+        };
+        let (backend, connection) = tokio::join!(backend_probe, spiral_probe);
+        let runtime = backend.as_ref().ok().map(|info| {
+            TrainingRuntimeInfo::new(info.id(), info.display_name(), info.runtime())
+                .with_devices(info.devices().to_vec())
+        });
+        let spiral_ready = connection.ok();
+        let ready = spiral_ready && backend.is_ok();
+        let summary = match (connection, backend) {
+            (result, _) if !result.ok() => {
+                format!("Spiral is not ready for training: {}", result.message())
+            }
+            (_, Err(error)) => format!("Training runtime is not ready: {error}"),
+            (_, Ok(backend)) => format!(
+                "Runtime ready · {probe} · Spiral project {} · namespace {} · query checked at run start",
+                self.inner.storage.project_id(),
+                self.inner.storage.namespace(),
+                probe = backend.display_summary(),
+            ),
+        };
+        TrainingReadiness::new(ready, spiral_ready, summary).with_runtime(runtime)
     }
-    let exponent = consecutive_failures.saturating_sub(1).min(5) as u32;
-    Duration::from_secs(1_u64 << exponent).min(Duration::from_secs(30))
+
+    async fn probe_backend(&self) -> Result<spiral_robotics_training::TrainingBackendInfo, String> {
+        let backend = self.inner.training_backend.clone();
+        tokio::time::timeout(
+            Duration::from_secs(8),
+            tokio::task::spawn_blocking(move || backend.health()),
+        )
+        .await
+        .map_err(|_| "training backend health probe timed out after 8 seconds".to_owned())
+        .and_then(|result| {
+            result.map_err(|error| format!("training backend health task failed: {error}"))
+        })
+        .and_then(|result| result.map_err(|error| error.to_string()))
+        .and_then(|info| {
+            match info.compatibility_error(spiral_robotics_storage::SCHEMA_VERSION) {
+                Some(error) => Err(error),
+                None => Ok(info),
+            }
+        })
+    }
+
+    fn admitted_snapshot(
+        &self,
+        snapshot: &TrainingSnapshot,
+        run: TrainingRun,
+    ) -> Result<(TrainingSnapshot, TrainingUpdate), String> {
+        let mut registry = snapshot.run_registry()?;
+        registry.admit(RunRecord::new(run.id(), run.phase().into()))?;
+        let retained = registry
+            .retained_ids()
+            .map(str::to_owned)
+            .collect::<std::collections::BTreeSet<_>>();
+        let update = TrainingUpdate::RunAdded { run: Box::new(run) };
+        let mut candidate = snapshot.clone();
+        candidate.apply(update.clone());
+        let removed = candidate
+            .runs()
+            .iter()
+            .filter(|run| !retained.contains(run.id()))
+            .map(|run| run.id().to_owned())
+            .collect::<Vec<_>>();
+        for run_id in removed {
+            candidate.apply(TrainingUpdate::RunRemoved { run_id });
+        }
+        self.inner.storage.save_training_snapshot(&candidate)?;
+        Ok((candidate, update))
+    }
 }
 
-async fn probe_training_backend(
-    training_backend: &Arc<dyn TrainingBackend>,
-) -> Result<spiral_robotics_training::TrainingBackendInfo, String> {
-    let backend = training_backend.clone();
-    tokio::time::timeout(
-        Duration::from_secs(8),
-        tokio::task::spawn_blocking(move || backend.health()),
-    )
-    .await
-    .map_err(|_| "training backend health probe timed out after 8 seconds".to_owned())
-    .and_then(|result| {
-        result.map_err(|error| format!("training backend health task failed: {error}"))
-    })
-    .and_then(|result| result.map_err(|error| error.to_string()))
-    .and_then(
-        |info| match info.compatibility_error(spiral_robotics_storage::SCHEMA_VERSION) {
-            Some(error) => Err(error),
-            None => Ok(info),
-        },
-    )
+struct RemotePollBackoff;
+
+impl RemotePollBackoff {
+    fn for_failures(consecutive_failures: u64) -> Duration {
+        if consecutive_failures == 0 {
+            return Duration::from_millis(500);
+        }
+        let exponent = consecutive_failures.saturating_sub(1).min(5) as u32;
+        Duration::from_secs(1_u64 << exponent).min(Duration::from_secs(30))
+    }
 }
 
 impl From<StartTrainingRequest> for CapabilityStartTrainingCommand {
@@ -1266,47 +1312,19 @@ impl From<TrainingRunPhase> for CapabilityRunPhase {
     }
 }
 
-fn registry(snapshot: &TrainingSnapshot) -> Result<TrainingRunRegistry, String> {
-    TrainingRunRegistry::new(
-        MAX_TRAINING_HISTORY_RUNS,
-        snapshot
-            .runs()
-            .iter()
-            .map(|run| RunRecord::new(run.id(), run.phase().into())),
-    )
+trait TrainingSnapshotRegistry {
+    fn run_registry(&self) -> Result<TrainingRunRegistry, String>;
 }
 
-fn admitted_snapshot(
-    storage: &StorageManager,
-    snapshot: &TrainingSnapshot,
-    run: TrainingRun,
-) -> Result<(TrainingSnapshot, TrainingUpdate), String> {
-    let mut registry = registry(snapshot)?;
-    registry.admit(RunRecord::new(run.id(), run.phase().into()))?;
-    let retained = registry
-        .retained_ids()
-        .map(str::to_owned)
-        .collect::<std::collections::BTreeSet<_>>();
-    let update = TrainingUpdate::RunAdded { run: Box::new(run) };
-    let mut candidate = snapshot.clone();
-    candidate.apply(update.clone());
-    let removed = candidate
-        .runs()
-        .iter()
-        .filter(|run| !retained.contains(run.id()))
-        .map(|run| run.id().to_owned())
-        .collect::<Vec<_>>();
-    for run_id in removed {
-        candidate.apply(TrainingUpdate::RunRemoved { run_id });
+impl TrainingSnapshotRegistry for TrainingSnapshot {
+    fn run_registry(&self) -> Result<TrainingRunRegistry, String> {
+        TrainingRunRegistry::new(
+            MAX_TRAINING_HISTORY_RUNS,
+            self.runs()
+                .iter()
+                .map(|run| RunRecord::new(run.id(), run.phase().into())),
+        )
     }
-    storage.save_training_snapshot(&candidate)?;
-    Ok((candidate, update))
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
@@ -1327,10 +1345,16 @@ mod tests {
 
     #[test]
     fn remote_polling_backs_off_but_remains_bounded() {
-        assert_eq!(remote_poll_delay(0), Duration::from_millis(500));
-        assert_eq!(remote_poll_delay(1), Duration::from_secs(1));
-        assert_eq!(remote_poll_delay(4), Duration::from_secs(8));
-        assert_eq!(remote_poll_delay(100), Duration::from_secs(30));
+        assert_eq!(
+            RemotePollBackoff::for_failures(0),
+            Duration::from_millis(500)
+        );
+        assert_eq!(RemotePollBackoff::for_failures(1), Duration::from_secs(1));
+        assert_eq!(RemotePollBackoff::for_failures(4), Duration::from_secs(8));
+        assert_eq!(
+            RemotePollBackoff::for_failures(100),
+            Duration::from_secs(30)
+        );
     }
 
     #[test]

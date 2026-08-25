@@ -11,7 +11,7 @@ use spiral_robotics_core::calibration::MINIMUM_CALIBRATION_TRAVEL;
 use crate::client::http as api;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::studio;
-use crate::tasks::single_flight;
+use crate::tasks::SingleFlight;
 
 #[component]
 pub(super) fn CalibrationSection(
@@ -76,7 +76,7 @@ pub(super) fn CalibrationSection(
                             let id = recalibrate_id.clone();
                             command.set(Some("start"));
                             studio.run("", async move {
-                                let result = api::post(&format!("/api/robots/{id}/calibration/start")).await;
+                                let result = api::Http::post(&format!("/api/robots/{id}/calibration/start")).await;
                                 command.set(None);
                                 result
                             });
@@ -106,9 +106,9 @@ pub(super) fn CalibrationSection(
                                 }
                                 let id = id.clone();
                                 studio.run_utility("", async move {
-                                    let Some(result) = single_flight(
+                                    let Some(result) = SingleFlight::run(
                                         reapplying,
-                                        api::send_json::<(), CalibrationReapplyResponse>(
+                                        api::Http::send_json::<(), CalibrationReapplyResponse>(
                                             Method::POST,
                                             &format!("/api/robots/{id}/calibration/reapply"),
                                             None,
@@ -123,7 +123,7 @@ pub(super) fn CalibrationSection(
                                     }
                                     match result {
                                         Ok(result) => {
-                                            studio.report_success(format_reapply_success(&result));
+                                            studio.report_success(result.reapply_success());
                                             if !result.warnings().is_empty() {
                                                 studio.report_warning_from(
                                                     MessageSource::Studio,
@@ -176,7 +176,7 @@ pub(super) fn CalibrationSection(
                             let id = id.clone();
                             command.set(Some("finish"));
                             studio.run("Calibration saved.", async move {
-                                let result = api::post(&format!("/api/robots/{id}/calibration/finish")).await;
+                                let result = api::Http::post(&format!("/api/robots/{id}/calibration/finish")).await;
                                 command.set(None);
                                 result
                             });
@@ -197,7 +197,7 @@ pub(super) fn CalibrationSection(
                             let id = id.clone();
                             command.set(Some("cancel"));
                             studio.run("", async move {
-                                let result = api::post(&format!("/api/robots/{id}/calibration/cancel")).await;
+                                let result = api::Http::post(&format!("/api/robots/{id}/calibration/cancel")).await;
                                 command.set(None);
                                 result
                             });
@@ -213,7 +213,7 @@ pub(super) fn CalibrationSection(
                 for joint in progress.joints().to_owned() {
                     li { key: "{joint.name()}", class: "flex min-h-5 items-center gap-1.5",
                         span { class: "w-16 shrink-0 truncate text-[11px]",
-                            {arm::so101_joint(joint.name()).map_or_else(|| joint.name().to_owned(), |known| known.label().to_owned())}
+                            {arm::JointDefinition::so101(joint.name()).map_or_else(|| joint.name().to_owned(), |known| known.label().to_owned())}
                         }
                         SweepBar { min: joint.min(), position: joint.position(), max: joint.max() }
                         span {
@@ -228,24 +228,27 @@ pub(super) fn CalibrationSection(
     }
 }
 
-fn format_reapply_success(result: &CalibrationReapplyResponse) -> String {
-    let episodes = result.episodes_updated();
-    let noun = if episodes == 1 { "take" } else { "takes" };
-    let mut message = format!(
-        "Reapplied calibration to {episodes} {noun} ({} frames)",
-        result.frames_updated()
-    );
-    if result.episodes_unchanged() > 0 {
-        message.push_str(&format!(
-            "; {} already matched",
-            result.episodes_unchanged()
-        ));
+trait CalibrationReapplyPresentation {
+    fn reapply_success(&self) -> String;
+}
+
+impl CalibrationReapplyPresentation for CalibrationReapplyResponse {
+    fn reapply_success(&self) -> String {
+        let episodes = self.episodes_updated();
+        let noun = if episodes == 1 { "take" } else { "takes" };
+        let mut message = format!(
+            "Reapplied calibration to {episodes} {noun} ({} frames)",
+            self.frames_updated()
+        );
+        if self.episodes_unchanged() > 0 {
+            message.push_str(&format!("; {} already matched", self.episodes_unchanged()));
+        }
+        if self.episodes_skipped() > 0 {
+            message.push_str(&format!("; {} skipped", self.episodes_skipped()));
+        }
+        message.push('.');
+        message
     }
-    if result.episodes_skipped() > 0 {
-        message.push_str(&format!("; {} skipped", result.episodes_skipped()));
-    }
-    message.push('.');
-    message
 }
 
 #[component]

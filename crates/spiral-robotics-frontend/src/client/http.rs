@@ -32,29 +32,49 @@ use spiral_robotics_api::workflow::{
     WorkflowAgentStateResponse, WorkflowStateResponse, WorkflowUpdate,
 };
 
-/// Fetch and decode a JSON resource.
-pub(crate) async fn get<T: DeserializeOwned>(path: &str) -> Result<T, String> {
-    decode(&request(Method::GET, path, None).await?, path)
-}
+pub(crate) struct Http;
 
-/// Send a request whose response body does not matter.
-pub(crate) async fn send<B: Serialize>(
-    method: Method,
-    path: &str,
-    body: Option<&B>,
-) -> Result<(), String> {
-    let body = body.map(to_value).transpose()?;
-    request(method, path, body).await.map(|_| ())
-}
+impl Http {
+    /// Fetch and decode a JSON resource.
+    pub(crate) async fn get<T: DeserializeOwned>(path: &str) -> Result<T, String> {
+        RawRequest::new(Method::GET, path)
+            .send()
+            .await?
+            .decode_json(path)
+    }
 
-/// Send a request and decode its JSON response.
-pub(crate) async fn send_json<B: Serialize, T: DeserializeOwned>(
-    method: Method,
-    path: &str,
-    body: Option<&B>,
-) -> Result<T, String> {
-    let body = body.map(to_value).transpose()?;
-    decode(&request(method, path, body).await?, path)
+    /// Send a request whose response body does not matter.
+    pub(crate) async fn send<B: Serialize>(
+        method: Method,
+        path: &str,
+        body: Option<&B>,
+    ) -> Result<(), String> {
+        let body = body.map(RequestBody::request_value).transpose()?;
+        RawRequest::new(method, path)
+            .with_body(body)
+            .send()
+            .await
+            .map(|_| ())
+    }
+
+    /// Send a request and decode its JSON response.
+    pub(crate) async fn send_json<B: Serialize, T: DeserializeOwned>(
+        method: Method,
+        path: &str,
+        body: Option<&B>,
+    ) -> Result<T, String> {
+        let body = body.map(RequestBody::request_value).transpose()?;
+        RawRequest::new(method, path)
+            .with_body(body)
+            .send()
+            .await?
+            .decode_json(path)
+    }
+
+    /// POST with no request body.
+    pub(crate) async fn post(path: &str) -> Result<(), String> {
+        Self::send::<()>(Method::POST, path, None).await
+    }
 }
 
 /// One JSON request with an optional browser-owned cancellation signal.
@@ -84,22 +104,14 @@ impl<'a, B: Serialize> AbortableJsonRequest<'a, B> {
     /// its own checked-out connection, so an abandoned query cannot block
     /// persistence or replay.
     pub(crate) async fn send<T: DeserializeOwned>(self) -> Result<T, String> {
-        let body = self.body.map(to_value).transpose()?;
-        let response = RawRequest {
-            method: self.method,
-            path: self.path,
-            body,
-            signal: self.signal,
-        }
-        .send()
-        .await?;
-        decode(&response, self.path)
+        let body = self.body.map(RequestBody::request_value).transpose()?;
+        let response = RawRequest::new(self.method, self.path)
+            .with_body(body)
+            .with_signal(self.signal)
+            .send()
+            .await?;
+        response.decode_json(self.path)
     }
-}
-
-/// POST with no request body.
-pub(crate) async fn post(path: &str) -> Result<(), String> {
-    send::<()>(Method::POST, path, None).await
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -264,96 +276,99 @@ impl TimelineSample {
     }
 }
 
-/// Upload one file and decode the server's JSON response.
-pub(crate) async fn upload_json<T: DeserializeOwned>(
-    path: &str,
-    bytes: &[u8],
-    content_type: &str,
-) -> Result<T, String> {
-    let body = Uint8Array::from(bytes);
-    let response = RequestBuilder::new(path)
-        .method(Method::POST)
-        .header("Content-Type", content_type)
-        .body(body)
-        .map_err(|error| format!("could not build the upload: {error}"))?
-        .send()
-        .await
-        .map_err(|error| format!("the studio server is unreachable: {error}"))?;
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-    if (200..300).contains(&status) {
-        return decode(&text, path);
-    }
-    Err(serde_json::from_str::<ApiError>(&text)
-        .map(ApiError::into_error)
-        .unwrap_or_else(|_| format!("upload to {path} failed with status {status}")))
-}
-
-/// Upload the browser's native File object directly through Fetch. This avoids
-/// copying a potentially hundreds-of-megabytes archive through Rust/WASM and
-/// a second JavaScript Uint8Array before the network request can begin.
-pub(crate) async fn upload_file_json<T: DeserializeOwned>(
-    path: &str,
-    file: &dioxus::html::FileData,
-    content_type: &str,
-) -> Result<T, String> {
-    #[cfg(target_arch = "wasm32")]
-    let request = {
-        let web_file = file
-            .inner()
-            .downcast_ref::<web_sys::File>()
-            .cloned()
-            .ok_or_else(|| format!("{} is not a browser file", file.name()))?;
-        RequestBuilder::new(path)
+impl Http {
+    /// Upload one file and decode the server's JSON response.
+    pub(crate) async fn upload_json<T: DeserializeOwned>(
+        path: &str,
+        bytes: &[u8],
+        content_type: &str,
+    ) -> Result<T, String> {
+        let body = Uint8Array::from(bytes);
+        let response = RequestBuilder::new(path)
             .method(Method::POST)
             .header("Content-Type", content_type)
-            .body(web_file)
+            .body(body)
             .map_err(|error| format!("could not build the upload: {error}"))?
-    };
-    #[cfg(not(target_arch = "wasm32"))]
-    let request = {
-        let bytes = file
-            .read_bytes()
+            .send()
             .await
-            .map_err(|error| format!("could not read {}: {error}", file.name()))?;
-        RequestBuilder::new(path)
-            .method(Method::POST)
-            .header("Content-Type", content_type)
-            .body(Uint8Array::from(bytes.as_ref()))
-            .map_err(|error| format!("could not build the upload: {error}"))?
-    };
-    let response = request
-        .send()
-        .await
-        .map_err(|error| format!("the studio server is unreachable: {error}"))?;
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-    if (200..300).contains(&status) {
-        return decode(&text, path);
+            .map_err(|error| format!("the studio server is unreachable: {error}"))?;
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if (200..300).contains(&status) {
+            return text.decode_json(path);
+        }
+        Err(serde_json::from_str::<ApiError>(&text)
+            .map(ApiError::into_error)
+            .unwrap_or_else(|_| format!("upload to {path} failed with status {status}")))
     }
-    Err(serde_json::from_str::<ApiError>(&text)
-        .map(ApiError::into_error)
-        .unwrap_or_else(|_| format!("upload to {path} failed with status {status}")))
-}
 
-fn to_value<B: Serialize>(body: &B) -> Result<Value, String> {
-    serde_json::to_value(body).map_err(|error| format!("could not encode the request: {error}"))
-}
-
-fn decode<T: DeserializeOwned>(body: &str, path: &str) -> Result<T, String> {
-    serde_json::from_str(body)
-        .map_err(|error| format!("could not read the response from {path}: {error}"))
-}
-
-async fn request(method: Method, path: &str, body: Option<Value>) -> Result<String, String> {
-    RawRequest {
-        method,
-        path,
-        body,
-        signal: None,
+    /// Upload the browser's native File object directly through Fetch. This avoids
+    /// copying a potentially hundreds-of-megabytes archive through Rust/WASM and
+    /// a second JavaScript Uint8Array before the network request can begin.
+    pub(crate) async fn upload_file_json<T: DeserializeOwned>(
+        path: &str,
+        file: &dioxus::html::FileData,
+        content_type: &str,
+    ) -> Result<T, String> {
+        #[cfg(target_arch = "wasm32")]
+        let request = {
+            let web_file = file
+                .inner()
+                .downcast_ref::<web_sys::File>()
+                .cloned()
+                .ok_or_else(|| format!("{} is not a browser file", file.name()))?;
+            RequestBuilder::new(path)
+                .method(Method::POST)
+                .header("Content-Type", content_type)
+                .body(web_file)
+                .map_err(|error| format!("could not build the upload: {error}"))?
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let request = {
+            let bytes = file
+                .read_bytes()
+                .await
+                .map_err(|error| format!("could not read {}: {error}", file.name()))?;
+            RequestBuilder::new(path)
+                .method(Method::POST)
+                .header("Content-Type", content_type)
+                .body(Uint8Array::from(bytes.as_ref()))
+                .map_err(|error| format!("could not build the upload: {error}"))?
+        };
+        let response = request
+            .send()
+            .await
+            .map_err(|error| format!("the studio server is unreachable: {error}"))?;
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if (200..300).contains(&status) {
+            return text.decode_json(path);
+        }
+        Err(serde_json::from_str::<ApiError>(&text)
+            .map(ApiError::into_error)
+            .unwrap_or_else(|_| format!("upload to {path} failed with status {status}")))
     }
-    .send()
-    .await
+}
+
+trait RequestBody {
+    fn request_value(&self) -> Result<Value, String>;
+}
+
+impl<B: Serialize> RequestBody for B {
+    fn request_value(&self) -> Result<Value, String> {
+        serde_json::to_value(self).map_err(|error| format!("could not encode the request: {error}"))
+    }
+}
+
+trait ResponseBody {
+    fn decode_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, String>;
+}
+
+impl ResponseBody for str {
+    fn decode_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
+        serde_json::from_str(self)
+            .map_err(|error| format!("could not read the response from {path}: {error}"))
+    }
 }
 
 struct RawRequest<'a> {
@@ -363,7 +378,26 @@ struct RawRequest<'a> {
     signal: Option<&'a web_sys::AbortSignal>,
 }
 
-impl RawRequest<'_> {
+impl<'a> RawRequest<'a> {
+    fn new(method: Method, path: &'a str) -> Self {
+        Self {
+            method,
+            path,
+            body: None,
+            signal: None,
+        }
+    }
+
+    fn with_body(mut self, body: Option<Value>) -> Self {
+        self.body = body;
+        self
+    }
+
+    fn with_signal(mut self, signal: Option<&'a web_sys::AbortSignal>) -> Self {
+        self.signal = signal;
+        self
+    }
+
     async fn send(self) -> Result<String, String> {
         let builder = RequestBuilder::new(self.path)
             .method(self.method)
@@ -411,132 +445,154 @@ pub(crate) enum StudioEvent {
 /// reconnect. The [`EventSource`] is owned by this future, so dropping the
 /// future closes the connection.
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
-pub(crate) async fn stream_events<F>(mut on_event: F) -> Result<(), String>
-where
-    F: FnMut(StudioEvent),
-{
-    let mut source = EventSource::new("/api/events")
-        .map_err(|error| format!("could not open the event stream: {error}"))?;
-    let snapshots = source
-        .subscribe("state")
-        .map_err(|error| format!("could not subscribe to studio state: {error}"))?;
-    let telemetry = source
-        .subscribe("telemetry")
-        .map_err(|error| format!("could not subscribe to telemetry: {error}"))?;
-    let training_snapshots = source
-        .subscribe("training_snapshot")
-        .map_err(|error| format!("could not subscribe to training snapshots: {error}"))?;
-    let training_updates = source
-        .subscribe("training_update")
-        .map_err(|error| format!("could not subscribe to training updates: {error}"))?;
-    let rollout = source
-        .subscribe("rollout_state")
-        .map_err(|error| format!("could not subscribe to rollout state: {error}"))?;
-    let workflow_snapshots = source
-        .subscribe("workflow_snapshot")
-        .map_err(|error| format!("could not subscribe to Workflow snapshots: {error}"))?;
-    let workflow_updates = source
-        .subscribe("workflow_update")
-        .map_err(|error| format!("could not subscribe to Workflow updates: {error}"))?;
-    let workflow_agent = source
-        .subscribe("workflow_agent")
-        .map_err(|error| format!("could not subscribe to Workflow Assistant updates: {error}"))?;
+impl Http {
+    pub(crate) async fn stream_events<F>(mut on_event: F) -> Result<(), String>
+    where
+        F: FnMut(StudioEvent),
+    {
+        let mut source = EventSource::new("/api/events")
+            .map_err(|error| format!("could not open the event stream: {error}"))?;
+        let snapshots = source
+            .subscribe("state")
+            .map_err(|error| format!("could not subscribe to studio state: {error}"))?;
+        let telemetry = source
+            .subscribe("telemetry")
+            .map_err(|error| format!("could not subscribe to telemetry: {error}"))?;
+        let training_snapshots = source
+            .subscribe("training_snapshot")
+            .map_err(|error| format!("could not subscribe to training snapshots: {error}"))?;
+        let training_updates = source
+            .subscribe("training_update")
+            .map_err(|error| format!("could not subscribe to training updates: {error}"))?;
+        let rollout = source
+            .subscribe("rollout_state")
+            .map_err(|error| format!("could not subscribe to rollout state: {error}"))?;
+        let workflow_snapshots = source
+            .subscribe("workflow_snapshot")
+            .map_err(|error| format!("could not subscribe to Workflow snapshots: {error}"))?;
+        let workflow_updates = source
+            .subscribe("workflow_update")
+            .map_err(|error| format!("could not subscribe to Workflow updates: {error}"))?;
+        let workflow_agent = source.subscribe("workflow_agent").map_err(|error| {
+            format!("could not subscribe to Workflow Assistant updates: {error}")
+        })?;
 
-    let mut events = stream::select(
-        stream::select(stream::select(snapshots, telemetry), rollout),
-        stream::select(
-            stream::select(training_snapshots, training_updates),
+        let mut events = stream::select(
+            stream::select(stream::select(snapshots, telemetry), rollout),
             stream::select(
-                stream::select(workflow_snapshots, workflow_updates),
-                workflow_agent,
+                stream::select(training_snapshots, training_updates),
+                stream::select(
+                    stream::select(workflow_snapshots, workflow_updates),
+                    workflow_agent,
+                ),
             ),
-        ),
-    );
-    while let Some(Ok((kind, message))) = events.next().await {
-        let Some(text) = message.data().as_string() else {
-            continue;
-        };
-        match kind.as_str() {
-            "state" => {
-                if let Ok(snapshot) = serde_json::from_str(&text) {
-                    on_event(StudioEvent::Snapshot(Box::new(snapshot)));
+        );
+        while let Some(Ok((kind, message))) = events.next().await {
+            let Some(text) = message.data().as_string() else {
+                continue;
+            };
+            match kind.as_str() {
+                "state" => {
+                    if let Ok(snapshot) = serde_json::from_str(&text) {
+                        on_event(StudioEvent::Snapshot(Box::new(snapshot)));
+                    }
                 }
-            }
-            "telemetry" => {
-                if let Ok(frame) = serde_json::from_str(&text) {
-                    on_event(StudioEvent::Telemetry(Box::new(frame)));
+                "telemetry" => {
+                    if let Ok(frame) = serde_json::from_str(&text) {
+                        on_event(StudioEvent::Telemetry(Box::new(frame)));
+                    }
                 }
-            }
-            "training_snapshot" => {
-                if let Ok(snapshot) = serde_json::from_str(&text) {
-                    on_event(StudioEvent::TrainingSnapshot(Box::new(snapshot)));
+                "training_snapshot" => {
+                    if let Ok(snapshot) = serde_json::from_str(&text) {
+                        on_event(StudioEvent::TrainingSnapshot(Box::new(snapshot)));
+                    }
                 }
-            }
-            "training_update" => {
-                if let Ok(update) = serde_json::from_str(&text) {
-                    on_event(StudioEvent::TrainingUpdate(Box::new(update)));
+                "training_update" => {
+                    if let Ok(update) = serde_json::from_str(&text) {
+                        on_event(StudioEvent::TrainingUpdate(Box::new(update)));
+                    }
                 }
-            }
-            "rollout_state" => {
-                if let Ok(snapshot) = serde_json::from_str(&text) {
-                    on_event(StudioEvent::Rollout(Box::new(snapshot)));
+                "rollout_state" => {
+                    if let Ok(snapshot) = serde_json::from_str(&text) {
+                        on_event(StudioEvent::Rollout(Box::new(snapshot)));
+                    }
                 }
-            }
-            "workflow_snapshot" => {
-                if let Ok(snapshot) = serde_json::from_str(&text) {
-                    on_event(StudioEvent::WorkflowSnapshot(Box::new(snapshot)));
+                "workflow_snapshot" => {
+                    if let Ok(snapshot) = serde_json::from_str(&text) {
+                        on_event(StudioEvent::WorkflowSnapshot(Box::new(snapshot)));
+                    }
                 }
-            }
-            "workflow_update" => {
-                if let Ok(update) = serde_json::from_str(&text) {
-                    on_event(StudioEvent::WorkflowUpdate(Box::new(update)));
+                "workflow_update" => {
+                    if let Ok(update) = serde_json::from_str(&text) {
+                        on_event(StudioEvent::WorkflowUpdate(Box::new(update)));
+                    }
                 }
-            }
-            "workflow_agent" => {
-                if let Ok(state) = serde_json::from_str(&text) {
-                    on_event(StudioEvent::WorkflowAgent(Box::new(state)));
+                "workflow_agent" => {
+                    if let Ok(state) = serde_json::from_str(&text) {
+                        on_event(StudioEvent::WorkflowAgent(Box::new(state)));
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
+        Ok(())
     }
-    Ok(())
 }
 
-/// URL of a camera's live MJPEG stream.
-pub(crate) fn camera_stream_url(id: &str) -> String {
-    format!("/api/cameras/stream.mjpeg?id={}", encode_query(id))
+pub(crate) trait CameraApiPath {
+    /// URL of this camera's live MJPEG stream.
+    fn camera_stream_url(&self) -> String;
 }
 
-/// Complete visual-inspection snapshot for one persisted Spiral episode.
-pub(crate) fn episode_inspection_url(episode: &str) -> String {
-    format!("/api/episodes/{}/inspection", encode_query(episode))
+impl CameraApiPath for str {
+    fn camera_stream_url(&self) -> String {
+        format!("/api/cameras/stream.mjpeg?id={}", self.url_component())
+    }
 }
 
-/// Browser-native MP4 endpoint for one segment of a local camera stream.
-pub(crate) fn episode_video_url(episode: &str, stream: &str, segment: u32) -> String {
-    format!(
-        "/api/episodes/{}/videos/{}?segment={segment}",
-        encode_query(episode),
-        encode_query(stream)
-    )
+pub(crate) trait EpisodeApiPath {
+    /// Complete visual-inspection snapshot for this persisted Spiral episode.
+    fn inspection_url(&self) -> String;
+
+    /// Browser-native MP4 endpoint for one segment of this episode's camera stream.
+    fn video_url(&self, stream: &str, segment: u32) -> String;
+}
+
+impl EpisodeApiPath for str {
+    fn inspection_url(&self) -> String {
+        format!("/api/episodes/{}/inspection", self.url_component())
+    }
+
+    fn video_url(&self, stream: &str, segment: u32) -> String {
+        format!(
+            "/api/episodes/{}/videos/{}?segment={segment}",
+            self.url_component(),
+            stream.url_component()
+        )
+    }
 }
 
 /// Percent-encode a value for use in a query string.
 ///
 /// Camera identifiers are device paths on Linux, so at minimum the separators
 /// and reserved characters have to survive the round trip.
-fn encode_query(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(byte as char);
+trait UrlComponent {
+    fn url_component(&self) -> String;
+}
+
+impl UrlComponent for str {
+    fn url_component(&self) -> String {
+        let mut encoded = String::with_capacity(self.len());
+        for byte in self.bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    encoded.push(byte as char);
+                }
+                _ => encoded.push_str(&format!("%{byte:02X}")),
             }
-            _ => encoded.push_str(&format!("%{byte:02X}")),
         }
+        encoded
     }
-    encoded
 }
 
 #[cfg(test)]
@@ -545,20 +601,20 @@ mod tests {
 
     #[test]
     fn device_paths_survive_the_query_string() {
-        assert_eq!(encode_query("/dev/video0"), "%2Fdev%2Fvideo0");
+        assert_eq!("/dev/video0".url_component(), "%2Fdev%2Fvideo0");
         assert_eq!(
-            camera_stream_url("/dev/video0"),
+            "/dev/video0".camera_stream_url(),
             "/api/cameras/stream.mjpeg?id=%2Fdev%2Fvideo0"
         );
         // macOS reports opaque identifiers that may contain anything at all.
-        assert_eq!(encode_query("cam 1&x=2"), "cam%201%26x%3D2");
-        assert_eq!(encode_query("plain-id_1.0~"), "plain-id_1.0~");
+        assert_eq!("cam 1&x=2".url_component(), "cam%201%26x%3D2");
+        assert_eq!("plain-id_1.0~".url_component(), "plain-id_1.0~");
         assert_eq!(
-            episode_inspection_url("episode 1"),
+            "episode 1".inspection_url(),
             "/api/episodes/episode%201/inspection"
         );
         assert_eq!(
-            episode_video_url("episode 1", "arm/camera", 2),
+            "episode 1".video_url("arm/camera", 2),
             "/api/episodes/episode%201/videos/arm%2Fcamera?segment=2"
         );
     }

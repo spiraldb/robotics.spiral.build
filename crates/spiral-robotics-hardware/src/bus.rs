@@ -397,16 +397,6 @@ const SIMULATED_HOLDING_LOAD: f64 = 0.08;
 #[cfg(test)]
 const SIMULATED_FULL_LOAD_ERROR: f64 = 400.0;
 
-/// Limits a simulated motor claims for itself, in the shape a real one reports.
-#[cfg(test)]
-fn simulated_limits() -> MotorLimits {
-    MotorLimits::new(
-        Some(70.0),
-        MotorVoltageLimits::new(Some(4.5), Some(9.0)),
-        Some(1.0),
-    )
-}
-
 #[derive(Clone, Debug, PartialEq)]
 #[cfg(test)]
 struct SimulatedMotor {
@@ -421,6 +411,18 @@ struct SimulatedMotor {
     previous_position: i64,
     temperature: f64,
     load: f64,
+}
+
+#[cfg(test)]
+impl SimulatedMotor {
+    /// Limits a simulated motor claims for itself, in the shape a real one reports.
+    fn limits() -> MotorLimits {
+        MotorLimits::new(
+            Some(70.0),
+            MotorVoltageLimits::new(Some(4.5), Some(9.0)),
+            Some(1.0),
+        )
+    }
 }
 
 /// An in-process stand-in for a Feetech bus.
@@ -542,7 +544,9 @@ impl MotorBus for SimulatedBus {
                         motor.position,
                         MotorMechanicalSample::new(
                             Some(
-                                spiral_robotics_core::arm::counts_to_degrees(travelled)
+                                spiral_robotics_core::arm::JointDefinition::degrees_from_encoder_counts(
+                                    travelled,
+                                )
                                     * SIMULATED_READS_PER_SECOND,
                             ),
                             Some(motor.load),
@@ -562,7 +566,7 @@ impl MotorBus for SimulatedBus {
     fn read_limits(&mut self) -> BTreeMap<String, MotorLimits> {
         self.motors
             .keys()
-            .map(|name| (name.clone(), simulated_limits()))
+            .map(|name| (name.clone(), SimulatedMotor::limits()))
             .collect()
     }
 

@@ -29,7 +29,10 @@ pub(crate) struct ProviderConfig {
 
 impl ProviderConfig {
     pub(crate) fn from_env() -> Result<Option<Self>, String> {
-        Self::from_lookup_and_local(|name| std::env::var(name).ok(), &repo_root_local_env_path())
+        Self::from_lookup_and_local(
+            |name| std::env::var(name).ok(),
+            &Self::repo_root_local_env_path(),
+        )
     }
 
     fn from_lookup_and_local(
@@ -37,12 +40,12 @@ impl ProviderConfig {
         local_path: &Path,
     ) -> Result<Option<Self>, String> {
         let mut values = ProviderValues {
-            api_key: non_empty(lookup("LLM_API_KEY")),
-            model: non_empty(lookup("LLM_MODEL")),
-            base_url: non_empty(lookup("LLM_BASE_URL")),
+            api_key: lookup("LLM_API_KEY").non_empty(),
+            model: lookup("LLM_MODEL").non_empty(),
+            base_url: lookup("LLM_BASE_URL").non_empty(),
         };
         if values.has_missing_value() {
-            values.fill_missing(load_local_provider_values(local_path)?);
+            values.fill_missing(ProviderValues::load(local_path)?);
         }
         let Some(api_key) = values.api_key else {
             return Ok(None);
@@ -74,6 +77,17 @@ impl ProviderConfig {
         base.push_str("/chat/completions");
         Url::parse(&base).map_err(|error| format!("provider endpoint is invalid: {error}"))
     }
+
+    fn repo_root_local_env_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(".env.local")
+    }
+
+    fn public_error(&self, context: &str, detail: &str) -> String {
+        // Never include request headers, request bodies, or configured secrets.
+        format!("LLM {context}: {detail}").replace(&self.api_key, "[redacted]")
+    }
 }
 
 #[derive(Default)]
@@ -99,125 +113,136 @@ impl ProviderValues {
             self.base_url = fallback.base_url;
         }
     }
+
+    fn load(path: &Path) -> Result<Self, String> {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                return Ok(ProviderValues::default());
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Could not inspect the local Assistant credential file: {error}"
+                ));
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("The local Assistant credential path must be a regular file.".to_owned());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err(
+                    "The local Assistant credential file must be readable only by its owner."
+                        .to_owned(),
+                );
+            }
+        }
+        if metadata.len() > MAX_LOCAL_ENV_BYTES {
+            return Err("The local Assistant credential file exceeds its size bound.".to_owned());
+        }
+        let encoded = fs::read(path).map_err(|error| {
+            format!("Could not read the local Assistant credential file: {error}")
+        })?;
+        if encoded.len() as u64 > MAX_LOCAL_ENV_BYTES {
+            return Err("The local Assistant credential file exceeds its size bound.".to_owned());
+        }
+        let contents = std::str::from_utf8(&encoded)
+            .map_err(|_| "The local Assistant credential file is not UTF-8.".to_owned())?;
+        Self::parse(contents)
+    }
+
+    fn parse(contents: &str) -> Result<Self, String> {
+        let mut values = Self::default();
+        for (index, line) in contents.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+            let Some((name, raw_value)) = line.split_once('=') else {
+                continue;
+            };
+            let target = match name.trim() {
+                "LLM_API_KEY" => &mut values.api_key,
+                "LLM_MODEL" => &mut values.model,
+                "LLM_BASE_URL" => &mut values.base_url,
+                _ => continue,
+            };
+            *target =
+                Some(LocalProviderValue::parse(raw_value, index + 1)?.into_string()).non_empty();
+        }
+        Ok(values)
+    }
 }
 
-fn non_empty(value: Option<String>) -> Option<String> {
-    value
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
+trait NonEmptyString {
+    fn non_empty(self) -> Option<String>;
 }
 
-fn repo_root_local_env_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(".env.local")
+impl NonEmptyString for Option<String> {
+    fn non_empty(self) -> Option<String> {
+        self.map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    }
 }
 
-fn load_local_provider_values(path: &Path) -> Result<ProviderValues, String> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(ProviderValues::default()),
-        Err(error) => {
+struct LocalProviderValue(String);
+
+impl LocalProviderValue {
+    fn parse(raw: &str, line: usize) -> Result<Self, String> {
+        let raw = raw.trim();
+        let Some(quote @ ('\'' | '"')) = raw.chars().next() else {
+            let comment = raw.char_indices().find_map(|(index, character)| {
+                (character == '#'
+                    && (index == 0
+                        || raw[..index]
+                            .chars()
+                            .next_back()
+                            .is_some_and(char::is_whitespace)))
+                .then_some(index)
+            });
+            return Ok(Self(raw[..comment.unwrap_or(raw.len())].trim().to_owned()));
+        };
+        let mut value = String::new();
+        let mut escaped = false;
+        let mut closed_at = None;
+        for (index, character) in raw.char_indices().skip(1) {
+            if quote == '"' && escaped {
+                value.push(match character {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    other => other,
+                });
+                escaped = false;
+            } else if quote == '"' && character == '\\' {
+                escaped = true;
+            } else if character == quote {
+                closed_at = Some(index + character.len_utf8());
+                break;
+            } else {
+                value.push(character);
+            }
+        }
+        let Some(closed_at) = closed_at else {
             return Err(format!(
-                "Could not inspect the local Assistant credential file: {error}"
+                "The local Assistant credential file has an unterminated quoted value on line {line}."
+            ));
+        };
+        let trailing = raw[closed_at..].trim();
+        if !trailing.is_empty() && !trailing.starts_with('#') {
+            return Err(format!(
+                "The local Assistant credential file has trailing text on line {line}."
             ));
         }
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err("The local Assistant credential path must be a regular file.".to_owned());
+        Ok(Self(value))
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(
-                "The local Assistant credential file must be readable only by its owner."
-                    .to_owned(),
-            );
-        }
-    }
-    if metadata.len() > MAX_LOCAL_ENV_BYTES {
-        return Err("The local Assistant credential file exceeds its size bound.".to_owned());
-    }
-    let encoded = fs::read(path)
-        .map_err(|error| format!("Could not read the local Assistant credential file: {error}"))?;
-    if encoded.len() as u64 > MAX_LOCAL_ENV_BYTES {
-        return Err("The local Assistant credential file exceeds its size bound.".to_owned());
-    }
-    let contents = std::str::from_utf8(&encoded)
-        .map_err(|_| "The local Assistant credential file is not UTF-8.".to_owned())?;
-    parse_local_provider_values(contents)
-}
 
-fn parse_local_provider_values(contents: &str) -> Result<ProviderValues, String> {
-    let mut values = ProviderValues::default();
-    for (index, line) in contents.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
-        let Some((name, raw_value)) = line.split_once('=') else {
-            continue;
-        };
-        let target = match name.trim() {
-            "LLM_API_KEY" => &mut values.api_key,
-            "LLM_MODEL" => &mut values.model,
-            "LLM_BASE_URL" => &mut values.base_url,
-            _ => continue,
-        };
-        *target = non_empty(Some(parse_local_value(raw_value, index + 1)?));
+    fn into_string(self) -> String {
+        self.0
     }
-    Ok(values)
-}
-
-fn parse_local_value(raw: &str, line: usize) -> Result<String, String> {
-    let raw = raw.trim();
-    let Some(quote @ ('\'' | '"')) = raw.chars().next() else {
-        let comment = raw.char_indices().find_map(|(index, character)| {
-            (character == '#'
-                && (index == 0
-                    || raw[..index]
-                        .chars()
-                        .next_back()
-                        .is_some_and(char::is_whitespace)))
-            .then_some(index)
-        });
-        return Ok(raw[..comment.unwrap_or(raw.len())].trim().to_owned());
-    };
-    let mut value = String::new();
-    let mut escaped = false;
-    let mut closed_at = None;
-    for (index, character) in raw.char_indices().skip(1) {
-        if quote == '"' && escaped {
-            value.push(match character {
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                other => other,
-            });
-            escaped = false;
-        } else if quote == '"' && character == '\\' {
-            escaped = true;
-        } else if character == quote {
-            closed_at = Some(index + character.len_utf8());
-            break;
-        } else {
-            value.push(character);
-        }
-    }
-    let Some(closed_at) = closed_at else {
-        return Err(format!(
-            "The local Assistant credential file has an unterminated quoted value on line {line}."
-        ));
-    };
-    let trailing = raw[closed_at..].trim();
-    if !trailing.is_empty() && !trailing.starts_with('#') {
-        return Err(format!(
-            "The local Assistant credential file has trailing text on line {line}."
-        ));
-    }
-    Ok(value)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -471,8 +496,8 @@ impl OpenAiProvider {
                 .json(&request)
                 .send();
             let response = tokio::select! {
-                response = send => response.map_err(|error| provider_error("request failed", &error.to_string()))?,
-                () = wait_cancelled(cancel.clone()) => return Err("Agent turn cancelled.".to_owned()),
+                response = send => response.map_err(|error| self.config.public_error("request failed", &error.to_string()))?,
+                () = cancel.wait_cancelled() => return Err("Agent turn cancelled.".to_owned()),
             };
             if matches!(
                 response.status(),
@@ -484,161 +509,175 @@ impl OpenAiProvider {
                 let delay = Duration::from_millis(250 * (attempt as u64 + 1));
                 tokio::select! {
                     () = tokio::time::sleep(delay) => {},
-                    () = wait_cancelled(cancel.clone()) => return Err("Agent turn cancelled.".to_owned()),
+                    () = cancel.wait_cancelled() => return Err("Agent turn cancelled.".to_owned()),
                 }
                 continue;
             }
             if !response.status().is_success() {
                 let status = response.status();
-                let body = bounded_body(response).await.unwrap_or_default();
-                let detail = public_error_body(&body).replace(&self.config.api_key, "[redacted]");
-                return Err(provider_error(
-                    &format!("provider returned {status}"),
-                    &detail,
-                ));
+                let body = response.bounded_error_body().await.unwrap_or_default();
+                let detail = body.public_error_summary();
+                return Err(self
+                    .config
+                    .public_error(&format!("provider returned {status}"), &detail));
             }
-            return parse_stream(response, cancel, &mut on_text_delta).await;
+            return ProviderResponse::from_stream(response, cancel, &mut on_text_delta).await;
         }
         Err("The LLM provider remained overloaded after bounded retries.".to_owned())
     }
 }
 
-async fn parse_stream<F>(
-    response: reqwest::Response,
-    cancel: Arc<AtomicBool>,
-    on_text_delta: &mut F,
-) -> Result<ProviderResponse, String>
-where
-    F: FnMut(&str),
-{
-    let mut stream = response.bytes_stream();
-    // HTTP byte chunks are not UTF-8 character boundaries. Buffer complete
-    // SSE lines as bytes, then decode each line after its newline arrives.
-    let mut buffer = VecDeque::new();
-    let mut searched = 0_usize;
-    let mut received = 0_usize;
-    let mut content = String::new();
-    let mut calls = Vec::<PendingToolCall>::new();
-    while let Some(next) = tokio::select! {
-        next = stream.next() => next,
-        () = wait_cancelled(cancel.clone()) => return Err("Agent turn cancelled.".to_owned()),
-    } {
-        let chunk = next.map_err(|error| provider_error("stream failed", &error.to_string()))?;
-        received = received.saturating_add(chunk.len());
-        if received > MAX_RESPONSE_BYTES {
-            return Err("The LLM provider response exceeded the 2 MiB safety limit.".to_owned());
-        }
-        buffer.extend(chunk);
-        while let Some(position) = buffer
-            .iter()
-            .enumerate()
-            .skip(searched)
-            .find_map(|(index, byte)| (*byte == b'\n').then_some(index))
-        {
-            // VecDeque removes the completed prefix without shifting a growing
-            // partial SSE line. Together with `searched`, every received byte
-            // is scanned and copied at most once, even for adversarial streams
-            // with many short lines or multibyte characters split by chunks.
-            let mut line = buffer.drain(..=position).collect::<Vec<_>>();
-            line.pop(); // newline
-            searched = 0;
-            if line.last() == Some(&b'\r') {
-                line.pop();
+impl ProviderResponse {
+    async fn from_stream<F>(
+        response: reqwest::Response,
+        cancel: Arc<AtomicBool>,
+        on_text_delta: &mut F,
+    ) -> Result<ProviderResponse, String>
+    where
+        F: FnMut(&str),
+    {
+        let mut stream = response.bytes_stream();
+        // HTTP byte chunks are not UTF-8 character boundaries. Buffer complete
+        // SSE lines as bytes, then decode each line after its newline arrives.
+        let mut buffer = VecDeque::new();
+        let mut searched = 0_usize;
+        let mut received = 0_usize;
+        let mut content = String::new();
+        let mut calls = Vec::<PendingToolCall>::new();
+        while let Some(next) = tokio::select! {
+            next = stream.next() => next,
+            () = cancel.wait_cancelled() => return Err("Agent turn cancelled.".to_owned()),
+        } {
+            let chunk = next.map_err(|error| format!("LLM stream failed: {error}"))?;
+            received = received.saturating_add(chunk.len());
+            if received > MAX_RESPONSE_BYTES {
+                return Err("The LLM provider response exceeded the 2 MiB safety limit.".to_owned());
             }
-            let line = std::str::from_utf8(&line)
+            buffer.extend(chunk);
+            while let Some(position) = buffer
+                .iter()
+                .enumerate()
+                .skip(searched)
+                .find_map(|(index, byte)| (*byte == b'\n').then_some(index))
+            {
+                // VecDeque removes the completed prefix without shifting a growing
+                // partial SSE line. Together with `searched`, every received byte
+                // is scanned and copied at most once, even for adversarial streams
+                // with many short lines or multibyte characters split by chunks.
+                let mut line = buffer.drain(..=position).collect::<Vec<_>>();
+                line.pop(); // newline
+                searched = 0;
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                let line = std::str::from_utf8(&line)
+                    .map_err(|_| "The LLM provider returned non-UTF-8 stream data.".to_owned())?;
+                let Some(data) = line.strip_prefix("data:") else {
+                    continue;
+                };
+                let data = data.trim();
+                if data.is_empty() || data == "[DONE]" {
+                    continue;
+                }
+                let chunk: StreamChunk = serde_json::from_str(data).map_err(|error| {
+                    format!("The LLM provider returned malformed stream data: {error}")
+                })?;
+                for choice in chunk.choices {
+                    if let Some(delta) = choice.delta.content {
+                        content.push_str(&delta);
+                        on_text_delta(&delta);
+                    }
+                    for delta in choice.delta.tool_calls {
+                        if delta.index >= MAX_STREAM_TOOL_CALLS {
+                            return Err(format!(
+                                "The LLM provider returned a tool-call index outside the 0–{} safety bound.",
+                                MAX_STREAM_TOOL_CALLS - 1
+                            ));
+                        }
+                        if calls.len() <= delta.index {
+                            calls.resize_with(delta.index + 1, PendingToolCall::default);
+                        }
+                        let call = &mut calls[delta.index];
+                        if let Some(id) = delta.id {
+                            call.id.push_str(&id);
+                        }
+                        if let Some(function) = delta.function {
+                            if let Some(name) = function.name {
+                                call.name.push_str(&name);
+                            }
+                            if let Some(arguments) = function.arguments {
+                                call.arguments.push_str(&arguments);
+                            }
+                        }
+                    }
+                }
+            }
+            searched = buffer.len();
+        }
+        if !buffer.is_empty() {
+            let tail = buffer.into_iter().collect::<Vec<_>>();
+            std::str::from_utf8(&tail)
                 .map_err(|_| "The LLM provider returned non-UTF-8 stream data.".to_owned())?;
-            let Some(data) = line.strip_prefix("data:") else {
-                continue;
-            };
-            let data = data.trim();
-            if data.is_empty() || data == "[DONE]" {
-                continue;
-            }
-            let chunk: StreamChunk = serde_json::from_str(data).map_err(|error| {
-                format!("The LLM provider returned malformed stream data: {error}")
-            })?;
-            for choice in chunk.choices {
-                if let Some(delta) = choice.delta.content {
-                    content.push_str(&delta);
-                    on_text_delta(&delta);
-                }
-                for delta in choice.delta.tool_calls {
-                    if delta.index >= MAX_STREAM_TOOL_CALLS {
-                        return Err(format!(
-                            "The LLM provider returned a tool-call index outside the 0–{} safety bound.",
-                            MAX_STREAM_TOOL_CALLS - 1
-                        ));
-                    }
-                    if calls.len() <= delta.index {
-                        calls.resize_with(delta.index + 1, PendingToolCall::default);
-                    }
-                    let call = &mut calls[delta.index];
-                    if let Some(id) = delta.id {
-                        call.id.push_str(&id);
-                    }
-                    if let Some(function) = delta.function {
-                        if let Some(name) = function.name {
-                            call.name.push_str(&name);
-                        }
-                        if let Some(arguments) = function.arguments {
-                            call.arguments.push_str(&arguments);
-                        }
-                    }
-                }
-            }
         }
-        searched = buffer.len();
-    }
-    if !buffer.is_empty() {
-        let tail = buffer.into_iter().collect::<Vec<_>>();
-        std::str::from_utf8(&tail)
-            .map_err(|_| "The LLM provider returned non-UTF-8 stream data.".to_owned())?;
-    }
-    let tool_calls = calls
-        .into_iter()
-        .filter(|call| !call.id.is_empty() || !call.name.is_empty())
-        .map(|call| ProviderToolCall {
-            id: call.id,
-            kind: "function".to_owned(),
-            function: ProviderFunctionCall {
-                name: call.name,
-                arguments: call.arguments,
-            },
+        let tool_calls = calls
+            .into_iter()
+            .filter(|call| !call.id.is_empty() || !call.name.is_empty())
+            .map(|call| ProviderToolCall {
+                id: call.id,
+                kind: "function".to_owned(),
+                function: ProviderFunctionCall {
+                    name: call.name,
+                    arguments: call.arguments,
+                },
+            })
+            .collect();
+        Ok(Self {
+            content,
+            tool_calls,
         })
-        .collect();
-    Ok(ProviderResponse {
-        content,
-        tool_calls,
-    })
-}
-
-async fn bounded_body(response: reqwest::Response) -> Result<String, String> {
-    let mut stream = response.bytes_stream();
-    let mut bytes = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| format!("could not read provider error: {error}"))?;
-        let remaining = (32_usize * 1024).saturating_sub(bytes.len());
-        if remaining == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
     }
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn public_error_body(body: &str) -> String {
-    let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
-    compact.chars().take(512).collect()
+trait ProviderHttpResponse {
+    async fn bounded_error_body(self) -> Result<String, String>;
 }
 
-fn provider_error(context: &str, detail: &str) -> String {
-    // Never include request headers, request bodies, or configured secrets.
-    format!("LLM {context}: {detail}")
+impl ProviderHttpResponse for reqwest::Response {
+    async fn bounded_error_body(self) -> Result<String, String> {
+        let mut stream = self.bytes_stream();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| format!("could not read provider error: {error}"))?;
+            let remaining = (32_usize * 1024).saturating_sub(bytes.len());
+            if remaining == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        }
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
 }
 
-async fn wait_cancelled(cancel: Arc<AtomicBool>) {
-    while !cancel.load(Ordering::SeqCst) {
-        tokio::time::sleep(Duration::from_millis(50)).await;
+trait ProviderErrorBody {
+    fn public_error_summary(&self) -> String;
+}
+
+impl ProviderErrorBody for str {
+    fn public_error_summary(&self) -> String {
+        let compact = self.split_whitespace().collect::<Vec<_>>().join(" ");
+        compact.chars().take(512).collect()
+    }
+}
+
+trait CancellationWait {
+    async fn wait_cancelled(&self);
+}
+
+impl CancellationWait for AtomicBool {
+    async fn wait_cancelled(&self) {
+        while !self.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }
 
@@ -743,7 +782,12 @@ mod tests {
 
     #[test]
     fn error_format_never_contains_configuration() {
-        let error = provider_error("request failed", "connection refused");
+        let config = ProviderConfig {
+            base_url: Url::parse(OPENROUTER_BASE_URL).unwrap(),
+            api_key: "secret".to_owned(),
+            model: DEFAULT_OPENROUTER_MODEL.to_owned(),
+        };
+        let error = config.public_error("request failed", "connection refused");
         assert!(!error.contains("LLM_API_KEY"));
         assert_eq!(error, "LLM request failed: connection refused");
     }

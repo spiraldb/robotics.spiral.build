@@ -4,54 +4,73 @@ use spiral_robotics_api::robots::{CameraStreamFormat, CameraStreamState};
 
 /// Camera discovery and preview do not depend on SpiralDB, so they remain
 /// useful while catalog bootstrap is still running or needs repair.
-pub(super) fn bootstrap_router() -> Router<AppState> {
-    Router::new()
-        .route("/cameras", get(list_cameras))
-        .route("/cameras/refresh", post(refresh_cameras))
-        .route("/cameras/stream.mjpeg", get(camera_stream))
-        .route("/cameras/snapshot.jpg", get(camera_snapshot))
-}
+impl AppState {
+    pub(super) fn device_bootstrap_router() -> Router<Self> {
+        Router::new()
+            .route("/cameras", get(Self::list_cameras))
+            .route("/cameras/refresh", post(Self::refresh_cameras))
+            .route("/cameras/stream.mjpeg", get(Self::camera_stream))
+            .route("/cameras/snapshot.jpg", get(Self::camera_snapshot))
+    }
 
-pub(super) fn catalog_router() -> Router<AppState> {
-    Router::new()
-        .route("/ports", get(list_ports))
-        .route("/ports/identify", post(identify_port))
-        .route("/robots", get(list_robots).post(create_robot))
-        .route(
-            "/robots/import",
-            post(import_robot_configuration).layer(DefaultBodyLimit::max(1024 * 1024)),
-        )
-        .route(
-            "/robots/{id}",
-            get(get_robot).patch(update_robot).delete(delete_robot),
-        )
-        .route(
-            "/robots/{id}/configuration",
-            get(export_robot_configuration),
-        )
-        .route("/robots/{id}/connect", post(connect_robot))
-        .route("/robots/{id}/disconnect", post(disconnect_robot))
-        .route("/robots/{id}/hold", post(hold_robot))
-        .route("/robots/{id}/release", post(release_robot))
-        .route("/robots/{id}/goal", post(set_goal))
-        .route("/robots/{id}/calibration/start", post(start_calibration))
-        .route("/robots/{id}/calibration/finish", post(finish_calibration))
-        .route("/robots/{id}/calibration/cancel", post(cancel_calibration))
-        .route(
-            "/robots/{id}/calibration/reapply",
-            post(reapply_calibration),
-        )
-        .route("/mode", post(set_mode))
+    pub(super) fn device_catalog_router() -> Router<Self> {
+        Router::new()
+            .route("/ports", get(Self::list_ports))
+            .route("/ports/identify", post(Self::identify_port))
+            .route("/robots", get(Self::list_robots).post(Self::create_robot))
+            .route(
+                "/robots/import",
+                post(Self::import_robot_configuration).layer(DefaultBodyLimit::max(1024 * 1024)),
+            )
+            .route(
+                "/robots/{id}",
+                get(Self::get_robot)
+                    .patch(Self::update_robot)
+                    .delete(Self::delete_robot),
+            )
+            .route(
+                "/robots/{id}/configuration",
+                get(Self::export_robot_configuration),
+            )
+            .route("/robots/{id}/connect", post(Self::connect_robot))
+            .route("/robots/{id}/disconnect", post(Self::disconnect_robot))
+            .route("/robots/{id}/hold", post(Self::hold_robot))
+            .route("/robots/{id}/release", post(Self::release_robot))
+            .route("/robots/{id}/goal", post(Self::set_robot_goal))
+            .route(
+                "/robots/{id}/calibration/start",
+                post(Self::start_calibration),
+            )
+            .route(
+                "/robots/{id}/calibration/finish",
+                post(Self::finish_calibration),
+            )
+            .route(
+                "/robots/{id}/calibration/cancel",
+                post(Self::cancel_calibration),
+            )
+            .route(
+                "/robots/{id}/calibration/reapply",
+                post(Self::reapply_calibration),
+            )
+            .route("/mode", post(Self::set_mode))
+    }
 }
 
 struct SystemSerialPortInventory;
 
 impl SerialPortInventory for SystemSerialPortInventory {
     async fn available_port_paths(&self) -> Result<Vec<String>, OperationError> {
-        tokio::task::spawn_blocking(available_ports)
+        tokio::task::spawn_blocking(SerialPortCatalog::discover)
             .await
             .map_err(|error| OperationError::Internal(error.to_string()))?
-            .map(|ports| ports.into_iter().map(|port| port.port_name).collect())
+            .map(|ports| {
+                ports
+                    .into_ports()
+                    .into_iter()
+                    .map(|port| port.port_name)
+                    .collect()
+            })
             .map_err(|error| OperationError::Internal(error.to_string()))
     }
 }
@@ -62,7 +81,7 @@ struct SerialPortQueryAdapter<'a> {
 
 impl SerialPortQueryPort for SerialPortQueryAdapter<'_> {
     async fn serial_ports(&self) -> Result<Vec<SerialPortDescriptor>, OperationError> {
-        let ports = tokio::task::spawn_blocking(available_ports)
+        let ports = tokio::task::spawn_blocking(SerialPortCatalog::discover)
             .await
             .map_err(|error| OperationError::Internal(error.to_string()))?
             .map_err(|error| {
@@ -83,12 +102,13 @@ impl SerialPortQueryPort for SerialPortQueryAdapter<'_> {
             .filter_map(|record| Some((record.port()?.path().to_owned(), record.id().to_owned())))
             .collect::<std::collections::BTreeMap<_, _>>();
         Ok(ports
+            .into_ports()
             .into_iter()
             .map(|port| {
                 SerialPortDescriptor::new(
                     port.port_name.clone(),
-                    port_kind(&port.port_type),
-                    port_description(&port.port_type),
+                    port.port_type.kind(),
+                    port.port_type.description(),
                 )
                 .with_owner(in_use.get(&port.port_name).cloned())
             })
@@ -375,12 +395,7 @@ struct CalibrationHistoryHttpAdapter<'a> {
 
 impl CalibrationHistoryPort for CalibrationHistoryHttpAdapter<'_> {
     fn reserve_catalog_mutation(&self) -> Result<Option<CatalogLeaseToken>, OperationError> {
-        reserve_calibration_history_mutation(self.state.catalog_lease(), || {
-            (
-                self.state.workflow().is_active(),
-                self.state.workflow_agent().is_active(),
-            )
-        })
+        self.state.reserve_calibration_history_mutation()
     }
 
     fn release_catalog_mutation(&self, token: CatalogLeaseToken) {
@@ -454,105 +469,131 @@ impl CalibrationHistoryPort for CalibrationHistoryHttpAdapter<'_> {
     }
 }
 
-fn reserve_calibration_history_mutation(
-    lease: &CatalogMutationLease,
-    activity: impl FnOnce() -> (bool, bool),
-) -> Result<Option<CatalogLeaseToken>, OperationError> {
-    let Some(token) = lease.try_acquire(CatalogLeaseOwner::CalibrationReapply) else {
-        return Ok(None);
-    };
-    let (workflow_active, assistant_active) = activity();
-    let conflict = if workflow_active {
-        Some(
-            "Wait for the active Workflow run to finish before reapplying calibration to episode history.",
+impl AppState {
+    fn reserve_calibration_history_mutation(
+        &self,
+    ) -> Result<Option<CatalogLeaseToken>, OperationError> {
+        self.catalog_lease().reserve_calibration_history(
+            self.workflow().is_active(),
+            self.workflow_agent().is_active(),
         )
-    } else if assistant_active {
-        Some(
-            "Wait for the active Workflow Assistant turn to finish before reapplying calibration to episode history.",
-        )
-    } else {
-        None
-    };
-    if let Some(message) = conflict {
-        let released = lease.release(token);
-        debug_assert!(
-            released,
-            "rejected calibration-history admission releases its exact catalog lease"
-        );
-        return Err(OperationError::Conflict(message.to_owned()));
     }
-    Ok(Some(token))
+
+    /// Try every usable saved robot once when the studio starts.
+    ///
+    /// A failed bus stays disconnected with its error attached; one absent arm
+    /// never prevents the web interface or another arm from starting.
+    pub(crate) async fn auto_connect_saved_robots(&self) {
+        let adapter = RobotHttpAdapter::new(self);
+        for outcome in RobotActions::new(&adapter, &adapter).auto_connect().await {
+            outcome.log();
+        }
+    }
 }
 
-async fn list_ports(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<SerialPortSummary>>, Failure> {
-    Ok(Json(
-        SerialPortQueryAdapter { state: &state }
-            .serial_ports()
-            .await?
-            .into_iter()
-            .map(|port| {
-                let (path, kind, description, used_by) = port.into_parts();
-                SerialPortSummary::new(path, kind, description).with_owner(used_by)
-            })
-            .collect(),
-    ))
+impl CatalogMutationLease {
+    fn reserve_calibration_history(
+        &self,
+        workflow_active: bool,
+        assistant_active: bool,
+    ) -> Result<Option<CatalogLeaseToken>, OperationError> {
+        let Some(token) = self.try_acquire(CatalogLeaseOwner::CalibrationReapply) else {
+            return Ok(None);
+        };
+        let conflict = if workflow_active {
+            Some(
+                "Wait for the active Workflow run to finish before reapplying calibration to episode history.",
+            )
+        } else if assistant_active {
+            Some(
+                "Wait for the active Workflow Assistant turn to finish before reapplying calibration to episode history.",
+            )
+        } else {
+            None
+        };
+        if let Some(message) = conflict {
+            let released = self.release(token);
+            debug_assert!(
+                released,
+                "rejected calibration-history admission releases its exact catalog lease"
+            );
+            return Err(OperationError::Conflict(message.to_owned()));
+        }
+        Ok(Some(token))
+    }
 }
 
-async fn identify_port(
-    Json(request): Json<IdentifyPortRequest>,
-) -> Result<Json<IdentifyPortResponse>, Failure> {
-    let result = IdentifySerialPortCommand::new(request.before().to_vec())
-        .execute(&SystemSerialPortInventory)
-        .await?;
-    let (port, removed, guidance) = result.into_parts();
-    Ok(Json(IdentifyPortResponse::new(port, removed, guidance)))
-}
+impl AppState {
+    async fn list_ports(
+        State(state): State<Self>,
+    ) -> Result<Json<Vec<SerialPortSummary>>, Failure> {
+        Ok(Json(
+            SerialPortQueryAdapter { state: &state }
+                .serial_ports()
+                .await?
+                .into_iter()
+                .map(|port| {
+                    let (path, kind, description, used_by) = port.into_parts();
+                    SerialPortSummary::new(path, kind, description).with_owner(used_by)
+                })
+                .collect(),
+        ))
+    }
 
-async fn list_cameras(State(state): State<AppState>) -> Json<Vec<CameraStatus>> {
-    Json(
-        CameraDiscoveryAdapter::new(state.cameras().clone())
-            .cameras()
-            .into_iter()
-            .map(|camera| {
-                CameraStatus::new(
-                    camera.id(),
-                    camera.name(),
-                    CameraStreamFormat::new(camera.width(), camera.height(), camera.fps()),
-                )
-                .with_state(CameraStreamState::new(
-                    camera.streaming(),
-                    camera.frames(),
-                    camera.error().map(str::to_owned),
-                ))
-            })
-            .collect(),
-    )
-}
+    async fn identify_port(
+        Json(request): Json<IdentifyPortRequest>,
+    ) -> Result<Json<IdentifyPortResponse>, Failure> {
+        let result = IdentifySerialPortCommand::new(request.before().to_vec())
+            .execute(&SystemSerialPortInventory)
+            .await?;
+        let (port, removed, guidance) = result.into_parts();
+        Ok(Json(IdentifyPortResponse::new(port, removed, guidance)))
+    }
 
-async fn refresh_cameras(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<CameraStatus>>, Failure> {
-    Ok(Json(
-        CameraDiscoveryAdapter::new(state.cameras().clone())
-            .refresh_cameras()
-            .await?
-            .into_iter()
-            .map(|camera| {
-                CameraStatus::new(
-                    camera.id(),
-                    camera.name(),
-                    CameraStreamFormat::new(camera.width(), camera.height(), camera.fps()),
-                )
-                .with_state(CameraStreamState::new(
-                    camera.streaming(),
-                    camera.frames(),
-                    camera.error().map(str::to_owned),
-                ))
-            })
-            .collect(),
-    ))
+    async fn list_cameras(State(state): State<Self>) -> Json<Vec<CameraStatus>> {
+        Json(
+            CameraDiscoveryAdapter::new(state.cameras().clone())
+                .cameras()
+                .into_iter()
+                .map(|camera| {
+                    CameraStatus::new(
+                        camera.id(),
+                        camera.name(),
+                        CameraStreamFormat::new(camera.width(), camera.height(), camera.fps()),
+                    )
+                    .with_state(CameraStreamState::new(
+                        camera.streaming(),
+                        camera.frames(),
+                        camera.error().map(str::to_owned),
+                    ))
+                })
+                .collect(),
+        )
+    }
+
+    async fn refresh_cameras(
+        State(state): State<Self>,
+    ) -> Result<Json<Vec<CameraStatus>>, Failure> {
+        Ok(Json(
+            CameraDiscoveryAdapter::new(state.cameras().clone())
+                .refresh_cameras()
+                .await?
+                .into_iter()
+                .map(|camera| {
+                    CameraStatus::new(
+                        camera.id(),
+                        camera.name(),
+                        CameraStreamFormat::new(camera.width(), camera.height(), camera.fps()),
+                    )
+                    .with_state(CameraStreamState::new(
+                        camera.streaming(),
+                        camera.frames(),
+                        camera.error().map(str::to_owned),
+                    ))
+                })
+                .collect(),
+        ))
+    }
 }
 
 /// A camera is addressed by query string because its identifier may be a device
@@ -562,226 +603,224 @@ struct CameraQuery {
     id: String,
 }
 
-async fn camera_stream(
-    State(state): State<AppState>,
-    Query(query): Query<CameraQuery>,
-) -> Result<Response, Failure> {
-    let receiver = state
-        .cameras()
-        .subscribe(&query.id)
-        .map_err(|error| Failure(StatusCode::NOT_FOUND, error))?;
+impl AppState {
+    async fn camera_stream(
+        State(state): State<Self>,
+        Query(query): Query<CameraQuery>,
+    ) -> Result<Response, Failure> {
+        let receiver = state
+            .cameras()
+            .subscribe(&query.id)
+            .map_err(|error| Failure(StatusCode::NOT_FOUND, error))?;
 
-    let frames = tokio_stream::wrappers::WatchStream::new(receiver)
-        .filter_map(|frame| async move { frame })
-        .scan(0_u64, |last, frame| {
-            let fresh = frame.sequence() != *last;
-            *last = frame.sequence();
-            futures_util::future::ready(Some(fresh.then_some(frame)))
-        })
-        .filter_map(|frame| async move { frame })
-        .map(|frame| Ok::<Bytes, Infallible>(multipart_part(&frame)));
-
-    Ok(Response::builder()
-        .header(
-            header::CONTENT_TYPE,
-            format!("multipart/x-mixed-replace; boundary={MJPEG_BOUNDARY}"),
-        )
-        .header(header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
-        .header(header::PRAGMA, "no-cache")
-        .header(header::EXPIRES, "0")
-        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-        .body(Body::from_stream(frames))
-        .expect("a valid MJPEG response"))
-}
-
-async fn camera_snapshot(
-    State(state): State<AppState>,
-    Query(query): Query<CameraQuery>,
-) -> Result<Response, Failure> {
-    let mut receiver = state
-        .cameras()
-        .subscribe(&query.id)
-        .map_err(|error| Failure(StatusCode::NOT_FOUND, error))?;
-
-    // The stream may have just started, so wait briefly for the first frame.
-    let available = receiver.borrow_and_update().clone();
-    let frame = match available {
-        Some(frame) => Some(frame),
-        None => tokio::time::timeout(Duration::from_secs(5), async {
-            receiver.changed().await.ok()?;
-            receiver.borrow_and_update().clone()
-        })
-        .await
-        .ok()
-        .flatten(),
-    };
-
-    let frame = frame.ok_or_else(|| {
-        Failure(
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("camera {:?} has not produced a frame yet", query.id),
-        )
-    })?;
-
-    Ok(Response::builder()
-        .header(header::CONTENT_TYPE, "image/jpeg")
-        .header(header::CACHE_CONTROL, "no-store")
-        .body(Body::from(frame.bytes().clone()))
-        .expect("a valid JPEG response"))
-}
-
-/// Wrap one JPEG as a part of a `multipart/x-mixed-replace` response.
-pub(super) fn multipart_part(frame: &Frame) -> Bytes {
-    let mut part = BytesMut::with_capacity(frame.bytes().len() + 96);
-    part.put_slice(b"--");
-    part.put_slice(MJPEG_BOUNDARY.as_bytes());
-    part.put_slice(b"\r\nContent-Type: image/jpeg\r\nContent-Length: ");
-    part.put_slice(frame.bytes().len().to_string().as_bytes());
-    part.put_slice(b"\r\n\r\n");
-    part.put_slice(frame.bytes());
-    part.put_slice(b"\r\n");
-    part.freeze()
-}
-
-async fn list_robots(State(state): State<AppState>) -> Json<Vec<RobotSummary>> {
-    let adapter = RobotHttpAdapter::prefetched(&state);
-    let hardware = state.hardware().state();
-    Json(
-        robots::list(&adapter)
-            .into_iter()
-            .filter_map(|robot| {
-                let connection = hardware
-                    .connections()
-                    .get(robot.id())
-                    .cloned()
-                    .unwrap_or_default();
-                adapter.summary(robot.id(), connection).ok()
+        let frames = tokio_stream::wrappers::WatchStream::new(receiver)
+            .filter_map(|frame| async move { frame })
+            .scan(0_u64, |last, frame| {
+                let fresh = frame.sequence() != *last;
+                *last = frame.sequence();
+                futures_util::future::ready(Some(fresh.then_some(frame)))
             })
-            .collect(),
-    )
-}
+            .filter_map(|frame| async move { frame })
+            .map(|frame| Ok::<Bytes, Infallible>(frame.multipart_part()));
 
-pub(super) fn present_saved_robot(
-    state: &AppState,
-    robot: SavedRobot,
-) -> Result<RobotSummary, Failure> {
-    let connection = state
-        .hardware()
-        .state()
-        .connections()
-        .get(robot.id())
-        .cloned()
-        .unwrap_or_default();
-    Ok(state.workspace().get(robot.id())?.summary(connection))
-}
-
-async fn create_robot(
-    State(state): State<AppState>,
-    Json(request): Json<CreateRobotRequest>,
-) -> Result<(StatusCode, Json<RobotSummary>), Failure> {
-    let adapter = RobotHttpAdapter::new(&state);
-    let robot = robots::create(
-        &adapter,
-        CreateRobotCommand::new(
-            request.id(),
-            request.robot_type().map(str::to_owned),
-            request.port().map(str::to_owned),
-        )
-        .with_baud_rate(request.baud_rate()),
-    )?;
-    log_auto_connect_outcome(
-        robots::auto_connect_robot(&adapter, &adapter, robot.id().to_owned()).await,
-    );
-    Ok((
-        StatusCode::CREATED,
-        Json(present_saved_robot(&state, robot)?),
-    ))
-}
-
-/// Add a complete unified robot JSON document as a new workspace instance.
-async fn import_robot_configuration(
-    State(state): State<AppState>,
-    body: Bytes,
-) -> Result<(StatusCode, Json<RobotSummary>), Failure> {
-    if body.is_empty() {
-        return Err(Failure::bad_request(
-            "choose a robot configuration JSON file to import",
-        ));
+        Ok(Response::builder()
+            .header(
+                header::CONTENT_TYPE,
+                format!("multipart/x-mixed-replace; boundary={MJPEG_BOUNDARY}"),
+            )
+            .header(header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
+            .header(header::PRAGMA, "no-cache")
+            .header(header::EXPIRES, "0")
+            .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+            .body(Body::from_stream(frames))
+            .expect("a valid MJPEG response"))
     }
-    let adapter = RobotHttpAdapter::import(&state, body);
-    let robot = robots::import_configuration(&adapter)?;
-    log_auto_connect_outcome(
-        robots::auto_connect_robot(&adapter, &adapter, robot.id().to_owned()).await,
-    );
-    Ok((
-        StatusCode::CREATED,
-        Json(present_saved_robot(&state, robot)?),
-    ))
-}
 
-/// Download the complete canonical JSON document for one robot.
-async fn export_robot_configuration(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Response, Failure> {
-    let adapter = RobotHttpAdapter::new(&state);
-    let document = robots::export_configuration(&adapter, &id)?;
-    Ok(Response::builder()
-        .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
-        .header(header::CACHE_CONTROL, "no-store")
-        .header(
-            header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{id}.json\""),
-        )
-        .body(Body::from(document.into_bytes()))
-        .expect("static robot configuration response headers are valid"))
-}
+    async fn camera_snapshot(
+        State(state): State<Self>,
+        Query(query): Query<CameraQuery>,
+    ) -> Result<Response, Failure> {
+        let mut receiver = state
+            .cameras()
+            .subscribe(&query.id)
+            .map_err(|error| Failure(StatusCode::NOT_FOUND, error))?;
 
-async fn get_robot(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<RobotSummary>, Failure> {
-    let robot = robots::get(&RobotHttpAdapter::new(&state), id)?;
-    let connection = state
-        .hardware()
-        .state()
-        .connections()
-        .get(robot.id())
-        .cloned()
-        .unwrap_or_default();
-    Ok(Json(state.workspace().get(robot.id())?.summary(connection)))
-}
+        // The stream may have just started, so wait briefly for the first frame.
+        let available = receiver.borrow_and_update().clone();
+        let frame = match available {
+            Some(frame) => Some(frame),
+            None => tokio::time::timeout(Duration::from_secs(5), async {
+                receiver.changed().await.ok()?;
+                receiver.borrow_and_update().clone()
+            })
+            .await
+            .ok()
+            .flatten(),
+        };
 
-async fn update_robot(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(request): Json<UpdateRobotRequest>,
-) -> Result<Json<RobotSummary>, Failure> {
-    let adapter = RobotHttpAdapter::new(&state);
-    let should_auto_connect = request.port().is_some();
-    let robot = robots::update(
-        &adapter,
-        &adapter,
-        UpdateRobotCommand::new(
-            id.clone(),
-            request.robot_type().map(str::to_owned),
-            request
-                .port()
-                .map(|port| SerialPortConfiguration::new(port.path(), port.baud_rate())),
-        )
-        .with_cameras(request.cameras().map(|bindings| {
-            bindings
-                .iter()
-                .map(|binding| CameraAssignment::new(binding.name(), binding.id()))
-                .collect()
-        })),
-    )?;
-    if should_auto_connect {
-        log_auto_connect_outcome(
-            robots::auto_connect_robot(&adapter, &adapter, robot.id().to_owned()).await,
-        );
+        let frame = frame.ok_or_else(|| {
+            Failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("camera {:?} has not produced a frame yet", query.id),
+            )
+        })?;
+
+        Ok(Response::builder()
+            .header(header::CONTENT_TYPE, "image/jpeg")
+            .header(header::CACHE_CONTROL, "no-store")
+            .body(Body::from(frame.bytes().clone()))
+            .expect("a valid JPEG response"))
     }
-    Ok(Json(present_saved_robot(&state, robot)?))
+}
+
+impl Frame {
+    /// Wrap this JPEG as a part of a `multipart/x-mixed-replace` response.
+    pub(super) fn multipart_part(&self) -> Bytes {
+        let mut part = BytesMut::with_capacity(self.bytes().len() + 96);
+        part.put_slice(b"--");
+        part.put_slice(MJPEG_BOUNDARY.as_bytes());
+        part.put_slice(b"\r\nContent-Type: image/jpeg\r\nContent-Length: ");
+        part.put_slice(self.bytes().len().to_string().as_bytes());
+        part.put_slice(b"\r\n\r\n");
+        part.put_slice(self.bytes());
+        part.put_slice(b"\r\n");
+        part.freeze()
+    }
+}
+
+impl AppState {
+    async fn list_robots(State(state): State<Self>) -> Json<Vec<RobotSummary>> {
+        let adapter = RobotHttpAdapter::prefetched(&state);
+        let hardware = state.hardware().state();
+        Json(
+            RobotCatalogActions::new(&adapter)
+                .list()
+                .into_iter()
+                .filter_map(|robot| {
+                    let connection = hardware
+                        .connections()
+                        .get(robot.id())
+                        .cloned()
+                        .unwrap_or_default();
+                    adapter.summary(robot.id(), connection).ok()
+                })
+                .collect(),
+        )
+    }
+
+    pub(super) fn present_saved_robot(&self, robot: SavedRobot) -> Result<RobotSummary, Failure> {
+        let connection = self
+            .hardware()
+            .state()
+            .connections()
+            .get(robot.id())
+            .cloned()
+            .unwrap_or_default();
+        Ok(self.workspace().get(robot.id())?.summary(connection))
+    }
+
+    async fn create_robot(
+        State(state): State<Self>,
+        Json(request): Json<CreateRobotRequest>,
+    ) -> Result<(StatusCode, Json<RobotSummary>), Failure> {
+        let adapter = RobotHttpAdapter::new(&state);
+        let robot = RobotCatalogActions::new(&adapter).create(
+            CreateRobotCommand::new(
+                request.id(),
+                request.robot_type().map(str::to_owned),
+                request.port().map(str::to_owned),
+            )
+            .with_baud_rate(request.baud_rate()),
+        )?;
+        RobotActions::new(&adapter, &adapter)
+            .auto_connect_robot(robot.id().to_owned())
+            .await
+            .log();
+        Ok((StatusCode::CREATED, Json(state.present_saved_robot(robot)?)))
+    }
+
+    /// Add a complete unified robot JSON document as a new workspace instance.
+    async fn import_robot_configuration(
+        State(state): State<Self>,
+        body: Bytes,
+    ) -> Result<(StatusCode, Json<RobotSummary>), Failure> {
+        if body.is_empty() {
+            return Err(Failure::bad_request(
+                "choose a robot configuration JSON file to import",
+            ));
+        }
+        let adapter = RobotHttpAdapter::import(&state, body);
+        let robot = RobotCatalogActions::new(&adapter).import_configuration()?;
+        RobotActions::new(&adapter, &adapter)
+            .auto_connect_robot(robot.id().to_owned())
+            .await
+            .log();
+        Ok((StatusCode::CREATED, Json(state.present_saved_robot(robot)?)))
+    }
+
+    /// Download the complete canonical JSON document for one robot.
+    async fn export_robot_configuration(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+    ) -> Result<Response, Failure> {
+        let adapter = RobotHttpAdapter::new(&state);
+        let document = RobotCatalogActions::new(&adapter).export_configuration(&id)?;
+        Ok(Response::builder()
+            .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+            .header(header::CACHE_CONTROL, "no-store")
+            .header(
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{id}.json\""),
+            )
+            .body(Body::from(document.into_bytes()))
+            .expect("static robot configuration response headers are valid"))
+    }
+
+    async fn get_robot(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+    ) -> Result<Json<RobotSummary>, Failure> {
+        let robot = RobotCatalogActions::new(&RobotHttpAdapter::new(&state)).get(id)?;
+        let connection = state
+            .hardware()
+            .state()
+            .connections()
+            .get(robot.id())
+            .cloned()
+            .unwrap_or_default();
+        Ok(Json(state.workspace().get(robot.id())?.summary(connection)))
+    }
+
+    async fn update_robot(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+        Json(request): Json<UpdateRobotRequest>,
+    ) -> Result<Json<RobotSummary>, Failure> {
+        let adapter = RobotHttpAdapter::new(&state);
+        let should_auto_connect = request.port().is_some();
+        let robot = RobotActions::new(&adapter, &adapter).update(
+            UpdateRobotCommand::new(
+                id.clone(),
+                request.robot_type().map(str::to_owned),
+                request
+                    .port()
+                    .map(|port| SerialPortConfiguration::new(port.path(), port.baud_rate())),
+            )
+            .with_cameras(request.cameras().map(|bindings| {
+                bindings
+                    .iter()
+                    .map(|binding| CameraAssignment::new(binding.name(), binding.id()))
+                    .collect()
+            })),
+        )?;
+        if should_auto_connect {
+            RobotActions::new(&adapter, &adapter)
+                .auto_connect_robot(robot.id().to_owned())
+                .await
+                .log();
+        }
+        Ok(Json(state.present_saved_robot(robot)?))
+    }
 }
 
 /// Merge camera assignments into the robot's stored `cameras` object.
@@ -833,178 +872,178 @@ impl CameraConfigurationObject for Map<String, Value> {
     }
 }
 
-async fn delete_robot(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, Failure> {
-    let adapter = RobotHttpAdapter::new(&state);
-    robots::delete(&adapter, &adapter, &id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
+impl AppState {
+    async fn delete_robot(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+    ) -> Result<StatusCode, Failure> {
+        let adapter = RobotHttpAdapter::new(&state);
+        RobotActions::new(&adapter, &adapter).delete(&id).await?;
+        Ok(StatusCode::NO_CONTENT)
+    }
 
-async fn connect_robot(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, Failure> {
-    let adapter = RobotHttpAdapter::new(&state);
-    robots::connect(&adapter, &adapter, &id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-/// Try every usable saved robot once when the studio starts.
-///
-/// A failed bus stays disconnected with its error attached; one absent arm
-/// never prevents the web interface or another arm from starting.
-pub(crate) async fn auto_connect_saved_robots(state: AppState) {
-    let adapter = RobotHttpAdapter::new(&state);
-    for outcome in robots::auto_connect(&adapter, &adapter).await {
-        log_auto_connect_outcome(outcome);
+    async fn connect_robot(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+    ) -> Result<StatusCode, Failure> {
+        let adapter = RobotHttpAdapter::new(&state);
+        RobotActions::new(&adapter, &adapter).connect(&id).await?;
+        Ok(StatusCode::NO_CONTENT)
     }
 }
 
-fn log_auto_connect_outcome(outcome: AutoConnectOutcome) {
-    let (robot, status) = outcome.into_parts();
-    match status {
-        AutoConnectStatus::Connected => {
-            tracing::info!(robot = %robot, "auto-connected saved robot")
-        }
-        AutoConnectStatus::Skipped(error) => {
-            tracing::info!(robot = %robot, "saved robot is not ready for auto-connect: {error}")
-        }
-        AutoConnectStatus::Failed(error) => {
-            tracing::warn!(robot = %robot, "auto-connect failed: {error}")
+impl AutoConnectOutcome {
+    fn log(self) {
+        let (robot, status) = self.into_parts();
+        match status {
+            AutoConnectStatus::Connected => {
+                tracing::info!(robot = %robot, "auto-connected saved robot")
+            }
+            AutoConnectStatus::Skipped(error) => {
+                tracing::info!(robot = %robot, "saved robot is not ready for auto-connect: {error}")
+            }
+            AutoConnectStatus::Failed(error) => {
+                tracing::warn!(robot = %robot, "auto-connect failed: {error}")
+            }
         }
     }
 }
 
-async fn disconnect_robot(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, Failure> {
-    let adapter = RobotHttpAdapter::new(&state);
-    robots::disconnect(&adapter, &id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn hold_robot(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, Failure> {
-    robot_control::execute(
-        state.hardware().as_ref(),
-        RobotControlCommand::Hold { robot: id },
-    )
-    .await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn release_robot(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, Failure> {
-    robot_control::execute(
-        state.hardware().as_ref(),
-        RobotControlCommand::Release { robot: id },
-    )
-    .await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn set_goal(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(request): Json<GoalRequest>,
-) -> Result<StatusCode, Failure> {
-    robot_control::execute(
-        state.hardware().as_ref(),
-        RobotControlCommand::MoveJoints {
-            robot: id,
-            normalized: request.normalized().clone(),
-        },
-    )
-    .await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn start_calibration(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, Failure> {
-    calibration::start(state.hardware().as_ref(), &id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn finish_calibration(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<RobotSummary>, Failure> {
-    let output =
-        calibration::finish(state.workspace().as_ref(), state.hardware().as_ref(), &id).await?;
-    if let Some(warning) = output.live_warning() {
-        tracing::warn!(robot = %id, "saved calibration but live refresh was incomplete: {warning}");
+impl AppState {
+    async fn disconnect_robot(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+    ) -> Result<StatusCode, Failure> {
+        let adapter = RobotHttpAdapter::new(&state);
+        RobotConnectionActions::new(&adapter)
+            .disconnect(&id)
+            .await?;
+        Ok(StatusCode::NO_CONTENT)
     }
 
-    let record = state.workspace().get(&id)?;
-    let connection = state
-        .hardware()
-        .state()
-        .connections()
-        .get(&id)
-        .cloned()
-        .unwrap_or_default();
-    Ok(Json(record.summary(connection)))
-}
+    async fn hold_robot(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+    ) -> Result<StatusCode, Failure> {
+        RobotControlActions::new(state.hardware().as_ref())
+            .execute(RobotControlCommand::Hold { robot: id })
+            .await?;
+        Ok(StatusCode::NO_CONTENT)
+    }
 
-async fn cancel_calibration(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, Failure> {
-    calibration::cancel(state.hardware().as_ref(), &id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
+    async fn release_robot(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+    ) -> Result<StatusCode, Failure> {
+        RobotControlActions::new(state.hardware().as_ref())
+            .execute(RobotControlCommand::Release { robot: id })
+            .await?;
+        Ok(StatusCode::NO_CONTENT)
+    }
 
-async fn reapply_calibration(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<CalibrationReapplyResponse>, Failure> {
-    let output =
-        calibration::reapply_history(&CalibrationHistoryHttpAdapter { state: &state }, &id).await?;
-    Ok(Json(
-        CalibrationReapplyResponse::new(
-            output.episodes_updated(),
-            output.frames_updated(),
-            output.episodes_unchanged(),
-        )
-        .with_skipped(output.episodes_skipped(), output.warnings().to_vec()),
-    ))
-}
+    async fn set_robot_goal(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+        Json(request): Json<GoalRequest>,
+    ) -> Result<StatusCode, Failure> {
+        RobotControlActions::new(state.hardware().as_ref())
+            .execute(RobotControlCommand::MoveJoints {
+                robot: id,
+                normalized: request.normalized().clone(),
+            })
+            .await?;
+        Ok(StatusCode::NO_CONTENT)
+    }
 
-async fn set_mode(
-    State(state): State<AppState>,
-    Json(selection): Json<ModeSelection>,
-) -> Result<StatusCode, Failure> {
-    // Replay carries a trajectory that has to be read from SpiralDB, so it has its
-    // own endpoint. Accepting it here would mean either loading the episode
-    // behind the caller's back or entering a mode with nothing to play.
-    let mode = match selection {
-        ModeSelection::Idle => OperatorMode::Idle,
-        ModeSelection::Manual { robot } => OperatorMode::Manual { robot },
-        ModeSelection::Teleoperate { leader, follower } => {
-            OperatorMode::Teleoperate { leader, follower }
+    async fn start_calibration(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+    ) -> Result<StatusCode, Failure> {
+        CalibrationControlActions::new(state.hardware().as_ref())
+            .start(&id)
+            .await?;
+        Ok(StatusCode::NO_CONTENT)
+    }
+
+    async fn finish_calibration(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+    ) -> Result<Json<RobotSummary>, Failure> {
+        let output = CalibrationActions::new(state.workspace().as_ref(), state.hardware().as_ref())
+            .finish(&id)
+            .await?;
+        if let Some(warning) = output.live_warning() {
+            tracing::warn!(robot = %id, "saved calibration but live refresh was incomplete: {warning}");
         }
-        ModeSelection::Replay { .. } => {
-            return Err(Failure::bad_request(
-                "start a replay with POST /api/episodes/replay, which loads the take first",
-            ));
-        }
-        ModeSelection::Policy { .. } => {
-            return Err(Failure::bad_request(
-                "start policy control with POST /api/rollout, which validates and warms the checkpoint first",
-            ));
-        }
-    };
-    mode_control::set_mode(state.hardware().as_ref(), mode).await?;
-    Ok(StatusCode::NO_CONTENT)
+
+        let record = state.workspace().get(&id)?;
+        let connection = state
+            .hardware()
+            .state()
+            .connections()
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        Ok(Json(record.summary(connection)))
+    }
+
+    async fn cancel_calibration(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+    ) -> Result<StatusCode, Failure> {
+        CalibrationControlActions::new(state.hardware().as_ref())
+            .cancel(&id)
+            .await?;
+        Ok(StatusCode::NO_CONTENT)
+    }
+
+    async fn reapply_calibration(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+    ) -> Result<Json<CalibrationReapplyResponse>, Failure> {
+        let output =
+            CalibrationHistoryActions::new(&CalibrationHistoryHttpAdapter { state: &state })
+                .reapply(&id)
+                .await?;
+        Ok(Json(
+            CalibrationReapplyResponse::new(
+                output.episodes_updated(),
+                output.frames_updated(),
+                output.episodes_unchanged(),
+            )
+            .with_skipped(output.episodes_skipped(), output.warnings().to_vec()),
+        ))
+    }
+
+    async fn set_mode(
+        State(state): State<Self>,
+        Json(selection): Json<ModeSelection>,
+    ) -> Result<StatusCode, Failure> {
+        // Replay carries a trajectory that has to be read from SpiralDB, so it has its
+        // own endpoint. Accepting it here would mean either loading the episode
+        // behind the caller's back or entering a mode with nothing to play.
+        let mode = match selection {
+            ModeSelection::Idle => OperatorMode::Idle,
+            ModeSelection::Manual { robot } => OperatorMode::Manual { robot },
+            ModeSelection::Teleoperate { leader, follower } => {
+                OperatorMode::Teleoperate { leader, follower }
+            }
+            ModeSelection::Replay { .. } => {
+                return Err(Failure::bad_request(
+                    "start a replay with POST /api/episodes/replay, which loads the take first",
+                ));
+            }
+            ModeSelection::Policy { .. } => {
+                return Err(Failure::bad_request(
+                    "start policy control with POST /api/rollout, which validates and warms the checkpoint first",
+                ));
+            }
+        };
+        ModeActions::new(state.hardware().as_ref())
+            .set(mode)
+            .await?;
+        Ok(StatusCode::NO_CONTENT)
+    }
 }
 
 #[cfg(test)]
@@ -1026,7 +1065,8 @@ mod admission_tests {
             ),
         ] {
             let lease = CatalogMutationLease::default();
-            let error = reserve_calibration_history_mutation(&lease, || activity)
+            let error = lease
+                .reserve_calibration_history(activity.0, activity.1)
                 .expect_err("published activity must block a later history rewrite");
             assert!(error.to_string().contains(expected));
 
@@ -1040,7 +1080,8 @@ mod admission_tests {
     #[test]
     fn admitted_history_rewrite_blocks_later_workflow_and_assistant_admission() {
         let lease = CatalogMutationLease::default();
-        let calibration = reserve_calibration_history_mutation(&lease, || (false, false))
+        let calibration = lease
+            .reserve_calibration_history(false, false)
             .expect("idle activity check")
             .expect("calibration-history admission");
 

@@ -16,29 +16,86 @@ use spiral_robotics_core::calibration::{
     Calibration, CalibrationFormat, MotorCalibration, MotorDirection, MotorReading,
 };
 
-/// Serialize a domain direction at a delivery or persistence edge.
-pub(crate) fn serialize_direction<S>(
-    direction: &MotorDirection,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_str(match direction {
-        MotorDirection::Normal => "normal",
-        MotorDirection::Reversed => "reversed",
-    })
+pub(crate) struct CalibrationCodec;
+
+impl CalibrationCodec {
+    /// Decode a strict calibration document and apply all domain invariants.
+    pub(crate) fn decode(value: serde_json::Value) -> serde_json::Result<Calibration> {
+        Calibration::try_from(serde_json::from_value::<CalibrationWire>(value)?)
+    }
+
+    /// Encode a validated calibration document for a robot file.
+    pub(crate) fn encode(calibration: &Calibration) -> serde_json::Result<serde_json::Value> {
+        calibration.validate().map_err(Self::json_error)?;
+        let format = calibration.format();
+        serde_json::to_value(CalibrationWire {
+            format_version: format.version(),
+            units: format.units().to_owned(),
+            coordinate_space: format.coordinate_space().to_owned(),
+            motors: UniqueMap(
+                calibration
+                    .motors()
+                    .iter()
+                    .map(|(name, motor)| (name.clone(), (*motor).into()))
+                    .collect(),
+            ),
+        })
+    }
+
+    #[cfg(test)]
+    fn decode_json(json: &str) -> serde_json::Result<Calibration> {
+        let wire = serde_json::from_str::<CalibrationWire>(json)?;
+        wire.try_into()
+    }
+
+    #[cfg(test)]
+    fn decode_input(json: &str) -> serde_json::Result<CalibrationInput> {
+        let wire = serde_json::from_str::<CalibrationInputWire>(json)?;
+        Ok(match wire {
+            CalibrationInputWire::Direct(input) => CalibrationInput::Direct {
+                motors: input
+                    .motors
+                    .0
+                    .into_iter()
+                    .map(|(name, reading)| (name, reading.into()))
+                    .collect(),
+            },
+            CalibrationInputWire::Sweep(input) => CalibrationInput::Sweep {
+                center: input.center.0,
+                samples: input.samples.into_iter().map(|sample| sample.0).collect(),
+            },
+        })
+    }
+
+    fn json_error(error: impl fmt::Display) -> serde_json::Error {
+        <serde_json::Error as de::Error>::custom(error.to_string())
+    }
 }
 
-/// Deserialize a persisted or delivered direction into the domain value.
-pub(crate) fn deserialize_direction<'de, D>(deserializer: D) -> Result<MotorDirection, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    match String::deserialize(deserializer)?.as_str() {
-        "normal" => Ok(MotorDirection::Normal),
-        "reversed" => Ok(MotorDirection::Reversed),
-        value => Err(de::Error::unknown_variant(value, &["normal", "reversed"])),
+struct MotorDirectionCodec;
+
+impl MotorDirectionCodec {
+    /// Serialize a domain direction at a delivery or persistence edge.
+    fn serialize<S>(direction: &MotorDirection, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(match direction {
+            MotorDirection::Normal => "normal",
+            MotorDirection::Reversed => "reversed",
+        })
+    }
+
+    /// Deserialize a persisted or delivered direction into the domain value.
+    fn deserialize<'de, D>(deserializer: D) -> Result<MotorDirection, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            "normal" => Ok(MotorDirection::Normal),
+            "reversed" => Ok(MotorDirection::Reversed),
+            value => Err(de::Error::unknown_variant(value, &["normal", "reversed"])),
+        }
     }
 }
 
@@ -48,8 +105,8 @@ where
 struct MotorCalibrationWire {
     id: u32,
     #[serde(
-        deserialize_with = "deserialize_direction",
-        serialize_with = "serialize_direction"
+        deserialize_with = "MotorDirectionCodec::deserialize",
+        serialize_with = "MotorDirectionCodec::serialize"
     )]
     direction: MotorDirection,
     range_min: i64,
@@ -91,18 +148,6 @@ struct CalibrationWire {
     motors: UniqueMap<MotorCalibrationWire>,
 }
 
-/// Decode a strict calibration document and apply all domain invariants.
-pub(crate) fn decode_calibration(value: serde_json::Value) -> serde_json::Result<Calibration> {
-    Calibration::try_from(serde_json::from_value::<CalibrationWire>(value)?)
-}
-
-/// Decode calibration JSON before generic values can erase duplicate keys.
-#[cfg(test)]
-fn decode_calibration_json(json: &str) -> serde_json::Result<Calibration> {
-    let wire = serde_json::from_str::<CalibrationWire>(json)?;
-    wire.try_into()
-}
-
 impl TryFrom<CalibrationWire> for Calibration {
     type Error = serde_json::Error;
 
@@ -113,37 +158,13 @@ impl TryFrom<CalibrationWire> for Calibration {
             .into_iter()
             .map(|(name, motor)| MotorCalibration::try_from(motor).map(|motor| (name, motor)))
             .collect::<Result<_, _>>()
-            .map_err(json_error)?;
+            .map_err(CalibrationCodec::json_error)?;
         Self::from_persisted(
             CalibrationFormat::new(wire.format_version, wire.units, wire.coordinate_space),
             motors,
         )
-        .map_err(json_error)
+        .map_err(CalibrationCodec::json_error)
     }
-}
-
-/// Encode a validated calibration document for a robot file.
-pub(crate) fn encode_calibration(
-    calibration: &Calibration,
-) -> serde_json::Result<serde_json::Value> {
-    calibration.validate().map_err(json_error)?;
-    let format = calibration.format();
-    serde_json::to_value(CalibrationWire {
-        format_version: format.version(),
-        units: format.units().to_owned(),
-        coordinate_space: format.coordinate_space().to_owned(),
-        motors: UniqueMap(
-            calibration
-                .motors()
-                .iter()
-                .map(|(name, motor)| (name.clone(), (*motor).into()))
-                .collect(),
-        ),
-    })
-}
-
-fn json_error(error: impl fmt::Display) -> serde_json::Error {
-    <serde_json::Error as de::Error>::custom(error.to_string())
 }
 
 #[cfg(test)]
@@ -183,26 +204,6 @@ struct SweepInput {
 enum CalibrationInputWire {
     Direct(DirectInput),
     Sweep(SweepInput),
-}
-
-/// Decode strict calibration JSON into a framework-neutral domain input.
-#[cfg(test)]
-fn decode_input(json: &str) -> serde_json::Result<CalibrationInput> {
-    let wire = serde_json::from_str::<CalibrationInputWire>(json)?;
-    Ok(match wire {
-        CalibrationInputWire::Direct(input) => CalibrationInput::Direct {
-            motors: input
-                .motors
-                .0
-                .into_iter()
-                .map(|(name, reading)| (name, reading.into()))
-                .collect(),
-        },
-        CalibrationInputWire::Sweep(input) => CalibrationInput::Sweep {
-            center: input.center.0,
-            samples: input.samples.into_iter().map(|sample| sample.0).collect(),
-        },
-    })
 }
 
 #[derive(Serialize)]
@@ -255,7 +256,7 @@ mod tests {
 
     #[test]
     fn sweep_input_decodes_without_transport_types_in_domain_policy() {
-        let input = decode_input(
+        let input = CalibrationCodec::decode_input(
             r#"{
                 "center":{"shoulder":2000,"elbow":1900},
                 "samples":[
@@ -280,7 +281,10 @@ mod tests {
             r#"{"motors":{"joint":{"center":2,"range_min":1,"range_max":3,"typo":4}}}"#,
             r#"{"motors":{"joint":{"center":2,"range_min":1,"range_max":3},"joint":{"center":2,"range_min":1,"range_max":3}}}"#,
         ] {
-            assert!(decode_input(invalid).is_err(), "accepted {invalid}");
+            assert!(
+                CalibrationCodec::decode_input(invalid).is_err(),
+                "accepted {invalid}"
+            );
         }
     }
 
@@ -300,8 +304,8 @@ mod tests {
         )
         .unwrap();
 
-        let encoded = encode_calibration(&calibration).unwrap();
-        assert_eq!(decode_calibration(encoded).unwrap(), calibration);
+        let encoded = CalibrationCodec::encode(&calibration).unwrap();
+        assert_eq!(CalibrationCodec::decode(encoded).unwrap(), calibration);
     }
 
     #[test]
@@ -315,7 +319,10 @@ mod tests {
             r#"{"format_version":2,"units":"raw","coordinate_space":"unhomed_raw","motors":{"joint":{"id":1,"direction":"normal","range_min":1,"center":2,"range_max":3}}}"#.to_owned(),
             r#"{"format_version":1,"units":"raw","coordinate_space":"unhomed_raw","motors":{"joint":{"id":1,"direction":"normal","range_min":1,"center":1,"range_max":3}}}"#.to_owned(),
         ] {
-            assert!(decode_calibration_json(&invalid).is_err(), "accepted {invalid}");
+            assert!(
+                CalibrationCodec::decode_json(&invalid).is_err(),
+                "accepted {invalid}"
+            );
         }
     }
 }

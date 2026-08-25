@@ -6,7 +6,9 @@
 //! generation token: only the exact acquisition may bind, claim, or release
 //! its slot.
 
-use std::sync::{Mutex, MutexGuard};
+use std::sync::Mutex;
+
+use crate::sync::MutexRecovery;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CatalogLeaseOwner {
@@ -67,7 +69,7 @@ pub(crate) struct CatalogMutationLease {
 
 impl CatalogMutationLease {
     pub(crate) fn try_acquire(&self, owner: CatalogLeaseOwner) -> Option<CatalogLeaseToken> {
-        let mut state = lock(&self.state);
+        let mut state = self.state.recover_lock();
         if state.holder.is_some() {
             return None;
         }
@@ -87,7 +89,7 @@ impl CatalogMutationLease {
     /// Associate the identity allocated by a successful recording start with
     /// its still-held catalog lease.
     pub(crate) fn bind_recording(&self, token: CatalogLeaseToken, episode: String) -> bool {
-        let mut state = lock(&self.state);
+        let mut state = self.state.recover_lock();
         let Some(holder) = state.holder.as_mut() else {
             return false;
         };
@@ -105,7 +107,7 @@ impl CatalogMutationLease {
     /// Claim finalization exactly once while keeping the exclusion held until
     /// durable commit calls [`release`](Self::release).
     pub(crate) fn claim_recording(&self) -> Option<ClaimedRecordingLease> {
-        let mut state = lock(&self.state);
+        let mut state = self.state.recover_lock();
         let holder = state.holder.as_mut()?;
         if holder.token.owner != CatalogLeaseOwner::Recording || holder.claimed {
             return None;
@@ -116,7 +118,7 @@ impl CatalogMutationLease {
     }
 
     pub(crate) fn recording_episode(&self) -> Option<String> {
-        let state = lock(&self.state);
+        let state = self.state.recover_lock();
         let holder = state.holder.as_ref()?;
         (holder.token.owner == CatalogLeaseOwner::Recording && !holder.claimed)
             .then(|| holder.recording_episode.clone())
@@ -124,7 +126,7 @@ impl CatalogMutationLease {
     }
 
     pub(crate) fn recording_is_opening(&self) -> bool {
-        let state = lock(&self.state);
+        let state = self.state.recover_lock();
         state.holder.as_ref().is_some_and(|holder| {
             holder.token.owner == CatalogLeaseOwner::Recording
                 && holder.recording_episode.is_none()
@@ -134,13 +136,13 @@ impl CatalogMutationLease {
 
     #[cfg(test)]
     pub(crate) fn is_held(&self) -> bool {
-        lock(&self.state).holder.is_some()
+        self.state.recover_lock().holder.is_some()
     }
 
     /// Release only the acquisition identified by `token`. A stale token or a
     /// token belonging to another owner is a no-op.
     pub(crate) fn release(&self, token: CatalogLeaseToken) -> bool {
-        let mut state = lock(&self.state);
+        let mut state = self.state.recover_lock();
         if state
             .holder
             .as_ref()
@@ -152,12 +154,6 @@ impl CatalogMutationLease {
             false
         }
     }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

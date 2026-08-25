@@ -104,7 +104,7 @@ fn RobotRoster(
                     let id = robot.id().to_owned();
                     let selected = focused.as_deref() == Some(robot.id());
                     let ready = robot.connection().connected() && robot.calibrated() && robot.problem().is_none();
-                    let role = robot.robot_type().map(role_label).unwrap_or("arm");
+                    let role = robot.robot_type().map(str::role_label).unwrap_or("arm");
                     let show_role = !robot.id().eq_ignore_ascii_case(role);
                     let state = if robot.problem().is_some() {
                         "Needs attention"
@@ -121,7 +121,7 @@ fn RobotRoster(
                         format!("{}, {state}", robot.id())
                     };
                     let accent =
-                        crate::panels::scene::accent_css(
+                        crate::panels::scene::ScenePalette::accent_css(
                             studio.position_of(robot.id()),
                         );
                     rsx! {
@@ -244,13 +244,19 @@ fn ControlSection(on_action: EventHandler<LiveAction>) -> Element {
     }
 }
 
-fn role_label(kind: &str) -> &'static str {
-    let kind = kind.to_ascii_lowercase();
-    if kind.contains("follower") {
-        "follower"
-    } else if kind.contains("leader") {
-        "leader"
-    } else {
-        "arm"
+trait RobotRolePresentation {
+    fn role_label(&self) -> &'static str;
+}
+
+impl RobotRolePresentation for str {
+    fn role_label(&self) -> &'static str {
+        let kind = self.to_ascii_lowercase();
+        if kind.contains("follower") {
+            "follower"
+        } else if kind.contains("leader") {
+            "leader"
+        } else {
+            "arm"
+        }
     }
 }

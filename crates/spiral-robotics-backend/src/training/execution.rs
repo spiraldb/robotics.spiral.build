@@ -78,6 +78,41 @@ pub(crate) trait TrainingRunPort: Send + Sync {
     fn mark_persistence_failure(&self, run_id: &str, error: &str);
     fn cleanup_runtime(&self, run_id: &str);
     fn now_ms(&self) -> i64;
+
+    fn fail_run(&self, run_id: &str, message: String) {
+        if let Err(error) = self.transition_run(
+            run_id,
+            RunStateChange {
+                phase: TrainingRunPhase::Failed,
+                finished_ms: Some(self.now_ms()),
+                message: Some(message),
+            },
+        ) {
+            self.mark_persistence_failure(run_id, &error);
+        }
+    }
+
+    fn coordinate_training_stop(&self, run_id: &str) -> Result<(), OperationError> {
+        if !self.runtime_is_active(run_id) {
+            return Err(OperationError::Conflict(format!(
+                "training run {run_id:?} is not active"
+            )));
+        }
+        let transition = self.transition_run(
+            run_id,
+            RunStateChange {
+                phase: TrainingRunPhase::Stopping,
+                finished_ms: None,
+                message: Some(STOPPING_MESSAGE.to_owned()),
+            },
+        );
+        self.signal_runtime_stop(run_id);
+        if let Err(error) = transition {
+            self.mark_persistence_failure(run_id, &error);
+            return Err(OperationError::Conflict(error));
+        }
+        Ok(())
+    }
 }
 
 pub(crate) trait TrainingCoordinatorPort: TrainingRunPort {
@@ -90,76 +125,32 @@ pub(crate) trait TrainingCoordinatorPort: TrainingRunPort {
     fn next_training_identity(&self) -> TrainingRunIdentity;
     fn admit_training_run(&self, run: TrainingRun) -> Result<(), OperationError>;
     fn launch_training_runtime(&self, launch: TrainingLaunch) -> Result<(), OperationError>;
-}
 
-pub(crate) async fn coordinate_training_start<P>(
-    port: &P,
-    command: StartTrainingCommand,
-) -> Result<TrainingRun, OperationError>
-where
-    P: TrainingCoordinatorPort + ?Sized,
-{
-    let readiness = port.refresh_training_readiness().await;
-    if !readiness.ready() {
-        return Err(OperationError::Conflict(readiness.summary().to_owned()));
-    }
-    let source = port.resolve_training_source(command.dataset_id())?;
-    port.validate_training_query(&command).await?;
-    let identity = port.next_training_identity();
-    let run = TrainingRun::new(
-        StoredTrainingRunIdentity::new(identity.id.clone(), command.clone(), source),
-        TrainingRunState::new(TrainingRunPhase::Starting, 0, identity.created_ms)
-            .finished(None, Some(STARTING_MESSAGE.to_owned())),
-        TrainingRunHistory::default(),
-    );
-    port.admit_training_run(run.clone())?;
-    let launch = TrainingLaunch::new(run.id(), command);
-    if let Err(error) = port.launch_training_runtime(launch) {
-        fail_run(port, run.id(), error.message().to_owned());
-        port.cleanup_runtime(run.id());
-        return Err(error);
-    }
-    Ok(run)
-}
-
-pub(crate) fn coordinate_training_stop<P>(port: &P, run_id: &str) -> Result<(), OperationError>
-where
-    P: TrainingRunPort + ?Sized,
-{
-    if !port.runtime_is_active(run_id) {
-        return Err(OperationError::Conflict(format!(
-            "training run {run_id:?} is not active"
-        )));
-    }
-    let transition = port.transition_run(
-        run_id,
-        RunStateChange {
-            phase: TrainingRunPhase::Stopping,
-            finished_ms: None,
-            message: Some(STOPPING_MESSAGE.to_owned()),
-        },
-    );
-    port.signal_runtime_stop(run_id);
-    if let Err(error) = transition {
-        port.mark_persistence_failure(run_id, &error);
-        return Err(OperationError::Conflict(error));
-    }
-    Ok(())
-}
-
-fn fail_run<P>(port: &P, run_id: &str, message: String)
-where
-    P: TrainingRunPort + ?Sized,
-{
-    if let Err(error) = port.transition_run(
-        run_id,
-        RunStateChange {
-            phase: TrainingRunPhase::Failed,
-            finished_ms: Some(port.now_ms()),
-            message: Some(message),
-        },
-    ) {
-        port.mark_persistence_failure(run_id, &error);
+    async fn coordinate_training_start(
+        &self,
+        command: StartTrainingCommand,
+    ) -> Result<TrainingRun, OperationError> {
+        let readiness = self.refresh_training_readiness().await;
+        if !readiness.ready() {
+            return Err(OperationError::Conflict(readiness.summary().to_owned()));
+        }
+        let source = self.resolve_training_source(command.dataset_id())?;
+        self.validate_training_query(&command).await?;
+        let identity = self.next_training_identity();
+        let run = TrainingRun::new(
+            StoredTrainingRunIdentity::new(identity.id.clone(), command.clone(), source),
+            TrainingRunState::new(TrainingRunPhase::Starting, 0, identity.created_ms)
+                .finished(None, Some(STARTING_MESSAGE.to_owned())),
+            TrainingRunHistory::default(),
+        );
+        self.admit_training_run(run.clone())?;
+        let launch = TrainingLaunch::new(run.id(), command);
+        if let Err(error) = self.launch_training_runtime(launch) {
+            self.fail_run(run.id(), error.message().to_owned());
+            self.cleanup_runtime(run.id());
+            return Err(error);
+        }
+        Ok(run)
     }
 }
 
@@ -296,7 +287,7 @@ mod tests {
     #[tokio::test]
     async fn start_orders_all_effects_before_launch() {
         let port = FakePort::ready();
-        let run = coordinate_training_start(&port, command()).await.unwrap();
+        let run = port.coordinate_training_start(command()).await.unwrap();
         assert_eq!(run.id(), "run-1");
         assert_eq!(
             port.events(),
@@ -315,14 +306,14 @@ mod tests {
     async fn failed_readiness_short_circuits_start() {
         let mut port = FakePort::ready();
         port.readiness = TrainingReadiness::new(false, true, "not ready");
-        assert!(coordinate_training_start(&port, command()).await.is_err());
+        assert!(port.coordinate_training_start(command()).await.is_err());
         assert_eq!(port.events(), ["readiness"]);
     }
 
     #[tokio::test]
     async fn launch_failure_terminalizes_the_admitted_run() {
         let port = FakePort::with_failure("launch");
-        assert!(coordinate_training_start(&port, command()).await.is_err());
+        assert!(port.coordinate_training_start(command()).await.is_err());
         assert_eq!(
             port.events(),
             [
@@ -341,7 +332,7 @@ mod tests {
     #[test]
     fn stop_signals_runtime_even_when_state_persistence_fails() {
         let port = FakePort::with_failure("transition");
-        assert!(coordinate_training_stop(&port, "run-1").is_err());
+        assert!(port.coordinate_training_stop("run-1").is_err());
         assert_eq!(
             port.events(),
             [
@@ -359,7 +350,7 @@ mod tests {
             active: false,
             ..FakePort::ready()
         };
-        assert!(coordinate_training_stop(&port, "run-1").is_err());
+        assert!(port.coordinate_training_stop("run-1").is_err());
         assert_eq!(port.events(), ["active:run-1"]);
     }
 }

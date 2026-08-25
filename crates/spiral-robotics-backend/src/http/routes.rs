@@ -52,10 +52,10 @@ use spiral_robotics_api::status::{
 };
 use spiral_robotics_api::training::{StartTrainingRequest, TrainingRun, TrainingSnapshot};
 use spiral_robotics_core::calibration::{Calibration, MotorSpec};
-use spiral_robotics_hardware::serial_ports::{available_ports, port_description, port_kind};
+use spiral_robotics_hardware::serial_ports::{SerialPortCatalog, SerialPortTypeExt};
 
 use crate::data::catalog::{
-    self as episode_catalog, DeleteEpisodeCommand, EpisodeActivity, EpisodeCatalogPort,
+    DeleteEpisodeCommand, EpisodeActivity, EpisodeCatalogActions, EpisodeCatalogPort,
     EpisodeMutationResult, JudgeEpisodeCommand,
 };
 use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease};
@@ -69,7 +69,7 @@ use crate::data::queries::{
     VideoAssetTimeline,
 };
 use crate::data::seek::{
-    self as episode_seek, ActiveRecording, HistoricalSample, HistoricalSeekState, PhysicalSeekPlan,
+    ActiveRecording, HistoricalSample, HistoricalSeekState, PhysicalSeekActions, PhysicalSeekPlan,
     PhysicalSeekPort, SampledArm, SeekActivity, SeekControlMode, SeekEpisodeCommand, SeekTarget,
     SeekableEpisode,
 };
@@ -80,9 +80,10 @@ use crate::data::{
     StartSpiralReplayCommand, UpdateDataSettingsCommand, VideoAssetQuery,
 };
 use crate::recording::{
-    self, RecordingContext, RecordingPort, RecordingResult, ReplayEpisode, ReplayPlan, ReplayPort,
-    ReplayTrajectory, SetRecordingPausedCommand, SetReplayPausedCommand, StartRecordingCommand,
-    StartReplayCommand, StopRecordingCommand, TeleoperationPair,
+    RecordingActions, RecordingContext, RecordingPort, RecordingResult, ReplayActions,
+    ReplayEpisode, ReplayPlan, ReplayPort, ReplayTrajectory, SetRecordingPausedCommand,
+    SetReplayPausedCommand, StartRecordingCommand, StartReplayCommand, StopRecordingCommand,
+    TeleoperationPair,
 };
 use crate::robotics::cameras::{CameraManager, Frame};
 use crate::robotics::video::{
@@ -90,32 +91,34 @@ use crate::robotics::video::{
     VideoEncoderSettings,
 };
 use crate::robots::calibration::{
-    self, CalibrationHistoryActivity, CalibrationHistoryPort, CalibrationUpdate,
-    ReappliedPositions, RobotCalibrationStore,
+    CalibrationActions, CalibrationControlActions, CalibrationHistoryActions,
+    CalibrationHistoryActivity, CalibrationHistoryPort, CalibrationUpdate, ReappliedPositions,
+    RobotCalibrationStore,
 };
-use crate::robots::control::{self as robot_control, RobotControlCommand};
+use crate::robots::control::{RobotControlActions, RobotControlCommand};
 use crate::robots::discovery::{
     CameraDiscoveryFormat, CameraDiscoveryPort, CameraDiscoveryStatus, DiscoveredCamera,
     IdentifySerialPortCommand, SerialPortDescriptor, SerialPortInventory, SerialPortQueryPort,
 };
-use crate::robots::mode::{self as mode_control, OperatorMode};
+use crate::robots::mode::{ModeActions, OperatorMode};
 use crate::robots::service::{
-    self as robots, AutoConnectOutcome, AutoConnectStatus, CameraAssignment, CreateRobotCommand,
-    ExportedRobotDocument, NewRobot, RobotConnectionPort, RobotConnectionSpec, RobotStore,
-    RobotUpdate, SavedRobot, SerialPortConfiguration, UpdateRobotCommand,
+    AutoConnectOutcome, AutoConnectStatus, CameraAssignment, CreateRobotCommand,
+    ExportedRobotDocument, NewRobot, RobotActions, RobotCatalogActions, RobotConnectionActions,
+    RobotConnectionPort, RobotConnectionSpec, RobotStore, RobotUpdate, SavedRobot,
+    SerialPortConfiguration, UpdateRobotCommand,
 };
 use crate::robots::workspace::{RobotRecord, RobotWorkspace, WorkspaceError};
 use crate::rollout::manager::RolloutManager;
 use crate::rollout::service::{
-    self as rollout_application, RolloutMetrics as CapabilityRolloutMetrics,
+    RolloutActions, RolloutMetrics as CapabilityRolloutMetrics,
     RolloutPhase as CapabilityRolloutPhase, RolloutRequest, RolloutSessionPort,
     RolloutSnapshot as CapabilityRolloutSnapshot,
 };
 use crate::training::manager::TrainingManager;
 use crate::training::service::{
-    self as training_application, DeleteTrainingRunCommand, StartTrainingCommand,
-    TrainingCheckpointStatus, TrainingPort, TrainingRun as CapabilityTrainingRun,
-    TrainingRunActivity, TrainingRunStatus, TrainingSnapshot as CapabilityTrainingSnapshot,
+    DeleteTrainingRunCommand, StartTrainingCommand, TrainingActions, TrainingCheckpointStatus,
+    TrainingPort, TrainingRun as CapabilityTrainingRun, TrainingRunActivity, TrainingRunStatus,
+    TrainingSnapshot as CapabilityTrainingSnapshot,
 };
 use crate::workflow::agent::WorkflowAgentManager;
 use crate::workflow::manager::WorkflowManager;
@@ -126,7 +129,7 @@ use spiral_robotics_storage::StorageManager;
 use spiral_robotics_storage::StudioPreferencesStore;
 use spiral_robotics_storage::episodes::{
     ArmCondition, EpisodeError, EpisodeInspection, EpisodeRecordingRequest, EpisodeStore,
-    EpisodeWriter, ReplayRequest, TimelineMetadata, TimelineSample, TimelineTraces, build_arms,
+    EpisodeWriter, ReplayRequest, TimelineMetadata, TimelineSample, TimelineTraces,
 };
 use spiral_robotics_storage::video::{
     VideoAssetKey, VideoByteRange, VideoSegment, VideoSize, VideoTiming,
@@ -404,121 +407,112 @@ impl BootstrapState {
     }
 }
 
-pub(crate) async fn monitor_video_recording(state: AppState) {
-    let mut ticker = tokio::time::interval(VIDEO_RECORDING_MONITOR_INTERVAL);
-    let mut missing_episode = String::new();
-    let mut missing_ticks = 0_u8;
-    loop {
-        ticker.tick().await;
-        let capture_episode = state
-            .recording_video()
-            .lock()
-            .await
-            .as_ref()
-            .map(|capture| capture.episode_id().to_owned());
-        let watched_episode = state
-            .catalog_lease()
-            .recording_episode()
-            .or(capture_episode);
-        let Some(capture_episode) = watched_episode else {
-            missing_episode.clear();
-            missing_ticks = 0;
-            continue;
-        };
-        let hardware = state.hardware().state();
-        let hardware_episode = hardware
-            .telemetry()
-            .recording()
-            .as_ref()
-            .map(|recording| recording.episode().to_owned());
-        if hardware_episode.as_deref() == Some(&capture_episode) {
-            missing_episode.clear();
-            missing_ticks = 0;
-            continue;
-        }
-        if missing_episode == capture_episode {
-            missing_ticks = missing_ticks.saturating_add(1);
-        } else {
-            missing_episode = capture_episode;
-            missing_ticks = 1;
-        }
-        if missing_ticks < VIDEO_RECORDING_STOP_TICKS {
-            continue;
-        }
-        finish_stale_video_capture(&state).await;
-        missing_episode.clear();
-        missing_ticks = 0;
-    }
-}
-
-pub(crate) async fn auto_connect_saved_robots(state: AppState) {
-    devices::auto_connect_saved_robots(state).await;
-}
-
-/// Close and commit any capture whose corresponding control-loop recording has
-/// already ended. Also used during graceful backend shutdown.
-pub(crate) async fn finish_stale_video_capture(state: &AppState) {
-    // Claim the recording exactly once, but retain catalog exclusion until the
-    // episode and finalized media have both been committed. This exists
-    // independently of VideoCapture because camera-less recordings still
-    // allocate catalog identities.
-    let recording = state.catalog_lease().claim_recording();
-    let capture = state.recording_video().lock().await.take();
-    if recording.is_none() && capture.is_none() {
-        return;
-    }
-    let episode_id = recording
-        .as_ref()
-        .map(|recording| recording.episode().to_owned())
-        .or_else(|| {
-            capture
+impl AppState {
+    pub(crate) async fn monitor_video_recording(self) {
+        let mut ticker = tokio::time::interval(VIDEO_RECORDING_MONITOR_INTERVAL);
+        let mut missing_episode = String::new();
+        let mut missing_ticks = 0_u8;
+        loop {
+            ticker.tick().await;
+            let capture_episode = self
+                .recording_video()
+                .lock()
+                .await
                 .as_ref()
-                .map(|capture| capture.episode_id().to_owned())
-        });
-    let videos = match capture {
-        Some(capture) => finish_video_capture(state, capture).await,
-        None => Vec::new(),
-    };
-    if let Some(episode_id) = episode_id {
-        let episodes = state.episodes().clone();
-        let storage = state.storage().clone();
-        let committed = tokio::task::spawn_blocking(move || {
-            let episode = episodes
-                .completed(&episode_id)
-                .map_err(|error| error.to_string())?;
-            storage.commit_episode_blocking(&episode, &videos)
-        })
-        .await;
-        if let Err(error) = committed
-            .map_err(|error| error.to_string())
-            .and_then(|result| result)
-        {
-            tracing::error!("could not commit automatically stopped episode media: {error}");
-            state.cameras().note_issue(format!(
-                "episode media could not be committed to SpiralDB: {error}"
-            ));
+                .map(|capture| capture.episode_id().to_owned());
+            let watched_episode = self.catalog_lease().recording_episode().or(capture_episode);
+            let Some(capture_episode) = watched_episode else {
+                missing_episode.clear();
+                missing_ticks = 0;
+                continue;
+            };
+            let hardware = self.hardware().state();
+            let hardware_episode = hardware
+                .telemetry()
+                .recording()
+                .as_ref()
+                .map(|recording| recording.episode().to_owned());
+            if hardware_episode.as_deref() == Some(&capture_episode) {
+                missing_episode.clear();
+                missing_ticks = 0;
+                continue;
+            }
+            if missing_episode == capture_episode {
+                missing_ticks = missing_ticks.saturating_add(1);
+            } else {
+                missing_episode = capture_episode;
+                missing_ticks = 1;
+            }
+            if missing_ticks < VIDEO_RECORDING_STOP_TICKS {
+                continue;
+            }
+            self.finish_stale_video_capture().await;
+            missing_episode.clear();
+            missing_ticks = 0;
         }
     }
-    if let Some(recording) = recording {
-        let released = state.catalog_lease().release(recording.token());
-        debug_assert!(
-            released,
-            "claimed recording lease must release exactly once"
-        );
-    }
-}
 
-pub(super) async fn finish_video_capture(
-    state: &AppState,
-    capture: VideoCapture,
-) -> Vec<VideoAsset> {
-    let (videos, failures) = capture.finish().await;
-    for failure in failures {
-        state
-            .cameras()
-            .note_issue(format!("episode video was not saved: {failure}"));
+    /// Close and commit any capture whose corresponding control-loop recording
+    /// has already ended. Also used during graceful backend shutdown.
+    pub(crate) async fn finish_stale_video_capture(&self) {
+        // Claim the recording exactly once, but retain catalog exclusion until the
+        // episode and finalized media have both been committed. This exists
+        // independently of VideoCapture because camera-less recordings still
+        // allocate catalog identities.
+        let recording = self.catalog_lease().claim_recording();
+        let capture = self.recording_video().lock().await.take();
+        if recording.is_none() && capture.is_none() {
+            return;
+        }
+        let episode_id = recording
+            .as_ref()
+            .map(|recording| recording.episode().to_owned())
+            .or_else(|| {
+                capture
+                    .as_ref()
+                    .map(|capture| capture.episode_id().to_owned())
+            });
+        let videos = match capture {
+            Some(capture) => self.finish_video_capture(capture).await,
+            None => Vec::new(),
+        };
+        if let Some(episode_id) = episode_id {
+            let episodes = self.episodes().clone();
+            let storage = self.storage().clone();
+            let committed = tokio::task::spawn_blocking(move || {
+                let episode = episodes
+                    .completed(&episode_id)
+                    .map_err(|error| error.to_string())?;
+                storage.commit_episode_blocking(&episode, &videos)
+            })
+            .await;
+            if let Err(error) = committed
+                .map_err(|error| error.to_string())
+                .and_then(|result| result)
+            {
+                tracing::error!("could not commit automatically stopped episode media: {error}");
+                self.cameras().note_issue(format!(
+                    "episode media could not be committed to SpiralDB: {error}"
+                ));
+            }
+        }
+        if let Some(recording) = recording {
+            let released = self.catalog_lease().release(recording.token());
+            debug_assert!(
+                released,
+                "claimed recording lease must release exactly once"
+            );
+        }
     }
-    videos
+
+    pub(super) async fn finish_video_capture(&self, capture: VideoCapture) -> Vec<VideoAsset> {
+        let (videos, failures) = capture.finish().await;
+        for failure in failures {
+            self.cameras()
+                .note_issue(format!("episode video was not saved: {failure}"));
+        }
+        videos
+    }
 }
 
 /// A failed request, rendered as `{"error": "..."}`.
@@ -532,7 +526,7 @@ impl Failure {
 
     fn import(message: impl Into<String>) -> Self {
         let message = message.into();
-        let status = if spiral_robotics_storage::is_unavailable_error(&message) {
+        let status = if spiral_robotics_storage::ProjectStore::is_unavailable_error(&message) {
             StatusCode::SERVICE_UNAVAILABLE
         } else {
             StatusCode::BAD_REQUEST
@@ -606,49 +600,50 @@ impl From<OperationError> for Failure {
 }
 
 /// Build the studio's API routes.
-pub(crate) fn api_router(state: AppState) -> Router {
-    let catalog_routes = Router::new()
-        .merge(data::catalog_router())
-        .merge(devices::catalog_router())
-        .merge(recordings::router())
-        .merge(training_rollout::router())
-        .merge(workflow::router())
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            require_catalog_ready,
-        ));
-
-    Router::new()
-        .merge(data::bootstrap_router())
-        .merge(devices::bootstrap_router())
-        .merge(catalog_routes)
-        .route("/state", get(get_state))
-        .route("/events", get(events))
-        .with_state(state)
-}
-
-async fn require_catalog_ready(
-    State(state): State<AppState>,
-    request: Request,
-    next: Next,
-) -> Result<Response, Failure> {
-    match state.bootstrap().catalog_unavailable() {
-        Some(detail) => Err(Failure::unavailable(format!(
-            "Studio catalog is not ready: {detail}"
-        ))),
-        None => Ok(next.run(request).await),
-    }
-}
-
-/// Assemble the current setup-level view of the studio.
 impl AppState {
+    pub(crate) fn api_router(self) -> Router {
+        let catalog_routes = Router::new()
+            .merge(Self::data_catalog_router())
+            .merge(Self::device_catalog_router())
+            .merge(Self::recording_router())
+            .merge(Self::training_rollout_router())
+            .merge(Self::workflow_router())
+            .route_layer(middleware::from_fn_with_state(
+                self.clone(),
+                Self::require_catalog_ready,
+            ));
+
+        Router::new()
+            .merge(Self::data_bootstrap_router())
+            .merge(Self::device_bootstrap_router())
+            .merge(catalog_routes)
+            .route("/state", get(Self::get_state))
+            .route("/events", get(Self::events))
+            .with_state(self)
+    }
+
+    async fn require_catalog_ready(
+        State(state): State<Self>,
+        request: Request,
+        next: Next,
+    ) -> Result<Response, Failure> {
+        match state.bootstrap().catalog_unavailable() {
+            Some(detail) => Err(Failure::unavailable(format!(
+                "Studio catalog is not ready: {detail}"
+            ))),
+            None => Ok(next.run(request).await),
+        }
+    }
+
+    /// Assemble the current setup-level view of the studio.
     pub(crate) fn snapshot(&self) -> StudioSnapshot {
         let state = self;
         let hardware = state.hardware().state();
         let readiness = state.bootstrap().current();
         let robots = if readiness.catalog_available() {
             let robot_adapter = devices::RobotHttpAdapter::prefetched(state);
-            robots::list(&robot_adapter)
+            RobotCatalogActions::new(&robot_adapter)
+                .list()
                 .into_iter()
                 .filter_map(|saved| {
                     let connection = hardware
@@ -713,204 +708,218 @@ impl AppState {
             .with_cameras(cameras)
             .with_issues(issues)
     }
-}
 
-async fn get_state(State(state): State<AppState>) -> Json<StudioSnapshot> {
-    Json(state.snapshot())
-}
+    async fn get_state(State(state): State<Self>) -> Json<StudioSnapshot> {
+        Json(state.snapshot())
+    }
 
-/// Push setup changes and live telemetry to the browser.
-///
-/// The snapshot is only re-sent when it actually differs, so an idle studio
-/// costs one small telemetry frame per tick instead of a full state dump.
-async fn events(
-    State(state): State<AppState>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let stream = async_stream::stream! {
-        let mut snapshot_timer = tokio::time::interval(SNAPSHOT_INTERVAL);
-        snapshot_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut telemetry_timer = tokio::time::interval(TELEMETRY_INTERVAL);
-        let (initial_training, mut training) = state.training().subscription();
-        let (initial_workflow, mut workflow) = state.workflow().subscription();
-        let mut last_workflow = initial_workflow.clone();
-        let (initial_agent, mut workflow_agent) = state.workflow_agent().subscription();
-        let mut last_agent_cursor = (
-            initial_agent.scope_id().to_owned(),
-            initial_agent.revision(),
-        );
-        let initial_rollout = RolloutManager::snapshot(state.rollout().as_ref());
-        let mut rollout = state.rollout().subscribe();
-        let mut last_snapshot: Option<StudioSnapshot> = None;
-        let mut last_sequence = 0_u64;
+    /// Push setup changes and live telemetry to the browser.
+    ///
+    /// The snapshot is only re-sent when it actually differs, so an idle studio
+    /// costs one small telemetry frame per tick instead of a full state dump.
+    async fn events(
+        State(state): State<Self>,
+    ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+        let stream = async_stream::stream! {
+            let mut snapshot_timer = tokio::time::interval(SNAPSHOT_INTERVAL);
+            snapshot_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut telemetry_timer = tokio::time::interval(TELEMETRY_INTERVAL);
+            let (initial_training, mut training) = state.training().subscription();
+            let (initial_workflow, mut workflow) = state.workflow().subscription();
+            let mut last_workflow = initial_workflow.clone();
+            let (initial_agent, mut workflow_agent) = state.workflow_agent().subscription();
+            let mut last_agent_cursor = AgentCursor::from(&initial_agent);
+            let initial_rollout = RolloutManager::snapshot(state.rollout().as_ref());
+            let mut rollout = state.rollout().subscribe();
+            let mut last_snapshot: Option<StudioSnapshot> = None;
+            let mut last_sequence = 0_u64;
 
-        if let Ok(event) = Event::default()
-            .event("training_snapshot")
-            .json_data(&initial_training)
-        {
-            yield Ok(event);
-        }
-        if let Ok(event) = Event::default()
-            .event("rollout_state")
-            .json_data(&initial_rollout)
-        {
-            yield Ok(event);
-        }
-        if let Ok(event) = Event::default()
-            .event("workflow_snapshot")
-            .json_data(&initial_workflow)
-        {
-            yield Ok(event);
-        }
-        if let Ok(event) = Event::default()
-            .event("workflow_agent")
-            .json_data(&initial_agent)
-        {
-            yield Ok(event);
-        }
+            if let Ok(event) = Event::default()
+                .event("training_snapshot")
+                .json_data(&initial_training)
+            {
+                yield Ok(event);
+            }
+            if let Ok(event) = Event::default()
+                .event("rollout_state")
+                .json_data(&initial_rollout)
+            {
+                yield Ok(event);
+            }
+            if let Ok(event) = Event::default()
+                .event("workflow_snapshot")
+                .json_data(&initial_workflow)
+            {
+                yield Ok(event);
+            }
+            if let Ok(event) = Event::default()
+                .event("workflow_agent")
+                .json_data(&initial_agent)
+            {
+                yield Ok(event);
+            }
 
-        loop {
-            tokio::select! {
-                _ = snapshot_timer.tick() => {
-                    let snapshot = state.snapshot();
-                    if last_snapshot.as_ref() == Some(&snapshot) {
-                        continue;
-                    }
-                    last_snapshot = Some(snapshot.clone());
-                    if let Ok(event) = Event::default().event("state").json_data(&snapshot) {
-                        yield Ok(event);
-                    }
-                }
-                _ = telemetry_timer.tick() => {
-                    let hardware = state.hardware().state();
-                    let telemetry = hardware.telemetry();
-                    if telemetry.sequence() == last_sequence {
-                        continue;
-                    }
-                    last_sequence = telemetry.sequence();
-                    if let Ok(event) = Event::default().event("telemetry").json_data(telemetry) {
-                        yield Ok(event);
-                    }
-                }
-                update = training.recv() => {
-                    match update {
-                        Ok(update) => {
-                            if let Ok(event) = Event::default()
-                                .event("training_update")
-                                .json_data(&update)
-                            {
-                                yield Ok(event);
-                            }
+            loop {
+                tokio::select! {
+                    _ = snapshot_timer.tick() => {
+                        let snapshot = state.snapshot();
+                        if last_snapshot.as_ref() == Some(&snapshot) {
+                            continue;
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            let (snapshot, replacement) = state.training().subscription();
-                            training = replacement;
-                            if let Ok(event) = Event::default()
-                                .event("training_snapshot")
-                                .json_data(&snapshot)
-                            {
-                                yield Ok(event);
-                            }
+                        last_snapshot = Some(snapshot.clone());
+                        if let Ok(event) = Event::default().event("state").json_data(&snapshot) {
+                            yield Ok(event);
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
-                }
-                update = workflow.recv() => {
-                    match update {
-                        Ok(_) => {
-                            // Broadcast values are wakeups. A queued update
-                            // from the project that was just replaced must not
-                            // overwrite the manager's newer, lower-revision
-                            // scoped state.
-                            let snapshot = state.workflow().state();
-                            if snapshot == last_workflow {
-                                continue;
-                            }
-                            last_workflow = snapshot.clone();
-                            let update = spiral_robotics_api::workflow::WorkflowUpdate::new(snapshot);
-                            if let Ok(event) = Event::default()
-                                .event("workflow_update")
-                                .json_data(&update)
-                            {
-                                yield Ok(event);
-                            }
+                    _ = telemetry_timer.tick() => {
+                        let hardware = state.hardware().state();
+                        let telemetry = hardware.telemetry();
+                        if telemetry.sequence() == last_sequence {
+                            continue;
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            let (snapshot, replacement) = state.workflow().subscription();
-                            workflow = replacement;
-                            if snapshot == last_workflow {
-                                continue;
-                            }
-                            last_workflow = snapshot.clone();
-                            if let Ok(event) = Event::default()
-                                .event("workflow_snapshot")
-                                .json_data(&snapshot)
-                            {
-                                yield Ok(event);
-                            }
+                        last_sequence = telemetry.sequence();
+                        if let Ok(event) = Event::default().event("telemetry").json_data(telemetry) {
+                            yield Ok(event);
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
-                }
-                update = workflow_agent.recv() => {
-                    match update {
-                        Ok(_) => {
-                            // Broadcast values are wakeups. Snapshot current
-                            // manager truth so a queued update from a prior
-                            // conversation or project scope cannot regress SSE.
-                            let snapshot = state.workflow_agent().state();
-                            let cursor = (snapshot.scope_id().to_owned(), snapshot.revision());
-                            if !replace_agent_cursor(&mut last_agent_cursor, &cursor) {
-                                continue;
+                    update = training.recv() => {
+                        match update {
+                            Ok(update) => {
+                                if let Ok(event) = Event::default()
+                                    .event("training_update")
+                                    .json_data(&update)
+                                {
+                                    yield Ok(event);
+                                }
                             }
-                            if let Ok(event) = Event::default()
-                                .event("workflow_agent")
-                                .json_data(&snapshot)
-                            {
-                                yield Ok(event);
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                let (snapshot, replacement) = state.training().subscription();
+                                training = replacement;
+                                if let Ok(event) = Event::default()
+                                    .event("training_snapshot")
+                                    .json_data(&snapshot)
+                                {
+                                    yield Ok(event);
+                                }
                             }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            let (snapshot, replacement) = state.workflow_agent().subscription();
-                            workflow_agent = replacement;
-                            let cursor = (snapshot.scope_id().to_owned(), snapshot.revision());
-                            if !replace_agent_cursor(&mut last_agent_cursor, &cursor) {
-                                continue;
+                    }
+                    update = workflow.recv() => {
+                        match update {
+                            Ok(_) => {
+                                // Broadcast values are wakeups. A queued update
+                                // from the project that was just replaced must not
+                                // overwrite the manager's newer, lower-revision
+                                // scoped state.
+                                let snapshot = state.workflow().state();
+                                if snapshot == last_workflow {
+                                    continue;
+                                }
+                                last_workflow = snapshot.clone();
+                                let update = spiral_robotics_api::workflow::WorkflowUpdate::new(snapshot);
+                                if let Ok(event) = Event::default()
+                                    .event("workflow_update")
+                                    .json_data(&update)
+                                {
+                                    yield Ok(event);
+                                }
                             }
-                            if let Ok(event) = Event::default()
-                                .event("workflow_agent")
-                                .json_data(&snapshot)
-                            {
-                                yield Ok(event);
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                let (snapshot, replacement) = state.workflow().subscription();
+                                workflow = replacement;
+                                if snapshot == last_workflow {
+                                    continue;
+                                }
+                                last_workflow = snapshot.clone();
+                                if let Ok(event) = Event::default()
+                                    .event("workflow_snapshot")
+                                    .json_data(&snapshot)
+                                {
+                                    yield Ok(event);
+                                }
                             }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
-                }
-                changed = rollout.changed() => {
-                    if changed.is_err() {
-                        break;
+                    update = workflow_agent.recv() => {
+                        match update {
+                            Ok(_) => {
+                                // Broadcast values are wakeups. Snapshot current
+                                // manager truth so a queued update from a prior
+                                // conversation or project scope cannot regress SSE.
+                                let snapshot = state.workflow_agent().state();
+                                let cursor = AgentCursor::from(&snapshot);
+                                if !last_agent_cursor.advance_to(cursor) {
+                                    continue;
+                                }
+                                if let Ok(event) = Event::default()
+                                    .event("workflow_agent")
+                                    .json_data(&snapshot)
+                                {
+                                    yield Ok(event);
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                let (snapshot, replacement) = state.workflow_agent().subscription();
+                                workflow_agent = replacement;
+                                let cursor = AgentCursor::from(&snapshot);
+                                if !last_agent_cursor.advance_to(cursor) {
+                                    continue;
+                                }
+                                if let Ok(event) = Event::default()
+                                    .event("workflow_agent")
+                                    .json_data(&snapshot)
+                                {
+                                    yield Ok(event);
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
                     }
-                    let snapshot = rollout.borrow_and_update().clone();
-                    if let Ok(event) = Event::default()
-                        .event("rollout_state")
-                        .json_data(&snapshot)
-                    {
-                        yield Ok(event);
+                    changed = rollout.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        let snapshot = rollout.borrow_and_update().clone();
+                        if let Ok(event) = Event::default()
+                            .event("rollout_state")
+                            .json_data(&snapshot)
+                        {
+                            yield Ok(event);
+                        }
                     }
                 }
             }
-        }
-    };
+        };
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+        Sse::new(stream).keep_alive(KeepAlive::default())
+    }
 }
 
-fn replace_agent_cursor(last: &mut (String, u64), next: &(String, u64)) -> bool {
-    if last == next {
-        return false;
+#[derive(Eq, PartialEq)]
+struct AgentCursor {
+    scope_id: String,
+    revision: u64,
+}
+
+impl AgentCursor {
+    fn advance_to(&mut self, next: Self) -> bool {
+        if *self == next {
+            return false;
+        }
+        *self = next;
+        true
     }
-    *last = next.clone();
-    true
+}
+
+impl From<&spiral_robotics_api::workflow::WorkflowAgentStateResponse> for AgentCursor {
+    fn from(state: &spiral_robotics_api::workflow::WorkflowAgentStateResponse) -> Self {
+        Self {
+            scope_id: state.scope_id().to_owned(),
+            revision: state.revision(),
+        }
+    }
 }
 
 #[cfg(test)]

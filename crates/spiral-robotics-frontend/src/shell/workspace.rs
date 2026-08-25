@@ -10,20 +10,16 @@ use spiral_robotics_api::recording::{ReplayPhase, ReplayPurpose};
 use spiral_robotics_api::robots::ModeSelection;
 
 use crate::activities::data::relations::RelationsPanel;
-use crate::activities::data::workbench::{EpisodesPanel, QueryPanel, QueryResultView, short_id};
+use crate::activities::data::workbench::{
+    EpisodeIdPresentation, EpisodesPanel, QueryPanel, QueryResultView,
+};
 use crate::activities::live::workbench::LiveWorkbench;
 use crate::activities::rollout::state::rollout_controller;
 use crate::activities::rollout::workspace::{
-    InferencePanel, RolloutWorkbench, follower as rollout_follower,
-    selected_checkpoint_camera_roles,
+    InferencePanel, RobotFleet, RolloutWorkbench, TrainingSnapshotRollout,
 };
 use crate::client::{commands, historical};
-use crate::panels::camera::{
-    CameraEditor, CameraEditorSource, RecordedCameraSourceRequest,
-    recorded_camera_registry_placeholder, recorded_scene_source,
-};
-#[cfg(test)]
-use crate::panels::camera::{historical_camera, historical_camera_at};
+use crate::panels::camera::{CameraEditor, CameraEditorSource, RecordedCameraSourceRequest};
 use crate::panels::timeline::panel::{
     RecordedTimelineTraces, SignalSource, StudioTimeline, StudioTimelineState,
     TimelineCapabilities, TimelineGate, TimelinePlayback,
@@ -39,13 +35,13 @@ use crate::shell::activity::{
     PrimaryVisualization, RecordedSource, TimelineSubject, TimelineTarget,
 };
 #[cfg(test)]
-use crate::shell::layout::default_panel_layout;
-use crate::shell::routes::studio_configuration;
+use crate::shell::layout::PanelLayoutDefinition;
+use crate::shell::routes::StudioConfiguration;
 use crate::shell::state::Studio;
 
 use historical::{
     EpisodeInspectionCache, HistoricalPreview, HistoricalPreviewRequest, HistoricalPreviewSignals,
-    historical_replay_slot, request_historical_preview,
+    HistoricalReplayTime,
 };
 
 #[derive(Clone, PartialEq)]
@@ -80,7 +76,7 @@ impl ScreenWorkspaceDefinition {
 #[component]
 pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
     let studio = crate::shell::state::studio();
-    let configuration = studio_configuration();
+    let configuration = StudioConfiguration::current();
     let dataset = configuration.dataset();
     let selected_dataset = studio.selected_dataset().read().to_owned();
     let spiral_query_available = configuration.spiral_query_available();
@@ -123,12 +119,11 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                 .unwrap_or_default();
             let next = (playhead() + delta).clamp(0.0, duration.max(0.0));
             playhead.set(next);
-            let slot = historical_replay_slot(next);
+            let slot = next.replay_slot();
             let target = (episode.clone(), slot);
             if sampled_preview_slot.peek().as_ref() != Some(&target) {
                 sampled_preview_slot.set(Some(target));
-                request_historical_preview(
-                    studio,
+                studio.request_historical_preview(
                     HistoricalPreviewRequest::new(episode.clone(), None, next),
                     HistoricalPreviewSignals::new(
                         historical_state,
@@ -152,23 +147,25 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
     // request instead of replacing it with replay telemetry. Replay purpose is
     // explicit because a valid timeline replay can contain only one frame.
     use_effect(move || {
-        let Some(replay) = studio.replay().filter(replay_owns_timeline_transport) else {
+        let Some(replay) = studio
+            .replay()
+            .filter(|replay| replay.owns_timeline_transport())
+        else {
             sampled_replay_slot.set(None);
             return;
         };
         let subject_episode = studio.visible_timeline_episode(activity);
-        if !replay_matches_timeline_subject(subject_episode.as_deref(), &replay) {
+        if !replay.matches_timeline_subject(subject_episode.as_deref()) {
             sampled_replay_slot.set(None);
             return;
         }
-        let slot = historical_replay_slot(replay.elapsed_seconds());
+        let slot = replay.elapsed_seconds().replay_slot();
         let next = (replay.episode().to_owned(), slot);
         if sampled_replay_slot.peek().as_ref() == Some(&next) {
             return;
         }
         sampled_replay_slot.set(Some(next));
-        request_historical_preview(
-            studio,
+        studio.request_historical_preview(
             HistoricalPreviewRequest::new(
                 replay.episode().to_owned(),
                 None,
@@ -188,9 +185,12 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             if !recording.paused() {
                 timeline.stop_preview();
             }
-        } else if let Some(replay) = studio.replay().filter(replay_owns_timeline_transport) {
+        } else if let Some(replay) = studio
+            .replay()
+            .filter(|replay| replay.owns_timeline_transport())
+        {
             let subject_episode = studio.visible_timeline_episode(activity);
-            if replay_matches_timeline_subject(subject_episode.as_deref(), &replay) {
+            if replay.matches_timeline_subject(subject_episode.as_deref()) {
                 playhead.set(replay.elapsed_seconds());
                 timeline.stop_preview();
             }
@@ -253,8 +253,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
         {
             return;
         }
-        request_historical_preview(
-            studio,
+        studio.request_historical_preview(
             HistoricalPreviewRequest::new(episode, Some(frames), seconds),
             HistoricalPreviewSignals::new(historical_state, historical_revision, historical_cache),
         );
@@ -286,8 +285,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
             historical_revision.set(next_revision);
             historical_state.set(None);
             playhead.set(seconds);
-            request_historical_preview(
-                studio,
+            studio.request_historical_preview(
                 HistoricalPreviewRequest::new(episode, Some(source_frames), seconds),
                 HistoricalPreviewSignals::new(
                     historical_state,
@@ -303,7 +301,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
         let store = recording_signals.read();
         store.timeline_lanes()
     });
-    let assigned_cameras = assigned_cameras(projection.activity());
+    let assigned_cameras = studio.assigned_cameras(projection.activity());
     let review_episode = subject.recorded_episode().map(str::to_owned);
     let historical_source = historical_state
         .read()
@@ -345,7 +343,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
     let seek_context = studio.timeline_seek_context(&subject);
     let playback = studio
         .replay()
-        .filter(replay_owns_timeline_transport)
+        .filter(|replay| replay.owns_timeline_transport())
         .and_then(|replay| {
             (subject.episode_id() == Some(replay.episode())).then_some(if replay.paused() {
                 TimelinePlayback::RobotSyncPaused
@@ -373,7 +371,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                 return;
             }
             robot_sync_target.set(None);
-            let armed_episode = armed.as_ref().map(timeline_target_episode);
+            let armed_episode = armed.as_ref().map(TimelineTarget::episode);
             if let Some(replay) = studio.replay()
                 && armed_episode == Some(replay.episode())
             {
@@ -384,19 +382,24 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
     let mut selected = studio.selection();
     let scene_robot = (projection.activity() == Activity::Rollout)
         .then(|| {
-            rollout_follower(studio.snapshot().read().robots()).map(|robot| robot.id().to_owned())
+            studio
+                .snapshot()
+                .read()
+                .robots()
+                .follower()
+                .map(|robot| robot.id().to_owned())
         })
         .flatten();
 
     let mut dock_panels = Vec::<(Panel, PanelRole)>::new();
     match &projection.primary() {
         PrimaryVisualization::LiveScene | PrimaryVisualization::RecordedScene(_) => {
-            let scene_source = recorded_scene_source(&subject, historical_source.as_ref());
+            let scene_source = subject.recorded_scene_source(historical_source.as_ref());
             let title = match &projection.primary() {
                 PrimaryVisualization::RecordedScene(episode)
                     if projection.activity() == Activity::Data =>
                 {
-                    format!("Episode · {}", short_id(episode.id()))
+                    format!("Episode · {}", episode.id().short_episode_id())
                 }
                 _ => "Scene".to_owned(),
             };
@@ -444,7 +447,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
     match &projection.cameras() {
         CameraRegistrySource::LiveAssignments if !assigned_cameras.is_empty() => {
             for camera in &assigned_cameras {
-                let id = camera_panel_id(camera);
+                let id = camera.panel_id();
                 let source = if let Some(episode) = review_episode.as_deref() {
                     RecordedCameraSourceRequest::new(
                         episode,
@@ -466,7 +469,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                         "cameras",
                         rsx! {
                             CameraEditor {
-                                element_id: recorded_camera_element_id(&id),
+                                element_id: id.recorded_element_id(),
                                 source,
                                 playing: matches!(playback, TimelinePlayback::PreviewPlaying | TimelinePlayback::RobotSyncPlaying),
                             }
@@ -521,7 +524,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                         "cameras",
                         rsx! {
                             CameraEditor {
-                                element_id: recorded_camera_element_id(&id),
+                                element_id: id.recorded_element_id(),
                                 source,
                                 playing: matches!(playback, TimelinePlayback::PreviewPlaying | TimelinePlayback::RobotSyncPlaying),
                             }
@@ -537,7 +540,12 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                 ));
             }
             if !dock_panels.iter().any(|(_, role)| matches!(role, PanelRole::Camera(CameraIdentity::Recorded { episode: panel_episode, .. }) if panel_episode == episode.id())) {
-                let source = recorded_camera_registry_placeholder(episode.id(), historical_source.as_ref());
+                let source = RecordedCameraSourceRequest::new(
+                    episode.id(),
+                    historical_source.as_ref(),
+                    playhead(),
+                )
+                .registry_placeholder();
                 dock_panels.push((
                     Panel::new(
                         "episode-camera-empty",
@@ -708,7 +716,7 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
                 if event.modifiers().ctrl() || event.modifiers().meta() || event.modifiers().alt() {
                     return;
                 }
-                if !commands::shortcuts_enabled() {
+                if !studio.shortcuts_enabled() {
                     return;
                 }
                 let recording = studio.recording();
@@ -790,15 +798,26 @@ pub(crate) fn EpisodeWorkspace(activity: Activity) -> Element {
 
 /// Physical seeks are consequences of the Timeline playhead, not transport
 /// that may replace or reposition it while the arm is travelling to a pose.
-fn replay_owns_timeline_transport(replay: &spiral_robotics_api::recording::ReplayProgress) -> bool {
-    replay.purpose() == ReplayPurpose::Timeline
+trait TimelineReplay {
+    fn owns_timeline_transport(&self) -> bool;
+    fn matches_timeline_subject(&self, subject_episode: Option<&str>) -> bool;
+    #[cfg(test)]
+    fn drives_recorded_media(&self) -> bool;
 }
 
-fn replay_matches_timeline_subject(
-    subject_episode: Option<&str>,
-    replay: &spiral_robotics_api::recording::ReplayProgress,
-) -> bool {
-    subject_episode == Some(replay.episode())
+impl TimelineReplay for spiral_robotics_api::recording::ReplayProgress {
+    fn owns_timeline_transport(&self) -> bool {
+        self.purpose() == ReplayPurpose::Timeline
+    }
+
+    fn matches_timeline_subject(&self, subject_episode: Option<&str>) -> bool {
+        subject_episode == Some(self.episode())
+    }
+
+    #[cfg(test)]
+    fn drives_recorded_media(&self) -> bool {
+        self.owns_timeline_transport() && self.phase() == ReplayPhase::Playing && !self.paused()
+    }
 }
 
 impl Studio {
@@ -814,81 +833,91 @@ impl Studio {
     }
 }
 
-#[cfg(test)]
-fn replay_drives_recorded_media(replay: &spiral_robotics_api::recording::ReplayProgress) -> bool {
-    replay_owns_timeline_transport(replay)
-        && replay.phase() == ReplayPhase::Playing
-        && !replay.paused()
-}
-
-fn timeline_target_episode(target: &TimelineTarget) -> &str {
-    match target {
-        TimelineTarget::Recording(episode) | TimelineTarget::Episode(episode) => episode,
-    }
-}
-
-fn assigned_cameras(activity: Activity) -> Vec<(String, String, String)> {
-    let studio = crate::shell::state::studio();
-    let robot = if activity == Activity::Rollout {
-        rollout_follower(studio.snapshot().read().robots())
-    } else {
-        studio.focused()
-    };
-    let Some(focused) = robot else {
-        return Vec::new();
-    };
-    if activity == Activity::Rollout {
-        let selected_key = rollout_controller().checkpoint();
-        let roles =
-            selected_checkpoint_camera_roles(&studio.training().read(), selected_key.as_deref());
-        if !roles.is_empty() {
-            return roles
-                .iter()
-                .filter_map(|role| {
-                    focused
-                        .cameras()
-                        .iter()
-                        .find(|binding| binding.name() == role.as_str())
-                        .map(|binding| {
-                            (
-                                focused.id().to_owned(),
-                                binding.name().to_owned(),
-                                binding.id().to_owned(),
-                            )
-                        })
-                })
-                .collect();
+impl TimelineTarget {
+    fn episode(&self) -> &str {
+        match self {
+            Self::Recording(episode) | Self::Episode(episode) => episode,
         }
     }
-    focused
-        .cameras()
-        .iter()
-        .map(|binding| {
-            (
-                focused.id().to_owned(),
-                binding.name().to_owned(),
-                binding.id().to_owned(),
-            )
-        })
-        .collect()
 }
 
-fn camera_panel_id(camera: &(String, String, String)) -> String {
-    format!("camera:{}:{}", camera.0, camera.1)
-}
-
-fn recorded_camera_element_id(panel_id: &str) -> String {
-    let safe = panel_id
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
-                character
-            } else {
-                '-'
+impl Studio {
+    fn assigned_cameras(self, activity: Activity) -> Vec<(String, String, String)> {
+        let robot = if activity == Activity::Rollout {
+            self.snapshot().read().robots().follower()
+        } else {
+            self.focused()
+        };
+        let Some(focused) = robot else {
+            return Vec::new();
+        };
+        if activity == Activity::Rollout {
+            let selected_key = rollout_controller().checkpoint();
+            let roles = self
+                .training()
+                .read()
+                .selected_checkpoint_camera_roles(selected_key.as_deref());
+            if !roles.is_empty() {
+                return roles
+                    .iter()
+                    .filter_map(|role| {
+                        focused
+                            .cameras()
+                            .iter()
+                            .find(|binding| binding.name() == role.as_str())
+                            .map(|binding| {
+                                (
+                                    focused.id().to_owned(),
+                                    binding.name().to_owned(),
+                                    binding.id().to_owned(),
+                                )
+                            })
+                    })
+                    .collect();
             }
-        })
-        .collect::<String>();
-    format!("recorded-{safe}")
+        }
+        focused
+            .cameras()
+            .iter()
+            .map(|binding| {
+                (
+                    focused.id().to_owned(),
+                    binding.name().to_owned(),
+                    binding.id().to_owned(),
+                )
+            })
+            .collect()
+    }
+}
+
+trait CameraAssignmentPresentation {
+    fn panel_id(&self) -> String;
+}
+
+impl CameraAssignmentPresentation for (String, String, String) {
+    fn panel_id(&self) -> String {
+        format!("camera:{}:{}", self.0, self.1)
+    }
+}
+
+trait CameraPanelPresentation {
+    fn recorded_element_id(&self) -> String;
+}
+
+impl CameraPanelPresentation for str {
+    fn recorded_element_id(&self) -> String {
+        let safe = self
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                    character
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>();
+        format!("recorded-{safe}")
+    }
 }
 
 impl Studio {
@@ -1031,7 +1060,7 @@ mod tests {
             vec![video(0, Some(0.0), 2.0), video(1, Some(4.0), 3.0)],
         );
 
-        let camera = historical_camera(&preview, None).expect("recorded camera");
+        let camera = preview.historical_camera(None).expect("recorded camera");
 
         assert!(!camera.approximate());
         assert_eq!(camera.video_seconds(), 0.25);
@@ -1045,7 +1074,7 @@ mod tests {
     fn historical_camera_keeps_legacy_sync_explicitly_approximate() {
         let preview = preview(5.0, vec![video(0, None, 8.0)]);
 
-        let camera = historical_camera(&preview, None).expect("recorded camera");
+        let camera = preview.historical_camera(None).expect("recorded camera");
 
         assert!(camera.approximate());
         assert_eq!(camera.video_seconds(), 4.0);
@@ -1059,7 +1088,9 @@ mod tests {
     fn recorded_video_sync_uses_the_controller_clock_not_a_late_sample_response() {
         let preview = preview(1.0, vec![video(0, Some(0.0), 8.0)]);
 
-        let camera = historical_camera_at(&preview, None, 5.0).expect("recorded camera");
+        let camera = preview
+            .historical_camera_at(None, 5.0)
+            .expect("recorded camera");
 
         assert_eq!(camera.video_seconds(), 5.0);
         assert_eq!(camera.episode_seconds(), 5.0);
@@ -1101,7 +1132,7 @@ mod tests {
             }
         }
 
-        let panels = vec![
+        let panels = [
             Panel::new("workbench", "Live", "workbench", rsx! { div {} }),
             Panel::new("scene", "Scene", "primary", rsx! { div {} }),
             Panel::new(
@@ -1118,7 +1149,7 @@ mod tests {
             ),
             Panel::new("timeline", "Timeline", "timeline", rsx! { div {} }),
         ];
-        let layout = default_panel_layout(&panels);
+        let layout = panels.default_panel_layout();
         let gripper = layout.tile_for_panel(&PanelId::from("camera:follower:gripper"));
         let top = layout.tile_for_panel(&PanelId::from("camera:follower:top"));
 
@@ -1133,13 +1164,13 @@ mod tests {
 
     #[test]
     fn asynchronous_data_cameras_keep_their_named_right_hand_home() {
-        let initial = vec![
+        let initial = [
             Panel::new("workbench", "Data", "workbench", rsx! { div {} }),
             Panel::new("episodes-empty", "Episodes", "primary", rsx! { div {} }),
             Panel::new("data-camera-context", "Camera", "cameras", rsx! { div {} }),
             Panel::new("timeline", "Timeline", "timeline", rsx! { div {} }),
         ];
-        let mut layout = default_panel_layout(&initial);
+        let mut layout = initial.default_panel_layout();
         layout.reconcile(&[
             dioxus_workbench::PanelPlacement::new("workbench", "workbench"),
             dioxus_workbench::PanelPlacement::new("episode-scene", "primary"),
@@ -1158,13 +1189,13 @@ mod tests {
 
     #[test]
     fn query_result_joins_the_scene_without_unregistering_it() {
-        let initial = vec![
+        let initial = [
             Panel::new("workbench", "Data", "workbench", rsx! { div {} }),
             Panel::new("episode-scene", "Episode", "primary", rsx! { div {} }),
             Panel::new("episode-camera:wrist", "Camera", "cameras", rsx! { div {} }),
             Panel::new("timeline", "Timeline", "timeline", rsx! { div {} }),
         ];
-        let mut layout = default_panel_layout(&initial);
+        let mut layout = initial.default_panel_layout();
         layout.reconcile(&[
             dioxus_workbench::PanelPlacement::new("workbench", "workbench"),
             dioxus_workbench::PanelPlacement::new("episode-scene", "primary"),
@@ -1187,11 +1218,11 @@ mod tests {
 
     #[test]
     fn recorded_render_slots_bound_sample_fetches_to_thirty_hz() {
-        assert_eq!(historical_replay_slot(f64::NAN), 0);
-        assert_eq!(historical_replay_slot(0.0), 0);
-        assert_eq!(historical_replay_slot(0.032), 0);
-        assert_eq!(historical_replay_slot(0.034), 1);
-        assert_eq!(historical_replay_slot(1.249), 37);
+        assert_eq!(f64::NAN.replay_slot(), 0);
+        assert_eq!(0.0_f64.replay_slot(), 0);
+        assert_eq!(0.032_f64.replay_slot(), 0);
+        assert_eq!(0.034_f64.replay_slot(), 1);
+        assert_eq!(1.249_f64.replay_slot(), 37);
     }
 
     #[test]
@@ -1202,30 +1233,30 @@ mod tests {
             ReplayTransport::new(ReplayPurpose::PhysicalSeek, ReplayPhase::Seeking, false),
         );
 
-        assert!(!replay_owns_timeline_transport(&replay));
-        assert!(!replay_drives_recorded_media(&replay));
+        assert!(!replay.owns_timeline_transport());
+        assert!(!replay.drives_recorded_media());
         replay.set_transport(ReplayTransport::new(
             ReplayPurpose::Timeline,
             ReplayPhase::Seeking,
             false,
         ));
-        assert!(replay_owns_timeline_transport(&replay));
-        assert!(!replay_drives_recorded_media(&replay));
+        assert!(replay.owns_timeline_transport());
+        assert!(!replay.drives_recorded_media());
         replay.set_transport(ReplayTransport::new(
             ReplayPurpose::Timeline,
             ReplayPhase::Playing,
             false,
         ));
-        assert!(replay_drives_recorded_media(&replay));
-        assert!(replay_matches_timeline_subject(Some("take-1"), &replay));
-        assert!(!replay_matches_timeline_subject(Some("take-2"), &replay));
-        assert!(!replay_matches_timeline_subject(None, &replay));
+        assert!(replay.drives_recorded_media());
+        assert!(replay.matches_timeline_subject(Some("take-1")));
+        assert!(!replay.matches_timeline_subject(Some("take-2")));
+        assert!(!replay.matches_timeline_subject(None));
         replay.set_transport(ReplayTransport::new(
             ReplayPurpose::Timeline,
             ReplayPhase::Playing,
             true,
         ));
-        assert!(!replay_drives_recorded_media(&replay));
+        assert!(!replay.drives_recorded_media());
     }
 
     #[test]
@@ -1236,7 +1267,7 @@ mod tests {
             episode,
         };
 
-        let source = recorded_scene_source(&subject, None);
+        let source = subject.recorded_scene_source(None);
 
         assert!(matches!(
             source,

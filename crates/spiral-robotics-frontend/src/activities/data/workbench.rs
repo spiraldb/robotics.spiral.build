@@ -7,9 +7,9 @@
 use std::collections::BTreeSet;
 
 use crate::components::interaction::{
-    Action, ActionAuxiliaryHandlers, ActionLink, ActionPurpose, ActionVariant, CloseIcon,
-    ConfirmationCopy, ConfirmationDismissal, ConfirmationResponse, FileAction, FileInput,
-    InlineConfirmation, RefreshIcon, focus_after_render,
+    Action, ActionAuxiliaryHandlers, ActionLink, ActionPurpose, ActionVariant, BrowserFocus,
+    CloseIcon, ConfirmationCopy, ConfirmationDismissal, ConfirmationResponse, FileAction,
+    FileInput, InlineConfirmation, RefreshIcon,
 };
 use dioxus::prelude::*;
 use gloo_net::http::Method;
@@ -24,9 +24,9 @@ use spiral_robotics_api::workflow::WorkflowRelationsResponse;
 
 use crate::activities::data::state::data_controller;
 use crate::client::http as api;
-use crate::format::format_clock;
+use crate::format::ClockPresentation;
 use crate::shell::state::studio;
-use crate::tasks::single_flight;
+use crate::tasks::SingleFlight;
 
 pub(crate) const DEFAULT_QUERY_ROWS: usize = 100;
 const QUERY_ROW_OPTIONS: [usize; 5] = [25, 100, 250, 500, 1_000];
@@ -136,7 +136,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
     });
 
     let dataset_id = studio.selected_dataset().read().trim().to_owned();
-    let dataset_valid = spiral_robotics_api::catalog::is_dataset_id(&dataset_id);
+    let dataset_valid = spiral_robotics_core::identity::DatasetId::is_canonical(&dataset_id);
     let all_episodes = studio.episodes();
     let dataset_ids = all_episodes
         .iter()
@@ -239,8 +239,8 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                             let Some(file) = event.files().first().cloned() else { return };
                             let target_dataset = import_dataset_id.clone();
                             studio.run_utility("", async move {
-                                let Some(outcome) = single_flight(importing, async {
-                                        let result = api::upload_file_json::<EpisodeImportSummary>(
+                                let Some(outcome) = SingleFlight::run(importing, async {
+                                        let result = api::Http::upload_file_json::<EpisodeImportSummary>(
                                             &format!("/api/episodes/import?dataset_id={target_dataset}"),
                                             &file,
                                             "application/vnd.spiral-robotics.episodes",
@@ -263,7 +263,7 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
                                             result.episodes(),
                                             result.dataset_id(),
                                             result.rows(),
-                                            import_warning_suffix(result.warnings()),
+                                            result.warnings().import_warning_suffix(),
                                         ));
                                         Ok(())
                                     }
@@ -390,11 +390,17 @@ pub(crate) fn EpisodesPanel(namespace: String) -> Element {
     }
 }
 
-fn import_warning_suffix(warnings: &[String]) -> String {
-    if warnings.is_empty() {
-        String::new()
-    } else {
-        format!(" Warning: {}", warnings.join(" "))
+trait ImportWarningsPresentation {
+    fn import_warning_suffix(&self) -> String;
+}
+
+impl ImportWarningsPresentation for [String] {
+    fn import_warning_suffix(&self) -> String {
+        if self.is_empty() {
+            String::new()
+        } else {
+            format!(" Warning: {}", self.join(" "))
+        }
     }
 }
 
@@ -506,9 +512,9 @@ fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element 
                             inspection.set(None);
                             imported.set(None);
                             studio.run_utility("", async move {
-                                let Some(outcome) = single_flight(
+                                let Some(outcome) = SingleFlight::run(
                                     inspecting,
-                                    api::send_json::<_, HuggingFaceDatasetInspection>(
+                                    api::Http::send_json::<_, HuggingFaceDatasetInspection>(
                                         Method::POST,
                                         "/api/datasets/huggingface/inspect",
                                         Some(&request),
@@ -546,7 +552,7 @@ fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element 
                         strong { "Dataset ready in Query" }
                         p {
                             "Imported {summary.files()} files into {summary.relations().len()} Spiral relations at "
-                            code { "{short_revision(summary.resolved_revision())}" }
+                            code { "{summary.resolved_revision().short_revision()}" }
                             "."
                         }
                     }
@@ -561,9 +567,9 @@ fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element 
                 div { class: "data-import-inspection",
                     div { class: "data-import-inspection-scroll",
                         dl { class: "data-import-facts",
-                            div { dt { "Snapshot" } dd { code { "{short_revision(source.resolved_revision())}" } } }
+                            div { dt { "Snapshot" } dd { code { "{source.resolved_revision().short_revision()}" } } }
                             div { dt { "Files" } dd { "{source.files().len()}" } }
-                            div { dt { "Size" } dd { "{format_bytes(source.total_bytes())}" } }
+                            div { dt { "Size" } dd { "{source.total_bytes().byte_size_label()}" } }
                             div { dt { "Target" } dd { code { "{source.dataset_id()}" } } }
                         }
                         div { class: "data-import-plan",
@@ -601,9 +607,9 @@ fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element 
                                     .with_revision(source.resolved_revision());
                                     error.set(None);
                                     studio.run_utility("", async move {
-                                        let Some(outcome) = single_flight(
+                                        let Some(outcome) = SingleFlight::run(
                                             importing,
-                                            api::send_json::<_, HuggingFaceDatasetImportSummary>(
+                                            api::Http::send_json::<_, HuggingFaceDatasetImportSummary>(
                                                 Method::POST,
                                                 "/api/datasets/huggingface/import",
                                                 Some(&import_request),
@@ -623,7 +629,7 @@ fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element 
                                                         summary.files(),
                                                         summary.format().label(),
                                                         summary.repository(),
-                                                        short_revision(summary.resolved_revision()),
+                                                        summary.resolved_revision().short_revision(),
                                                         summary.relations().len(),
                                                     ),
                                                 );
@@ -656,23 +662,35 @@ fn HuggingFaceImport(dataset_id: String, on_close: EventHandler<()>) -> Element 
     }
 }
 
-fn short_revision(revision: &str) -> &str {
-    revision.get(..10).unwrap_or(revision)
+trait RevisionPresentation {
+    fn short_revision(&self) -> &str;
 }
 
-fn format_bytes(bytes: u64) -> String {
-    const KIB: f64 = 1024.0;
-    const MIB: f64 = KIB * 1024.0;
-    const GIB: f64 = MIB * 1024.0;
-    let bytes = bytes as f64;
-    if bytes >= GIB {
-        format!("{:.2} GiB", bytes / GIB)
-    } else if bytes >= MIB {
-        format!("{:.1} MiB", bytes / MIB)
-    } else if bytes >= KIB {
-        format!("{:.1} KiB", bytes / KIB)
-    } else {
-        format!("{bytes:.0} B")
+impl RevisionPresentation for str {
+    fn short_revision(&self) -> &str {
+        self.get(..10).unwrap_or(self)
+    }
+}
+
+trait ByteCountPresentation {
+    fn byte_size_label(self) -> String;
+}
+
+impl ByteCountPresentation for u64 {
+    fn byte_size_label(self) -> String {
+        const KIB: f64 = 1024.0;
+        const MIB: f64 = KIB * 1024.0;
+        const GIB: f64 = MIB * 1024.0;
+        let bytes = self as f64;
+        if bytes >= GIB {
+            format!("{:.2} GiB", bytes / GIB)
+        } else if bytes >= MIB {
+            format!("{:.1} MiB", bytes / MIB)
+        } else if bytes >= KIB {
+            format!("{:.1} KiB", bytes / KIB)
+        } else {
+            format!("{bytes:.0} B")
+        }
     }
 }
 
@@ -686,7 +704,7 @@ pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available:
         let _generation = controller.relation_generation();
         async move {
             if query_available {
-                api::get::<WorkflowRelationsResponse>("/api/spiral/relations").await
+                api::Http::get::<WorkflowRelationsResponse>("/api/spiral/relations").await
             } else {
                 Ok(WorkflowRelationsResponse::default())
             }
@@ -700,12 +718,12 @@ pub(crate) fn QueryPanel(namespace: String, dataset_id: String, query_available:
     let relation_response = relation_result
         .as_ref()
         .and_then(|result| result.as_ref().ok());
-    let schema_relations = schema_relation_views(
+    let schema_relations = SchemaRelationSummary::for_dataset(
         &namespace,
         &dataset_id,
         query_available.then_some(relation_response).flatten(),
     );
-    let dataset_valid = spiral_robotics_api::catalog::is_dataset_id(&dataset_id);
+    let dataset_valid = spiral_robotics_core::identity::DatasetId::is_canonical(&dataset_id);
     let can_query = query_available && dataset_valid;
     let query_running = controller.query_running();
     let run_query = move || controller.run_query(studio, can_query);
@@ -872,14 +890,14 @@ fn EpisodeRow(
                         move |_| actions.on_select.call(episode.clone())
                     },
                     span { class: "flex items-baseline gap-1.5",
-                        strong { class: "truncate font-mono text-[11px] font-medium text-ink", "{short_id(&episode.id())}" }
+                        strong { class: "truncate font-mono text-[11px] font-medium text-ink", "{episode.id().short_episode_id()}" }
                         span { class: if state.playing { "text-[10px] text-accent" } else { "text-[10px] text-ink-faint" }, "{episode_state}" }
                         // No storage badge. SpiralDB is the only persistent path
                         // this product has, so the chip was green on every row of
                         // every catalog and could never have read otherwise; the
                         // panel header already names the store once. A tag that
                         // cannot report an exception is not reporting anything.
-                        span { class: "ml-auto shrink-0 font-mono text-[10px] text-ink-soft", "{format_clock(episode.duration_seconds())}" }
+                        span { class: "ml-auto shrink-0 font-mono text-[10px] text-ink-soft", "{episode.duration_seconds().clock_label()}" }
                     }
                     span { class: "mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] text-ink-faint",
                         span { class: "truncate", title: "{episode.source()}", "{episode.source()}" }
@@ -893,7 +911,7 @@ fn EpisodeRow(
                         copy: ConfirmationCopy::new(
                             format!(
                                 "Delete episode {}? Its streams and video will be permanently removed from SpiralDB.",
-                                short_id(episode.id()),
+                                episode.id().short_episode_id(),
                             ),
                             if state.deleting { "Deleting…" } else { "Delete episode" },
                             "Keep episode",
@@ -968,12 +986,12 @@ pub(crate) fn QueryResultView() -> Element {
                                     let id = tab.id;
                                     move |event: KeyboardEvent| {
                                         let target = match event.key() {
-                                            Key::ArrowLeft => query_tab_neighbor(&ids, id, false),
-                                            Key::ArrowRight => query_tab_neighbor(&ids, id, true),
+                                            Key::ArrowLeft => ids.neighbor(id, false),
+                                            Key::ArrowRight => ids.neighbor(id, true),
                                             Key::Home => ids.first().copied(),
                                             Key::End => ids.last().copied(),
                                             Key::Delete => {
-                                                let target = query_tab_neighbor_after_close(&ids, id);
+                                                let target = ids.neighbor_after_close(id);
                                                 controller.close_query(id);
                                                 target
                                             }
@@ -982,11 +1000,11 @@ pub(crate) fn QueryResultView() -> Element {
                                         event.prevent_default();
                                         if let Some(target) = target {
                                             controller.select_query(target);
-                                            focus_query_tab(target);
+                                            target.focus_after_render();
                                         }
                                     }
                                 }),
-                                span { class: query_tab_state_class(tab.presentation().state()), "aria-hidden": "true" }
+                                span { class: tab.presentation().state().tab_state_class(), "aria-hidden": "true" }
                                 span { class: "query-result-tab-label", "{tab.title}" }
                             }
                             Action {
@@ -999,11 +1017,11 @@ pub(crate) fn QueryResultView() -> Element {
                                     let ids = tab_ids.clone();
                                     let id = tab.id;
                                     move |_| {
-                                        let target = query_tab_neighbor_after_close(&ids, id);
+                                        let target = ids.neighbor_after_close(id);
                                         controller.close_query(id);
                                         if let Some(target) = target {
                                             controller.select_query(target);
-                                            focus_query_tab(target);
+                                            target.focus_after_render();
                                         }
                                     }
                                 },
@@ -1050,27 +1068,40 @@ pub(crate) fn QueryResultView() -> Element {
     }
 }
 
-fn query_tab_neighbor(ids: &[u64], current: u64, forward: bool) -> Option<u64> {
-    let index = ids.iter().position(|id| *id == current)?;
-    let offset = if forward {
-        (index + 1) % ids.len()
-    } else {
-        (index + ids.len() - 1) % ids.len()
-    };
-    ids.get(offset).copied()
+trait QueryTabNavigation {
+    fn neighbor(&self, current: u64, forward: bool) -> Option<u64>;
+    fn neighbor_after_close(&self, current: u64) -> Option<u64>;
 }
 
-fn query_tab_neighbor_after_close(ids: &[u64], current: u64) -> Option<u64> {
-    let index = ids.iter().position(|id| *id == current)?;
-    index
-        .checked_sub(1)
-        .and_then(|index| ids.get(index))
-        .or_else(|| ids.get(index + 1))
-        .copied()
+impl QueryTabNavigation for [u64] {
+    fn neighbor(&self, current: u64, forward: bool) -> Option<u64> {
+        let index = self.iter().position(|id| *id == current)?;
+        let offset = if forward {
+            (index + 1) % self.len()
+        } else {
+            (index + self.len() - 1) % self.len()
+        };
+        self.get(offset).copied()
+    }
+
+    fn neighbor_after_close(&self, current: u64) -> Option<u64> {
+        let index = self.iter().position(|id| *id == current)?;
+        index
+            .checked_sub(1)
+            .and_then(|index| self.get(index))
+            .or_else(|| self.get(index + 1))
+            .copied()
+    }
 }
 
-fn focus_query_tab(id: u64) {
-    focus_after_render(format!("query-tab-{id}"));
+trait QueryTabPresentation {
+    fn focus_after_render(self);
+}
+
+impl QueryTabPresentation for u64 {
+    fn focus_after_render(self) {
+        BrowserFocus::after_render(format!("query-tab-{self}"));
+    }
 }
 
 #[component]
@@ -1140,11 +1171,13 @@ fn QueryResultContent(model: QueryExecutionPresentation) -> Element {
     }
 }
 
-fn query_tab_state_class(state: &QueryState) -> &'static str {
-    match state {
-        QueryState::Running => "query-tab-state query-tab-running",
-        QueryState::Ready(_) => "query-tab-state query-tab-ready",
-        QueryState::Failed(_) => "query-tab-state query-tab-failed",
+impl QueryState {
+    fn tab_state_class(&self) -> &'static str {
+        match self {
+            Self::Running => "query-tab-state query-tab-running",
+            Self::Ready(_) => "query-tab-state query-tab-ready",
+            Self::Failed(_) => "query-tab-state query-tab-failed",
+        }
     }
 }
 
@@ -1157,89 +1190,93 @@ struct SchemaRelationSummary {
     sql: String,
 }
 
-fn schema_relation_views(
-    namespace: &str,
-    dataset_id: &str,
-    response: Option<&WorkflowRelationsResponse>,
-) -> Vec<SchemaRelationSummary> {
-    let Some(response) = response else {
-        return Table::ALL
-            .into_iter()
-            .map(|table| SchemaRelationSummary {
-                name: table.qualified_name(namespace),
-                label: table.name().to_owned(),
-                description: table.description().to_owned(),
-                columns: table.columns().join(", "),
-                sql: preset_sql(namespace, dataset_id, table.preset()),
-            })
-            .collect();
-    };
-    response
-        .relations()
-        .iter()
-        .map(|relation| {
-            let managed = Table::ALL
+impl SchemaRelationSummary {
+    fn for_dataset(
+        namespace: &str,
+        dataset_id: &str,
+        response: Option<&WorkflowRelationsResponse>,
+    ) -> Vec<Self> {
+        let Some(response) = response else {
+            return Table::ALL
                 .into_iter()
-                .find(|table| relation.name() == table.qualified_name(namespace));
-            let label = managed
-                .map(|table| table.name().to_owned())
-                .unwrap_or_else(|| {
-                    relation
-                        .name()
-                        .strip_prefix(&format!("{namespace}."))
-                        .unwrap_or(relation.name())
-                        .to_owned()
-                });
-            SchemaRelationSummary {
-                name: relation.name().to_owned(),
-                label,
-                description: managed
-                    .map(ManagedTablePresentation::description)
-                    .unwrap_or(relation.relation_type())
-                    .to_owned(),
-                columns: relation
-                    .columns()
-                    .iter()
-                    .map(|column| column.name())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                sql: managed
-                    .map(|table| preset_sql(namespace, dataset_id, table.preset()))
-                    .unwrap_or_else(|| format!("SELECT * FROM {} LIMIT 100", relation.name())),
-            }
-        })
-        .collect()
-}
-
-fn preset_sql(namespace: &str, dataset_id: &str, preset: QueryPreset) -> String {
-    let dataset_id = dataset_id.replace('\'', "''");
-    let episodes = Table::Episodes.qualified_name(namespace);
-    let relation = preset.table().qualified_name(namespace);
-    match preset {
-        QueryPreset::Datasets => preset.sql(namespace),
-        QueryPreset::Episodes => format!(
-            "SELECT * FROM {relation} WHERE dataset_id = '{dataset_id}' ORDER BY started_ms DESC LIMIT 100"
-        ),
-        QueryPreset::EpisodeStreams => format!(
-            "SELECT s.* FROM {relation} AS s JOIN {episodes} AS e ON e.episode_id = s.episode_id WHERE e.dataset_id = '{dataset_id}' ORDER BY s.episode_id DESC, s.stream_id LIMIT 100"
-        ),
-        QueryPreset::JointSamples => format!(
-            "SELECT j.* FROM {relation} AS j JOIN {episodes} AS e ON e.episode_id = j.episode_id WHERE e.dataset_id = '{dataset_id}' ORDER BY j.episode_id DESC, j.stream_id, j.sample_index LIMIT 100"
-        ),
-        QueryPreset::VideoAssets => format!(
-            "SELECT v.episode_id, v.stream_id, v.segment_index, v.camera_id, v.byte_size, v.width, v.height, v.fps, v.frames FROM {relation} AS v JOIN {episodes} AS e ON e.episode_id = v.episode_id WHERE e.dataset_id = '{dataset_id}' ORDER BY v.episode_id DESC, v.stream_id, v.segment_index LIMIT 100"
-        ),
-        QueryPreset::TrainingCheckpoints
-        | QueryPreset::Robots
-        | QueryPreset::StudioSettings
-        | QueryPreset::TrainingRuns
-        | QueryPreset::RolloutRuns
-        | QueryPreset::WorkflowRuns => preset.sql(namespace),
+                .map(|table| Self {
+                    name: table.qualified_name(namespace),
+                    label: table.name().to_owned(),
+                    description: table.description().to_owned(),
+                    columns: table.columns().join(", "),
+                    sql: table.preset().scoped_sql(namespace, dataset_id),
+                })
+                .collect();
+        };
+        response
+            .relations()
+            .iter()
+            .map(|relation| {
+                let managed = Table::ALL
+                    .into_iter()
+                    .find(|table| relation.name() == table.qualified_name(namespace));
+                let label = managed
+                    .map(|table| table.name().to_owned())
+                    .unwrap_or_else(|| {
+                        relation
+                            .name()
+                            .strip_prefix(&format!("{namespace}."))
+                            .unwrap_or(relation.name())
+                            .to_owned()
+                    });
+                Self {
+                    name: relation.name().to_owned(),
+                    label,
+                    description: managed
+                        .map(ManagedTablePresentation::description)
+                        .unwrap_or(relation.relation_type())
+                        .to_owned(),
+                    columns: relation
+                        .columns()
+                        .iter()
+                        .map(|column| column.name())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    sql: managed
+                        .map(|table| table.preset().scoped_sql(namespace, dataset_id))
+                        .unwrap_or_else(|| format!("SELECT * FROM {} LIMIT 100", relation.name())),
+                }
+            })
+            .collect()
     }
 }
 
-pub(crate) fn default_query_sql(namespace: &str, dataset_id: &str) -> String {
-    preset_sql(namespace, dataset_id, QueryPreset::Episodes)
+pub(crate) trait QueryPresetSql {
+    fn scoped_sql(self, namespace: &str, dataset_id: &str) -> String;
+}
+
+impl QueryPresetSql for QueryPreset {
+    fn scoped_sql(self, namespace: &str, dataset_id: &str) -> String {
+        let dataset_id = dataset_id.replace('\'', "''");
+        let episodes = Table::Episodes.qualified_name(namespace);
+        let relation = self.table().qualified_name(namespace);
+        match self {
+            QueryPreset::Datasets => self.sql(namespace),
+            QueryPreset::Episodes => format!(
+                "SELECT * FROM {relation} WHERE dataset_id = '{dataset_id}' ORDER BY started_ms DESC LIMIT 100"
+            ),
+            QueryPreset::EpisodeStreams => format!(
+                "SELECT s.* FROM {relation} AS s JOIN {episodes} AS e ON e.episode_id = s.episode_id WHERE e.dataset_id = '{dataset_id}' ORDER BY s.episode_id DESC, s.stream_id LIMIT 100"
+            ),
+            QueryPreset::JointSamples => format!(
+                "SELECT j.* FROM {relation} AS j JOIN {episodes} AS e ON e.episode_id = j.episode_id WHERE e.dataset_id = '{dataset_id}' ORDER BY j.episode_id DESC, j.stream_id, j.sample_index LIMIT 100"
+            ),
+            QueryPreset::VideoAssets => format!(
+                "SELECT v.episode_id, v.stream_id, v.segment_index, v.camera_id, v.byte_size, v.width, v.height, v.fps, v.frames FROM {relation} AS v JOIN {episodes} AS e ON e.episode_id = v.episode_id WHERE e.dataset_id = '{dataset_id}' ORDER BY v.episode_id DESC, v.stream_id, v.segment_index LIMIT 100"
+            ),
+            QueryPreset::TrainingCheckpoints
+            | QueryPreset::Robots
+            | QueryPreset::StudioSettings
+            | QueryPreset::TrainingRuns
+            | QueryPreset::RolloutRuns
+            | QueryPreset::WorkflowRuns => self.sql(namespace),
+        }
+    }
 }
 
 trait ManagedTablePresentation {
@@ -1322,7 +1359,7 @@ impl EpisodeDeletion {
         let mut confirming = self.signals.confirming;
         self.studio
             .run_utility(format!("Deleted {}.", self.id), async move {
-                let result = api::send::<()>(Method::DELETE, &path, None).await;
+                let result = api::Http::send::<()>(Method::DELETE, &path, None).await;
                 deleting.set(None);
                 if result.is_ok() {
                     confirming.set(None);
@@ -1340,6 +1377,7 @@ impl EpisodeDeletion {
 
 trait QueryColumnPresentation {
     fn presentation_title(&self) -> String;
+    fn humanized_name(&self) -> String;
     fn is_image(&self) -> bool;
     fn presentation_kind(&self) -> &str;
     fn image_src<'a>(&self, value: Option<&'a serde_json::Value>) -> Option<&'a str>;
@@ -1356,6 +1394,25 @@ impl QueryColumnPresentation for QueryColumn {
             title.push_str(" · nullable");
         }
         title
+    }
+
+    fn humanized_name(&self) -> String {
+        let words = self
+            .name()
+            .trim_end_matches("_preview")
+            .trim_end_matches("_image")
+            .split('_')
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>();
+        let mut label = words.join(" ");
+        if let Some(first) = label.get_mut(0..1) {
+            first.make_ascii_uppercase();
+        }
+        if label.is_empty() {
+            "Image".to_owned()
+        } else {
+            label
+        }
     }
 
     fn is_image(&self) -> bool {
@@ -1377,24 +1434,6 @@ impl QueryColumnPresentation for QueryColumn {
         self.is_image()
             .then(|| value?.as_str())?
             .filter(|value| value.starts_with("data:image/"))
-    }
-}
-
-fn humanize_query_column(name: &str) -> String {
-    let words = name
-        .trim_end_matches("_preview")
-        .trim_end_matches("_image")
-        .split('_')
-        .filter(|word| !word.is_empty())
-        .collect::<Vec<_>>();
-    let mut label = words.join(" ");
-    if let Some(first) = label.get_mut(0..1) {
-        first.make_ascii_uppercase();
-    }
-    if label.is_empty() {
-        "Image".to_owned()
-    } else {
-        label
     }
 }
 
@@ -1461,7 +1500,7 @@ impl<'a> QueryCellContext<'a> {
         };
         format!(
             "{}{}; result {} of {}",
-            humanize_query_column(self.column.name()),
+            self.column.humanized_name(),
             context,
             self.row_index + 1,
             self.row_count
@@ -1615,15 +1654,22 @@ impl QueryRowPresentation for serde_json::Map<String, serde_json::Value> {
             .filter(|label| !label.is_empty())
             .unwrap_or(stream)
             .to_owned();
-        Some((api::episode_video_url(episode, stream, segment), label))
+        use crate::client::http::EpisodeApiPath;
+        Some((episode.video_url(stream, segment), label))
     }
 }
 
-pub(crate) fn short_id(id: &str) -> String {
-    id.strip_prefix("episode_")
-        .and_then(|number| number.parse::<u64>().ok())
-        .map(|number| format!("#{number}"))
-        .unwrap_or_else(|| id.to_owned())
+pub(crate) trait EpisodeIdPresentation {
+    fn short_episode_id(&self) -> String;
+}
+
+impl EpisodeIdPresentation for str {
+    fn short_episode_id(&self) -> String {
+        self.strip_prefix("episode_")
+            .and_then(|number| number.parse::<u64>().ok())
+            .map(|number| format!("#{number}"))
+            .unwrap_or_else(|| self.to_owned())
+    }
 }
 
 #[cfg(test)]
@@ -1652,7 +1698,7 @@ mod tests {
 
     #[test]
     fn episode_selection_reconciliation_preserves_valid_choices_and_replaces_stale_ones() {
-        let episodes = vec![
+        let episodes = [
             episode("older", true, false),
             episode("discarded", true, true),
             episode("newer", true, false),
@@ -1670,15 +1716,15 @@ mod tests {
     #[test]
     fn presets_are_scoped_to_the_current_dataset() {
         assert_eq!(
-            preset_sql("training", "pick-place", QueryPreset::JointSamples),
+            QueryPreset::JointSamples.scoped_sql("training", "pick-place"),
             "SELECT j.* FROM training.joint_samples AS j JOIN training.episodes AS e ON e.episode_id = j.episode_id WHERE e.dataset_id = 'pick-place' ORDER BY j.episode_id DESC, j.stream_id, j.sample_index LIMIT 100"
         );
         assert_eq!(
-            preset_sql("training", "pick-'place", QueryPreset::Episodes),
+            QueryPreset::Episodes.scoped_sql("training", "pick-'place"),
             "SELECT * FROM training.episodes WHERE dataset_id = 'pick-''place' ORDER BY started_ms DESC LIMIT 100"
         );
         assert_eq!(
-            preset_sql("training", "pick-place", QueryPreset::VideoAssets),
+            QueryPreset::VideoAssets.scoped_sql("training", "pick-place"),
             "SELECT v.episode_id, v.stream_id, v.segment_index, v.camera_id, v.byte_size, v.width, v.height, v.fps, v.frames FROM training.video_assets AS v JOIN training.episodes AS e ON e.episode_id = v.episode_id WHERE e.dataset_id = 'pick-place' ORDER BY v.episode_id DESC, v.stream_id, v.segment_index LIMIT 100"
         );
     }
@@ -1788,15 +1834,15 @@ mod tests {
     #[test]
     fn result_tab_keyboard_navigation_wraps_and_close_prefers_the_left_neighbor() {
         let ids = [3, 7, 9];
-        assert_eq!(query_tab_neighbor(&ids, 3, false), Some(9));
-        assert_eq!(query_tab_neighbor(&ids, 9, true), Some(3));
-        assert_eq!(query_tab_neighbor_after_close(&ids, 7), Some(3));
-        assert_eq!(query_tab_neighbor_after_close(&ids, 3), Some(7));
+        assert_eq!(ids.neighbor(3, false), Some(9));
+        assert_eq!(ids.neighbor(9, true), Some(3));
+        assert_eq!(ids.neighbor_after_close(7), Some(3));
+        assert_eq!(ids.neighbor_after_close(3), Some(7));
     }
 
     #[test]
     fn generated_episode_ids_read_as_take_numbers() {
-        assert_eq!(short_id("episode_000024"), "#24");
-        assert_eq!(short_id("imported-pass"), "imported-pass");
+        assert_eq!("episode_000024".short_episode_id(), "#24");
+        assert_eq!("imported-pass".short_episode_id(), "imported-pass");
     }
 }

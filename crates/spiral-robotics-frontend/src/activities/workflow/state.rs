@@ -19,7 +19,7 @@ use spiral_robotics_api::workflow::{
     WorkflowFeatureDefinition, WorkflowModelRunMetadata, WorkflowNodeConfig, WorkflowNodeKind,
     WorkflowNodePhase, WorkflowNodeProgress, WorkflowNodeSnapshot, WorkflowQuarantineSummary,
     WorkflowRelation, WorkflowRelationsResponse, WorkflowRunPhase, WorkflowRunSnapshot,
-    WorkflowSpec, WorkflowStateResponse, WorkflowValidationReport, derived_feature_cache_relation,
+    WorkflowSpec, WorkflowStateResponse, WorkflowValidationReport,
 };
 
 use crate::client::http as api;
@@ -323,10 +323,10 @@ struct WorkflowAssistantSignals {
 }
 
 pub(crate) fn use_workflow_controller() -> WorkflowController {
-    let initial = initial_state();
+    let initial = WorkflowStateResponse::from_workflow("", WorkflowSpec::default());
     let initial_spec = initial.workflow().to_owned();
-    let initial_nodes = graph_nodes(&initial_spec, initial.snapshot(), &[]);
-    let initial_edges = graph_edges(initial_spec.edges(), initial.snapshot());
+    let initial_nodes = initial_spec.graph_nodes(initial.snapshot(), &[]);
+    let initial_edges = initial_spec.graph_edges(initial.snapshot());
     let controller = WorkflowController {
         graph: WorkflowGraphSignals {
             nodes: use_signal(move || initial_nodes),
@@ -519,10 +519,10 @@ impl WorkflowController {
     }
 
     pub(crate) fn revision_conflict(&self) -> bool {
-        revision_conflict(
-            &self.document.draft.read(),
-            self.document.server.read().workflow(),
-        )
+        self.document
+            .draft
+            .read()
+            .revision_conflicts_with(self.document.server.read().workflow())
     }
 
     pub(crate) fn selected_node(&self) -> Option<String> {
@@ -654,7 +654,7 @@ impl WorkflowController {
     pub(crate) fn receipt_panel(&self, receipt: &WorkflowAgentArtifactReceipt) -> Option<PanelId> {
         let dirty = self.dirty();
         let server = self.document.server.read();
-        receipt_panel_id(receipt, &server, dirty).map(PanelId::from)
+        receipt.panel_id(&server, dirty).map(PanelId::from)
     }
 
     pub(crate) fn open_agent_receipt(mut self, receipt: WorkflowAgentArtifactReceipt) {
@@ -678,13 +678,16 @@ impl WorkflowController {
     }
 
     pub(crate) fn clear_workflow_draft(mut self) {
-        if topology_mutation_blocked(self.snapshot().phase(), self.command())
+        if self
+            .snapshot()
+            .phase()
+            .topology_mutation_blocked(self.command())
             || self.agent_state().session().phase().active()
             || self.agent_command().is_some()
         {
             return;
         }
-        let empty = empty_workflow_draft(&self.document.draft.peek());
+        let empty = self.document.draft.peek().empty_draft();
         self.document.draft.set(empty);
         self.clear_selection();
         self.sync_graph();
@@ -811,7 +814,12 @@ impl WorkflowController {
     }
 
     pub(crate) fn add_siglip_model(mut self) {
-        if self.has_model() || topology_mutation_blocked(self.snapshot().phase(), self.command()) {
+        if self.has_model()
+            || self
+                .snapshot()
+                .phase()
+                .topology_mutation_blocked(self.command())
+        {
             return;
         }
         let Some(node_id) = self.document.draft.write().insert_siglip_model() else {
@@ -822,7 +830,11 @@ impl WorkflowController {
     }
 
     pub(crate) fn remove_siglip_model(mut self, node_id: &str) {
-        if topology_mutation_blocked(self.snapshot().phase(), self.command()) {
+        if self
+            .snapshot()
+            .phase()
+            .topology_mutation_blocked(self.command())
+        {
             return;
         }
         let Some(query_id) = self.document.draft.write().remove_siglip_model(node_id) else {
@@ -844,7 +856,7 @@ impl WorkflowController {
             self.document.draft.peek().to_owned(),
         );
         dioxus::dioxus_core::spawn_forever(async move {
-            let response = api::send_json::<_, WorkflowStateResponse>(
+            let response = api::Http::send_json::<_, WorkflowStateResponse>(
                 Method::PUT,
                 "/api/workflow",
                 Some(&request),
@@ -855,7 +867,9 @@ impl WorkflowController {
                 Ok(response) => self.accept_applied_state(response, &requested_scope_id),
                 Err(error) => {
                     studio.report_from(MessageSource::Workflow, error);
-                    if let Ok(state) = api::get::<WorkflowStateResponse>("/api/workflow").await {
+                    if let Ok(state) =
+                        api::Http::get::<WorkflowStateResponse>("/api/workflow").await
+                    {
                         self.reconcile_state_command(state, &requested_scope_id);
                     }
                 }
@@ -875,7 +889,7 @@ impl WorkflowController {
             self.document.server.peek().workflow().revision(),
         );
         dioxus::dioxus_core::spawn_forever(async move {
-            let response = api::send_json::<_, WorkflowRunSnapshot>(
+            let response = api::Http::send_json::<_, WorkflowRunSnapshot>(
                 Method::POST,
                 "/api/workflow/run",
                 Some(&request),
@@ -899,7 +913,7 @@ impl WorkflowController {
         let requested_scope_id = self.document.server.peek().scope_id().to_owned();
         let request = CancelWorkflowRequest::new(requested_scope_id.clone());
         dioxus::dioxus_core::spawn_forever(async move {
-            let response = api::send_json::<_, WorkflowRunSnapshot>(
+            let response = api::Http::send_json::<_, WorkflowRunSnapshot>(
                 Method::POST,
                 "/api/workflow/cancel",
                 Some(&request),
@@ -929,7 +943,7 @@ impl WorkflowController {
         let request =
             WorkflowAgentCreateConversationRequest::new(current.scope_id(), current.revision());
         dioxus::dioxus_core::spawn_forever(async move {
-            let response = api::send_json::<_, WorkflowAgentStateResponse>(
+            let response = api::Http::send_json::<_, WorkflowAgentStateResponse>(
                 Method::POST,
                 "/api/workflow/agent/conversations",
                 Some(&request),
@@ -968,7 +982,7 @@ impl WorkflowController {
             current.revision(),
         );
         dioxus::dioxus_core::spawn_forever(async move {
-            let response = api::send_json::<_, WorkflowAgentStateResponse>(
+            let response = api::Http::send_json::<_, WorkflowAgentStateResponse>(
                 Method::PUT,
                 "/api/workflow/agent/conversations/active",
                 Some(&request),
@@ -1009,7 +1023,7 @@ impl WorkflowController {
         )
         .expecting_revision(state.revision());
         dioxus::dioxus_core::spawn_forever(async move {
-            let response = api::send_json::<_, WorkflowAgentTurnAccepted>(
+            let response = api::Http::send_json::<_, WorkflowAgentTurnAccepted>(
                 Method::POST,
                 "/api/workflow/agent/turn",
                 Some(&request),
@@ -1032,7 +1046,7 @@ impl WorkflowController {
                     self.assistant.agent_error.set(Some(error.clone()));
                     studio.report_from(MessageSource::Workflow, error);
                     if let Ok(state) =
-                        api::get::<WorkflowAgentStateResponse>("/api/workflow/agent").await
+                        api::Http::get::<WorkflowAgentStateResponse>("/api/workflow/agent").await
                     {
                         self.reconcile_agent_command(state, request.scope_id());
                     }
@@ -1059,7 +1073,7 @@ impl WorkflowController {
                 current.active_conversation_id(),
                 turn_id,
             );
-            let response = api::send_json::<_, WorkflowAgentStateResponse>(
+            let response = api::Http::send_json::<_, WorkflowAgentStateResponse>(
                 Method::POST,
                 "/api/workflow/agent/cancel",
                 Some(&request),
@@ -1098,7 +1112,7 @@ impl WorkflowController {
 
     async fn load(mut self, studio: Studio) {
         let workflow_bootstrap_scope = self.document.server.peek().scope_id().to_owned();
-        let state_loaded = match api::get::<WorkflowStateResponse>("/api/workflow").await {
+        let state_loaded = match api::Http::get::<WorkflowStateResponse>("/api/workflow").await {
             Ok(state) => self.reconcile_state_bootstrap(state, &workflow_bootstrap_scope),
             Err(error) => {
                 if !*self.lifecycle.loaded.peek() {
@@ -1110,12 +1124,12 @@ impl WorkflowController {
         };
         let relations_scope = self.document.server.peek().scope_id().to_owned();
         self.load_relations(studio, relations_scope).await;
-        match api::get::<WorkflowCapabilities>("/api/workflow/capabilities").await {
+        match api::Http::get::<WorkflowCapabilities>("/api/workflow/capabilities").await {
             Ok(capabilities) => self.document.capabilities.set(capabilities),
             Err(error) => studio.report_from(MessageSource::Workflow, error),
         }
         let agent_bootstrap_scope = self.assistant.agent.peek().scope_id().to_owned();
-        match api::get::<WorkflowAgentStateResponse>("/api/workflow/agent").await {
+        match api::Http::get::<WorkflowAgentStateResponse>("/api/workflow/agent").await {
             Ok(state) => self.reconcile_agent_bootstrap(state, &agent_bootstrap_scope),
             Err(error) => {
                 if !*self.assistant.agent_loaded.peek() {
@@ -1130,13 +1144,11 @@ impl WorkflowController {
     }
 
     async fn load_relations(mut self, studio: Studio, expected_scope_id: String) {
-        match api::get::<WorkflowRelationsResponse>("/api/workflow/relations").await {
+        match api::Http::get::<WorkflowRelationsResponse>("/api/workflow/relations").await {
             Ok(relations) => {
-                if relations_are_current(
-                    self.document.server.peek().scope_id(),
-                    &expected_scope_id,
-                    &relations,
-                ) {
+                if relations
+                    .matches_scope(self.document.server.peek().scope_id(), &expected_scope_id)
+                {
                     self.document.relations.set(relations);
                     self.sync_graph();
                 }
@@ -1162,7 +1174,7 @@ impl WorkflowController {
                 return;
             }
             self.document.draft.set(current.workflow().to_owned());
-            if snapshot_is_monotonic(current.snapshot(), state.snapshot()) {
+            if current.snapshot().accepts(state.snapshot()) {
                 self.document.server.set(state);
             }
         } else {
@@ -1177,7 +1189,7 @@ impl WorkflowController {
         if self.document.server.peek().scope_id() != requested_scope_id
             || snapshot.workflow_id() != self.document.server.peek().workflow().id()
             || snapshot.workflow_revision() != self.document.server.peek().workflow().revision()
-            || !snapshot_is_monotonic(self.document.server.peek().snapshot(), &snapshot)
+            || !self.document.server.peek().snapshot().accepts(&snapshot)
         {
             return;
         }
@@ -1186,7 +1198,7 @@ impl WorkflowController {
     }
 
     fn reconcile_state(mut self, state: WorkflowStateResponse) -> bool {
-        if !server_state_is_monotonic(&self.document.server.peek(), &state) {
+        if !self.document.server.peek().accepts(&state) {
             return false;
         }
         // This path runs inside the shell's Workflow SSE effect. Keep draft
@@ -1249,7 +1261,7 @@ impl WorkflowController {
 
     fn reconcile_agent(mut self, state: WorkflowAgentStateResponse) {
         let current = self.assistant.agent.peek();
-        if !agent_state_is_monotonic(&current, &state) {
+        if !current.accepts_streamed(&state) {
             return;
         }
         drop(current);
@@ -1263,11 +1275,12 @@ impl WorkflowController {
         state: WorkflowAgentStateResponse,
         requested_scope_id: &str,
     ) -> bool {
-        if !agent_command_response_is_current(
-            &self.assistant.agent.peek(),
-            &state,
-            requested_scope_id,
-        ) {
+        if !self
+            .assistant
+            .agent
+            .peek()
+            .accepts_command_response(&state, requested_scope_id)
+        {
             // A command issued before a project reload cannot replace the
             // authoritative state from the newer server scope when its HTTP
             // response arrives late.
@@ -1283,7 +1296,7 @@ impl WorkflowController {
         requested_scope_id: &str,
     ) {
         let current = self.assistant.agent.peek();
-        if !agent_bootstrap_is_current(&current, &state, requested_scope_id) {
+        if !current.accepts_bootstrap(&state, requested_scope_id) {
             // A slower GET from the prior project/import scope must not replace
             // a newer authoritative scope already delivered over SSE.
             return;
@@ -1296,8 +1309,8 @@ impl WorkflowController {
         let spec = self.document.draft.peek().to_owned();
         let snapshot = self.document.server.peek().snapshot().to_owned();
         let relations = self.document.relations.peek().relations().to_owned();
-        let mut next = graph_nodes(&spec, &snapshot, &relations);
-        let next_edges = graph_edges(spec.edges(), &snapshot);
+        let mut next = spec.graph_nodes(&snapshot, &relations);
+        let next_edges = spec.graph_edges(&snapshot);
         let previous = self
             .graph
             .nodes
@@ -1337,49 +1350,72 @@ impl WorkflowController {
     }
 }
 
-fn receipt_panel_id(
-    receipt: &WorkflowAgentArtifactReceipt,
-    state: &WorkflowStateResponse,
-    dirty: bool,
-) -> Option<&'static str> {
-    match receipt.kind() {
-        WorkflowAgentArtifactKind::Graph
-            if !dirty && receipt.revision() == Some(state.workflow().revision()) =>
-        {
-            Some(CANVAS_PANEL_ID)
+trait WorkflowArtifactNavigation {
+    fn panel_id(&self, state: &WorkflowStateResponse, dirty: bool) -> Option<&'static str>;
+}
+
+impl WorkflowArtifactNavigation for WorkflowAgentArtifactReceipt {
+    fn panel_id(&self, state: &WorkflowStateResponse, dirty: bool) -> Option<&'static str> {
+        match self.kind() {
+            WorkflowAgentArtifactKind::Graph
+                if !dirty && self.revision() == Some(state.workflow().revision()) =>
+            {
+                Some(CANVAS_PANEL_ID)
+            }
+            WorkflowAgentArtifactKind::Run
+                if self.run_id().is_some() && self.run_id() == state.snapshot().run_id() =>
+            {
+                Some(CANVAS_PANEL_ID)
+            }
+            WorkflowAgentArtifactKind::Results
+                if self.run_id().is_some()
+                    && self.run_id() == state.snapshot().run_id()
+                    && state.snapshot().phase() == WorkflowRunPhase::Completed
+                    && !state.snapshot().result_stale()
+                    && state.snapshot().result().is_some() =>
+            {
+                Some(RESULTS_PANEL_ID)
+            }
+            _ => None,
         }
-        WorkflowAgentArtifactKind::Run
-            if receipt.run_id().is_some() && receipt.run_id() == state.snapshot().run_id() =>
-        {
-            Some(CANVAS_PANEL_ID)
-        }
-        WorkflowAgentArtifactKind::Results
-            if receipt.run_id().is_some()
-                && receipt.run_id() == state.snapshot().run_id()
-                && state.snapshot().phase() == WorkflowRunPhase::Completed
-                && !state.snapshot().result_stale()
-                && state.snapshot().result().is_some() =>
-        {
-            Some(RESULTS_PANEL_ID)
-        }
-        _ => None,
     }
 }
 
-fn agent_state_is_monotonic(
-    current: &WorkflowAgentStateResponse,
-    incoming: &WorkflowAgentStateResponse,
-) -> bool {
-    incoming.session().workflow_id() == current.session().workflow_id()
-        && (incoming.scope_id() != current.scope_id() || incoming.revision() >= current.revision())
+trait WorkflowAgentReconciliation {
+    fn accepts_streamed(&self, incoming: &WorkflowAgentStateResponse) -> bool;
+    fn accepts_command_response(
+        &self,
+        incoming: &WorkflowAgentStateResponse,
+        requested_scope_id: &str,
+    ) -> bool;
+    fn accepts_bootstrap(
+        &self,
+        incoming: &WorkflowAgentStateResponse,
+        requested_scope_id: &str,
+    ) -> bool;
 }
 
-fn agent_command_response_is_current(
-    current: &WorkflowAgentStateResponse,
-    incoming: &WorkflowAgentStateResponse,
-    requested_scope_id: &str,
-) -> bool {
-    current.scope_id() == requested_scope_id && incoming.scope_id() == requested_scope_id
+impl WorkflowAgentReconciliation for WorkflowAgentStateResponse {
+    fn accepts_streamed(&self, incoming: &WorkflowAgentStateResponse) -> bool {
+        incoming.session().workflow_id() == self.session().workflow_id()
+            && (incoming.scope_id() != self.scope_id() || incoming.revision() >= self.revision())
+    }
+
+    fn accepts_command_response(
+        &self,
+        incoming: &WorkflowAgentStateResponse,
+        requested_scope_id: &str,
+    ) -> bool {
+        self.scope_id() == requested_scope_id && incoming.scope_id() == requested_scope_id
+    }
+
+    fn accepts_bootstrap(
+        &self,
+        incoming: &WorkflowAgentStateResponse,
+        requested_scope_id: &str,
+    ) -> bool {
+        self.scope_id() == requested_scope_id || incoming.scope_id() == self.scope_id()
+    }
 }
 
 struct AgentConversationChange<'a> {
@@ -1430,80 +1466,84 @@ impl AgentConversationChange<'_> {
     }
 }
 
-fn agent_bootstrap_is_current(
-    current: &WorkflowAgentStateResponse,
-    incoming: &WorkflowAgentStateResponse,
-    requested_scope_id: &str,
-) -> bool {
-    current.scope_id() == requested_scope_id || incoming.scope_id() == current.scope_id()
+trait WorkflowStateReconciliation {
+    fn accepts(&self, incoming: &WorkflowStateResponse) -> bool;
 }
 
-fn initial_state() -> WorkflowStateResponse {
-    let workflow = WorkflowSpec::default();
-    WorkflowStateResponse::from_workflow("", workflow)
+impl WorkflowStateReconciliation for WorkflowStateResponse {
+    fn accepts(&self, incoming: &WorkflowStateResponse) -> bool {
+        if incoming.snapshot().workflow_id() != incoming.workflow().id()
+            || incoming.snapshot().workflow_revision() != incoming.workflow().revision()
+        {
+            return false;
+        }
+        if incoming.scope_id() != self.scope_id() {
+            return true;
+        }
+        if incoming.workflow().id() != self.workflow().id()
+            || incoming.workflow().revision() < self.workflow().revision()
+        {
+            return false;
+        }
+        incoming.workflow().revision() > self.workflow().revision()
+            || self.snapshot().accepts(incoming.snapshot())
+    }
 }
 
-fn server_state_is_monotonic(
-    current: &WorkflowStateResponse,
-    incoming: &WorkflowStateResponse,
-) -> bool {
-    if incoming.snapshot().workflow_id() != incoming.workflow().id()
-        || incoming.snapshot().workflow_revision() != incoming.workflow().revision()
-    {
-        return false;
-    }
-    if incoming.scope_id() != current.scope_id() {
-        return true;
-    }
-    if incoming.workflow().id() != current.workflow().id()
-        || incoming.workflow().revision() < current.workflow().revision()
-    {
-        return false;
-    }
-    incoming.workflow().revision() > current.workflow().revision()
-        || snapshot_is_monotonic(current.snapshot(), incoming.snapshot())
+trait WorkflowRelationsReconciliation {
+    fn matches_scope(&self, current_scope_id: &str, requested_scope_id: &str) -> bool;
 }
 
-fn relations_are_current(
-    current_scope_id: &str,
-    requested_scope_id: &str,
-    incoming: &WorkflowRelationsResponse,
-) -> bool {
-    current_scope_id == requested_scope_id && incoming.scope_id() == requested_scope_id
+impl WorkflowRelationsReconciliation for WorkflowRelationsResponse {
+    fn matches_scope(&self, current_scope_id: &str, requested_scope_id: &str) -> bool {
+        current_scope_id == requested_scope_id && self.scope_id() == requested_scope_id
+    }
 }
 
-fn snapshot_is_monotonic(current: &WorkflowRunSnapshot, incoming: &WorkflowRunSnapshot) -> bool {
-    if incoming.workflow_id() != current.workflow_id()
-        || incoming.workflow_revision() != current.workflow_revision()
-    {
-        return false;
-    }
-
-    if incoming.run_id() != current.run_id() {
-        return match (&current.run_id(), &incoming.run_id()) {
-            (None, Some(_)) => true,
-            (Some(_), None) => false,
-            (Some(_), Some(_)) => incoming.started_ms() > current.started_ms(),
-            (None, None) => true,
-        };
-    }
-    if incoming.updated_ms() != current.updated_ms() {
-        return incoming.updated_ms() > current.updated_ms();
-    }
-
-    run_phase_order(incoming.phase()) >= run_phase_order(current.phase())
+trait WorkflowSnapshotReconciliation {
+    fn accepts(&self, incoming: &WorkflowRunSnapshot) -> bool;
 }
 
-const fn run_phase_order(phase: WorkflowRunPhase) -> u8 {
-    match phase {
-        WorkflowRunPhase::Idle => 0,
-        WorkflowRunPhase::Validating => 1,
-        WorkflowRunPhase::Running => 2,
-        WorkflowRunPhase::Cancelling => 3,
-        WorkflowRunPhase::Completed
-        | WorkflowRunPhase::Failed
-        | WorkflowRunPhase::Cancelled
-        | WorkflowRunPhase::Interrupted => 4,
+impl WorkflowSnapshotReconciliation for WorkflowRunSnapshot {
+    fn accepts(&self, incoming: &WorkflowRunSnapshot) -> bool {
+        if incoming.workflow_id() != self.workflow_id()
+            || incoming.workflow_revision() != self.workflow_revision()
+        {
+            return false;
+        }
+
+        if incoming.run_id() != self.run_id() {
+            return match (&self.run_id(), &incoming.run_id()) {
+                (None, Some(_)) => true,
+                (Some(_), None) => false,
+                (Some(_), Some(_)) => incoming.started_ms() > self.started_ms(),
+                (None, None) => true,
+            };
+        }
+        if incoming.updated_ms() != self.updated_ms() {
+            return incoming.updated_ms() > self.updated_ms();
+        }
+
+        incoming.phase().monotonic_rank() >= self.phase().monotonic_rank()
+    }
+}
+
+trait WorkflowRunPhaseReconciliation {
+    fn monotonic_rank(self) -> u8;
+}
+
+impl WorkflowRunPhaseReconciliation for WorkflowRunPhase {
+    fn monotonic_rank(self) -> u8 {
+        match self {
+            WorkflowRunPhase::Idle => 0,
+            WorkflowRunPhase::Validating => 1,
+            WorkflowRunPhase::Running => 2,
+            WorkflowRunPhase::Cancelling => 3,
+            WorkflowRunPhase::Completed
+            | WorkflowRunPhase::Failed
+            | WorkflowRunPhase::Cancelled
+            | WorkflowRunPhase::Interrupted => 4,
+        }
     }
 }
 
@@ -1522,6 +1562,8 @@ trait WorkflowDraft {
         features: &[WorkflowFeatureDefinition],
     );
     fn normalize_model_sources(&mut self);
+    fn revision_conflicts_with(&self, server: &WorkflowSpec) -> bool;
+    fn empty_draft(&self) -> WorkflowSpec;
 }
 
 impl WorkflowDraft for WorkflowSpec {
@@ -1624,7 +1666,7 @@ impl WorkflowDraft for WorkflowSpec {
                 final_query_id.clone(),
                 "Join candidates and features",
                 WorkflowNodeConfig::Query {
-                    sql: feature_join_sql(&candidate_id, &node_id, &[]),
+                    sql: FeatureJoinSql::build(&candidate_id, &node_id, &[]),
                     max_rows: 100,
                 },
             ),
@@ -1723,7 +1765,7 @@ impl WorkflowDraft for WorkflowSpec {
             .find(|node| node.id() == final_query_id)
             && let WorkflowNodeConfig::Query { sql, .. } = query.config_mut()
         {
-            *sql = feature_join_sql(&candidate_id, model_id, features);
+            *sql = FeatureJoinSql::build(&candidate_id, model_id, features);
         }
     }
 
@@ -1777,123 +1819,172 @@ impl WorkflowDraft for WorkflowSpec {
             let source = (sources.len() == 1)
                 .then(|| sources.into_iter().next())
                 .flatten();
-            *feature_cache_relation = source.as_deref().map(derived_feature_cache_relation);
+            *feature_cache_relation = source.as_deref().map(
+                spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation,
+            );
             for feature in features {
                 feature.set_source_relation(source.clone().unwrap_or_default());
             }
         }
     }
+
+    fn revision_conflicts_with(&self, server: &WorkflowSpec) -> bool {
+        self != server && self.revision() != server.revision()
+    }
+
+    fn empty_draft(&self) -> WorkflowSpec {
+        WorkflowSpec::new(self.id(), "Untitled workflow").with_revision(self.revision())
+    }
 }
 
-fn feature_join_sql(
-    candidate_id: &str,
-    model_id: &str,
-    features: &[WorkflowFeatureDefinition],
-) -> String {
-    let feature_projection = features
-        .iter()
-        .filter(|feature| !feature.name().is_empty())
-        .map(|feature| format!(", features.{}", feature.name()))
-        .collect::<String>();
-    format!(
-        "SELECT candidates.*{feature_projection} FROM {{{{node:{candidate_id}}}}} candidates JOIN {{{{node:{model_id}}}}} features ON candidates.episode_id = features.episode_id AND candidates.stream_id = features.stream_id AND candidates.segment_index = features.segment_index AND candidates.frame_index = features.frame_index AND candidates.episode_time_ns = features.episode_time_ns"
-    )
+struct FeatureJoinSql;
+
+impl FeatureJoinSql {
+    fn build(candidate_id: &str, model_id: &str, features: &[WorkflowFeatureDefinition]) -> String {
+        let feature_projection = features
+            .iter()
+            .filter(|feature| !feature.name().is_empty())
+            .map(|feature| format!(", features.{}", feature.name()))
+            .collect::<String>();
+        format!(
+            "SELECT candidates.*{feature_projection} FROM {{{{node:{candidate_id}}}}} candidates JOIN {{{{node:{model_id}}}}} features ON candidates.episode_id = features.episode_id AND candidates.stream_id = features.stream_id AND candidates.segment_index = features.segment_index AND candidates.frame_index = features.frame_index AND candidates.episode_time_ns = features.episode_time_ns"
+        )
+    }
 }
 
-fn topology_mutation_blocked(phase: WorkflowRunPhase, command: Option<WorkflowCommand>) -> bool {
-    phase.active() || command.is_some()
+trait WorkflowRunPhaseEditing {
+    fn topology_mutation_blocked(self, command: Option<WorkflowCommand>) -> bool;
 }
 
-fn revision_conflict(draft: &WorkflowSpec, server: &WorkflowSpec) -> bool {
-    draft != server && draft.revision() != server.revision()
+impl WorkflowRunPhaseEditing for WorkflowRunPhase {
+    fn topology_mutation_blocked(self, command: Option<WorkflowCommand>) -> bool {
+        self.active() || command.is_some()
+    }
 }
 
-fn graph_nodes(
-    workflow: &WorkflowSpec,
-    snapshot: &WorkflowRunSnapshot,
-    relations: &[WorkflowRelation],
-) -> Vec<Node<WorkflowNodeData>> {
-    // Keep the fallback coordinates aligned with the canvas' layered-layout
-    // geometry. The flow handle may not be ready for the first mount-time
-    // layout pass, and widely spaced fallback ranks force Fit against the
-    // readability-preserving minimum zoom at the 1024 px desktop floor.
-    const FIRST_RANK_X: f64 = 24.0;
-    // Smooth-step edges reserve a 20-unit stub at both endpoints. The
-    // fallback must therefore keep more than 40 units between cards even
-    // when the first mount-time auto-layout is not ready yet.
-    const RANK_STEP_X: f64 = 224.0; // 10.5 rem card + 56 flow-unit rank gap.
-    let relation_index = relations
-        .iter()
-        .map(|relation| (relation.name(), relation))
-        .collect::<BTreeMap<_, _>>();
-    let phase_index = snapshot
-        .nodes()
-        .iter()
-        .map(|node| (node.node_id(), node))
-        .collect::<BTreeMap<_, _>>();
-    let ranks = fallback_node_ranks(workflow);
-    let mut rank_indices = BTreeMap::<usize, usize>::new();
-    workflow
-        .nodes()
-        .iter()
-        .map(|node| {
-            let rank = ranks.get(node.id()).copied().unwrap_or_default();
-            let rank_index = rank_indices.entry(rank).or_default();
-            let position = (
-                FIRST_RANK_X + RANK_STEP_X * rank as f64,
-                30.0 + *rank_index as f64 * 178.0,
-            );
-            *rank_index += 1;
-            let type_name = match node.config().kind() {
-                WorkflowNodeKind::Table => "table",
-                WorkflowNodeKind::Model => "model",
-                WorkflowNodeKind::Query => "query",
-                WorkflowNodeKind::Result => "result",
-            };
-            Node::with_data(
-                node.id().to_owned(),
-                node.name().to_owned(),
-                position,
-                NodeProjection {
-                    run_snapshot: snapshot,
-                    relations: &relation_index,
-                }
-                .project(node, phase_index.get(node.id()).copied()),
-            )
-            .node_type(type_name)
-            .sides(Side::Left, Side::Right)
-        })
-        .collect()
+trait WorkflowGraphProjection {
+    fn graph_nodes(
+        &self,
+        snapshot: &WorkflowRunSnapshot,
+        relations: &[WorkflowRelation],
+    ) -> Vec<Node<WorkflowNodeData>>;
+    fn fallback_node_ranks(&self) -> BTreeMap<&str, usize>;
+    fn graph_edges(&self, snapshot: &WorkflowRunSnapshot) -> Vec<Edge>;
 }
 
-fn fallback_node_ranks(workflow: &WorkflowSpec) -> BTreeMap<&str, usize> {
-    let mut ranks = workflow
-        .nodes()
-        .iter()
-        .map(|node| (node.id(), 0_usize))
-        .collect::<BTreeMap<_, _>>();
-    let order = workflow.topological_order().unwrap_or_else(|_| {
-        // Invalid drafts are not runnable, but still need deterministic finite
-        // fallback geometry while validation explains the graph error.
-        workflow
+impl WorkflowGraphProjection for WorkflowSpec {
+    fn graph_nodes(
+        &self,
+        snapshot: &WorkflowRunSnapshot,
+        relations: &[WorkflowRelation],
+    ) -> Vec<Node<WorkflowNodeData>> {
+        // Keep the fallback coordinates aligned with the canvas' layered-layout
+        // geometry. The flow handle may not be ready for the first mount-time
+        // layout pass, and widely spaced fallback ranks force Fit against the
+        // readability-preserving minimum zoom at the 1024 px desktop floor.
+        const FIRST_RANK_X: f64 = 24.0;
+        // Smooth-step edges reserve a 20-unit stub at both endpoints. The
+        // fallback must therefore keep more than 40 units between cards even
+        // when the first mount-time auto-layout is not ready yet.
+        const RANK_STEP_X: f64 = 224.0; // 10.5 rem card + 56 flow-unit rank gap.
+        let relation_index = relations
+            .iter()
+            .map(|relation| (relation.name(), relation))
+            .collect::<BTreeMap<_, _>>();
+        let phase_index = snapshot
             .nodes()
             .iter()
-            .map(|node| node.id().to_owned())
-            .collect()
-    });
-    for source in order {
-        let source_rank = ranks.get(source.as_str()).copied().unwrap_or_default();
-        for edge in workflow
-            .edges()
+            .map(|node| (node.node_id(), node))
+            .collect::<BTreeMap<_, _>>();
+        let ranks = self.fallback_node_ranks();
+        let mut rank_indices = BTreeMap::<usize, usize>::new();
+        self.nodes()
             .iter()
-            .filter(|edge| edge.source() == source)
-        {
-            if let Some(target_rank) = ranks.get_mut(edge.target()) {
-                *target_rank = (*target_rank).max(source_rank.saturating_add(1));
+            .map(|node| {
+                let rank = ranks.get(node.id()).copied().unwrap_or_default();
+                let rank_index = rank_indices.entry(rank).or_default();
+                let position = (
+                    FIRST_RANK_X + RANK_STEP_X * rank as f64,
+                    30.0 + *rank_index as f64 * 178.0,
+                );
+                *rank_index += 1;
+                let type_name = match node.config().kind() {
+                    WorkflowNodeKind::Table => "table",
+                    WorkflowNodeKind::Model => "model",
+                    WorkflowNodeKind::Query => "query",
+                    WorkflowNodeKind::Result => "result",
+                };
+                Node::with_data(
+                    node.id().to_owned(),
+                    node.name().to_owned(),
+                    position,
+                    NodeProjection {
+                        run_snapshot: snapshot,
+                        relations: &relation_index,
+                    }
+                    .project(node, phase_index.get(node.id()).copied()),
+                )
+                .node_type(type_name)
+                .sides(Side::Left, Side::Right)
+            })
+            .collect()
+    }
+
+    fn fallback_node_ranks(&self) -> BTreeMap<&str, usize> {
+        let mut ranks = self
+            .nodes()
+            .iter()
+            .map(|node| (node.id(), 0_usize))
+            .collect::<BTreeMap<_, _>>();
+        let order = self.topological_order().unwrap_or_else(|_| {
+            // Invalid drafts are not runnable, but still need deterministic finite
+            // fallback geometry while validation explains the graph error.
+            self.nodes()
+                .iter()
+                .map(|node| node.id().to_owned())
+                .collect()
+        });
+        for source in order {
+            let source_rank = ranks.get(source.as_str()).copied().unwrap_or_default();
+            for edge in self.edges().iter().filter(|edge| edge.source() == source) {
+                if let Some(target_rank) = ranks.get_mut(edge.target()) {
+                    *target_rank = (*target_rank).max(source_rank.saturating_add(1));
+                }
             }
         }
+        ranks
     }
-    ranks
+
+    fn graph_edges(&self, snapshot: &WorkflowRunSnapshot) -> Vec<Edge> {
+        let active_targets = snapshot
+            .nodes()
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.phase(),
+                    WorkflowNodePhase::Validating
+                        | WorkflowNodePhase::Loading
+                        | WorkflowNodePhase::Running
+                        | WorkflowNodePhase::Cancelling
+                )
+            })
+            .map(|node| node.node_id())
+            .collect::<BTreeSet<_>>();
+        self.edges()
+            .iter()
+            .map(|edge| {
+                let active = active_targets.contains(edge.target());
+                let edge = Edge::new(edge.source().to_owned(), edge.target().to_owned())
+                    .kind(EdgeKind::SmoothStep)
+                    .animated(active);
+                if active {
+                    edge.class("workflow-edge-running")
+                } else {
+                    edge
+                }
+            })
+            .collect()
+    }
 }
 
 struct NodeProjection<'a> {
@@ -2031,41 +2122,6 @@ impl NodeProjection<'_> {
     }
 }
 
-fn graph_edges(edges: &[WorkflowEdgeSpec], snapshot: &WorkflowRunSnapshot) -> Vec<Edge> {
-    let active_targets = snapshot
-        .nodes()
-        .iter()
-        .filter(|node| {
-            matches!(
-                node.phase(),
-                WorkflowNodePhase::Validating
-                    | WorkflowNodePhase::Loading
-                    | WorkflowNodePhase::Running
-                    | WorkflowNodePhase::Cancelling
-            )
-        })
-        .map(|node| node.node_id())
-        .collect::<BTreeSet<_>>();
-    edges
-        .iter()
-        .map(|edge| {
-            let active = active_targets.contains(edge.target());
-            let edge = Edge::new(edge.source().to_owned(), edge.target().to_owned())
-                .kind(EdgeKind::SmoothStep)
-                .animated(active);
-            if active {
-                edge.class("workflow-edge-running")
-            } else {
-                edge
-            }
-        })
-        .collect()
-}
-
-fn empty_workflow_draft(current: &WorkflowSpec) -> WorkflowSpec {
-    WorkflowSpec::new(current.id(), "Untitled workflow").with_revision(current.revision())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2080,7 +2136,7 @@ mod tests {
 
     #[test]
     fn default_editor_is_table_query_result_without_a_fake_model() {
-        let state = initial_state();
+        let state = WorkflowStateResponse::from_workflow("", WorkflowSpec::default());
         let kinds = state
             .workflow()
             .nodes()
@@ -2102,8 +2158,8 @@ mod tests {
     fn graph_projection_preserves_saved_topology() {
         let workflow = WorkflowSpec::default();
         let snapshot = WorkflowRunSnapshot::idle_for(&workflow);
-        let nodes = graph_nodes(&workflow, &snapshot, &[]);
-        let edges = graph_edges(workflow.edges(), &snapshot);
+        let nodes = workflow.graph_nodes(&snapshot, &[]);
+        let edges = workflow.graph_edges(&snapshot);
         assert_eq!(nodes.len(), 3);
         assert_eq!(edges.len(), 2);
         assert_eq!(nodes[0].id, "table");
@@ -2116,7 +2172,7 @@ mod tests {
     fn starting_fresh_preserves_server_identity_but_removes_all_topology() {
         let workflow = WorkflowSpec::new("inspection", "Existing workflow").with_revision(17);
 
-        let empty = empty_workflow_draft(&workflow);
+        let empty = workflow.empty_draft();
 
         assert_eq!(empty.id(), "inspection");
         assert_eq!(empty.revision(), 17);
@@ -2124,8 +2180,16 @@ mod tests {
         assert!(empty.nodes().is_empty());
         assert!(empty.edges().is_empty());
         assert!(!empty.validate().valid());
-        assert!(graph_nodes(&empty, &WorkflowRunSnapshot::idle_for(&empty), &[]).is_empty());
-        assert!(graph_edges(empty.edges(), &WorkflowRunSnapshot::idle_for(&empty)).is_empty());
+        assert!(
+            empty
+                .graph_nodes(&WorkflowRunSnapshot::idle_for(&empty), &[])
+                .is_empty()
+        );
+        assert!(
+            empty
+                .graph_edges(&WorkflowRunSnapshot::idle_for(&empty))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2134,7 +2198,7 @@ mod tests {
         let mut snapshot = WorkflowRunSnapshot::idle_for(&workflow);
         snapshot.nodes_mut()[1].set_phase(WorkflowNodePhase::Running);
 
-        let edges = graph_edges(workflow.edges(), &snapshot);
+        let edges = workflow.graph_edges(&snapshot);
 
         assert!(edges[0].animated);
         assert_eq!(edges[0].class.as_deref(), Some("workflow-edge-running"));
@@ -2225,7 +2289,7 @@ mod tests {
             .edges_mut()
             .push(WorkflowEdgeSpec::new("joint_state", "feature_query"));
 
-        let ranks = fallback_node_ranks(&workflow);
+        let ranks = workflow.fallback_node_ranks();
         assert_eq!(ranks["table"], 0);
         assert_eq!(ranks["joint_state"], 0);
         assert_eq!(ranks["query"], 1);
@@ -2234,7 +2298,7 @@ mod tests {
         assert_eq!(ranks["result"], 4);
 
         let snapshot = WorkflowRunSnapshot::idle_for(&workflow);
-        let nodes = graph_nodes(&workflow, &snapshot, &[]);
+        let nodes = workflow.graph_nodes(&snapshot, &[]);
         let positions = nodes
             .iter()
             .map(|node| (node.id.as_str(), node.position.x))
@@ -2328,7 +2392,7 @@ mod tests {
         );
         assert_eq!(
             feature_cache_relation.as_deref(),
-            Some(derived_feature_cache_relation("pick_place.camera_frames").as_str())
+            Some(spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation("pick_place.camera_frames").as_str())
         );
         let WorkflowNodeConfig::Query { sql, .. } = &workflow
             .nodes()
@@ -2373,11 +2437,8 @@ mod tests {
 
     #[test]
     fn topology_mutation_is_blocked_during_start_command_before_sse_arrives() {
-        assert!(topology_mutation_blocked(
-            WorkflowRunPhase::Idle,
-            Some(WorkflowCommand::Starting)
-        ));
-        assert!(!topology_mutation_blocked(WorkflowRunPhase::Idle, None));
+        assert!(WorkflowRunPhase::Idle.topology_mutation_blocked(Some(WorkflowCommand::Starting)));
+        assert!(!WorkflowRunPhase::Idle.topology_mutation_blocked(None));
     }
 
     #[test]
@@ -2442,10 +2503,10 @@ mod tests {
         let mut draft = WorkflowSpec::default();
         let mut server = draft.clone();
         draft.set_name("Local edit");
-        assert!(!revision_conflict(&draft, &server));
+        assert!(!draft.revision_conflicts_with(&server));
         server.set_revision(1);
         server.set_name("Remote edit");
-        assert!(revision_conflict(&draft, &server));
+        assert!(draft.revision_conflicts_with(&server));
         assert_eq!(
             draft.revision(),
             0,
@@ -2461,14 +2522,11 @@ mod tests {
         let graph =
             WorkflowAgentArtifactReceipt::new(WorkflowAgentArtifactKind::Graph, "View graph")
                 .with_revision(Some(4));
-        assert_eq!(
-            receipt_panel_id(&graph, &state, false),
-            Some(CANVAS_PANEL_ID)
-        );
-        assert_eq!(receipt_panel_id(&graph, &state, true), None);
+        assert_eq!(graph.panel_id(&state, false), Some(CANVAS_PANEL_ID));
+        assert_eq!(graph.panel_id(&state, true), None);
         let mut old_graph = graph.clone();
         old_graph.set_revision(Some(3));
-        assert_eq!(receipt_panel_id(&old_graph, &state, false), None);
+        assert_eq!(old_graph.panel_id(&state, false), None);
 
         state.snapshot_mut().set_run_id(Some("run-4".to_owned()));
         state.snapshot_mut().set_phase(WorkflowRunPhase::Completed);
@@ -2481,16 +2539,16 @@ mod tests {
                 .with_run_id(Some("run-4".to_owned()))
                 .with_row_count(Some(0));
         assert_eq!(
-            receipt_panel_id(&results, &state, false),
+            results.panel_id(&state, false),
             Some(RESULTS_PANEL_ID),
             "zero-row completed results remain authoritative"
         );
         state.snapshot_mut().set_result_stale(true);
-        assert_eq!(receipt_panel_id(&results, &state, false), None);
+        assert_eq!(results.panel_id(&state, false), None);
         state.snapshot_mut().set_result_stale(false);
         let mut old_results = results;
         old_results.set_run_id(Some("run-3".to_owned()));
-        assert_eq!(receipt_panel_id(&old_results, &state, false), None);
+        assert_eq!(old_results.panel_id(&state, false), None);
     }
 
     #[test]
@@ -2502,17 +2560,17 @@ mod tests {
         let mut stale_bootstrap = current.clone();
         stale_bootstrap.workflow_mut().set_revision(1);
         stale_bootstrap.snapshot_mut().set_workflow_revision(1);
-        assert!(!server_state_is_monotonic(&current, &stale_bootstrap));
+        assert!(!current.accepts(&stale_bootstrap));
 
         let mut newer = current.clone();
         newer.workflow_mut().set_revision(3);
         newer.snapshot_mut().set_workflow_revision(3);
-        assert!(server_state_is_monotonic(&current, &newer));
+        assert!(current.accepts(&newer));
 
         let mut project_b = WorkflowStateResponse::default();
         project_b.set_scope_id("project-b-scope");
         assert!(
-            server_state_is_monotonic(&current, &project_b),
+            current.accepts(&project_b),
             "a new project scope owns an independent revision sequence"
         );
 
@@ -2520,16 +2578,8 @@ mod tests {
             WorkflowRelationsResponse::new("project-a-scope", Vec::new(), false);
         let project_b_relations =
             WorkflowRelationsResponse::new("project-b-scope", Vec::new(), false);
-        assert!(!relations_are_current(
-            "project-b-scope",
-            "project-a-scope",
-            &project_a_relations
-        ));
-        assert!(relations_are_current(
-            "project-b-scope",
-            "project-b-scope",
-            &project_b_relations
-        ));
+        assert!(!project_a_relations.matches_scope("project-b-scope", "project-a-scope"));
+        assert!(project_b_relations.matches_scope("project-b-scope", "project-b-scope"));
     }
 
     #[test]
@@ -2539,42 +2589,26 @@ mod tests {
         current.set_revision(8);
         let mut stale = current.clone();
         stale.set_revision(7);
-        assert!(!agent_state_is_monotonic(&current, &stale));
+        assert!(!current.accepts_streamed(&stale));
         let mut next = current.clone();
         next.set_revision(9);
-        assert!(agent_state_is_monotonic(&current, &next));
+        assert!(current.accepts_streamed(&next));
         next.session_mut().set_workflow_id("other");
-        assert!(!agent_state_is_monotonic(&current, &next));
+        assert!(!current.accepts_streamed(&next));
 
         let mut project_b = current.clone();
         project_b.set_scope_id("project-b-scope");
         project_b.set_revision(1);
         assert!(
-            agent_state_is_monotonic(&current, &project_b),
+            current.accepts_streamed(&project_b),
             "a new project scope owns an independent revision sequence"
         );
-        assert!(!agent_bootstrap_is_current(
-            &project_b,
-            &current,
-            "project-a-scope"
-        ));
-        assert!(agent_bootstrap_is_current(
-            &project_b,
-            &project_b,
-            "project-a-scope"
-        ));
+        assert!(!project_b.accepts_bootstrap(&current, "project-a-scope"));
+        assert!(project_b.accepts_bootstrap(&project_b, "project-a-scope"));
         let mut command_response = current.clone();
         command_response.set_revision(command_response.revision() + 1);
-        assert!(agent_command_response_is_current(
-            &current,
-            &command_response,
-            "project-a-scope"
-        ));
-        assert!(!agent_command_response_is_current(
-            &project_b,
-            &command_response,
-            "project-a-scope"
-        ));
+        assert!(current.accepts_command_response(&command_response, "project-a-scope"));
+        assert!(!project_b.accepts_command_response(&command_response, "project-a-scope"));
     }
 
     #[test]
@@ -2687,13 +2721,13 @@ mod tests {
             .set_phase(WorkflowRunPhase::Validating);
         late_start.snapshot_mut().set_finished_ms(0);
         late_start.snapshot_mut().set_updated_ms(10);
-        assert!(!server_state_is_monotonic(&current, &late_start));
+        assert!(!current.accepts(&late_start));
 
         // Millisecond clock ties still cannot move a terminal run backwards.
         late_start
             .snapshot_mut()
             .set_updated_ms(current.snapshot().updated_ms());
-        assert!(!server_state_is_monotonic(&current, &late_start));
+        assert!(!current.accepts(&late_start));
     }
 
     #[test]
@@ -2715,17 +2749,11 @@ mod tests {
             .set_phase(WorkflowRunPhase::Cancelling);
         late_cancel.snapshot_mut().set_finished_ms(0);
         late_cancel.snapshot_mut().set_updated_ms(12);
-        assert!(!snapshot_is_monotonic(
-            current.snapshot(),
-            late_cancel.snapshot()
-        ));
+        assert!(!current.snapshot().accepts(late_cancel.snapshot()));
 
         late_cancel
             .snapshot_mut()
             .set_updated_ms(current.snapshot().updated_ms());
-        assert!(!snapshot_is_monotonic(
-            current.snapshot(),
-            late_cancel.snapshot()
-        ));
+        assert!(!current.snapshot().accepts(late_cancel.snapshot()));
     }
 }

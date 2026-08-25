@@ -89,19 +89,29 @@ pub(crate) trait RolloutSessionPort: Send + Sync {
     async fn stop(&self) -> Result<(), OperationError>;
 }
 
-pub(crate) fn snapshot<P: RolloutSessionPort + ?Sized>(port: &P) -> RolloutSnapshot {
-    port.snapshot()
+pub(crate) struct RolloutActions<'a, P: ?Sized> {
+    port: &'a P,
 }
 
-pub(crate) async fn start<P: RolloutSessionPort + ?Sized>(
-    port: &P,
-    request: RolloutRequest,
-) -> Result<RolloutSnapshot, OperationError> {
-    port.start(request).await
-}
+impl<'a, P: RolloutSessionPort + ?Sized> RolloutActions<'a, P> {
+    pub(crate) fn new(port: &'a P) -> Self {
+        Self { port }
+    }
 
-pub(crate) async fn stop<P: RolloutSessionPort + ?Sized>(port: &P) -> Result<(), OperationError> {
-    port.stop().await
+    pub(crate) fn snapshot(&self) -> RolloutSnapshot {
+        self.port.snapshot()
+    }
+
+    pub(crate) async fn start(
+        &self,
+        request: RolloutRequest,
+    ) -> Result<RolloutSnapshot, OperationError> {
+        self.port.start(request).await
+    }
+
+    pub(crate) async fn stop(&self) -> Result<(), OperationError> {
+        self.port.stop().await
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -334,7 +344,7 @@ impl CompletionReason {
             }
             Self::DurationReached { duration_seconds } => format!(
                 "Policy completed its configured {} duration; the follower is holding its current position.",
-                format_duration(duration_seconds)
+                duration_seconds.rollout_duration_label()
             ),
             Self::ControlReplaced(message) => message,
         }
@@ -393,6 +403,14 @@ impl InferenceTiming {
             latency_ms,
             model_ms,
         }
+    }
+
+    fn finite_latency_ms(&self) -> Option<f64> {
+        (self.latency_ms.is_finite() && self.latency_ms >= 0.0).then_some(self.latency_ms)
+    }
+
+    fn finite_model_ms(&self) -> Option<f64> {
+        (self.model_ms.is_finite() && self.model_ms >= 0.0).then_some(self.model_ms)
     }
 }
 
@@ -597,8 +615,8 @@ impl RolloutCoordinator {
                 "policy session {session:?} cannot publish warmup metrics outside warmup"
             ));
         }
-        self.snapshot.metrics.last_latency_ms = finite_metric(timing.latency_ms);
-        self.snapshot.metrics.last_model_ms = finite_metric(timing.model_ms);
+        self.snapshot.metrics.last_latency_ms = timing.finite_latency_ms();
+        self.snapshot.metrics.last_model_ms = timing.finite_model_ms();
         self.publish();
         Ok(())
     }
@@ -643,7 +661,7 @@ impl RolloutCoordinator {
         self.snapshot.lifecycle.phase = RolloutPhase::Running;
         self.snapshot.lifecycle.message = Some(format!(
             "Controlling the follower at {sample_hz:.1} Hz · {action_steps} actions per observation · {} maximum.",
-            format_duration(duration)
+            duration.rollout_duration_label()
         ));
         self.publish();
         Ok(true)
@@ -786,7 +804,7 @@ impl RolloutCoordinator {
                 ticket.session
             )
         })?;
-        let (phase, message) = terminal_state(outcome, result.cleanup);
+        let (phase, message) = outcome.terminal_state(result.cleanup);
         self.snapshot.lifecycle.phase = phase;
         self.snapshot.lifecycle.finished_ms = Some(result.finished_ms);
         self.snapshot.lifecycle.message = Some(message);
@@ -814,40 +832,41 @@ impl RolloutCoordinator {
     }
 }
 
-fn finite_metric(value: f64) -> Option<f64> {
-    (value.is_finite() && value >= 0.0).then_some(value)
-}
-
-fn terminal_state(
-    outcome: ExecutionOutcome,
-    cleanup: Result<(), String>,
-) -> (RolloutPhase, String) {
-    let execution = match outcome {
-        ExecutionOutcome::Completed(reason) => Ok(reason.message()),
-        ExecutionOutcome::Failed(error) => Err(error),
-    };
-    match (execution, cleanup) {
-        (Ok(message), Ok(())) => (RolloutPhase::Idle, message),
-        (Err(error), Ok(())) => (RolloutPhase::Failed, error),
-        (Ok(_), Err(cleanup)) => (
-            RolloutPhase::Failed,
-            format!("policy execution ended, but safe control cleanup failed: {cleanup}"),
-        ),
-        (Err(error), Err(cleanup)) => (
-            RolloutPhase::Failed,
-            format!("{error}; safe control cleanup also failed: {cleanup}"),
-        ),
+impl ExecutionOutcome {
+    fn terminal_state(self, cleanup: Result<(), String>) -> (RolloutPhase, String) {
+        let execution = match self {
+            Self::Completed(reason) => Ok(reason.message()),
+            Self::Failed(error) => Err(error),
+        };
+        match (execution, cleanup) {
+            (Ok(message), Ok(())) => (RolloutPhase::Idle, message),
+            (Err(error), Ok(())) => (RolloutPhase::Failed, error),
+            (Ok(_), Err(cleanup)) => (
+                RolloutPhase::Failed,
+                format!("policy execution ended, but safe control cleanup failed: {cleanup}"),
+            ),
+            (Err(error), Err(cleanup)) => (
+                RolloutPhase::Failed,
+                format!("{error}; safe control cleanup also failed: {cleanup}"),
+            ),
+        }
     }
 }
 
-fn format_duration(seconds: u32) -> String {
-    match seconds {
-        1 => "1 second".to_owned(),
-        value if value % 60 == 0 => {
-            let minutes = value / 60;
-            format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
+trait RolloutDurationLabel {
+    fn rollout_duration_label(self) -> String;
+}
+
+impl RolloutDurationLabel for u32 {
+    fn rollout_duration_label(self) -> String {
+        match self {
+            1 => "1 second".to_owned(),
+            value if value % 60 == 0 => {
+                let minutes = value / 60;
+                format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
+            }
+            value => format!("{value} seconds"),
         }
-        value => format!("{value} seconds"),
     }
 }
 

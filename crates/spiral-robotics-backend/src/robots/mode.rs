@@ -17,33 +17,40 @@ pub(crate) trait ModeControlPort {
     async fn set_operator_mode(&self, mode: OperatorMode) -> Result<(), OperationError>;
 }
 
-pub(crate) async fn set_mode<P: ModeControlPort + ?Sized>(
-    control: &P,
-    mode: OperatorMode,
-) -> Result<(), OperationError> {
-    match &mode {
-        OperatorMode::Idle => {}
-        OperatorMode::Manual { robot } if robot.trim().is_empty() => {
-            return Err(OperationError::InvalidInput(
-                "manual control requires a robot".to_owned(),
-            ));
-        }
-        OperatorMode::Manual { .. } => {}
-        OperatorMode::Teleoperate { leader, follower }
-            if leader.trim().is_empty() || follower.trim().is_empty() =>
-        {
-            return Err(OperationError::InvalidInput(
-                "teleoperation requires a leader and follower".to_owned(),
-            ));
-        }
-        OperatorMode::Teleoperate { leader, follower } if leader == follower => {
-            return Err(OperationError::InvalidInput(
-                "teleoperation leader and follower must be different robots".to_owned(),
-            ));
-        }
-        OperatorMode::Teleoperate { .. } => {}
+pub(crate) struct ModeActions<'a, P: ModeControlPort + ?Sized> {
+    control: &'a P,
+}
+
+impl<'a, P: ModeControlPort + ?Sized> ModeActions<'a, P> {
+    pub(crate) const fn new(control: &'a P) -> Self {
+        Self { control }
     }
-    control.set_operator_mode(mode).await
+
+    pub(crate) async fn set(&self, mode: OperatorMode) -> Result<(), OperationError> {
+        match &mode {
+            OperatorMode::Idle => {}
+            OperatorMode::Manual { robot } if robot.trim().is_empty() => {
+                return Err(OperationError::InvalidInput(
+                    "manual control requires a robot".to_owned(),
+                ));
+            }
+            OperatorMode::Manual { .. } => {}
+            OperatorMode::Teleoperate { leader, follower }
+                if leader.trim().is_empty() || follower.trim().is_empty() =>
+            {
+                return Err(OperationError::InvalidInput(
+                    "teleoperation requires a leader and follower".to_owned(),
+                ));
+            }
+            OperatorMode::Teleoperate { leader, follower } if leader == follower => {
+                return Err(OperationError::InvalidInput(
+                    "teleoperation leader and follower must be different robots".to_owned(),
+                ));
+            }
+            OperatorMode::Teleoperate { .. } => {}
+        }
+        self.control.set_operator_mode(mode).await
+    }
 }
 
 #[cfg(test)]
@@ -69,22 +76,20 @@ mod tests {
             leader: "leader".to_owned(),
             follower: "follower".to_owned(),
         };
-        set_mode(&control, mode.clone()).await.unwrap();
+        ModeActions::new(&control).set(mode.clone()).await.unwrap();
         assert_eq!(*control.0.lock().unwrap(), [mode]);
     }
 
     #[tokio::test]
     async fn rejects_self_teleoperation_before_reaching_the_adapter() {
         let control = FakeControl::default();
-        let error = set_mode(
-            &control,
-            OperatorMode::Teleoperate {
+        let error = ModeActions::new(&control)
+            .set(OperatorMode::Teleoperate {
                 leader: "arm".to_owned(),
                 follower: "arm".to_owned(),
-            },
-        )
-        .await
-        .unwrap_err();
+            })
+            .await
+            .unwrap_err();
         assert!(matches!(error, OperationError::InvalidInput(_)));
         assert!(control.0.lock().unwrap().is_empty());
     }

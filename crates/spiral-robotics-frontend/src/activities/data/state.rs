@@ -6,11 +6,12 @@
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
+use spiral_robotics_api::catalog::QueryPreset;
 use spiral_robotics_api::relations::SpiralQueryRequest;
 
-use crate::activities::data::sql_draft::rebase_generated_sql;
+use crate::activities::data::sql_draft::GeneratedSqlDraft;
 use crate::activities::data::workbench::{
-    DEFAULT_QUERY_ROWS, QueryExecutionPresentation, QueryState, QueryTab, default_query_sql,
+    DEFAULT_QUERY_ROWS, QueryExecutionPresentation, QueryPresetSql, QueryState, QueryTab,
 };
 use crate::client::http as api;
 use crate::shell::notifications::MessageSource;
@@ -58,7 +59,7 @@ struct QueryExecutionSignals {
 /// Create the Data controller once at the shell boundary and publish it to the
 /// activity view. None of this state depends on the workbench being mounted.
 pub(crate) fn use_data_controller(namespace: &str, dataset_id: &str) -> DataController {
-    let initial_sql = default_query_sql(namespace, dataset_id);
+    let initial_sql = QueryPreset::Episodes.scoped_sql(namespace, dataset_id);
     let sql_value = initial_sql.clone();
     let controller = DataController {
         draft: QueryDraftSignals {
@@ -90,12 +91,12 @@ pub(crate) fn data_controller() -> DataController {
 impl DataController {
     fn sync_dataset(mut self, namespace: &str, dataset_id: &str) {
         let previous = self.draft.generated_sql.peek().to_owned();
-        let next = default_query_sql(namespace, dataset_id);
+        let next = QueryPreset::Episodes.scoped_sql(namespace, dataset_id);
         if previous == next {
             return;
         }
         let mut current = self.draft.sql.peek().to_owned();
-        if rebase_generated_sql(&mut current, &previous, &next) {
+        if current.rebase_generated(&previous, &next) {
             self.draft.sql.set(current);
         }
         self.draft.generated_sql.set(next);
@@ -193,7 +194,7 @@ impl DataController {
         let rows = (self.draft.max_rows)();
         let id = self.execution.next_query_id.peek().to_owned();
         self.execution.next_query_id.set(id.wrapping_add(1));
-        let title = query_title(&statement, id);
+        let title = statement.query_title(id);
         let running = QueryTab::new(
             id,
             title,
@@ -293,36 +294,42 @@ impl QueryTabs for Vec<QueryTab> {
     }
 }
 
-fn query_title(sql: &str, id: u64) -> String {
-    let normalized = sql.split_whitespace().collect::<Vec<_>>();
-    let table = normalized
-        .windows(2)
-        .find(|tokens| tokens[0].eq_ignore_ascii_case("from"))
-        .map(|tokens| {
-            tokens[1].trim_matches(|character: char| {
-                !character.is_alphanumeric() && character != '_' && character != '.'
+trait QuerySqlPresentation {
+    fn query_title(&self, id: u64) -> String;
+}
+
+impl QuerySqlPresentation for str {
+    fn query_title(&self, id: u64) -> String {
+        let normalized = self.split_whitespace().collect::<Vec<_>>();
+        let table = normalized
+            .windows(2)
+            .find(|tokens| tokens[0].eq_ignore_ascii_case("from"))
+            .map(|tokens| {
+                tokens[1].trim_matches(|character: char| {
+                    !character.is_alphanumeric() && character != '_' && character != '.'
+                })
             })
-        })
-        .and_then(|relation| relation.rsplit('.').next())
-        .filter(|relation| !relation.is_empty());
-    table
-        .map(|table| format!("{table} · {id}"))
-        .unwrap_or_else(|| format!("Query {id}"))
+            .and_then(|relation| relation.rsplit('.').next())
+            .filter(|relation| !relation.is_empty());
+        table
+            .map(|table| format!("{table} · {id}"))
+            .unwrap_or_else(|| format!("Query {id}"))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::activities::data::workbench::{QueryExecutionPresentation, QueryState, QueryTab};
 
-    use super::{MAX_QUERY_TABS, QueryTabs, query_title};
+    use super::{MAX_QUERY_TABS, QuerySqlPresentation, QueryTabs};
 
     #[test]
     fn query_tabs_name_the_first_relation_without_hiding_identity() {
         assert_eq!(
-            query_title("SELECT * FROM robotics.episodes", 3),
+            "SELECT * FROM robotics.episodes".query_title(3),
             "episodes · 3"
         );
-        assert_eq!(query_title("EXPLAIN SELECT 1", 4), "Query 4");
+        assert_eq!("EXPLAIN SELECT 1".query_title(4), "Query 4");
     }
 
     #[test]

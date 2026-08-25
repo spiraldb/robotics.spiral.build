@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
+
+use crate::sync::MutexRecovery;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow_array::{
@@ -14,22 +16,69 @@ use spiral_robotics_api::robots::{
     CameraBinding, ConnectionStatus, MotorLimits, MotorSummary, PortSettings, RobotSummary,
 };
 use spiral_robotics_core::OperationError;
-use spiral_robotics_core::arm;
 use spiral_robotics_core::calibration::{Calibration, MotorSpec, MotorSpecifications};
 use spiral_robotics_storage::{
     ProjectStore, ROBOT_CONFIGURATION_COLUMN, ROBOT_IDENTIFIER_COLUMN, ROBOT_UPDATED_MILLIS_COLUMN,
-    robot_configuration_relation,
+    StorageSchema,
 };
 
 use super::calibration::CalibrationUpdate;
 use super::calibration_codec;
 use super::robot_config::{ConfigError, RobotConfig, RobotConfigUpdate};
-use spiral_robotics_storage::string_literal;
+use spiral_robotics_storage::SpiralSql;
 
 pub(crate) const DEFAULT_ROBOT_TYPE: &str = "so101_follower";
 pub(crate) const DEFAULT_BAUD_RATE: u32 = 1_000_000;
 const MAX_ROBOT_ID_LENGTH: usize = 64;
 const MAX_LABEL_LENGTH: usize = 64;
+
+struct RobotId(String);
+
+impl RobotId {
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for RobotId {
+    type Error = WorkspaceError;
+
+    fn try_from(id: &str) -> Result<Self, Self::Error> {
+        if !id.is_empty()
+            && id.len() <= MAX_ROBOT_ID_LENGTH
+            && id.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
+        {
+            Ok(Self(id.to_owned()))
+        } else {
+            Err(WorkspaceError::InvalidId(id.to_owned()))
+        }
+    }
+}
+
+struct RobotLabel(String);
+
+impl RobotLabel {
+    fn parse(field: &str, value: &str) -> Result<Self, WorkspaceError> {
+        let trimmed = value.trim();
+        if trimmed.is_empty()
+            || trimmed.len() > MAX_LABEL_LENGTH
+            || trimmed.chars().any(char::is_control)
+        {
+            return Err(WorkspaceError::Invalid(format!(
+                "{field} must be 1 to {MAX_LABEL_LENGTH} characters and contain no control characters"
+            )));
+        }
+        Ok(Self(trimmed.to_owned()))
+    }
+}
+
+impl From<RobotLabel> for String {
+    fn from(label: RobotLabel) -> Self {
+        label.0
+    }
+}
 
 pub(crate) struct RobotWorkspaceCreate {
     id: String,
@@ -210,7 +259,7 @@ impl RobotRecord {
             .calibration()
             .filter(|value| !value.is_null())
             .map(|value| {
-                calibration_codec::decode_calibration(value.clone()).map_err(|source| {
+                calibration_codec::CalibrationCodec::decode(value.clone()).map_err(|source| {
                     WorkspaceError::Invalid(format!(
                         "robot {:?} has invalid calibration: {source}",
                         self.id
@@ -285,26 +334,26 @@ impl RobotWorkspace {
     pub(crate) fn list(&self) -> Vec<RobotRecord> {
         match self.try_list() {
             Ok(records) => {
-                *lock(&self.last_issue) = None;
+                *self.last_issue.recover_lock() = None;
                 records
             }
             Err(error) => {
-                *lock(&self.last_issue) = Some(error.to_string());
+                *self.last_issue.recover_lock() = Some(error.to_string());
                 Vec::new()
             }
         }
     }
 
     pub(crate) fn issues(&self) -> Vec<String> {
-        lock(&self.last_issue).iter().cloned().collect()
+        self.last_issue.recover_lock().iter().cloned().collect()
     }
 
     pub(crate) fn get(&self, id: &str) -> Result<RobotRecord, WorkspaceError> {
-        validate_robot_id(id)?;
+        let id = RobotId::try_from(id)?;
         self.try_list()?
             .into_iter()
-            .find(|record| record.id == id)
-            .ok_or_else(|| WorkspaceError::NotFound(id.to_owned()))
+            .find(|record| record.id == id.as_str())
+            .ok_or(WorkspaceError::NotFound(id.0))
     }
 
     pub(crate) fn create(
@@ -316,30 +365,27 @@ impl RobotWorkspace {
             robot_type,
             port,
         } = request;
+        let id = RobotId::try_from(id.as_str())?;
         let id = id.as_str();
-        validate_robot_id(id)?;
         match self.get(id) {
             Ok(_) => return Err(WorkspaceError::AlreadyExists(id.to_owned())),
             Err(WorkspaceError::NotFound(_)) => {}
             Err(error) => return Err(error),
         }
-        let robot_type = clean_label(
+        let robot_type = String::from(RobotLabel::parse(
             "robot_type",
             robot_type.as_deref().unwrap_or(DEFAULT_ROBOT_TYPE),
-        )?;
+        )?);
         let mut root = Map::new();
         root.insert("robot_id".to_owned(), Value::String(id.to_owned()));
         root.insert("robot_type".to_owned(), Value::String(robot_type));
         if let Some(port) = port.filter(|port| !port.path().trim().is_empty()) {
-            root.insert(
-                "port".to_owned(),
-                port_value(port.path().trim(), Some(port.baud_rate())),
-            );
+            root.insert("port".to_owned(), port.configuration_value());
         }
         root.insert(
             "motors".to_owned(),
             RobotConfig::default()
-                .encode_motor_specs(&arm::so101_motor_specs())
+                .encode_motor_specs(&spiral_robotics_core::calibration::MotorSpec::so101_arm())
                 .expect("stock motor specs encode"),
         );
         self.persist(id, RobotConfig::from_value(Value::Object(root))?)
@@ -359,7 +405,7 @@ impl RobotWorkspace {
                 )
             })?
             .to_owned();
-        validate_robot_id(&id)?;
+        let id = RobotId::try_from(id.as_str())?.0;
         match self.get(&id) {
             Ok(_) => return Err(WorkspaceError::AlreadyExists(id)),
             Err(WorkspaceError::NotFound(_)) => {}
@@ -384,7 +430,7 @@ impl RobotWorkspace {
         if let Some(robot_type) = robot_type.as_deref() {
             root.insert(
                 "robot_type".to_owned(),
-                Value::String(clean_label("robot_type", robot_type)?),
+                Value::String(RobotLabel::parse("robot_type", robot_type)?.into()),
             );
         }
         if let Some(port) = port {
@@ -418,7 +464,7 @@ impl RobotWorkspace {
         let record = self.get(id)?;
         let merged = record.config.merged(RobotConfigUpdate::new(
             record.config.encode_motor_specs(motors)?,
-            calibration_codec::encode_calibration(calibration).map_err(|source| {
+            calibration_codec::CalibrationCodec::encode(calibration).map_err(|source| {
                 WorkspaceError::Invalid(format!("calibration could not be serialized: {source}"))
             })?,
         ))?;
@@ -427,8 +473,8 @@ impl RobotWorkspace {
 
     pub(crate) fn delete(&self, id: &str) -> Result<(), WorkspaceError> {
         self.get(id)?;
-        let relation = robot_configuration_relation(self.project_store.namespace());
-        let id = string_literal(id);
+        let relation = StorageSchema::robot_configuration_relation(self.project_store.namespace());
+        let id = SpiralSql::string_literal(id);
         self.project_store
             .run_invalidating_blocking(move |connection| {
                 if connection.table_exists(&relation)? {
@@ -442,7 +488,7 @@ impl RobotWorkspace {
     }
 
     pub(crate) fn try_list(&self) -> Result<Vec<RobotRecord>, WorkspaceError> {
-        let relation = robot_configuration_relation(self.project_store.namespace());
+        let relation = StorageSchema::robot_configuration_relation(self.project_store.namespace());
         self.project_store
             .run_blocking(move |connection| {
                 if !connection.table_exists(&relation)? {
@@ -466,9 +512,9 @@ impl RobotWorkspace {
                         .column_by_name(ROBOT_CONFIGURATION_COLUMN)
                         .ok_or_else(|| "robots result has no config_json".to_owned())?;
                     for row in 0..batch.num_rows() {
-                        let id = text_value(ids.as_ref(), row)?;
+                        let id = ids.as_ref().text_at(row)?;
                         let config =
-                            RobotConfig::from_slice(text_value(configs.as_ref(), row)?.as_bytes())
+                            RobotConfig::from_slice(configs.as_ref().text_at(row)?.as_bytes())
                                 .map_err(|error| error.to_string())?;
                         records.push(RobotRecord { id, config });
                     }
@@ -480,10 +526,10 @@ impl RobotWorkspace {
 
     fn persist(&self, id: &str, config: RobotConfig) -> Result<RobotRecord, WorkspaceError> {
         let namespace = self.project_store.namespace().to_owned();
-        let relation = robot_configuration_relation(&namespace);
+        let relation = StorageSchema::robot_configuration_relation(&namespace);
         let config_json = config.to_pretty_json()?;
         let id_owned = id.to_owned();
-        let id_sql = string_literal(id);
+        let id_sql = SpiralSql::string_literal(id);
         self.project_store
             .run_invalidating_blocking(move |connection| {
                 connection.ensure_dataset_namespace(&namespace)?;
@@ -502,7 +548,8 @@ impl RobotWorkspace {
                     vec![
                         Arc::new(StringArray::from(vec![id_owned])) as ArrayRef,
                         Arc::new(StringArray::from(vec![config_json])) as ArrayRef,
-                        Arc::new(Int64Array::from(vec![unix_millis()])) as ArrayRef,
+                        Arc::new(Int64Array::from(vec![SystemTime::now().unix_millis()]))
+                            as ArrayRef,
                     ],
                 )
                 .map_err(|error| error.to_string())?;
@@ -516,70 +563,59 @@ impl RobotWorkspace {
     }
 }
 
-fn port_value(path: &str, baud_rate: Option<u32>) -> Value {
-    let mut fields = Map::new();
-    fields.insert("path".to_owned(), Value::String(path.to_owned()));
-    fields.insert(
-        "baud_rate".to_owned(),
-        Value::from(
-            baud_rate
-                .filter(|rate| *rate > 0)
-                .unwrap_or(DEFAULT_BAUD_RATE),
-        ),
-    );
-    Value::Object(fields)
+trait PortConfigurationValue {
+    fn configuration_value(&self) -> Value;
 }
 
-pub(crate) fn validate_robot_id(id: &str) -> Result<(), WorkspaceError> {
-    if !id.is_empty()
-        && id.len() <= MAX_ROBOT_ID_LENGTH
-        && id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-    {
-        Ok(())
-    } else {
-        Err(WorkspaceError::InvalidId(id.to_owned()))
+impl PortConfigurationValue for PortSettings {
+    fn configuration_value(&self) -> Value {
+        let mut fields = Map::new();
+        fields.insert(
+            "path".to_owned(),
+            Value::String(self.path().trim().to_owned()),
+        );
+        fields.insert(
+            "baud_rate".to_owned(),
+            Value::from(if self.baud_rate() == 0 {
+                DEFAULT_BAUD_RATE
+            } else {
+                self.baud_rate()
+            }),
+        );
+        Value::Object(fields)
     }
 }
 
-fn clean_label(field: &str, value: &str) -> Result<String, WorkspaceError> {
-    let trimmed = value.trim();
-    if trimmed.is_empty()
-        || trimmed.len() > MAX_LABEL_LENGTH
-        || trimmed.chars().any(char::is_control)
-    {
-        return Err(WorkspaceError::Invalid(format!(
-            "{field} must be 1 to {MAX_LABEL_LENGTH} characters and contain no control characters"
-        )));
-    }
-    Ok(trimmed.to_owned())
+trait ArrowTextValue {
+    fn text_at(&self, row: usize) -> Result<String, String>;
 }
 
-fn text_value(array: &dyn arrow_array::Array, row: usize) -> Result<String, String> {
-    if array.is_null(row) {
-        return Err("unexpected null text value".to_owned());
+impl ArrowTextValue for dyn arrow_array::Array {
+    fn text_at(&self, row: usize) -> Result<String, String> {
+        if self.is_null(row) {
+            return Err("unexpected null text value".to_owned());
+        }
+        if let Some(array) = self.as_any().downcast_ref::<StringArray>() {
+            return Ok(array.value(row).to_owned());
+        }
+        if let Some(array) = self.as_any().downcast_ref::<StringViewArray>() {
+            return Ok(array.value(row).to_owned());
+        }
+        if let Some(array) = self.as_any().downcast_ref::<LargeStringArray>() {
+            return Ok(array.value(row).to_owned());
+        }
+        Err(format!("expected UTF-8 text, got {}", self.data_type()))
     }
-    if let Some(array) = array.as_any().downcast_ref::<StringArray>() {
-        return Ok(array.value(row).to_owned());
-    }
-    if let Some(array) = array.as_any().downcast_ref::<StringViewArray>() {
-        return Ok(array.value(row).to_owned());
-    }
-    if let Some(array) = array.as_any().downcast_ref::<LargeStringArray>() {
-        return Ok(array.value(row).to_owned());
-    }
-    Err(format!("expected UTF-8 text, got {}", array.data_type()))
 }
 
-fn unix_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(0)
+trait UnixMillis {
+    fn unix_millis(self) -> i64;
 }
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+
+impl UnixMillis for SystemTime {
+    fn unix_millis(self) -> i64 {
+        self.duration_since(UNIX_EPOCH)
+            .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
+            .unwrap_or(0)
+    }
 }

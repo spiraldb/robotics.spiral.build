@@ -6,24 +6,42 @@
 
 use spiral_robotics_core::OperationError;
 
-pub(crate) fn admit_save(
+pub(crate) struct WorkflowSaveAdmission {
     expected_revision: u64,
     current_revision: u64,
     run_active: bool,
-) -> Result<u64, OperationError> {
-    if run_active {
-        return Err(OperationError::Conflict(
-            "Cancel the active Workflow run before applying graph changes.".to_owned(),
-        ));
+}
+
+impl WorkflowSaveAdmission {
+    pub(crate) const fn new(expected_revision: u64, current_revision: u64) -> Self {
+        Self {
+            expected_revision,
+            current_revision,
+            run_active: false,
+        }
     }
-    if expected_revision != current_revision {
-        return Err(OperationError::Conflict(format!(
-            "Workflow revision changed from {expected_revision} to {current_revision}; reload before applying edits."
-        )));
+
+    pub(crate) const fn with_run_active(mut self, run_active: bool) -> Self {
+        self.run_active = run_active;
+        self
     }
-    current_revision
-        .checked_add(1)
-        .ok_or_else(|| OperationError::Internal("Workflow revision overflowed.".to_owned()))
+
+    pub(crate) fn next_revision(self) -> Result<u64, OperationError> {
+        if self.run_active {
+            return Err(OperationError::Conflict(
+                "Cancel the active Workflow run before applying graph changes.".to_owned(),
+            ));
+        }
+        if self.expected_revision != self.current_revision {
+            return Err(OperationError::Conflict(format!(
+                "Workflow revision changed from {} to {}; reload before applying edits.",
+                self.expected_revision, self.current_revision
+            )));
+        }
+        self.current_revision
+            .checked_add(1)
+            .ok_or_else(|| OperationError::Internal("Workflow revision overflowed.".to_owned()))
+    }
 }
 
 pub(crate) struct WorkflowRunAdmission {
@@ -70,13 +88,23 @@ impl WorkflowRunAdmission {
     }
 }
 
-pub(crate) fn admit_cancel(run_active: bool) -> Result<(), OperationError> {
-    if run_active {
-        Ok(())
-    } else {
-        Err(OperationError::Conflict(
-            "No Workflow run is active.".to_owned(),
-        ))
+pub(crate) struct WorkflowCancellationAdmission {
+    run_active: bool,
+}
+
+impl WorkflowCancellationAdmission {
+    pub(crate) const fn new(run_active: bool) -> Self {
+        Self { run_active }
+    }
+
+    pub(crate) fn validate(self) -> Result<(), OperationError> {
+        if self.run_active {
+            Ok(())
+        } else {
+            Err(OperationError::Conflict(
+                "No Workflow run is active.".to_owned(),
+            ))
+        }
     }
 }
 
@@ -86,13 +114,15 @@ mod tests {
 
     #[test]
     fn save_requires_matching_revision_and_idle_runtime() {
-        assert_eq!(admit_save(4, 4, false), Ok(5));
+        assert_eq!(WorkflowSaveAdmission::new(4, 4).next_revision(), Ok(5));
         assert!(matches!(
-            admit_save(3, 4, false),
+            WorkflowSaveAdmission::new(3, 4).next_revision(),
             Err(OperationError::Conflict(_))
         ));
         assert!(matches!(
-            admit_save(4, 4, true),
+            WorkflowSaveAdmission::new(4, 4)
+                .with_run_active(true)
+                .next_revision(),
             Err(OperationError::Conflict(_))
         ));
     }
@@ -122,9 +152,9 @@ mod tests {
 
     #[test]
     fn cancel_requires_an_active_run() {
-        assert_eq!(admit_cancel(true), Ok(()));
+        assert_eq!(WorkflowCancellationAdmission::new(true).validate(), Ok(()));
         assert!(matches!(
-            admit_cancel(false),
+            WorkflowCancellationAdmission::new(false).validate(),
             Err(OperationError::Conflict(_))
         ));
     }

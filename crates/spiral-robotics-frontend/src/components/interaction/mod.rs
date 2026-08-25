@@ -111,6 +111,10 @@ impl ActionVariant {
             Self::Segment => "ui-action--segment",
         }
     }
+
+    fn action_class(self, size: ActionSize, extra: &str) -> String {
+        format!("ui-action {} {}", self.class_name(), size.class_name()).with_class(Some(extra))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -178,8 +182,8 @@ impl ActionAuxiliaryHandlers {
 /// forwarded, while the purpose remains visible in the DOM and in code review.
 #[component]
 pub(crate) fn Action(props: ActionProps) -> Element {
-    let (extra_class, attributes) = split_class_attribute(props.attributes);
-    let class = action_class(props.variant, props.size, &extra_class);
+    let (extra_class, attributes) = props.attributes.split_class_attribute();
+    let class = props.variant.action_class(props.size, &extra_class);
     let onclick = props.onclick;
     let handlers = props.auxiliary_handlers;
     rsx! {
@@ -214,7 +218,7 @@ pub(crate) struct ActionLinkProps {
 /// Anchor counterpart to [`Action()`], for real downloads and navigation.
 #[component]
 pub(crate) fn ActionLink(props: ActionLinkProps) -> Element {
-    let class = action_class(props.variant, ActionSize::Compact, "");
+    let class = props.variant.action_class(ActionSize::Compact, "");
     rsx! {
         a {
             class,
@@ -268,8 +272,10 @@ impl FileInput {
 /// Keyboard-visible file picker styled by the same contract as every action.
 #[component]
 pub(crate) fn FileAction(props: FileActionProps) -> Element {
-    let (extra_class, attributes) = split_class_attribute(props.attributes);
-    let class = action_class(props.variant, ActionSize::Compact, &extra_class);
+    let (extra_class, attributes) = props.attributes.split_class_attribute();
+    let class = props
+        .variant
+        .action_class(ActionSize::Compact, &extra_class);
     rsx! {
         label {
             class: class,
@@ -299,7 +305,7 @@ pub(crate) struct ModeGroupProps {
 
 #[component]
 pub(crate) fn ModeGroup(props: ModeGroupProps) -> Element {
-    let class = class_with("ui-mode-group", props.class.as_deref());
+    let class = "ui-mode-group".with_class(props.class.as_deref());
     rsx! {
         div {
             class,
@@ -314,7 +320,7 @@ pub(crate) fn ModeGroup(props: ModeGroupProps) -> Element {
                 if let Some(direction) = direction {
                     event.prevent_default();
                     event.stop_propagation();
-                    select_adjacent_mode(direction);
+                    BrowserFocus::select_adjacent_mode(direction);
                 }
             },
             {props.children}
@@ -336,8 +342,8 @@ pub(crate) struct ModeActionProps {
 /// A mutually exclusive mode control with native radio semantics.
 #[component]
 pub(crate) fn ModeAction(props: ModeActionProps) -> Element {
-    let (extra_class, attributes) = split_class_attribute(props.attributes);
-    let class = action_class(ActionVariant::Segment, ActionSize::Compact, &extra_class);
+    let (extra_class, attributes) = props.attributes.split_class_attribute();
+    let class = ActionVariant::Segment.action_class(ActionSize::Compact, &extra_class);
     let onclick = props.onclick;
     rsx! {
         button {
@@ -372,7 +378,7 @@ pub(crate) struct ToggleProps {
 /// A binary option whose label and hit target are always part of the control.
 #[component]
 pub(crate) fn Toggle(props: ToggleProps) -> Element {
-    let class = class_with("ui-toggle", props.class.as_deref());
+    let class = "ui-toggle".with_class(props.class.as_deref());
     rsx! {
         label {
             class,
@@ -479,7 +485,7 @@ fn ConfirmationActions(props: ConfirmationActionsProps) -> Element {
                 purpose: ActionPurpose::Cancel,
                 variant: ActionVariant::Outline,
                 disabled: props.dismissal.pending,
-                onclick: move |_| dismiss_confirmation(
+                onclick: move |_| BrowserFocus::dismiss_confirmation(
                     props.response.on_cancel,
                     &props.dismissal.return_focus_id,
                 ),
@@ -502,9 +508,9 @@ fn ConfirmationActions(props: ConfirmationActionsProps) -> Element {
 #[component]
 pub(crate) fn InlineConfirmation(props: InlineConfirmationProps) -> Element {
     let cancel_id = format!("{}-cancel", props.id);
-    let class = class_with("ui-inline-confirmation", props.class.as_deref());
+    let class = "ui-inline-confirmation".with_class(props.class.as_deref());
     let initial_focus_id = cancel_id.clone();
-    use_effect(move || focus_after_render(initial_focus_id.clone()));
+    use_effect(move || BrowserFocus::after_render(initial_focus_id.clone()));
 
     let cancel_from_key = props.response.on_cancel;
     let return_from_key = props.dismissal.return_focus_id.clone();
@@ -519,7 +525,7 @@ pub(crate) fn InlineConfirmation(props: InlineConfirmationProps) -> Element {
                 event.stop_propagation();
                 if event.key() == Key::Escape && !pending {
                     event.prevent_default();
-                    dismiss_confirmation(cancel_from_key, &return_from_key);
+                    BrowserFocus::dismiss_confirmation(cancel_from_key, &return_from_key);
                 }
             },
             p { "{props.copy.message}" }
@@ -551,7 +557,7 @@ pub(crate) fn BlockingConfirmation(props: BlockingConfirmationProps) -> Element 
     let description_id = format!("{}-description", props.id);
     let cancel_id = format!("{}-cancel", props.id);
     let initial_focus_id = cancel_id.clone();
-    use_effect(move || focus_after_render(initial_focus_id.clone()));
+    use_effect(move || BrowserFocus::after_render(initial_focus_id.clone()));
 
     let cancel_from_key = props.response.on_cancel;
     let cancel_from_backdrop = props.response.on_cancel;
@@ -563,7 +569,7 @@ pub(crate) fn BlockingConfirmation(props: BlockingConfirmationProps) -> Element 
             class: "ui-dialog-backdrop",
             onclick: move |_| {
                 if !pending {
-                    dismiss_confirmation(cancel_from_backdrop, &return_from_backdrop);
+                    BrowserFocus::dismiss_confirmation(cancel_from_backdrop, &return_from_backdrop);
                 }
             },
         }
@@ -580,9 +586,9 @@ pub(crate) fn BlockingConfirmation(props: BlockingConfirmationProps) -> Element 
                 event.stop_propagation();
                 if event.key() == Key::Escape && !pending {
                     event.prevent_default();
-                    dismiss_confirmation(cancel_from_key, &return_from_key);
+                    BrowserFocus::dismiss_confirmation(cancel_from_key, &return_from_key);
                 } else if event.key() == Key::Tab
-                    && trap_focus_within(&dialog_id, event.modifiers().shift())
+                    && BrowserFocus::trap_within(&dialog_id, event.modifiers().shift())
                 {
                     event.prevent_default();
                 }
@@ -606,153 +612,164 @@ pub(crate) fn BlockingConfirmation(props: BlockingConfirmationProps) -> Element 
     }
 }
 
-fn action_class(variant: ActionVariant, size: ActionSize, extra: &str) -> String {
-    let base = format!("ui-action {} {}", variant.class_name(), size.class_name());
-    class_with(&base, Some(extra))
+trait AttributeClass {
+    fn split_class_attribute(self) -> (String, Vec<Attribute>);
 }
 
-fn split_class_attribute(attributes: Vec<Attribute>) -> (String, Vec<Attribute>) {
-    let mut class_names = Vec::new();
-    let mut forwarded = Vec::with_capacity(attributes.len());
-    for attribute in attributes {
-        match attribute {
-            Attribute {
-                name: "class",
-                value: AttributeValue::Text(class_name),
-                ..
-            } => class_names.push(class_name),
-            attribute => forwarded.push(attribute),
-        }
-    }
-    (class_names.join(" "), forwarded)
-}
-
-fn class_with(base: &str, extra: Option<&str>) -> String {
-    let extra = extra.map(str::trim).filter(|extra| !extra.is_empty());
-    extra.map_or_else(|| base.to_owned(), |extra| format!("{base} {extra}"))
-}
-
-fn dismiss_confirmation(on_cancel: EventHandler<()>, return_focus_id: &str) {
-    on_cancel.call(());
-    focus_after_render(return_focus_id.to_owned());
-}
-
-/// Move focus after Dioxus has committed a replacement subtree.
-pub(crate) fn focus_after_render(id: String) {
-    dioxus::dioxus_core::spawn_forever(async move {
-        for attempt in 0..16 {
-            let delay_ms = if attempt == 0 { 0 } else { 16 };
-            gloo_timers::future::TimeoutFuture::new(delay_ms).await;
-            if focus_element(&id) {
-                break;
+impl AttributeClass for Vec<Attribute> {
+    fn split_class_attribute(self) -> (String, Vec<Attribute>) {
+        let mut class_names = Vec::new();
+        let mut forwarded = Vec::with_capacity(self.len());
+        for attribute in self {
+            match attribute {
+                Attribute {
+                    name: "class",
+                    value: AttributeValue::Text(class_name),
+                    ..
+                } => class_names.push(class_name),
+                attribute => forwarded.push(attribute),
             }
         }
-    });
-}
-
-#[cfg(feature = "web")]
-pub(crate) fn focus_element(id: &str) -> bool {
-    use wasm_bindgen::JsCast as _;
-
-    let Some(element) = web_sys::window()
-        .and_then(|window| window.document())
-        .and_then(|document| document.get_element_by_id(id))
-        .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
-    else {
-        return false;
-    };
-    element.focus().is_ok()
-}
-
-#[cfg(not(feature = "web"))]
-pub(crate) fn focus_element(_id: &str) -> bool {
-    false
-}
-
-#[cfg(feature = "web")]
-fn select_adjacent_mode(direction: isize) {
-    use wasm_bindgen::JsCast as _;
-
-    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
-        return;
-    };
-    let Some(active) = document.active_element() else {
-        return;
-    };
-    let Ok(Some(group)) = active.closest("[role='radiogroup']") else {
-        return;
-    };
-    let Ok(nodes) = group.query_selector_all("[role='radio']:not([disabled])") else {
-        return;
-    };
-    let radios = (0..nodes.length())
-        .filter_map(|index| nodes.item(index))
-        .filter_map(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
-        .collect::<Vec<_>>();
-    if radios.is_empty() {
-        return;
-    }
-    let current = radios
-        .iter()
-        .position(|radio| active.is_same_node(Some(radio.as_ref())))
-        .unwrap_or_default();
-    let next = (current as isize + direction).rem_euclid(radios.len() as isize) as usize;
-    if let Some(radio) = radios.get(next) {
-        let _ = radio.focus();
-        radio.click();
+        (class_names.join(" "), forwarded)
     }
 }
 
-#[cfg(not(feature = "web"))]
-fn select_adjacent_mode(_direction: isize) {}
+trait ClassNames {
+    fn with_class(&self, extra: Option<&str>) -> String;
+}
 
-#[cfg(feature = "web")]
-pub(crate) fn trap_focus_within(container_id: &str, backwards: bool) -> bool {
-    use wasm_bindgen::JsCast as _;
-
-    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
-        return false;
-    };
-    let Some(container) = document.get_element_by_id(container_id) else {
-        return false;
-    };
-    let Ok(nodes) = container.query_selector_all(
-        "button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])",
-    ) else {
-        return false;
-    };
-    let focusable = (0..nodes.length())
-        .filter_map(|index| nodes.item(index))
-        .filter_map(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
-        .collect::<Vec<_>>();
-    if focusable.is_empty() {
-        return false;
+impl ClassNames for str {
+    fn with_class(&self, extra: Option<&str>) -> String {
+        let extra = extra.map(str::trim).filter(|extra| !extra.is_empty());
+        extra.map_or_else(|| self.to_owned(), |extra| format!("{self} {extra}"))
     }
-    let current = document.active_element().and_then(|active| {
-        focusable
+}
+
+pub(crate) struct BrowserFocus;
+
+impl BrowserFocus {
+    fn dismiss_confirmation(on_cancel: EventHandler<()>, return_focus_id: &str) {
+        on_cancel.call(());
+        Self::after_render(return_focus_id.to_owned());
+    }
+
+    /// Move focus after Dioxus has committed a replacement subtree.
+    pub(crate) fn after_render(id: String) {
+        dioxus::dioxus_core::spawn_forever(async move {
+            for attempt in 0..16 {
+                let delay_ms = if attempt == 0 { 0 } else { 16 };
+                gloo_timers::future::TimeoutFuture::new(delay_ms).await;
+                if Self::element(&id) {
+                    break;
+                }
+            }
+        });
+    }
+
+    #[cfg(feature = "web")]
+    fn element(id: &str) -> bool {
+        use wasm_bindgen::JsCast as _;
+
+        let Some(element) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id(id))
+            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+        else {
+            return false;
+        };
+        element.focus().is_ok()
+    }
+
+    #[cfg(not(feature = "web"))]
+    fn element(_id: &str) -> bool {
+        false
+    }
+
+    #[cfg(feature = "web")]
+    fn select_adjacent_mode(direction: isize) {
+        use wasm_bindgen::JsCast as _;
+
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let Some(active) = document.active_element() else {
+            return;
+        };
+        let Ok(Some(group)) = active.closest("[role='radiogroup']") else {
+            return;
+        };
+        let Ok(nodes) = group.query_selector_all("[role='radio']:not([disabled])") else {
+            return;
+        };
+        let radios = (0..nodes.length())
+            .filter_map(|index| nodes.item(index))
+            .filter_map(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
+            .collect::<Vec<_>>();
+        if radios.is_empty() {
+            return;
+        }
+        let current = radios
             .iter()
-            .position(|item| active.is_same_node(Some(item.as_ref())))
-    });
-    let next = if backwards {
-        current
-            .and_then(|index| index.checked_sub(1))
-            .unwrap_or_else(|| focusable.len() - 1)
-    } else {
-        current.map_or(0, |index| (index + 1) % focusable.len())
-    };
-    focusable
-        .get(next)
-        .is_some_and(|element| element.focus().is_ok())
-}
+            .position(|radio| active.is_same_node(Some(radio.as_ref())))
+            .unwrap_or_default();
+        let next = (current as isize + direction).rem_euclid(radios.len() as isize) as usize;
+        if let Some(radio) = radios.get(next) {
+            let _ = radio.focus();
+            radio.click();
+        }
+    }
 
-#[cfg(not(feature = "web"))]
-pub(crate) fn trap_focus_within(_container_id: &str, _backwards: bool) -> bool {
-    false
+    #[cfg(not(feature = "web"))]
+    fn select_adjacent_mode(_direction: isize) {}
+
+    #[cfg(feature = "web")]
+    fn trap_within(container_id: &str, backwards: bool) -> bool {
+        use wasm_bindgen::JsCast as _;
+
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return false;
+        };
+        let Some(container) = document.get_element_by_id(container_id) else {
+            return false;
+        };
+        let Ok(nodes) = container.query_selector_all(
+            "button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])",
+        ) else {
+            return false;
+        };
+        let focusable = (0..nodes.length())
+            .filter_map(|index| nodes.item(index))
+            .filter_map(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
+            .collect::<Vec<_>>();
+        if focusable.is_empty() {
+            return false;
+        }
+        let current = document.active_element().and_then(|active| {
+            focusable
+                .iter()
+                .position(|item| active.is_same_node(Some(item.as_ref())))
+        });
+        let next = if backwards {
+            current
+                .and_then(|index| index.checked_sub(1))
+                .unwrap_or_else(|| focusable.len() - 1)
+        } else {
+            current.map_or(0, |index| (index + 1) % focusable.len())
+        };
+        focusable
+            .get(next)
+            .is_some_and(|element| element.focus().is_ok())
+    }
+
+    #[cfg(not(feature = "web"))]
+    fn trap_within(_container_id: &str, _backwards: bool) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ActionPurpose, ActionSize, ActionVariant, action_class};
+    use super::{ActionPurpose, ActionSize, ActionVariant};
 
     #[test]
     fn action_vocabulary_is_stable() {
@@ -766,11 +783,11 @@ mod tests {
     #[test]
     fn action_classes_separate_presentation_from_layout() {
         assert_eq!(
-            action_class(ActionVariant::Outline, ActionSize::Standard, "local-layout"),
+            ActionVariant::Outline.action_class(ActionSize::Standard, "local-layout"),
             "ui-action ui-action--outline ui-action--standard local-layout"
         );
         assert_eq!(
-            action_class(ActionVariant::Quiet, ActionSize::Compact, ""),
+            ActionVariant::Quiet.action_class(ActionSize::Compact, ""),
             "ui-action ui-action--quiet ui-action--compact"
         );
     }

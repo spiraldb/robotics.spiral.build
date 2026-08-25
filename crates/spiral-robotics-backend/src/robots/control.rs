@@ -32,36 +32,43 @@ pub(crate) trait RobotControlPort {
     ) -> Result<(), String>;
 }
 
-/// Execute operator-facing robot-control actions as one control-thread command.
-pub(crate) async fn execute<P: RobotControlPort + ?Sized>(
-    control: &P,
-    command: RobotControlCommand,
-) -> Result<(), OperationError> {
-    let result = match command {
-        RobotControlCommand::Hold { robot } => control.hold(&robot).await,
-        RobotControlCommand::Release { robot } => control.release(&robot).await,
-        RobotControlCommand::MoveJoints { robot, normalized } => {
-            if normalized.is_empty() {
-                return Err(OperationError::InvalidInput(
-                    "no joints were given a target".to_owned(),
-                ));
+pub(crate) struct RobotControlActions<'a, P: RobotControlPort + ?Sized> {
+    control: &'a P,
+}
+
+impl<'a, P: RobotControlPort + ?Sized> RobotControlActions<'a, P> {
+    pub(crate) const fn new(control: &'a P) -> Self {
+        Self { control }
+    }
+
+    /// Execute operator-facing robot-control actions as one control-thread command.
+    pub(crate) async fn execute(&self, command: RobotControlCommand) -> Result<(), OperationError> {
+        let result = match command {
+            RobotControlCommand::Hold { robot } => self.control.hold(&robot).await,
+            RobotControlCommand::Release { robot } => self.control.release(&robot).await,
+            RobotControlCommand::MoveJoints { robot, normalized } => {
+                if normalized.is_empty() {
+                    return Err(OperationError::InvalidInput(
+                        "no joints were given a target".to_owned(),
+                    ));
+                }
+                let normalized = normalized
+                    .into_iter()
+                    .map(|(joint, value)| {
+                        NormalizedPosition::new(value)
+                            .map(|value| (joint.clone(), value))
+                            .map_err(|error| {
+                                OperationError::InvalidInput(format!(
+                                    "joint {joint:?} has an invalid target: {error}"
+                                ))
+                            })
+                    })
+                    .collect::<Result<BTreeMap<_, _>, _>>()?;
+                self.control.set_joint_goals(&robot, normalized).await
             }
-            let normalized = normalized
-                .into_iter()
-                .map(|(joint, value)| {
-                    NormalizedPosition::new(value)
-                        .map(|value| (joint.clone(), value))
-                        .map_err(|error| {
-                            OperationError::InvalidInput(format!(
-                                "joint {joint:?} has an invalid target: {error}"
-                            ))
-                        })
-                })
-                .collect::<Result<BTreeMap<_, _>, _>>()?;
-            control.set_joint_goals(&robot, normalized).await
-        }
-    };
-    result.map_err(OperationError::conflict)
+        };
+        result.map_err(OperationError::conflict)
+    }
 }
 
 #[cfg(test)]
@@ -100,14 +107,12 @@ mod tests {
     #[tokio::test]
     async fn dispatches_one_semantic_command_to_the_port() {
         let control = FakeControl::default();
-        execute(
-            &control,
-            RobotControlCommand::Hold {
+        RobotControlActions::new(&control)
+            .execute(RobotControlCommand::Hold {
                 robot: "leader".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+            })
+            .await
+            .unwrap();
         assert_eq!(*control.calls.lock().unwrap(), ["hold:leader"]);
     }
 
@@ -117,14 +122,12 @@ mod tests {
             failure: Some("robot is disconnected".to_owned()),
             ..FakeControl::default()
         };
-        let error = execute(
-            &control,
-            RobotControlCommand::Release {
+        let error = RobotControlActions::new(&control)
+            .execute(RobotControlCommand::Release {
                 robot: "follower".to_owned(),
-            },
-        )
-        .await
-        .unwrap_err();
+            })
+            .await
+            .unwrap_err();
         assert_eq!(
             error,
             OperationError::Conflict("robot is disconnected".to_owned())
@@ -144,15 +147,13 @@ mod tests {
                 f64::from_bits((-1.0_f64).to_bits() + 1),
             )]),
         ] {
-            let error = execute(
-                &control,
-                RobotControlCommand::MoveJoints {
+            let error = RobotControlActions::new(&control)
+                .execute(RobotControlCommand::MoveJoints {
                     robot: "arm".to_owned(),
                     normalized,
-                },
-            )
-            .await
-            .unwrap_err();
+                })
+                .await
+                .unwrap_err();
             assert!(matches!(error, OperationError::InvalidInput(_)));
         }
         assert!(control.calls.lock().unwrap().is_empty());
@@ -162,15 +163,13 @@ mod tests {
     async fn exact_normalized_boundaries_reach_the_adapter() {
         let control = FakeControl::default();
         for value in [-1.0, 1.0] {
-            execute(
-                &control,
-                RobotControlCommand::MoveJoints {
+            RobotControlActions::new(&control)
+                .execute(RobotControlCommand::MoveJoints {
                     robot: "arm".to_owned(),
                     normalized: BTreeMap::from([("shoulder".to_owned(), value)]),
-                },
-            )
-            .await
-            .unwrap();
+                })
+                .await
+                .unwrap();
         }
         assert_eq!(*control.calls.lock().unwrap(), ["move:arm", "move:arm"]);
     }

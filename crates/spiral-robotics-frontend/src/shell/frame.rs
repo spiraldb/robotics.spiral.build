@@ -1,14 +1,16 @@
 //! Low-frequency Studio chrome around the activity workspaces.
 
-use crate::components::interaction::{Action, ActionPurpose, ActionVariant, focus_after_render};
+use crate::components::interaction::{Action, ActionPurpose, ActionVariant, BrowserFocus};
 use dioxus::prelude::*;
 use spiral_robotics_api::status::BackendReadinessState;
 use spiral_robotics_api::workflow::{WorkflowRunPhase, WorkflowStateResponse};
 
+use crate::activities::data::workbench::EpisodeIdPresentation;
 use crate::components::icons::{
     DataIcon, NotificationIcon, RobotPanelIcon, RolloutIcon, SettingsIcon, TrainingIcon,
     WorkflowIcon,
 };
+use crate::format::ClockPresentation;
 use crate::shell::activity::Activity;
 use crate::shell::notifications::MessageAction;
 
@@ -163,7 +165,7 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
     let recording_label = telemetry.recording().as_ref().map(|recording| {
         format!(
             "Recording {} · {}",
-            format_elapsed_status(recording.elapsed_seconds()),
+            recording.elapsed_seconds().clock_label(),
             recording.dataset_id(),
         )
     });
@@ -197,9 +199,9 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
     use_effect(use_reactive((&center_open,), move |(center_open,)| {
         let was_open = center_was_open();
         if center_open && !was_open {
-            focus_after_render("notification-center-close".to_owned());
+            BrowserFocus::after_render("notification-center-close".to_owned());
         } else if !center_open && was_open {
-            focus_after_render("notification-center-trigger".to_owned());
+            BrowserFocus::after_render("notification-center-trigger".to_owned());
         }
         if was_open != center_open {
             center_was_open.set(center_open);
@@ -263,7 +265,7 @@ pub(crate) fn StatusBar(mode: Activity, on_open_episode: EventHandler<String>) -
                                 div { class: "notification-item-heading",
                                     span { class: "notification-severity", "{message.severity().label()}" }
                                     strong { "{message.source().label()}" }
-                                    time { "{format_message_age(now, message.raised_ms())}" }
+                                    time { "{message.age_label(now)}" }
                                 }
                                 p { "{message.text()}" }
                                 div { class: "notification-item-actions",
@@ -406,7 +408,7 @@ fn SavedToDataCue(episode: String) -> Element {
             }
             span {
                 strong { "Saved to Data" }
-                small { "Episode {crate::activities::data::workbench::short_id(&episode)}" }
+                small { "Episode {episode.short_episode_id()}" }
             }
         }
     }
@@ -430,23 +432,6 @@ fn NotificationTrigger(unread: usize, open: bool) -> Element {
             if unread > 0 { span { "{unread}" } }
         }
     }
-}
-
-fn format_message_age(now_ms: f64, raised_ms: f64) -> String {
-    let seconds = ((now_ms - raised_ms) / 1_000.0).max(0.0);
-    if seconds < 60.0 {
-        "now".to_owned()
-    } else if seconds < 3_600.0 {
-        format!("{}m", (seconds / 60.0).floor() as u64)
-    } else {
-        format!("{}h", (seconds / 3_600.0).floor() as u64)
-    }
-}
-
-pub(crate) fn format_elapsed_status(seconds: f64) -> String {
-    let minutes = (seconds / 60.0).floor() as u64;
-    let remainder = seconds - minutes as f64 * 60.0;
-    format!("{minutes}:{remainder:04.1}")
 }
 
 #[derive(Debug, Eq, PartialEq)]

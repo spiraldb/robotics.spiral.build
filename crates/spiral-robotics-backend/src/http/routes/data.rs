@@ -1,4 +1,5 @@
 use super::*;
+use spiral_robotics_storage::ingestion::HuggingFaceDatasetDiscovery as _;
 
 struct CatalogReservation {
     lease: Arc<CatalogMutationLease>,
@@ -14,121 +15,133 @@ impl Drop for CatalogReservation {
 
 /// Bootstrap settings remain available even when the configured catalog does
 /// not, so an operator can repair or select the Spiral destination.
-pub(super) fn bootstrap_router() -> Router<AppState> {
-    Router::new()
-        .route(
-            "/settings/data",
-            get(get_data_settings).patch(update_data_settings),
-        )
-        .route("/settings/data/test/spiral", post(test_spiral))
-        .route("/settings/data/test/training", post(test_training_runtime))
-        .route(
-            "/datasets/huggingface/inspect",
-            post(inspect_huggingface_dataset),
-        )
-}
-
-pub(super) fn catalog_router() -> Router<AppState> {
-    Router::new()
-        .route("/spiral/query", post(spiral_query))
-        .route("/spiral/relations", get(spiral_relations))
-        .route("/spiral/project-relations", get(project_data_relations))
-        .route("/spiral/replay", post(start_spiral_replay))
-        .route("/spiral/video.mp4", get(spiral_video))
-        .route(
-            "/datasets/huggingface/import",
-            post(import_huggingface_dataset),
-        )
-        .route("/project/export", get(export_project))
-        .route(
-            "/project/import",
-            post(import_project).layer(DefaultBodyLimit::max(
-                spiral_robotics_storage::bundle::ProjectBundle::MAX_BYTES,
-            )),
-        )
-        .route("/episodes/export", get(export_episodes))
-        .route(
-            "/episodes/import",
-            post(import_episodes).layer(DefaultBodyLimit::max(
-                spiral_robotics_storage::bundle::EpisodeBundle::MAX_BYTES,
-            )),
-        )
-}
-
-async fn spiral_relations(
-    State(state): State<AppState>,
-) -> Result<Json<spiral_robotics_api::workflow::WorkflowRelationsResponse>, Failure> {
-    state
-        .storage()
-        .workflow_relations()
-        .await
-        .map(Json)
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))
-}
-
-async fn project_data_relations(
-    State(state): State<AppState>,
-) -> Result<Json<spiral_robotics_api::relations::ProjectDataRelationsResponse>, Failure> {
-    state
-        .storage()
-        .project_data_relations()
-        .await
-        .map(Json)
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))
-}
-
-async fn inspect_huggingface_dataset(
-    State(state): State<AppState>,
-    Json(request): Json<spiral_robotics_api::datasets::HuggingFaceDatasetRequest>,
-) -> Result<Json<spiral_robotics_api::datasets::HuggingFaceDatasetInspection>, Failure> {
-    spiral_robotics_storage::ingestion::inspect_huggingface_dataset(
-        request,
-        state.storage().workflow_model_store().namespace(),
-    )
-    .await
-    .map(Json)
-    .map_err(hugging_face_inspection_failure)
-}
-
-async fn import_huggingface_dataset(
-    State(state): State<AppState>,
-    Json(request): Json<spiral_robotics_api::datasets::HuggingFaceDatasetRequest>,
-) -> Result<Json<spiral_robotics_api::datasets::HuggingFaceDatasetImportSummary>, Failure> {
-    let inspection = spiral_robotics_storage::ingestion::inspect_huggingface_dataset(
-        request,
-        state.storage().workflow_model_store().namespace(),
-    )
-    .await
-    .map_err(hugging_face_inspection_failure)?;
-    let token = state
-        .catalog_lease()
-        .try_acquire(CatalogLeaseOwner::DatasetImport)
-        .ok_or_else(|| {
-            Failure::conflict(
-                "Wait for the current recording or catalog change before importing a dataset",
+impl AppState {
+    pub(super) fn data_bootstrap_router() -> Router<Self> {
+        Router::new()
+            .route(
+                "/settings/data",
+                get(Self::get_data_settings).patch(Self::update_data_settings),
             )
-        })?;
-    let _reservation = CatalogReservation {
-        lease: state.catalog_lease().clone(),
-        token,
-    };
-    state.require_import_idle("a dataset")?;
-    let storage = state.storage().clone();
-    tokio::task::spawn_blocking(move || storage.import_huggingface_dataset(inspection))
-        .await
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
-        .map(Json)
-        .map_err(Failure::import)
+            .route("/settings/data/test/spiral", post(Self::test_spiral))
+            .route(
+                "/settings/data/test/training",
+                post(Self::test_training_runtime),
+            )
+            .route(
+                "/datasets/huggingface/inspect",
+                post(Self::inspect_huggingface_dataset),
+            )
+    }
+
+    pub(super) fn data_catalog_router() -> Router<Self> {
+        Router::new()
+            .route("/spiral/query", post(Self::spiral_query))
+            .route("/spiral/relations", get(Self::spiral_relations))
+            .route(
+                "/spiral/project-relations",
+                get(Self::project_data_relations),
+            )
+            .route("/spiral/replay", post(Self::start_spiral_replay))
+            .route("/spiral/video.mp4", get(Self::spiral_video))
+            .route(
+                "/datasets/huggingface/import",
+                post(Self::import_huggingface_dataset),
+            )
+            .route("/project/export", get(Self::export_project))
+            .route(
+                "/project/import",
+                post(Self::import_project).layer(DefaultBodyLimit::max(
+                    spiral_robotics_storage::bundle::ProjectBundle::MAX_BYTES,
+                )),
+            )
+            .route("/episodes/export", get(Self::export_episodes))
+            .route(
+                "/episodes/import",
+                post(Self::import_episodes).layer(DefaultBodyLimit::max(
+                    spiral_robotics_storage::bundle::EpisodeBundle::MAX_BYTES,
+                )),
+            )
+    }
 }
 
-fn hugging_face_inspection_failure(error: String) -> Failure {
-    let remote = error.starts_with("contacting Hugging Face")
-        || error.starts_with("listing Hugging Face")
-        || error.starts_with("decoding Hugging Face");
-    if remote {
-        Failure(StatusCode::BAD_GATEWAY, error)
-    } else {
-        Failure::bad_request(error)
+impl AppState {
+    async fn spiral_relations(
+        State(state): State<Self>,
+    ) -> Result<Json<spiral_robotics_api::workflow::WorkflowRelationsResponse>, Failure> {
+        state
+            .storage()
+            .workflow_relations()
+            .await
+            .map(Json)
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))
+    }
+
+    async fn project_data_relations(
+        State(state): State<Self>,
+    ) -> Result<Json<spiral_robotics_api::relations::ProjectDataRelationsResponse>, Failure> {
+        state
+            .storage()
+            .project_data_relations()
+            .await
+            .map(Json)
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))
+    }
+
+    async fn inspect_huggingface_dataset(
+        State(state): State<Self>,
+        Json(request): Json<spiral_robotics_api::datasets::HuggingFaceDatasetRequest>,
+    ) -> Result<Json<spiral_robotics_api::datasets::HuggingFaceDatasetInspection>, Failure> {
+        spiral_robotics_api::datasets::HuggingFaceDatasetInspection::discover(
+            request,
+            state.storage().workflow_model_store().namespace(),
+        )
+        .await
+        .map(Json)
+        .map_err(Failure::hugging_face_inspection)
+    }
+
+    async fn import_huggingface_dataset(
+        State(state): State<Self>,
+        Json(request): Json<spiral_robotics_api::datasets::HuggingFaceDatasetRequest>,
+    ) -> Result<Json<spiral_robotics_api::datasets::HuggingFaceDatasetImportSummary>, Failure> {
+        let inspection = spiral_robotics_api::datasets::HuggingFaceDatasetInspection::discover(
+            request,
+            state.storage().workflow_model_store().namespace(),
+        )
+        .await
+        .map_err(Failure::hugging_face_inspection)?;
+        let token = state
+            .catalog_lease()
+            .try_acquire(CatalogLeaseOwner::DatasetImport)
+            .ok_or_else(|| {
+                Failure::conflict(
+                    "Wait for the current recording or catalog change before importing a dataset",
+                )
+            })?;
+        let _reservation = CatalogReservation {
+            lease: state.catalog_lease().clone(),
+            token,
+        };
+        state.require_import_idle("a dataset")?;
+        let storage = state.storage().clone();
+        tokio::task::spawn_blocking(move || storage.import_huggingface_dataset(inspection))
+            .await
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+            .map(Json)
+            .map_err(Failure::import)
+    }
+}
+
+impl Failure {
+    fn hugging_face_inspection(error: String) -> Self {
+        let remote = error.starts_with("contacting Hugging Face")
+            || error.starts_with("listing Hugging Face")
+            || error.starts_with("decoding Hugging Face");
+        if remote {
+            Self(StatusCode::BAD_GATEWAY, error)
+        } else {
+            Self::bad_request(error)
+        }
     }
 }
 
@@ -137,153 +150,155 @@ struct EpisodeTransferQuery {
     dataset_id: String,
 }
 
-async fn export_project(State(state): State<AppState>) -> Result<Response, Failure> {
-    let storage = state.storage().clone();
-    let bytes = tokio::task::spawn_blocking(move || storage.export_project_bundle())
-        .await
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(
-            header::CONTENT_TYPE,
-            "application/vnd.spiral-robotics.project",
-        )
-        .header(
-            header::CONTENT_DISPOSITION,
-            "attachment; filename=spiral-robotics-project.spiral-project",
-        )
-        .header(header::CONTENT_LENGTH, bytes.len())
-        .header(header::CACHE_CONTROL, "private, no-store")
-        .body(Body::from(bytes))
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
-}
-
-async fn import_project(
-    State(state): State<AppState>,
-    body: Bytes,
-) -> Result<Json<spiral_robotics_api::datasets::ProjectImportSummary>, Failure> {
-    let token = state
-        .catalog_lease()
-        .try_acquire(CatalogLeaseOwner::ProjectImport)
-        .ok_or_else(|| {
-            Failure(
-                StatusCode::CONFLICT,
-                "Wait for the current recording or catalog change before importing a project"
-                    .to_owned(),
+impl AppState {
+    async fn export_project(State(state): State<Self>) -> Result<Response, Failure> {
+        let storage = state.storage().clone();
+        let bytes = tokio::task::spawn_blocking(move || storage.export_project_bundle())
+            .await
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(
+                header::CONTENT_TYPE,
+                "application/vnd.spiral-robotics.project",
             )
-        })?;
-    let _reservation = CatalogReservation {
-        lease: state.catalog_lease().clone(),
-        token,
-    };
-    if body.is_empty() {
-        return Err(Failure::bad_request(
-            "choose a .spiral-project file to import",
-        ));
-    }
-    state.require_project_import_idle()?;
-    state.disconnect_all_robots().await?;
-    let storage = state.storage().clone();
-    let summary = tokio::task::spawn_blocking(move || storage.import_project_bundle(&body))
-        .await
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
-        .map_err(Failure::import)?;
-    super::auto_connect_saved_robots(state.clone()).await;
-    state.preferences().replace(
-        state
-            .storage()
-            .load_studio_preferences()
-            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?,
-    );
-    state
-        .training()
-        .reload_from_storage()
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
-    state.training().refresh_readiness().await;
-    state
-        .rollout()
-        .reload_from_storage()
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
-    state
-        .workflow()
-        .reload_from_storage()
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
-    state
-        .workflow_agent()
-        .reload_from_storage()
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
-    Ok(Json(summary))
-}
-
-async fn export_episodes(
-    State(state): State<AppState>,
-    Query(query): Query<EpisodeTransferQuery>,
-) -> Result<Response, Failure> {
-    if !spiral_robotics_storage::is_dataset_id(&query.dataset_id) {
-        return Err(Failure::bad_request(
-            "dataset ID must contain 1–96 letters, numbers, '.', '_' or '-'",
-        ));
-    }
-    let dataset_id = query.dataset_id;
-    let filename = format!("{dataset_id}.spiral-episodes");
-    let storage = state.storage().clone();
-    let bytes = tokio::task::spawn_blocking(move || storage.export_episode_bundle(&dataset_id))
-        .await
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
-        .map_err(Failure::bad_request)?;
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(
-            header::CONTENT_TYPE,
-            "application/vnd.spiral-robotics.episodes",
-        )
-        .header(
-            header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{filename}\""),
-        )
-        .header(header::CONTENT_LENGTH, bytes.len())
-        .header(header::CACHE_CONTROL, "private, no-store")
-        .body(Body::from(bytes))
-        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
-}
-
-async fn import_episodes(
-    State(state): State<AppState>,
-    Query(query): Query<EpisodeTransferQuery>,
-    body: Bytes,
-) -> Result<Json<spiral_robotics_api::datasets::EpisodeImportSummary>, Failure> {
-    if !spiral_robotics_storage::is_dataset_id(&query.dataset_id) {
-        return Err(Failure::bad_request(
-            "dataset ID must contain 1–96 letters, numbers, '.', '_' or '-'",
-        ));
-    }
-    let token = state
-        .catalog_lease()
-        .try_acquire(CatalogLeaseOwner::EpisodeImport)
-        .ok_or_else(|| {
-            Failure::conflict(
-                "Wait for the current recording or catalog change before importing episodes",
+            .header(
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=spiral-robotics-project.spiral-project",
             )
-        })?;
-    let _reservation = CatalogReservation {
-        lease: state.catalog_lease().clone(),
-        token,
-    };
-    state.require_import_idle("episodes")?;
-    if body.is_empty() {
-        return Err(Failure::bad_request(
-            "choose a .spiral-episodes file to import",
-        ));
+            .header(header::CONTENT_LENGTH, bytes.len())
+            .header(header::CACHE_CONTROL, "private, no-store")
+            .body(Body::from(bytes))
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
     }
-    let storage = state.storage().clone();
-    let dataset_id = query.dataset_id;
-    let summary =
-        tokio::task::spawn_blocking(move || storage.import_episode_bundle(&dataset_id, &body))
+
+    async fn import_project(
+        State(state): State<Self>,
+        body: Bytes,
+    ) -> Result<Json<spiral_robotics_api::datasets::ProjectImportSummary>, Failure> {
+        let token = state
+            .catalog_lease()
+            .try_acquire(CatalogLeaseOwner::ProjectImport)
+            .ok_or_else(|| {
+                Failure(
+                    StatusCode::CONFLICT,
+                    "Wait for the current recording or catalog change before importing a project"
+                        .to_owned(),
+                )
+            })?;
+        let _reservation = CatalogReservation {
+            lease: state.catalog_lease().clone(),
+            token,
+        };
+        if body.is_empty() {
+            return Err(Failure::bad_request(
+                "choose a .spiral-project file to import",
+            ));
+        }
+        state.require_project_import_idle()?;
+        state.disconnect_all_robots().await?;
+        let storage = state.storage().clone();
+        let summary = tokio::task::spawn_blocking(move || storage.import_project_bundle(&body))
             .await
             .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
             .map_err(Failure::import)?;
-    Ok(Json(summary))
+        state.auto_connect_saved_robots().await;
+        state.preferences().replace(
+            state
+                .storage()
+                .load_studio_preferences()
+                .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?,
+        );
+        state
+            .training()
+            .reload_from_storage()
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        state.training().refresh_readiness().await;
+        state
+            .rollout()
+            .reload_from_storage()
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        state
+            .workflow()
+            .reload_from_storage()
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        state
+            .workflow_agent()
+            .reload_from_storage()
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        Ok(Json(summary))
+    }
+
+    async fn export_episodes(
+        State(state): State<Self>,
+        Query(query): Query<EpisodeTransferQuery>,
+    ) -> Result<Response, Failure> {
+        if !spiral_robotics_storage::StorageSchema::is_dataset_id(&query.dataset_id) {
+            return Err(Failure::bad_request(
+                "dataset ID must contain 1–96 letters, numbers, '.', '_' or '-'",
+            ));
+        }
+        let dataset_id = query.dataset_id;
+        let filename = format!("{dataset_id}.spiral-episodes");
+        let storage = state.storage().clone();
+        let bytes = tokio::task::spawn_blocking(move || storage.export_episode_bundle(&dataset_id))
+            .await
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+            .map_err(Failure::bad_request)?;
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(
+                header::CONTENT_TYPE,
+                "application/vnd.spiral-robotics.episodes",
+            )
+            .header(
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            )
+            .header(header::CONTENT_LENGTH, bytes.len())
+            .header(header::CACHE_CONTROL, "private, no-store")
+            .body(Body::from(bytes))
+            .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+    }
+
+    async fn import_episodes(
+        State(state): State<Self>,
+        Query(query): Query<EpisodeTransferQuery>,
+        body: Bytes,
+    ) -> Result<Json<spiral_robotics_api::datasets::EpisodeImportSummary>, Failure> {
+        if !spiral_robotics_storage::StorageSchema::is_dataset_id(&query.dataset_id) {
+            return Err(Failure::bad_request(
+                "dataset ID must contain 1–96 letters, numbers, '.', '_' or '-'",
+            ));
+        }
+        let token = state
+            .catalog_lease()
+            .try_acquire(CatalogLeaseOwner::EpisodeImport)
+            .ok_or_else(|| {
+                Failure::conflict(
+                    "Wait for the current recording or catalog change before importing episodes",
+                )
+            })?;
+        let _reservation = CatalogReservation {
+            lease: state.catalog_lease().clone(),
+            token,
+        };
+        state.require_import_idle("episodes")?;
+        if body.is_empty() {
+            return Err(Failure::bad_request(
+                "choose a .spiral-episodes file to import",
+            ));
+        }
+        let storage = state.storage().clone();
+        let dataset_id = query.dataset_id;
+        let summary =
+            tokio::task::spawn_blocking(move || storage.import_episode_bundle(&dataset_id, &body))
+                .await
+                .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+                .map_err(Failure::import)?;
+        Ok(Json(summary))
+    }
 }
 
 impl AppState {
@@ -321,9 +336,10 @@ impl AppState {
                 .iter()
                 .any(|run| run.phase().active())
             || matches!(
-                rollout_application::snapshot(&super::training_rollout::RolloutHttpAdapter::new(
+                RolloutActions::new(&super::training_rollout::RolloutHttpAdapter::new(
                     self.rollout().clone(),
                 ))
+                .snapshot()
                 .phase(),
                 CapabilityRolloutPhase::Loading
                     | CapabilityRolloutPhase::WarmingUp
@@ -710,8 +726,10 @@ impl From<StartSpiralReplayRequest> for StartSpiralReplayCommand {
     }
 }
 
-async fn get_data_settings(State(state): State<AppState>) -> Json<DataSettings> {
-    Json(DataHttpAdapter { state: &state }.settings().into())
+impl AppState {
+    async fn get_data_settings(State(state): State<Self>) -> Json<DataSettings> {
+        Json(DataHttpAdapter { state: &state }.settings().into())
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -780,40 +798,46 @@ impl DestinationChangeContext {
     }
 }
 
-async fn update_data_settings(
-    State(state): State<AppState>,
-    Json(request): Json<UpdateDataSettingsRequest>,
-) -> Result<Json<DataSettings>, Failure> {
-    let requested_endpoint =
-        spiral_robotics_storage::normalize_spiral_endpoint(request.spiral_endpoint())
+impl AppState {
+    async fn update_data_settings(
+        State(state): State<Self>,
+        Json(request): Json<UpdateDataSettingsRequest>,
+    ) -> Result<Json<DataSettings>, Failure> {
+        let requested_endpoint =
+            spiral_robotics_storage::ServiceEndpoint::spiral(request.spiral_endpoint())
+                .map(spiral_robotics_storage::ServiceEndpoint::into_string)
+                .map_err(Failure::bad_request)?;
+        let requested_spfs_endpoint =
+            spiral_robotics_storage::ServiceEndpoint::spiral_spfs(request.spiral_spfs_endpoint())
+                .map(spiral_robotics_storage::ServiceEndpoint::into_string)
+                .map_err(Failure::bad_request)?;
+        let requested_training_endpoint =
+            spiral_robotics_storage::ServiceEndpoint::training_runtime(
+                request.training().endpoint(),
+            )
+            .map(spiral_robotics_storage::ServiceEndpoint::into_string)
             .map_err(Failure::bad_request)?;
-    let requested_spfs_endpoint =
-        spiral_robotics_storage::normalize_spiral_spfs_endpoint(request.spiral_spfs_endpoint())
-            .map_err(Failure::bad_request)?;
-    let requested_training_endpoint =
-        spiral_robotics_storage::normalize_training_runtime_endpoint(request.training().endpoint())
-            .map_err(Failure::bad_request)?;
-    let endpoint_changed = state.storage().spiral_endpoint() != requested_endpoint
-        || state.storage().spiral_spfs_endpoint() != requested_spfs_endpoint;
-    let project_changed = state.storage().project_id() != request.project_id().trim();
-    let credentials_change_requested = request.clear_client_secret()
-        || !request.client_secret().trim().is_empty()
-        || state.backend_state().client_id() != request.client_id();
-    let training_endpoint_changed =
-        state.preferences().get().training().endpoint() != requested_training_endpoint;
-    let training_is_active = state
-        .training()
-        .snapshot()
-        .runs()
-        .iter()
-        .any(|run| run.phase().active());
-    if training_endpoint_changed && training_is_active {
-        return Err(Failure::conflict(
-            "Stop the active training job before changing its remote worker endpoint",
-        ));
-    }
-    let _reservation = if project_changed || endpoint_changed || credentials_change_requested {
-        let token = state
+        let endpoint_changed = state.storage().spiral_endpoint() != requested_endpoint
+            || state.storage().spiral_spfs_endpoint() != requested_spfs_endpoint;
+        let project_changed = state.storage().project_id() != request.project_id().trim();
+        let credentials_change_requested = request.clear_client_secret()
+            || !request.client_secret().trim().is_empty()
+            || state.backend_state().client_id() != request.client_id();
+        let training_endpoint_changed =
+            state.preferences().get().training().endpoint() != requested_training_endpoint;
+        let training_is_active = state
+            .training()
+            .snapshot()
+            .runs()
+            .iter()
+            .any(|run| run.phase().active());
+        if training_endpoint_changed && training_is_active {
+            return Err(Failure::conflict(
+                "Stop the active training job before changing its remote worker endpoint",
+            ));
+        }
+        let _reservation = if project_changed || endpoint_changed || credentials_change_requested {
+            let token = state
             .catalog_lease()
             .try_acquire(CatalogLeaseOwner::ProjectSwitch)
             .ok_or_else(|| {
@@ -821,101 +845,104 @@ async fn update_data_settings(
                     "Wait for the current recording or catalog change before changing the Spiral destination",
                 )
             })?;
-        let reservation = CatalogReservation {
-            lease: state.catalog_lease().clone(),
-            token,
-        };
-        if state.workflow_agent().is_active() {
-            return Err(Failure::conflict(
-                "Stop the active Workflow Assistant turn before changing the Spiral destination",
-            ));
-        }
-        let hardware = state.hardware().state();
-        let rollout_is_active = matches!(
-            rollout_application::snapshot(&super::training_rollout::RolloutHttpAdapter::new(
-                state.rollout().clone(),
-            ))
-            .phase(),
-            CapabilityRolloutPhase::Loading
-                | CapabilityRolloutPhase::WarmingUp
-                | CapabilityRolloutPhase::Running
-                | CapabilityRolloutPhase::Stopping
-        );
-        let current_robot_ids = state.workspace().try_list().ok().map(|records| {
-            records
-                .into_iter()
-                .map(|record| record.id().to_owned())
-                .collect::<BTreeSet<_>>()
-        });
-        match DestinationChangeContext::new(&hardware, current_robot_ids.as_ref())
-            .with_active_work(
-                training_is_active
-                    || rollout_is_active
-                    || state.workflow().state().snapshot().phase().active(),
-            )
-            .admission()
-        {
-            DestinationChangeAdmission::Ready => {}
-            DestinationChangeAdmission::Busy => {
+            let reservation = CatalogReservation {
+                lease: state.catalog_lease().clone(),
+                token,
+            };
+            if state.workflow_agent().is_active() {
                 return Err(Failure::conflict(
-                    "Stop recording, replay, rollout, training, and Workflow, then disconnect visible robots before changing the Spiral destination",
+                    "Stop the active Workflow Assistant turn before changing the Spiral destination",
                 ));
             }
-            DestinationChangeAdmission::DisconnectOrphaned(robot_ids) => {
-                for robot_id in robot_ids {
-                    state.hardware().disconnect(&robot_id).await.map_err(|error| {
+            let hardware = state.hardware().state();
+            let rollout_is_active = matches!(
+                RolloutActions::new(&super::training_rollout::RolloutHttpAdapter::new(
+                    state.rollout().clone(),
+                ))
+                .snapshot()
+                .phase(),
+                CapabilityRolloutPhase::Loading
+                    | CapabilityRolloutPhase::WarmingUp
+                    | CapabilityRolloutPhase::Running
+                    | CapabilityRolloutPhase::Stopping
+            );
+            let current_robot_ids = state.workspace().try_list().ok().map(|records| {
+                records
+                    .into_iter()
+                    .map(|record| record.id().to_owned())
+                    .collect::<BTreeSet<_>>()
+            });
+            match DestinationChangeContext::new(&hardware, current_robot_ids.as_ref())
+                .with_active_work(
+                    training_is_active
+                        || rollout_is_active
+                        || state.workflow().state().snapshot().phase().active(),
+                )
+                .admission()
+            {
+                DestinationChangeAdmission::Ready => {}
+                DestinationChangeAdmission::Busy => {
+                    return Err(Failure::conflict(
+                        "Stop recording, replay, rollout, training, and Workflow, then disconnect visible robots before changing the Spiral destination",
+                    ));
+                }
+                DestinationChangeAdmission::DisconnectOrphaned(robot_ids) => {
+                    for robot_id in robot_ids {
+                        state.hardware().disconnect(&robot_id).await.map_err(|error| {
                         Failure::conflict(format!(
                             "Could not safely disconnect hidden robot {robot_id:?} before changing the Spiral destination: {error}"
                         ))
                     })?;
+                    }
                 }
             }
+            Some(reservation)
+        } else {
+            None
+        };
+        let settings = UpdateDataSettingsCommand::from(request)
+            .apply(&DataHttpAdapter { state: &state })
+            .await?;
+        if !endpoint_changed {
+            state.bootstrap().ready();
+            let reconnect_state = state.clone();
+            tokio::spawn(async move { reconnect_state.auto_connect_saved_robots().await });
         }
-        Some(reservation)
-    } else {
-        None
-    };
-    let settings = UpdateDataSettingsCommand::from(request)
-        .apply(&DataHttpAdapter { state: &state })
-        .await?;
-    if !endpoint_changed {
-        state.bootstrap().ready();
-        tokio::spawn(super::auto_connect_saved_robots(state.clone()));
+        Ok(Json(settings.into()))
     }
-    Ok(Json(settings.into()))
-}
 
-async fn test_spiral(State(state): State<AppState>) -> Json<ConnectionTestResponse> {
-    let result = DataHttpAdapter { state: &state }.test_connection().await;
-    let (ok, message) = result.into_parts();
-    Json(ConnectionTestResponse::new(ok, message))
-}
+    async fn test_spiral(State(state): State<Self>) -> Json<ConnectionTestResponse> {
+        let result = DataHttpAdapter { state: &state }.test_connection().await;
+        let (ok, message) = result.into_parts();
+        Json(ConnectionTestResponse::new(ok, message))
+    }
 
-async fn test_training_runtime(State(state): State<AppState>) -> Json<ConnectionTestResponse> {
-    Json(state.training().test_runtime().await)
-}
+    async fn test_training_runtime(State(state): State<Self>) -> Json<ConnectionTestResponse> {
+        Json(state.training().test_runtime().await)
+    }
 
-async fn spiral_query(
-    State(state): State<AppState>,
-    Json(request): Json<SpiralQueryRequest>,
-) -> Result<Json<SpiralQueryResponse>, Failure> {
-    let result = QueryCommand::new(request.sql(), request.max_rows())
-        .execute(&DataHttpAdapter { state: &state })
-        .await?;
-    Ok(Json(result.into()))
-}
+    async fn spiral_query(
+        State(state): State<Self>,
+        Json(request): Json<SpiralQueryRequest>,
+    ) -> Result<Json<SpiralQueryResponse>, Failure> {
+        let result = QueryCommand::new(request.sql(), request.max_rows())
+            .execute(&DataHttpAdapter { state: &state })
+            .await?;
+        Ok(Json(result.into()))
+    }
 
-async fn start_spiral_replay(
-    State(state): State<AppState>,
-    Json(request): Json<StartSpiralReplayRequest>,
-) -> Result<StatusCode, Failure> {
-    StartSpiralReplayCommand::from(request)
-        .start(
-            &DataHttpAdapter { state: &state },
-            state.hardware().as_ref(),
-        )
-        .await?;
-    Ok(StatusCode::NO_CONTENT)
+    async fn start_spiral_replay(
+        State(state): State<Self>,
+        Json(request): Json<StartSpiralReplayRequest>,
+    ) -> Result<StatusCode, Failure> {
+        StartSpiralReplayCommand::from(request)
+            .start(
+                &DataHttpAdapter { state: &state },
+                state.hardware().as_ref(),
+            )
+            .await?;
+        Ok(StatusCode::NO_CONTENT)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -925,24 +952,26 @@ struct SpiralVideoQuery {
     segment: Option<u32>,
 }
 
-async fn spiral_video(
-    State(state): State<AppState>,
-    Query(query): Query<SpiralVideoQuery>,
-) -> Result<Response, Failure> {
-    let bytes = VideoAssetQuery::new(query.episode, query.stream, query.segment)
-        .load(&DataHttpAdapter { state: &state })
-        .await
-        .map_err(Failure::from)?;
-    let mut response = Body::from(bytes).into_response();
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        header::HeaderValue::from_static("video/mp4"),
-    );
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        header::HeaderValue::from_static("private, no-store"),
-    );
-    Ok(response)
+impl AppState {
+    async fn spiral_video(
+        State(state): State<Self>,
+        Query(query): Query<SpiralVideoQuery>,
+    ) -> Result<Response, Failure> {
+        let bytes = VideoAssetQuery::new(query.episode, query.stream, query.segment)
+            .load(&DataHttpAdapter { state: &state })
+            .await
+            .map_err(Failure::from)?;
+        let mut response = Body::from(bytes).into_response();
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("video/mp4"),
+        );
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("private, no-store"),
+        );
+        Ok(response)
+    }
 }
 
 #[cfg(test)]

@@ -37,7 +37,7 @@ fn artifact_identity_binds_format_purpose_namespace_run_and_step() {
         step: 10,
         tensor_namespace: ACT_TENSOR_NAMESPACE.to_owned(),
     };
-    assert!(validate_artifact_identity(&expected, "run-1", 10).is_ok());
+    assert!(expected.validate_for("run-1", 10).is_ok());
 
     for invalid in [
         ArtifactIdentity {
@@ -61,13 +61,13 @@ fn artifact_identity_binds_format_purpose_namespace_run_and_step() {
             ..expected.clone()
         },
     ] {
-        assert!(validate_artifact_identity(&invalid, "run-1", 10).is_err());
+        assert!(invalid.validate_for("run-1", 10).is_err());
     }
 }
 
 #[test]
 fn valid_contract_resolves_camera_roles_and_preserves_checkpoint_joint_order() {
-    let result = validate_rollout_contract(data(), &model(), &target()).unwrap();
+    let result = data().validated_with(&model(), &target()).unwrap();
     assert_eq!(result.joint_names, ["shoulder", "elbow"]);
     assert_eq!(result.action_steps, MAX_ROLLOUT_ACTION_STEPS);
     assert_eq!(result.sample_hz, 60.0);
@@ -86,7 +86,7 @@ fn rollout_preserves_a_checkpoint_prefix_shorter_than_the_replanning_cap() {
     let short_model = PolicyModelContract::new(2, 2, vec!["follower.camera.wrist".to_owned()])
         .with_action_shape(10, 10);
 
-    let result = validate_rollout_contract(data(), &short_model, &target()).unwrap();
+    let result = data().validated_with(&short_model, &target()).unwrap();
 
     assert_eq!(result.action_steps, 10);
 }
@@ -119,7 +119,7 @@ fn artifact_data_must_have_unique_names_and_a_safe_rate() {
         wrong_layout,
         old_schema,
     ] {
-        assert!(validate_rollout_contract(contract, &model(), &target()).is_err());
+        assert!(contract.validated_with(&model(), &target()).is_err());
     }
 }
 
@@ -127,18 +127,20 @@ fn artifact_data_must_have_unique_names_and_a_safe_rate() {
 fn action_output_must_have_exact_shape_and_finite_values() {
     let joints = vec!["shoulder".to_owned(), "elbow".to_owned()];
     assert_eq!(
-        prepare_action_goals(&joints, &[1.0, -1.0]).unwrap().goals,
+        PreparedActionGoals::from_action(&joints, &[1.0, -1.0])
+            .unwrap()
+            .goals,
         BTreeMap::from([("elbow".to_owned(), -1.0), ("shoulder".to_owned(), 1.0)])
     );
-    assert!(prepare_action_goals(&joints, &[0.25]).is_err());
-    assert!(prepare_action_goals(&joints, &[0.25, 0.5, 0.75]).is_err());
-    assert!(prepare_action_goals(&joints, &[0.25, f32::NAN]).is_err());
+    assert!(PreparedActionGoals::from_action(&joints, &[0.25]).is_err());
+    assert!(PreparedActionGoals::from_action(&joints, &[0.25, 0.5, 0.75]).is_err());
+    assert!(PreparedActionGoals::from_action(&joints, &[0.25, f32::NAN]).is_err());
 }
 
 #[test]
 fn finite_action_overshoots_are_clamped_and_reported() {
     let joints = vec!["shoulder".to_owned(), "elbow".to_owned()];
-    let prepared = prepare_action_goals(&joints, &[1.049_266_2, -1.005_372_2]).unwrap();
+    let prepared = PreparedActionGoals::from_action(&joints, &[1.049_266_2, -1.005_372_2]).unwrap();
 
     assert_eq!(
         prepared.goals,
@@ -157,15 +159,12 @@ fn finite_action_overshoots_are_clamped_and_reported() {
 
 #[test]
 fn live_joint_state_is_complete_finite_unique_and_checkpoint_ordered() {
-    let joints = vec!["shoulder".to_owned(), "elbow".to_owned()];
-    let observations = vec![
+    let joints = ["shoulder".to_owned(), "elbow".to_owned()];
+    let observations = [
         JointObservation::new("elbow", Some(-0.5)),
         JointObservation::new("shoulder", Some(0.25)),
     ];
-    assert_eq!(
-        prepare_observation_state(&joints, &observations).unwrap(),
-        [0.25, -0.5]
-    );
+    assert_eq!(observations.ordered_state(&joints).unwrap(), [0.25, -0.5]);
 
     for invalid in [
         vec![observations[0].clone()],
@@ -179,7 +178,7 @@ fn live_joint_state_is_complete_finite_unique_and_checkpoint_ordered() {
         ],
         vec![observations[0].clone(), observations[0].clone()],
     ] {
-        assert!(prepare_observation_state(&joints, &invalid).is_err());
+        assert!(invalid.ordered_state(&joints).is_err());
     }
 }
 
@@ -208,7 +207,7 @@ fn loaded_model_must_match_dimensions_camera_order_and_chunk_contract() {
         },
     ];
     for variant in variants {
-        assert!(validate_rollout_contract(data(), &variant, &target()).is_err());
+        assert!(data().validated_with(&variant, &target()).is_err());
     }
 }
 
@@ -248,7 +247,7 @@ fn target_must_be_healthy_exactly_typed_and_joint_compatible() {
     });
 
     for variant in variants {
-        assert!(validate_rollout_contract(data(), &model(), &variant).is_err());
+        assert!(data().validated_with(&model(), &variant).is_err());
     }
 }
 
@@ -256,33 +255,27 @@ fn target_must_be_healthy_exactly_typed_and_joint_compatible() {
 fn observations_must_exist_and_be_within_the_shared_freshness_window() {
     let maximum = Duration::from_millis(350);
     assert!(
-        require_fresh_observations(
-            &[ObservationFreshness {
-                source: "wrist".to_owned(),
-                age: Some(maximum),
-            }],
-            maximum,
-        )
+        [ObservationFreshness {
+            source: "wrist".to_owned(),
+            age: Some(maximum),
+        }]
+        .require_fresh(maximum)
         .is_ok()
     );
     assert!(
-        require_fresh_observations(
-            &[ObservationFreshness {
-                source: "wrist".to_owned(),
-                age: None,
-            }],
-            maximum,
-        )
+        [ObservationFreshness {
+            source: "wrist".to_owned(),
+            age: None,
+        }]
+        .require_fresh(maximum)
         .is_err()
     );
     assert!(
-        require_fresh_observations(
-            &[ObservationFreshness {
-                source: "wrist".to_owned(),
-                age: Some(maximum + Duration::from_nanos(1)),
-            }],
-            maximum,
-        )
+        [ObservationFreshness {
+            source: "wrist".to_owned(),
+            age: Some(maximum + Duration::from_nanos(1)),
+        }]
+        .require_fresh(maximum)
         .is_err()
     );
 }

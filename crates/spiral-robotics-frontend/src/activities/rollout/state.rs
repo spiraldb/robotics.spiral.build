@@ -41,7 +41,7 @@ impl RolloutController {
     }
 
     pub(crate) fn duration_seconds(&self) -> Option<u32> {
-        parse_duration(&self.duration_draft.read())
+        self.duration_draft.read().bounded_duration()
     }
 
     pub(crate) fn set_duration_draft(mut self, draft: String) {
@@ -49,24 +49,29 @@ impl RolloutController {
     }
 }
 
-fn parse_duration(draft: &str) -> Option<u32> {
-    draft
-        .parse::<u32>()
-        .ok()
-        .filter(|seconds| (1..=MAX_ROLLOUT_DURATION_SECONDS).contains(seconds))
+trait RolloutDurationDraft {
+    fn bounded_duration(&self) -> Option<u32>;
+}
+
+impl RolloutDurationDraft for str {
+    fn bounded_duration(&self) -> Option<u32> {
+        self.parse::<u32>()
+            .ok()
+            .filter(|seconds| (1..=MAX_ROLLOUT_DURATION_SECONDS).contains(seconds))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_duration;
+    use super::RolloutDurationDraft;
 
     #[test]
     fn duration_draft_must_be_a_bounded_whole_number() {
-        assert_eq!(parse_duration("30"), Some(30));
-        assert_eq!(parse_duration(""), None);
-        assert_eq!(parse_duration("0"), None);
-        assert_eq!(parse_duration("1.5"), None);
-        assert_eq!(parse_duration("-1"), None);
-        assert_eq!(parse_duration("601"), None);
+        assert_eq!("30".bounded_duration(), Some(30));
+        assert_eq!("".bounded_duration(), None);
+        assert_eq!("0".bounded_duration(), None);
+        assert_eq!("1.5".bounded_duration(), None);
+        assert_eq!("-1".bounded_duration(), None);
+        assert_eq!("601".bounded_duration(), None);
     }
 }

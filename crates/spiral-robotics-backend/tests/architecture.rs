@@ -3,7 +3,9 @@ use std::fs;
 use std::path::Path;
 
 use syn::visit::{self, Visit};
-use syn::{Attribute, Fields, ImplItem, Item, Signature, TraitItem, Visibility};
+use syn::{
+    Attribute, Fields, FnArg, ImplItem, Item, ReturnType, Signature, TraitItem, Type, Visibility,
+};
 
 fn collect_production_rust_sources(directory: &Path, sources: &mut Vec<std::path::PathBuf>) {
     for entry in fs::read_dir(directory).expect("source directory must exist") {
@@ -14,7 +16,9 @@ fn collect_production_rust_sources(directory: &Path, sources: &mut Vec<std::path
             .expect("source type must be readable")
             .is_dir()
         {
-            collect_production_rust_sources(&path, sources);
+            if path.file_name().and_then(|value| value.to_str()) != Some("tests") {
+                collect_production_rust_sources(&path, sources);
+            }
         } else if path.extension().and_then(|value| value.to_str()) == Some("rs")
             && path.file_name().and_then(|value| value.to_str()) != Some("tests.rs")
         {
@@ -90,15 +94,125 @@ impl ComplexityBoundaryVisitor<'_> {
 
     fn check_free_function_ownership(&mut self, signature: &Signature) {
         let name = signature.ident.to_string();
-        if ["capability_", "contract_", "reduce_", "toggle_"]
-            .iter()
-            .any(|prefix| name.starts_with(prefix))
+        let mut ownership_violation = false;
+        if [
+            "build_",
+            "capability_",
+            "contract_",
+            "create_",
+            "decode_",
+            "default_",
+            "encode_",
+            "ensure_",
+            "format_",
+            "humanize_",
+            "load_",
+            "normalize_",
+            "parse_",
+            "reduce_",
+            "run_",
+            "short_",
+            "toggle_",
+            "validate_",
+        ]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+            || name == "discover"
         {
+            ownership_violation = true;
             self.violations.push(format!(
-                "{} free function {name:?} names type-owned behavior; use a receiver method or From/TryFrom",
+                "{} free function {name:?} names type-owned behavior; use a receiver/associated method or From/TryFrom",
                 self.source_path.display(),
             ));
         }
+
+        if signature.inputs.iter().any(|argument| match argument {
+            FnArg::Receiver(_) => false,
+            FnArg::Typed(argument) => type_mentions(&argument.ty, "AppState"),
+        }) {
+            ownership_violation = true;
+            self.violations.push(format!(
+                "{} free function {name:?} orchestrates AppState; make it an AppState method",
+                self.source_path.display(),
+            ));
+        }
+
+        if let ReturnType::Type(_, output) = &signature.output
+            && direct_type_name(output).is_some_and(|name| name.ends_with("Error"))
+        {
+            ownership_violation = true;
+            self.violations.push(format!(
+                "{} free function {name:?} constructs an error; put the constructor on the error type",
+                self.source_path.display(),
+            ));
+        }
+
+        let frontend_source = self
+            .source_path
+            .components()
+            .any(|component| component.as_os_str().to_str() == Some("spiral-robotics-frontend"));
+        let dioxus_element = matches!(
+            &signature.output,
+            ReturnType::Type(_, output)
+                if direct_type_name(output).as_deref() == Some("Element")
+        );
+        let dioxus_context_hook = name.starts_with("use_")
+            || [
+                "data_controller",
+                "description",
+                "rollout_controller",
+                "studio",
+                "timeline_controller",
+                "training_controller",
+                "workflow_controller",
+            ]
+            .contains(&name.as_str());
+        let framework_boundary = frontend_source && (dioxus_element || dioxus_context_hook);
+        if !framework_boundary && name != "main" && !ownership_violation {
+            self.violations.push(format!(
+                "{} free production function {name:?} has no owner; use a receiver/associated method, From/TryFrom, or a local extension trait",
+                self.source_path.display(),
+            ));
+        }
+    }
+}
+
+fn type_mentions(r#type: &Type, expected: &str) -> bool {
+    struct TypeNameVisitor<'a> {
+        expected: &'a str,
+        found: bool,
+    }
+
+    impl<'ast> Visit<'ast> for TypeNameVisitor<'_> {
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            self.found |= path
+                .segments
+                .iter()
+                .any(|segment| segment.ident == self.expected);
+            if !self.found {
+                visit::visit_path(self, path);
+            }
+        }
+    }
+
+    let mut visitor = TypeNameVisitor {
+        expected,
+        found: false,
+    };
+    visitor.visit_type(r#type);
+    visitor.found
+}
+
+fn direct_type_name(r#type: &Type) -> Option<String> {
+    match r#type {
+        Type::Group(group) => direct_type_name(&group.elem),
+        Type::Paren(paren) => direct_type_name(&paren.elem),
+        Type::Path(path) if path.qself.is_none() => path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string()),
+        _ => None,
     }
 }
 
@@ -212,9 +326,8 @@ fn first_party_items_stay_within_cognitive_complexity_bounds() {
             continue;
         }
         let crate_root = entry.path();
-        let source_root = crate_root.join("src");
-        if crate_root.join("Cargo.toml").is_file() && source_root.is_dir() {
-            collect_production_rust_sources(&source_root, &mut sources);
+        if crate_root.join("Cargo.toml").is_file() && crate_root.join("src").is_dir() {
+            collect_production_rust_sources(&crate_root, &mut sources);
         }
     }
     sources.sort();
@@ -300,7 +413,7 @@ fn product_crates_follow_functional_boundaries() {
         );
     }
     assert!(
-        backend_library.contains("pub use http::server::run;"),
+        backend_library.contains("pub use http::server::StudioServer;"),
         "the backend's sole external capability must remain its launcher"
     );
 }
@@ -316,7 +429,7 @@ fn workspace_public_surface_stays_explicit_and_state_has_owners() {
         .map(str::trim)
         .filter(|line| line.starts_with("pub "))
         .collect::<Vec<_>>();
-    assert_eq!(backend_exports, ["pub use http::server::run;"]);
+    assert_eq!(backend_exports, ["pub use http::server::StudioServer;"]);
 
     let frontend_library = fs::read_to_string(crates.join("spiral-robotics-frontend/src/lib.rs"))
         .expect("frontend library");
@@ -423,7 +536,7 @@ fn read_controllers_delegate_selection_and_admission_to_backend_capabilities() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/http");
     let routes = fs::read_to_string(root.join("routes.rs")).expect("routes source");
     for seam in [
-        "robots::list(&robot_adapter)",
+        "RobotCatalogActions::new(&robot_adapter)",
         "devices::CameraDiscoveryAdapter::new(state.cameras().clone())",
     ] {
         assert!(routes.contains(seam), "state snapshot bypasses {seam}");
@@ -433,8 +546,8 @@ fn read_controllers_delegate_selection_and_admission_to_backend_capabilities() {
     for seam in [
         ".serial_ports()",
         ".cameras()",
-        "robots::list(&adapter)",
-        "robots::get(&RobotHttpAdapter::new(&state), id)",
+        "RobotCatalogActions::new(&adapter)",
+        "RobotCatalogActions::new(&RobotHttpAdapter::new(&state)).get(id)",
     ] {
         assert!(
             devices.contains(seam),
@@ -499,7 +612,7 @@ fn episode_catalog_is_loaded_explicitly_from_spiral() {
         fs::read_to_string(crates.join("spiral-robotics-frontend/src/shell/state.rs"))
             .expect("frontend state source");
     assert!(
-        frontend_state.contains("api::get::<EpisodeCatalogResponse>(\"/api/episodes\")"),
+        frontend_state.contains("api::Http::get::<EpisodeCatalogResponse>(\"/api/episodes\")"),
         "the browser must load episodes as one explicit catalog"
     );
     assert!(
@@ -542,7 +655,7 @@ fn listener_binding_precedes_concurrent_external_bootstrap() {
         .find("TcpListener::bind(bind).await")
         .expect("server must bind its listener");
     let bootstrap = server
-        .find("tokio::spawn(bootstrap_services")
+        .find(".bootstrap_services(")
         .expect("server must start background bootstrap");
     assert!(
         bind < bootstrap,
@@ -669,7 +782,7 @@ fn robot_mutations_invalidate_pooled_read_snapshots() {
         .expect("robot workspace source");
     for (operation, next) in [
         ("pub(crate) fn delete", "fn try_list"),
-        ("fn persist", "fn port_value"),
+        ("fn persist", "\n}\n\ntrait PortConfigurationValue"),
     ] {
         let implementation = workspace
             .split_once(operation)
@@ -694,8 +807,8 @@ fn robot_mutations_invalidate_pooled_read_snapshots() {
         .map(|(implementation, _)| implementation)
         .expect("invalidating project-store mutation implementation");
     assert!(
-        invalidating.contains("write(&self.operation_gate)")
-            && invalidating.contains("lock(&self.hosted).available.clear()")
+        invalidating.contains("self.operation_gate.write_unpoisoned()")
+            && invalidating.contains("self.hosted.lock_unpoisoned().available.clear()")
             && !invalidating.contains("checkin(connection.into_inner())"),
         "a robot write must drain readers and leave no pre-write or writer connection in the read pool"
     );
@@ -766,7 +879,8 @@ fn synchronous_adbc_is_confined_to_one_bounded_adapter() {
             .unwrap_or(implementation.len());
         let implementation = &implementation[..next_operation];
         assert!(
-            implementation.contains("hosted_slots"),
+            implementation.contains("hosted_slots")
+                || implementation.contains("acquire_blocking_slot"),
             "{operation} must consume the shared pool capacity gate"
         );
     }
@@ -1067,7 +1181,7 @@ fn rollout_action_scheduler_contains_no_inline_inference_work() {
         .expect("rollout session scheduler boundaries");
 
     assert!(
-        scheduler.contains("spawn_inference(next_policy, observation)"),
+        scheduler.contains("observation.spawn_inference(next_policy)"),
         "the running action scheduler must hand inference to its worker"
     );
     assert!(
@@ -1084,7 +1198,7 @@ fn rollout_action_scheduler_contains_no_inline_inference_work() {
     assert!(
         dispatch < observe
             && scheduler.contains("let latest_action = actions.latest_action_timestep()?")
-            && scheduler.contains("action_refill_threshold(initial.chunk.steps())"),
+            && scheduler.contains("initial.chunk.steps().refill_threshold()"),
         "LeRobot parity requires execute-then-observe timestamps and the default half-chunk refill threshold"
     );
     assert!(

@@ -30,7 +30,8 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
         let _generation = controller.relation_generation();
         async move {
             if query_available {
-                api::get::<ProjectDataRelationsResponse>("/api/spiral/project-relations").await
+                api::Http::get::<ProjectDataRelationsResponse>("/api/spiral/project-relations")
+                    .await
             } else {
                 Ok(ProjectDataRelationsResponse::default())
             }
@@ -74,8 +75,8 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
             if !query_available {
                 return Ok(None);
             }
-            let request = SpiralQueryRequest::new(preview_sql(&relation), PREVIEW_ROWS);
-            api::send_json::<_, SpiralQueryResponse>(
+            let request = SpiralQueryRequest::new(relation.preview_sql(), PREVIEW_ROWS);
+            api::Http::send_json::<_, SpiralQueryResponse>(
                 Method::POST,
                 "/api/spiral/query",
                 Some(&request),
@@ -92,7 +93,7 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
             .iter()
             .find(|relation| relation.name() == name)
     });
-    let links = relation_links(response.relations());
+    let links = response.relations().relation_links();
     let counted_rows = response
         .relations()
         .iter()
@@ -109,13 +110,13 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
         _ if count_complete => format!(
             "{} tables · {} rows · {} shared-key links",
             response.relations().len(),
-            format_count(counted_rows),
+            counted_rows.grouped_count(),
             links.len()
         ),
         _ => format!(
             "{} tables · {} counted rows · {} shared-key links",
             response.relations().len(),
-            format_count(counted_rows),
+            counted_rows.grouped_count(),
             links.len()
         ),
     };
@@ -150,7 +151,7 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
             } else if let Some(problem) = catalog_error {
                 div { class: "data-relations-message data-relations-message-error", role: "alert",
                     strong { "Project data is unavailable" }
-                    p { "{catalog_failure_summary(&problem)}" }
+                    p { "{problem.catalog_failure_summary()}" }
                     Action {
                         purpose: ActionPurpose::Retry,
                         variant: ActionVariant::Outline,
@@ -191,10 +192,10 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
                                             title: "Inspect {relation.name()}",
                                             onclick: move |_| selected.set(Some(relation_name.clone())),
                                             span {
-                                                strong { "{relation_label(relation.name())}" }
+                                                strong { "{relation.name().relation_label()}" }
                                                 small { "{relation.columns().len()} columns" }
                                             }
-                                            code { "{format_optional_count(relation.row_count())}" }
+                                            code { "{relation.row_count().grouped_count()}" }
                                         }
                                     }
                                 }
@@ -255,10 +256,10 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
                             if let Some(relation) = selected_relation {
                                 header { class: "data-relation-preview-heading",
                                     div {
-                                        strong { "{relation_label(relation.name())}" }
+                                        strong { "{relation.name().relation_label()}" }
                                         p { title: "{relation.name()}", "{relation.name()}" }
                                     }
-                                    span { "{format_optional_count(relation.row_count())} rows · {relation.columns().len()} columns" }
+                                    span { "{relation.row_count().grouped_count()} rows · {relation.columns().len()} columns" }
                                     Action {
                                         purpose: ActionPurpose::Apply,
                                         variant: ActionVariant::Outline,
@@ -284,7 +285,7 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
                                 }
                             }
                             div { class: "data-relation-preview-body",
-                                {render_preview(preview_result.as_ref(), selected_name.as_deref())}
+                                {preview_result.as_ref().render_preview(selected_name.as_deref())}
                             }
                         }
                     }
@@ -297,119 +298,152 @@ pub(crate) fn RelationsPanel(namespace: String, query_available: bool) -> Elemen
     }
 }
 
-fn render_preview(
-    result: Option<&Result<Option<SpiralQueryResponse>, String>>,
-    relation: Option<&str>,
-) -> Element {
-    let Some(relation) = relation else {
-        return rsx! {
-            div { class: "data-relation-preview-state", "Select a table to preview its rows." }
+trait RelationPreview {
+    fn render_preview(self, relation: Option<&str>) -> Element;
+}
+
+impl RelationPreview for Option<&Result<Option<SpiralQueryResponse>, String>> {
+    fn render_preview(self, relation: Option<&str>) -> Element {
+        let Some(relation) = relation else {
+            return rsx! {
+                div { class: "data-relation-preview-state", "Select a table to preview its rows." }
+            };
         };
-    };
-    match result {
-        None => rsx! {
-            div { class: "data-relation-preview-state", role: "status", "Loading five rows…" }
-        },
-        Some(Err(error)) => rsx! {
-            div { class: "data-relation-preview-state data-relation-preview-error", role: "alert",
-                strong { "Preview unavailable" }
-                p { "{preview_failure_summary(error)}" }
+        match self {
+            None => rsx! {
+                div { class: "data-relation-preview-state", role: "status", "Loading five rows…" }
+            },
+            Some(Err(error)) => rsx! {
+                div { class: "data-relation-preview-state data-relation-preview-error", role: "alert",
+                    strong { "Preview unavailable" }
+                    p { "{error.preview_failure_summary()}" }
+                }
+            },
+            Some(Ok(None)) => rsx! {
+                div { class: "data-relation-preview-state", "Select a table to preview its rows." }
+            },
+            Some(Ok(Some(response))) => {
+                let model = QueryExecutionPresentation::new(
+                    relation.preview_sql(),
+                    PREVIEW_ROWS,
+                    QueryState::Ready(response.clone()),
+                );
+                model.render()
             }
-        },
-        Some(Ok(None)) => rsx! {
-            div { class: "data-relation-preview-state", "Select a table to preview its rows." }
-        },
-        Some(Ok(Some(response))) => {
-            let model = QueryExecutionPresentation::new(
-                preview_sql(relation),
-                PREVIEW_ROWS,
-                QueryState::Ready(response.clone()),
-            );
-            model.render()
         }
     }
 }
 
-fn preview_sql(relation: &str) -> String {
-    format!("SELECT * FROM {relation} LIMIT {PREVIEW_ROWS}")
+trait RelationName {
+    fn preview_sql(&self) -> String;
+    fn relation_label(&self) -> &str;
+    fn is_relationship_key(&self) -> bool;
 }
 
-fn catalog_failure_summary(error: &str) -> &'static str {
-    if error.contains("catalog is not ready") || error.contains("catalog is unavailable") {
-        "The project catalog is not ready. Check SpiralDB in Settings, then retry."
-    } else {
-        "Studio could not read this project’s tables. Retry, or check the SpiralDB connection in Settings."
+impl RelationName for str {
+    fn preview_sql(&self) -> String {
+        format!("SELECT * FROM {self} LIMIT {PREVIEW_ROWS}")
+    }
+
+    fn relation_label(&self) -> &str {
+        self.rsplit('.').next().unwrap_or(self)
+    }
+
+    fn is_relationship_key(&self) -> bool {
+        self.ends_with("_id")
     }
 }
 
-fn preview_failure_summary(error: &str) -> &'static str {
-    if error.contains("catalog is not ready") || error.contains("catalog is unavailable") {
-        "The project catalog is not ready. Check SpiralDB in Settings, then retry."
-    } else {
-        "Studio could not preview this table. Refresh the relations view or check the SpiralDB connection in Settings."
-    }
+trait RelationCollection {
+    fn relation_links(&self) -> Vec<RelationLink>;
 }
 
-fn relation_links(relations: &[ProjectDataRelation]) -> Vec<RelationLink> {
-    let mut links = Vec::new();
-    for (index, left) in relations.iter().enumerate() {
-        let left_keys = left
-            .columns()
-            .iter()
-            .map(|column| column.name())
-            .filter(relationship_key)
-            .collect::<BTreeSet<_>>();
-        for right in relations.iter().skip(index + 1) {
-            let mut keys = right
+impl RelationCollection for [ProjectDataRelation] {
+    fn relation_links(&self) -> Vec<RelationLink> {
+        let mut links = Vec::new();
+        for (index, left) in self.iter().enumerate() {
+            let left_keys = left
                 .columns()
                 .iter()
                 .map(|column| column.name())
-                .filter(|name| left_keys.contains(name))
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>();
-            keys.sort();
-            if !keys.is_empty() {
-                links.push(RelationLink {
-                    left: left.name().to_owned(),
-                    right: right.name().to_owned(),
-                    keys,
-                });
+                .filter(|name| name.is_relationship_key())
+                .collect::<BTreeSet<_>>();
+            for right in self.iter().skip(index + 1) {
+                let mut keys = right
+                    .columns()
+                    .iter()
+                    .map(|column| column.name())
+                    .filter(|name| left_keys.contains(name))
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>();
+                keys.sort();
+                if !keys.is_empty() {
+                    links.push(RelationLink {
+                        left: left.name().to_owned(),
+                        right: right.name().to_owned(),
+                        keys,
+                    });
+                }
             }
         }
+        links.sort_by(|left, right| {
+            right
+                .keys
+                .len()
+                .cmp(&left.keys.len())
+                .then_with(|| left.left.cmp(&right.left))
+                .then_with(|| left.right.cmp(&right.right))
+        });
+        links
     }
-    links.sort_by(|left, right| {
-        right
-            .keys
-            .len()
-            .cmp(&left.keys.len())
-            .then_with(|| left.left.cmp(&right.left))
-            .then_with(|| left.right.cmp(&right.right))
-    });
-    links
 }
 
-fn relationship_key(name: &&str) -> bool {
-    name.ends_with("_id")
+trait RelationFailurePresentation {
+    fn catalog_failure_summary(&self) -> &'static str;
+    fn preview_failure_summary(&self) -> &'static str;
 }
 
-fn relation_label(name: &str) -> &str {
-    name.rsplit('.').next().unwrap_or(name)
-}
-
-fn format_optional_count(count: Option<u64>) -> String {
-    count.map(format_count).unwrap_or_else(|| "—".to_owned())
-}
-
-fn format_count(count: u64) -> String {
-    let digits = count.to_string();
-    let mut rendered = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, character) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            rendered.push(',');
+impl RelationFailurePresentation for str {
+    fn catalog_failure_summary(&self) -> &'static str {
+        if self.contains("catalog is not ready") || self.contains("catalog is unavailable") {
+            "The project catalog is not ready. Check SpiralDB in Settings, then retry."
+        } else {
+            "Studio could not read this project’s tables. Retry, or check the SpiralDB connection in Settings."
         }
-        rendered.push(character);
     }
-    rendered
+
+    fn preview_failure_summary(&self) -> &'static str {
+        if self.contains("catalog is not ready") || self.contains("catalog is unavailable") {
+            "The project catalog is not ready. Check SpiralDB in Settings, then retry."
+        } else {
+            "Studio could not preview this table. Refresh the relations view or check the SpiralDB connection in Settings."
+        }
+    }
+}
+
+trait RelationCountPresentation {
+    fn grouped_count(self) -> String;
+}
+
+impl RelationCountPresentation for u64 {
+    fn grouped_count(self) -> String {
+        let digits = self.to_string();
+        let mut rendered = String::with_capacity(digits.len() + digits.len() / 3);
+        for (index, character) in digits.chars().enumerate() {
+            if index > 0 && (digits.len() - index).is_multiple_of(3) {
+                rendered.push(',');
+            }
+            rendered.push(character);
+        }
+        rendered
+    }
+}
+
+impl RelationCountPresentation for Option<u64> {
+    fn grouped_count(self) -> String {
+        self.map(RelationCountPresentation::grouped_count)
+            .unwrap_or_else(|| "—".to_owned())
+    }
 }
 
 #[cfg(test)]
@@ -432,14 +466,15 @@ mod tests {
 
     #[test]
     fn relationships_use_shared_identity_fields_without_claiming_every_column() {
-        let links = relation_links(&[
+        let links = [
             relation("robot.datasets", &["dataset_id", "name"]),
             relation("robot.episodes", &["dataset_id", "episode_id"]),
             relation(
                 "robot.samples",
                 &["episode_id", "stream_id", "sample_index"],
             ),
-        ]);
+        ]
+        .relation_links();
 
         assert_eq!(links.len(), 2);
         assert_eq!(links[0].keys, ["dataset_id"]);
@@ -448,19 +483,19 @@ mod tests {
 
     #[test]
     fn counts_are_grouped_for_fast_scanning() {
-        assert_eq!(format_count(0), "0");
-        assert_eq!(format_count(999), "999");
-        assert_eq!(format_count(12_345_678), "12,345,678");
+        assert_eq!(0_u64.grouped_count(), "0");
+        assert_eq!(999_u64.grouped_count(), "999");
+        assert_eq!(12_345_678_u64.grouped_count(), "12,345,678");
     }
 
     #[test]
     fn backend_errors_are_replaced_with_recovery_copy() {
         assert_eq!(
-            catalog_failure_summary("500: driver exploded at /private/path"),
+            "500: driver exploded at /private/path".catalog_failure_summary(),
             "Studio could not read this project’s tables. Retry, or check the SpiralDB connection in Settings."
         );
         assert_eq!(
-            preview_failure_summary("500: driver exploded at /private/path"),
+            "500: driver exploded at /private/path".preview_failure_summary(),
             "Studio could not preview this table. Refresh the relations view or check the SpiralDB connection in Settings."
         );
     }

@@ -1,9 +1,9 @@
 //! Settings screen for robots, SpiralDB, training, and video.
 
 use crate::components::interaction::{
-    Action, ActionLink, ActionPurpose, ActionVariant, BlockingConfirmation, CloseIcon,
-    ConfirmationCopy, ConfirmationDismissal, ConfirmationResponse, FileAction, FileInput, Toggle,
-    focus_after_render,
+    Action, ActionLink, ActionPurpose, ActionVariant, BlockingConfirmation, BrowserFocus,
+    CloseIcon, ConfirmationCopy, ConfirmationDismissal, ConfirmationResponse, FileAction,
+    FileInput, Toggle,
 };
 use dioxus::prelude::*;
 use gloo_net::http::Method;
@@ -16,7 +16,7 @@ use crate::client::http as api;
 use crate::settings::robots::RobotPanel;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::studio;
-use crate::tasks::single_flight;
+use crate::tasks::SingleFlight;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsSection {
@@ -95,7 +95,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
 
     use_effect(move || {
         if !initial_focus_set() {
-            focus_after_render("data-settings-panel".to_owned());
+            BrowserFocus::after_render("data-settings-panel".to_owned());
             initial_focus_set.set(true);
         }
     });
@@ -132,7 +132,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
             current().video().to_owned(),
         );
         spawn(async move {
-            match api::send_json::<_, DataSettings>(
+            match api::Http::send_json::<_, DataSettings>(
                 Method::PATCH,
                 "/api/settings/data",
                 Some(&request),
@@ -146,8 +146,12 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                     if let Some(path) = test_path {
                         testing.set(true);
                         test_result.set(None);
-                        match api::send_json::<(), ConnectionTestResponse>(Method::POST, path, None)
-                            .await
+                        match api::Http::send_json::<(), ConnectionTestResponse>(
+                            Method::POST,
+                            path,
+                            None,
+                        )
+                        .await
                         {
                             Ok(response) => test_result.set(Some(response)),
                             Err(error) => {
@@ -409,8 +413,8 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                     project_transfer_error.set(None);
                     on_busy_change.call(true);
                     spawn(async move {
-                        let Some(outcome) = single_flight(transferring_project, async {
-                                let result = api::upload_file_json::<ProjectImportSummary>(
+                        let Some(outcome) = SingleFlight::run(transferring_project, async {
+                                let result = api::Http::upload_file_json::<ProjectImportSummary>(
                                     "/api/project/import",
                                     &file,
                                     "application/vnd.spiral-robotics.project",
@@ -418,7 +422,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                                 .await?;
                                 studio.selected_episode().set(None);
                                 studio.refresh_episode_catalog().await?;
-                                let settings = api::send_json::<(), DataSettings>(
+                                let settings = api::Http::send_json::<(), DataSettings>(
                                     Method::GET,
                                     "/api/settings/data",
                                     None,
@@ -443,7 +447,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                                         "Project restored from {} relations ({} rows).{}",
                                         result.relations(),
                                         result.rows(),
-                                        import_warning_suffix(result.warnings()),
+                                        result.warnings().import_warning_suffix(),
                                     ),
                                 );
                             }
@@ -451,7 +455,7 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
                                 pending_project_file.set(None);
                                 project_transfer_error.set(Some(error.clone()));
                                 studio.report_from(MessageSource::Settings, error);
-                                focus_after_render("project-import-input".to_owned());
+                                BrowserFocus::after_render("project-import-input".to_owned());
                             }
                         }
                         on_busy_change.call(false);
@@ -464,11 +468,17 @@ pub(crate) fn SettingsPanel(state: SettingsLoadState, handlers: SettingsPanelHan
     }
 }
 
-fn import_warning_suffix(warnings: &[String]) -> String {
-    if warnings.is_empty() {
-        String::new()
-    } else {
-        format!(" Warning: {}", warnings.join(" "))
+trait ImportWarningsPresentation {
+    fn import_warning_suffix(&self) -> String;
+}
+
+impl ImportWarningsPresentation for [String] {
+    fn import_warning_suffix(&self) -> String {
+        if self.is_empty() {
+            String::new()
+        } else {
+            format!(" Warning: {}", self.join(" "))
+        }
     }
 }
 

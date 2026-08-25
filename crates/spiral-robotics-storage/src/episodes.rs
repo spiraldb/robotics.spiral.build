@@ -20,16 +20,15 @@ pub use spiral_robotics_core::MAX_EPISODE_FRAMES;
 use spiral_robotics_core::OperationError;
 use spiral_robotics_core::arm::SO101_JOINTS;
 use spiral_robotics_core::calibration::Calibration;
+use spiral_robotics_core::identity::EpisodeId;
 use spiral_robotics_hardware::RecordingCompletion;
 use spiral_robotics_hardware::RecordingWriter;
 pub use spiral_robotics_hardware::{ArmConditionSummary, EpisodeCheckpoint, Sample};
 
 use crate::adbc::ProjectStore;
 use crate::episode_schema::{JointSampleRows, SpiralEpisodeEncoder};
-use crate::manager::{
-    EpisodeReplacement, execute_update_sql, ingest_batch, run_query, table_exists,
-};
-use crate::sql;
+use crate::manager::EpisodeReplacement;
+use crate::sql::SpiralSql;
 use crate::video::{VideoAssetMetadata, VideoSegment, VideoSize, VideoTiming};
 
 const SAMPLE_QUEUE_DEPTH: usize = 2_048;
@@ -65,6 +64,12 @@ pub enum EpisodeError {
     InvalidId(String),
     NotFound(String),
     Invalid(String),
+}
+
+impl EpisodeError {
+    pub(crate) fn invalid(message: impl Into<String>) -> Self {
+        Self::Invalid(message.into())
+    }
 }
 
 impl fmt::Display for EpisodeError {
@@ -185,6 +190,14 @@ impl EpisodeStart {
         self.recording.started_ms = started_ms;
         self.recording.sample_hz = sample_hz;
         self
+    }
+
+    pub(crate) fn with_current_timing(self, sample_hz: f64) -> Self {
+        let started_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
+            .unwrap_or(0);
+        self.with_timing(started_ms, sample_hz)
     }
 
     pub(crate) fn with_source(mut self, source: String, note: Option<String>) -> Self {
@@ -750,20 +763,20 @@ impl EpisodeStore {
     pub fn list(&self) -> Vec<EpisodeSummary> {
         match self.try_list() {
             Ok(episodes) => {
-                *lock(&self.last_issue) = None;
+                *self.last_issue.lock_unpoisoned() = None;
                 episodes
             }
             Err(error) => {
-                *lock(&self.last_issue) = Some(error.to_string());
+                *self.last_issue.lock_unpoisoned() = Some(error.to_string());
                 Vec::new()
             }
         }
     }
     pub fn issues(&self) -> Vec<String> {
-        lock(&self.last_issue).iter().cloned().collect()
+        self.last_issue.lock_unpoisoned().iter().cloned().collect()
     }
     pub fn get(&self, id: &str) -> Result<EpisodeSummary, EpisodeError> {
-        validate_episode_id(id)?;
+        EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.to_owned()))?;
         self.try_list()?
             .into_iter()
             .find(|episode| episode.id() == id)
@@ -771,18 +784,17 @@ impl EpisodeStore {
     }
 
     pub fn completed(&self, id: &str) -> Result<CompletedEpisode, EpisodeError> {
-        validate_episode_id(id)?;
+        EpisodeId::try_from(id).map_err(|_| EpisodeError::InvalidId(id.to_owned()))?;
         let episodes = Table::Episodes.qualified_name(self.project_store.namespace());
         let samples = Table::JointSamples.qualified_name(self.project_store.namespace());
-        let episode_value = sql::string_literal(id);
-        let sample_query = sql::episode_samples(self.project_store.namespace(), id);
+        let episode_value = SpiralSql::string_literal(id);
+        let sample_query = SpiralSql::episode_samples(self.project_store.namespace(), id);
         self.project_store
             .run_blocking(move |connection| {
-                if !table_exists(connection, &episodes)? {
+                if !connection.table_exists(&episodes)? {
                     return Err(EpisodeError::NotFound(id.to_owned()).to_string());
                 }
-                let metadata = run_query(
-                    connection,
+                let metadata = connection.run_query(
                     &format!(
                         "SELECT {} FROM {episodes} WHERE {} = {episode_value} LIMIT 1",
                         db::METADATA_JSON,
@@ -801,8 +813,8 @@ impl EpisodeStore {
                 let (start, completion): (EpisodeStart, EpisodeCompletion) =
                     serde_json::from_str(metadata)
                         .map_err(|error| format!("episode {id:?} metadata is invalid: {error}"))?;
-                let rows = if table_exists(connection, &samples)? {
-                    let result = run_query(connection, &sample_query, MAX_EPISODE_ROWS)?;
+                let rows = if connection.table_exists(&samples)? {
+                    let result = connection.run_query(&sample_query, MAX_EPISODE_ROWS)?;
                     if result.truncated() {
                         return Err(format!("episode {id:?} exceeds the supported row limit"));
                     }
@@ -837,7 +849,11 @@ impl EpisodeStore {
         let highest = self
             .try_list()?
             .iter()
-            .filter_map(|episode| episode_number(episode.id()))
+            .filter_map(|episode| {
+                EpisodeId::try_from(episode.id())
+                    .ok()
+                    .and_then(|id| id.sequence_number())
+            })
             .max()
             .unwrap_or(0);
         Ok(format!("episode_{:06}", highest + 1))
@@ -853,7 +869,7 @@ impl EpisodeStore {
             ));
         }
         let start = EpisodeStart::new(self.next_id()?, request.dataset_id)
-            .with_timing(unix_millis(), request.sample_hz)
+            .with_current_timing(request.sample_hz)
             .with_source(request.source, request.note)
             .with_arms(request.arms, request.condition);
         SpiralEpisodeEncoder::new(start.clone())?;
@@ -872,9 +888,7 @@ impl EpisodeStore {
         let id = id.to_owned();
         let namespace = self.project_store.namespace().to_owned();
         self.project_store
-            .run_blocking(move |connection| {
-                crate::manager::clear_episode_rows(connection, &namespace, &id)
-            })
+            .run_blocking(move |connection| connection.clear_episode_rows(&namespace, &id))
             .map_err(EpisodeError::Invalid)
     }
 
@@ -1027,11 +1041,14 @@ impl EpisodeStore {
 
     pub fn reserve_seek(&self, robot: &str) -> u64 {
         let ticket = self.seek_sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        lock(&self.latest_seek).insert(robot.to_owned(), ticket);
+        self.latest_seek
+            .lock_unpoisoned()
+            .insert(robot.to_owned(), ticket);
         ticket
     }
     pub fn seek_is_current(&self, robot: &str, ticket: u64) -> bool {
-        lock(&self.latest_seek)
+        self.latest_seek
+            .lock_unpoisoned()
             .get(robot)
             .is_some_and(|latest| *latest == ticket)
     }
@@ -1128,10 +1145,10 @@ impl EpisodeStore {
         id: &str,
     ) -> Result<Vec<VideoAssetMetadata>, EpisodeError> {
         let relation = Table::VideoAssets.qualified_name(self.project_store.namespace());
-        let id = sql::string_literal(id);
+        let id = SpiralSql::string_literal(id);
         self.project_store.run_blocking(move |connection| {
-            if !table_exists(connection, &relation)? { return Ok(Vec::new()); }
-            let result = run_query(connection, &format!("SELECT {}, {}, {}, {}, {}, {}, {}, {} FROM {relation} WHERE {} = {id} ORDER BY {}, {}", db::STREAM_ID, db::CAMERA_ID, db::WIDTH, db::HEIGHT, db::FPS, db::FRAMES, db::SEGMENT_INDEX, db::TIMELINE_OFFSET_NS, db::EPISODE_ID, db::STREAM_ID, db::SEGMENT_INDEX), 10_000)?;
+            if !connection.table_exists(&relation)? { return Ok(Vec::new()); }
+            let result = connection.run_query(&format!("SELECT {}, {}, {}, {}, {}, {}, {}, {} FROM {relation} WHERE {} = {id} ORDER BY {}, {}", db::STREAM_ID, db::CAMERA_ID, db::WIDTH, db::HEIGHT, db::FPS, db::FRAMES, db::SEGMENT_INDEX, db::TIMELINE_OFFSET_NS, db::EPISODE_ID, db::STREAM_ID, db::SEGMENT_INDEX), 10_000)?;
             result
                 .into_rows()
                 .into_iter()
@@ -1144,11 +1161,10 @@ impl EpisodeStore {
         let relation = Table::Episodes.qualified_name(self.project_store.namespace());
         self.project_store
             .run_blocking(move |connection| {
-                if !table_exists(connection, &relation)? {
+                if !connection.table_exists(&relation)? {
                     return Ok(Vec::new());
                 }
-                let result = run_query(
-                    connection,
+                let result = connection.run_query(
                     &format!(
                         "SELECT {}, {} FROM {relation} ORDER BY {}",
                         db::METADATA_JSON,
@@ -1172,12 +1188,11 @@ impl EpisodeStore {
         self.project_store
             .run_blocking(move |connection| {
                 let relation = Table::Episodes.qualified_name(&namespace);
-                execute_update_sql(
-                    connection,
-                    &sql::delete_episode(&relation, episode.start.id()),
-                )?;
-                ingest_batch(
-                    connection,
+                connection.execute_update_sql(&SpiralSql::delete_episode(
+                    &relation,
+                    episode.start.id(),
+                ))?;
+                connection.ingest_batch(
                     &relation,
                     episode
                         .completion
@@ -1195,22 +1210,21 @@ impl EpisodeStore {
             .run_blocking(move |connection| {
                 let sample_relation = Table::JointSamples.qualified_name(&namespace);
                 let episode_relation = Table::Episodes.qualified_name(&namespace);
-                execute_update_sql(
-                    connection,
-                    &sql::delete_episode(&sample_relation, episode.start.id()),
-                )?;
-                execute_update_sql(
-                    connection,
-                    &sql::delete_episode(&episode_relation, episode.start.id()),
-                )?;
+                connection.execute_update_sql(&SpiralSql::delete_episode(
+                    &sample_relation,
+                    episode.start.id(),
+                ))?;
+                connection.execute_update_sql(&SpiralSql::delete_episode(
+                    &episode_relation,
+                    episode.start.id(),
+                ))?;
                 let mut encoder = SpiralEpisodeEncoder::new(episode.start.clone())
                     .map_err(|error| error.to_string())?;
                 let mut rows = Vec::new();
                 for sample in &episode.samples {
                     rows.extend(encoder.encode(sample).map_err(|error| error.to_string())?);
                     if rows.len() >= 512 {
-                        ingest_batch(
-                            connection,
+                        connection.ingest_batch(
                             &sample_relation,
                             rows.batch().map_err(|error| error.to_string())?,
                         )?;
@@ -1218,14 +1232,12 @@ impl EpisodeStore {
                     }
                 }
                 if !rows.is_empty() {
-                    ingest_batch(
-                        connection,
+                    connection.ingest_batch(
                         &sample_relation,
                         rows.batch().map_err(|error| error.to_string())?,
                     )?;
                 }
-                ingest_batch(
-                    connection,
+                connection.ingest_batch(
                     &episode_relation,
                     episode
                         .completion
@@ -1432,7 +1444,7 @@ impl EpisodeWriteSession for SpiralEpisodeWriter {
         Ok(receiver)
     }
     fn failure(&self) -> Option<String> {
-        lock(&self.shared.failure).clone()
+        self.shared.failure.lock_unpoisoned().clone()
     }
     fn finish(
         mut self: Box<Self>,
@@ -1468,7 +1480,7 @@ impl EpisodeWriteSession for SpiralEpisodeWriter {
 
 impl SpiralEpisodeWriter {
     fn fail(&self, message: &str) -> bool {
-        let mut failure = lock(&self.shared.failure);
+        let mut failure = self.shared.failure.lock_unpoisoned();
         if failure.is_none() {
             *failure = Some(message.to_owned());
         }
@@ -1503,12 +1515,12 @@ impl EpisodeDrain<'_> {
                         let error = format!(
                             "recording reached the supported {MAX_EPISODE_FRAMES}-sample limit"
                         );
-                        *lock(&self.shared.failure) = Some(error.clone());
+                        *self.shared.failure.lock_unpoisoned() = Some(error.clone());
                         return Err(error);
                     }
                     encoder.encode(&sample).map_err(|error| {
                         let error = error.to_string();
-                        *lock(&self.shared.failure) = Some(error.clone());
+                        *self.shared.failure.lock_unpoisoned() = Some(error.clone());
                         error
                     })?;
                     samples.push(sample);
@@ -1528,7 +1540,7 @@ impl EpisodeDrain<'_> {
                         EpisodeReplacement::new(&namespace, &completed, &[]).save(connection)
                     });
                     if let Err(error) = &result {
-                        *lock(&self.shared.failure) = Some(error.clone());
+                        *self.shared.failure.lock_unpoisoned() = Some(error.clone());
                     }
                     let _ = complete.send(result);
                 }
@@ -1849,42 +1861,35 @@ impl TraceRange {
         }
     }
 }
-fn episode_number(id: &str) -> Option<u64> {
-    id.strip_prefix("episode_")?.parse().ok()
+pub trait EpisodeArmCollection: Sized {
+    fn from_joint_lists(arms: &[(String, Vec<String>)]) -> Result<Vec<Self>, EpisodeError>;
 }
-fn unix_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(0)
+
+impl EpisodeArmCollection for EpisodeArm {
+    fn from_joint_lists(arms: &[(String, Vec<String>)]) -> Result<Vec<Self>, EpisodeError> {
+        let mut seen = BTreeSet::new();
+        arms.iter()
+            .map(|(id, joints)| {
+                if joints.is_empty() {
+                    return Err(EpisodeError::Invalid(format!(
+                        "arm {id:?} reported no joints"
+                    )));
+                }
+                if !seen.insert(id.clone()) {
+                    return Err(EpisodeError::Invalid(format!("arm {id:?} was named twice")));
+                }
+                Ok(Self::new(id, None, joints.clone()))
+            })
+            .collect()
+    }
 }
-pub(crate) fn validate_episode_id(id: &str) -> Result<(), EpisodeError> {
-    (!id.is_empty()
-        && id.len() <= 64
-        && id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_')))
-    .then_some(())
-    .ok_or_else(|| EpisodeError::InvalidId(id.to_owned()))
+trait UnpoisonedMutex<T> {
+    fn lock_unpoisoned(&self) -> std::sync::MutexGuard<'_, T>;
 }
-pub fn build_arms(arms: &[(String, Vec<String>)]) -> Result<Vec<EpisodeArm>, EpisodeError> {
-    let mut seen = BTreeSet::new();
-    arms.iter()
-        .map(|(id, joints)| {
-            if joints.is_empty() {
-                return Err(EpisodeError::Invalid(format!(
-                    "arm {id:?} reported no joints"
-                )));
-            }
-            if !seen.insert(id.clone()) {
-                return Err(EpisodeError::Invalid(format!("arm {id:?} was named twice")));
-            }
-            Ok(EpisodeArm::new(id, None, joints.clone()))
-        })
-        .collect()
-}
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+
+impl<T> UnpoisonedMutex<T> for Mutex<T> {
+    fn lock_unpoisoned(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }

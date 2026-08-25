@@ -1,6 +1,6 @@
 //! URL routes and the low-frequency Studio shell shared by every screen.
 
-use crate::components::interaction::focus_after_render;
+use crate::components::interaction::BrowserFocus;
 use dioxus::prelude::*;
 use spiral_robotics_api::settings::DataSettings;
 
@@ -76,6 +76,10 @@ impl Default for StudioConfiguration {
 }
 
 impl StudioConfiguration {
+    pub(crate) fn current() -> Self {
+        use_context::<Signal<Self>>()()
+    }
+
     pub(crate) fn dataset(&self) -> &str {
         &self.dataset
     }
@@ -83,10 +87,6 @@ impl StudioConfiguration {
     pub(crate) const fn spiral_query_available(&self) -> bool {
         self.spiral_query_available
     }
-}
-
-pub(crate) fn studio_configuration() -> StudioConfiguration {
-    use_context::<Signal<StudioConfiguration>>()()
 }
 
 #[component]
@@ -105,7 +105,7 @@ fn StudioShell() -> Element {
     let shell = use_shell_controller();
     let mut settings_busy = use_signal(|| false);
     let mut settings =
-        use_resource(|| async { api::get::<DataSettings>("/api/settings/data").await });
+        use_resource(|| async { api::Http::get::<DataSettings>("/api/settings/data").await });
     let settings_result = settings.read_unchecked().to_owned();
     let loaded_settings = settings_result
         .as_ref()
@@ -136,11 +136,7 @@ fn StudioShell() -> Element {
     let selected_dataset = studio.selected_dataset().read().to_owned();
     use_data_controller(&configuration.dataset, &selected_dataset);
     use_workflow_controller();
-    use_training_controller(
-        &configuration.dataset,
-        &selected_dataset,
-        crate::activities::training::workspace::default_training_sql,
-    );
+    use_training_controller(&configuration.dataset, &selected_dataset);
     use_rollout_controller();
     let timeline = use_timeline_controller();
     let settings_open = shell.settings_open();
@@ -159,7 +155,7 @@ fn StudioShell() -> Element {
     use_effect(use_reactive((&settings_open,), move |(settings_open,)| {
         let was_open = settings_was_open();
         if !settings_open && was_open {
-            focus_after_render("settings-rail-trigger".to_owned());
+            BrowserFocus::after_render("settings-rail-trigger".to_owned());
         }
         if was_open != settings_open {
             settings_was_open.set(settings_open);

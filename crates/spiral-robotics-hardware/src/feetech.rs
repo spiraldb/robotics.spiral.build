@@ -130,6 +130,14 @@ struct Motor {
     id: u8,
 }
 
+struct InstructionPacket(Vec<u8>);
+
+struct PacketChecksum;
+
+struct RegisterValues<'a>(&'a [u8]);
+
+struct StatusPacketBuffer<'a>(&'a mut Vec<u8>);
+
 #[derive(Clone, Copy)]
 struct RegisterBlock<'a> {
     address: u8,
@@ -266,6 +274,66 @@ impl Error for FeetechError {
     }
 }
 
+impl FeetechError {
+    /// Finish an enable transition without losing either the enable failure or
+    /// the outcome of the compensating physical release.
+    fn finish_torque_enable(
+        enable: Result<(), Self>,
+        release: impl FnOnce() -> Result<(), Self>,
+    ) -> Result<(), Self> {
+        match enable {
+            Ok(()) => Ok(()),
+            Err(cause) => {
+                let release_error = release().err().map(Box::new);
+                Err(Self::TorqueEnableFailed {
+                    cause: Box::new(cause),
+                    release_error,
+                })
+            }
+        }
+    }
+}
+
+impl Motor {
+    fn from_specs(specs: &BTreeMap<String, MotorSpec>) -> Result<Vec<Self>, FeetechError> {
+        if specs.len() > MAX_SYNC_WRITE_MOTORS {
+            return Err(FeetechError::TooManyMotors {
+                count: specs.len(),
+                maximum: MAX_SYNC_WRITE_MOTORS,
+            });
+        }
+
+        let mut motors = Vec::with_capacity(specs.len());
+        for (name, spec) in specs {
+            let id = u8::try_from(spec.id())
+                .ok()
+                .filter(|id| *id < BROADCAST_ID)
+                .ok_or_else(|| FeetechError::InvalidMotorId {
+                    motor: name.clone(),
+                    id: spec.id(),
+                })?;
+            if let Some(model) = spec.model()
+                && !SUPPORTED_MODELS.contains(&model)
+            {
+                return Err(FeetechError::UnsupportedModel {
+                    motor: name.clone(),
+                    model: model.to_owned(),
+                });
+            }
+            motors.push(Self {
+                name: name.clone(),
+                id,
+            });
+        }
+        motors.sort_by(|left, right| {
+            left.id
+                .cmp(&right.id)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        Ok(motors)
+    }
+}
+
 /// A connection to a Feetech protocol-0 serial motor bus.
 pub(crate) struct FeetechBus {
     port: Box<dyn SerialPort>,
@@ -281,7 +349,7 @@ impl FeetechBus {
         baud_rate: u32,
         specs: &BTreeMap<String, MotorSpec>,
     ) -> Result<Self, FeetechError> {
-        let motors = motors_from_specs(specs)?;
+        let motors = Motor::from_specs(specs)?;
         let port = serialport::new(path, baud_rate)
             .timeout(IO_TIMEOUT)
             .open()
@@ -317,7 +385,7 @@ impl FeetechBus {
                     self.status_block = StatusBlock::Supported;
                     return Ok(blocks
                         .into_iter()
-                        .map(|(name, bytes)| (name, decode_status_block(&bytes)))
+                        .map(|(name, bytes)| (name, RegisterValues::new(&bytes).sample()))
                         .collect());
                 }
                 Err(error) if self.status_block == StatusBlock::Supported => return Err(error),
@@ -365,7 +433,7 @@ impl FeetechBus {
                 operation: "read present position",
             })?
             .into_iter()
-            .map(|(name, bytes)| (name, decode_position(&bytes)))
+            .map(|(name, bytes)| (name, RegisterValues::new(&bytes).position()))
             .collect())
     }
 
@@ -390,7 +458,7 @@ impl FeetechBus {
                         },
                     )
                     .ok()?;
-                Some((motor.name, decode_limits(&bytes)))
+                Some((motor.name, RegisterValues::new(&bytes).limits()))
             })
             .collect()
     }
@@ -467,8 +535,8 @@ impl FeetechBus {
             parameters.extend_from_slice(&encoded.to_le_bytes());
         }
 
-        let packet = instruction_packet(BROADCAST_ID, INSTRUCTION_SYNC_WRITE, &parameters);
-        self.write_packet(&packet, "send goal-position packet")
+        let packet = InstructionPacket::new(BROADCAST_ID, INSTRUCTION_SYNC_WRITE, &parameters);
+        self.write_packet(packet.as_ref(), "send goal-position packet")
     }
 
     /// Switch holding torque for every configured motor and verify the result.
@@ -487,7 +555,7 @@ impl FeetechBus {
             self.apply_torque_and_verify(true)
         })();
 
-        compensate_failed_torque_enable(enable, || self.apply_torque_and_verify(false))
+        FeetechError::finish_torque_enable(enable, || self.apply_torque_and_verify(false))
     }
 
     /// Broadcast one torque state and read every motor back. Once the packet
@@ -499,14 +567,14 @@ impl FeetechBus {
         for motor in &self.motors {
             parameters.extend_from_slice(&[motor.id, value]);
         }
-        let packet = instruction_packet(BROADCAST_ID, INSTRUCTION_SYNC_WRITE, &parameters);
+        let packet = InstructionPacket::new(BROADCAST_ID, INSTRUCTION_SYNC_WRITE, &parameters);
         let operation = if enabled {
             "clear stale serial input before enabling torque"
         } else {
             "clear stale serial input before disabling torque"
         };
         self.clear_input(operation)?;
-        self.write_packet(&packet, "send torque packet")?;
+        self.write_packet(packet.as_ref(), "send torque packet")?;
 
         // Give the servos time to apply the broadcast before reading it back.
         thread::sleep(Duration::from_millis(5));
@@ -542,12 +610,12 @@ impl FeetechBus {
         let mut parameters = Vec::with_capacity(2 + motors.len());
         parameters.extend_from_slice(&[register.address, register.length]);
         parameters.extend(motors.iter().map(|motor| motor.id));
-        let packet = instruction_packet(BROADCAST_ID, INSTRUCTION_SYNC_READ, &parameters);
+        let packet = InstructionPacket::new(BROADCAST_ID, INSTRUCTION_SYNC_READ, &parameters);
         let ids = motors.iter().map(|motor| motor.id).collect::<Vec<_>>();
         let operation = format!("sync {}", register.operation);
 
         self.clear_input("clear stale serial input before a sync read")?;
-        self.write_packet(&packet, "send sync-read packet")?;
+        self.write_packet(packet.as_ref(), "send sync-read packet")?;
         let mut responses = self.read_status_group(
             &ids,
             StatusExpectation {
@@ -577,7 +645,7 @@ impl FeetechBus {
         motor: &Motor,
         register: RegisterBlock<'_>,
     ) -> Result<Vec<u8>, FeetechError> {
-        let packet = instruction_packet(
+        let packet = InstructionPacket::new(
             motor.id,
             INSTRUCTION_READ,
             &[register.address, register.length],
@@ -593,7 +661,7 @@ impl FeetechBus {
                 last_detail = error.to_string();
                 continue;
             }
-            if let Err(error) = self.write_packet(&packet, &operation) {
+            if let Err(error) = self.write_packet(packet.as_ref(), &operation) {
                 last_detail = error.to_string();
                 continue;
             }
@@ -684,7 +752,9 @@ impl FeetechBus {
             }
 
             loop {
-                match take_status_packet(&mut received, expected_ids, expectation.parameters) {
+                match StatusPacketBuffer::new(&mut received)
+                    .take(expected_ids, expectation.parameters)
+                {
                     PacketParse::NeedMore => break,
                     PacketParse::Skip(detail) => last_parse_error = Some(detail),
                     PacketParse::Ready((id, parameters)) => {
@@ -742,158 +812,123 @@ impl MotorBus for FeetechBus {
     }
 }
 
-/// Finish an enable transition without losing either the enable failure or the
-/// outcome of the compensating physical release.
-fn compensate_failed_torque_enable(
-    enable: Result<(), FeetechError>,
-    release: impl FnOnce() -> Result<(), FeetechError>,
-) -> Result<(), FeetechError> {
-    match enable {
-        Ok(()) => Ok(()),
-        Err(cause) => {
-            let release_error = release().err().map(Box::new);
-            Err(FeetechError::TorqueEnableFailed {
-                cause: Box::new(cause),
-                release_error,
-            })
+impl InstructionPacket {
+    fn new(id: u8, instruction: u8, parameters: &[u8]) -> Self {
+        let length = u8::try_from(parameters.len() + 2)
+            .expect("Feetech instruction parameters must fit in one packet");
+        let mut packet = Vec::with_capacity(parameters.len() + 6);
+        packet.extend_from_slice(&[0xff, 0xff, id, length, instruction]);
+        packet.extend_from_slice(parameters);
+        packet.push(PacketChecksum::calculate(&packet[2..]));
+        Self(packet)
+    }
+}
+
+impl AsRef<[u8]> for InstructionPacket {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl PacketChecksum {
+    fn calculate(bytes: &[u8]) -> u8 {
+        !bytes.iter().fold(0_u8, |sum, byte| sum.wrapping_add(*byte))
+    }
+}
+
+impl<'a> RegisterValues<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self(bytes)
+    }
+
+    fn sign_magnitude(value: u16) -> i16 {
+        Self::sign_magnitude_at(value, 15)
+    }
+
+    /// Decode a sign-magnitude word whose direction lives at `sign_bit`.
+    ///
+    /// Not every Feetech register puts the sign in the top bit. Load is an 11-bit
+    /// field — a magnitude of at most 1000 in the low ten bits and its direction in
+    /// bit 10 — so reading it as a 16-bit sign-magnitude word turns a motor pushing
+    /// gently backwards into one working at a hundred and seven percent of its
+    /// rated torque. Released arms sitting on a bench reported exactly that.
+    fn sign_magnitude_at(value: u16, sign_bit: u32) -> i16 {
+        let sign = 1_u16 << sign_bit;
+        let magnitude = (value & (sign - 1)) as i16;
+        if value & sign == 0 {
+            magnitude
+        } else {
+            -magnitude
         }
     }
-}
 
-fn motors_from_specs(specs: &BTreeMap<String, MotorSpec>) -> Result<Vec<Motor>, FeetechError> {
-    if specs.len() > MAX_SYNC_WRITE_MOTORS {
-        return Err(FeetechError::TooManyMotors {
-            count: specs.len(),
-            maximum: MAX_SYNC_WRITE_MOTORS,
-        });
+    /// Read a little-endian word at `offset`, if the response reaches that far.
+    fn word(&self, offset: usize) -> Option<u16> {
+        let pair = self.0.get(offset..offset + 2)?;
+        Some(u16::from_le_bytes([pair[0], pair[1]]))
     }
 
-    let mut motors = Vec::with_capacity(specs.len());
-    for (name, spec) in specs {
-        let id = u8::try_from(spec.id())
-            .ok()
-            .filter(|id| *id < BROADCAST_ID)
-            .ok_or_else(|| FeetechError::InvalidMotorId {
-                motor: name.clone(),
-                id: spec.id(),
-            })?;
-        if let Some(model) = spec.model()
-            && !SUPPORTED_MODELS.contains(&model)
-        {
-            return Err(FeetechError::UnsupportedModel {
-                motor: name.clone(),
-                model: model.to_owned(),
-            });
-        }
-        motors.push(Motor {
-            name: name.clone(),
-            id,
-        });
+    /// Decode the Present_Position response.
+    fn position(&self) -> i64 {
+        i64::from(Self::sign_magnitude(
+            self.word(0)
+                .expect("a position response contains two bytes"),
+        ))
     }
-    motors.sort_by(|left, right| {
-        left.id
-            .cmp(&right.id)
-            .then_with(|| left.name.cmp(&right.name))
-    });
-    Ok(motors)
-}
 
-fn instruction_packet(id: u8, instruction: u8, parameters: &[u8]) -> Vec<u8> {
-    let length = u8::try_from(parameters.len() + 2)
-        .expect("Feetech instruction parameters must fit in one packet");
-    let mut packet = Vec::with_capacity(parameters.len() + 6);
-    packet.extend_from_slice(&[0xff, 0xff, id, length, instruction]);
-    packet.extend_from_slice(parameters);
-    packet.push(checksum(&packet[2..]));
-    packet
-}
-
-fn checksum(bytes: &[u8]) -> u8 {
-    !bytes.iter().fold(0_u8, |sum, byte| sum.wrapping_add(*byte))
-}
-
-fn decode_sign_magnitude(value: u16) -> i16 {
-    decode_sign_magnitude_at(value, 15)
-}
-
-/// Decode a sign-magnitude word whose direction lives at `sign_bit`.
-///
-/// Not every Feetech register puts the sign in the top bit. Load is an 11-bit
-/// field — a magnitude of at most 1000 in the low ten bits and its direction in
-/// bit 10 — so reading it as a 16-bit sign-magnitude word turns a motor pushing
-/// gently backwards into one working at a hundred and seven percent of its
-/// rated torque. Released arms sitting on a bench reported exactly that.
-fn decode_sign_magnitude_at(value: u16, sign_bit: u32) -> i16 {
-    let sign = 1_u16 << sign_bit;
-    let magnitude = (value & (sign - 1)) as i16;
-    if value & sign == 0 {
-        magnitude
-    } else {
-        -magnitude
+    /// Decode one motor's status block into physical units.
+    ///
+    /// A response that stops short simply reports fewer measurements. Nothing here
+    /// substitutes a zero for a byte that never arrived.
+    fn sample(&self) -> MotorSample {
+        let mechanical = MotorMechanicalSample::new(
+            self.word(OFFSET_SPEED).map(|speed| {
+                spiral_robotics_core::arm::JointDefinition::degrees_from_encoder_counts(i64::from(
+                    Self::sign_magnitude(speed),
+                ))
+            }),
+            self.word(OFFSET_LOAD).map(|load| {
+                f64::from(Self::sign_magnitude_at(load, LOAD_SIGN_BIT)) / LOAD_FULL_SCALE
+            }),
+            self.0.get(OFFSET_MOVING).map(|moving| *moving != 0),
+        );
+        let electrical = MotorElectricalSample::new(
+            // A servo answering at all is a servo with supply voltage, so a zero
+            // here is a register this firmware does not fill rather than a reading.
+            self.0
+                .get(OFFSET_VOLTAGE)
+                .copied()
+                .filter(|volts| *volts != 0)
+                .map(|volts| f64::from(volts) * VOLTS_PER_COUNT),
+            self.0
+                .get(OFFSET_TEMPERATURE)
+                .map(|celsius| f64::from(*celsius)),
+            // Direction of current draw says nothing an operator acts on, and the
+            // magnitude is what a stall shows up in.
+            self.word(OFFSET_CURRENT)
+                .map(|current| f64::from(Self::sign_magnitude(current).abs()) * AMPS_PER_COUNT),
+        );
+        MotorSample::new(self.position(), mechanical, electrical).with_faults(
+            MotorFaults::from_raw(self.0.get(OFFSET_STATUS).copied().unwrap_or_default()),
+        )
     }
-}
 
-/// Decode the two little-endian bytes of a Present_Position response.
-fn decode_position(bytes: &[u8]) -> i64 {
-    let encoded = u16::from_le_bytes([bytes[0], bytes[1]]);
-    i64::from(decode_sign_magnitude(encoded))
-}
-
-/// Read a little-endian word at `offset`, if the response reaches that far.
-fn word_at(bytes: &[u8], offset: usize) -> Option<u16> {
-    let pair = bytes.get(offset..offset + 2)?;
-    Some(u16::from_le_bytes([pair[0], pair[1]]))
-}
-
-/// Decode one motor's status block into physical units.
-///
-/// A response that stops short simply reports fewer measurements. Nothing here
-/// substitutes a zero for a byte that never arrived.
-fn decode_status_block(bytes: &[u8]) -> MotorSample {
-    let mechanical = MotorMechanicalSample::new(
-        word_at(bytes, OFFSET_SPEED).map(|speed| {
-            spiral_robotics_core::arm::counts_to_degrees(i64::from(decode_sign_magnitude(speed)))
-        }),
-        word_at(bytes, OFFSET_LOAD)
-            .map(|load| f64::from(decode_sign_magnitude_at(load, LOAD_SIGN_BIT)) / LOAD_FULL_SCALE),
-        bytes.get(OFFSET_MOVING).map(|moving| *moving != 0),
-    );
-    let electrical = MotorElectricalSample::new(
-        // A servo answering at all is a servo with supply voltage, so a zero
-        // here is a register this firmware does not fill rather than a reading.
-        bytes
-            .get(OFFSET_VOLTAGE)
-            .copied()
-            .filter(|volts| *volts != 0)
-            .map(|volts| f64::from(volts) * VOLTS_PER_COUNT),
-        bytes
-            .get(OFFSET_TEMPERATURE)
-            .map(|celsius| f64::from(*celsius)),
-        // Direction of current draw says nothing an operator acts on, and the
-        // magnitude is what a stall shows up in.
-        word_at(bytes, OFFSET_CURRENT)
-            .map(|current| f64::from(decode_sign_magnitude(current).abs()) * AMPS_PER_COUNT),
-    );
-    MotorSample::new(decode_position(bytes), mechanical, electrical).with_faults(
-        MotorFaults::from_raw(bytes.get(OFFSET_STATUS).copied().unwrap_or_default()),
-    )
-}
-
-/// Decode the EEPROM limit run beginning at [`LIMITS_ADDRESS`].
-fn decode_limits(bytes: &[u8]) -> MotorLimits {
-    // A limit register left at zero is a limit the servo is not enforcing, and
-    // a zero-degree ceiling would put every motor permanently in caution.
-    let byte_at = |offset: usize| bytes.get(offset).copied().filter(|value| *value != 0);
-    MotorLimits::new(
-        byte_at(0).map(f64::from),
-        MotorVoltageLimits::new(
-            byte_at(2).map(|volts| f64::from(volts) * VOLTS_PER_COUNT),
-            byte_at(1).map(|volts| f64::from(volts) * VOLTS_PER_COUNT),
-        ),
-        word_at(bytes, 3)
-            .filter(|torque| *torque != 0)
-            .map(|torque| f64::from(torque) / LOAD_FULL_SCALE),
-    )
+    /// Decode the EEPROM limit run beginning at [`LIMITS_ADDRESS`].
+    fn limits(&self) -> MotorLimits {
+        // A limit register left at zero is a limit the servo is not enforcing, and
+        // a zero-degree ceiling would put every motor permanently in caution.
+        let byte = |offset: usize| self.0.get(offset).copied().filter(|value| *value != 0);
+        MotorLimits::new(
+            byte(0).map(f64::from),
+            MotorVoltageLimits::new(
+                byte(2).map(|volts| f64::from(volts) * VOLTS_PER_COUNT),
+                byte(1).map(|volts| f64::from(volts) * VOLTS_PER_COUNT),
+            ),
+            self.word(3)
+                .filter(|torque| *torque != 0)
+                .map(|torque| f64::from(torque) / LOAD_FULL_SCALE),
+        )
+    }
 }
 
 enum PacketParse {
@@ -902,66 +937,71 @@ enum PacketParse {
     Ready((u8, Vec<u8>)),
 }
 
-fn take_status_packet(
-    bytes: &mut Vec<u8>,
-    expected_ids: &[u8],
-    expected_parameters: usize,
-) -> PacketParse {
-    let Some(header) = bytes.windows(2).position(|window| window == [0xff, 0xff]) else {
-        if bytes.last() == Some(&0xff) {
-            bytes.drain(..bytes.len().saturating_sub(1));
-        } else {
-            bytes.clear();
+impl<'a> StatusPacketBuffer<'a> {
+    fn new(bytes: &'a mut Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    fn take(&mut self, expected_ids: &[u8], expected_parameters: usize) -> PacketParse {
+        let bytes = &mut self.0;
+        let Some(header) = bytes.windows(2).position(|window| window == [0xff, 0xff]) else {
+            if bytes.last() == Some(&0xff) {
+                bytes.drain(..bytes.len().saturating_sub(1));
+            } else {
+                bytes.clear();
+            }
+            return PacketParse::NeedMore;
+        };
+        if header > 0 {
+            bytes.drain(..header);
         }
-        return PacketParse::NeedMore;
-    };
-    if header > 0 {
-        bytes.drain(..header);
-    }
-    if bytes.len() < 4 {
-        return PacketParse::NeedMore;
-    }
+        if bytes.len() < 4 {
+            return PacketParse::NeedMore;
+        }
 
-    let length = usize::from(bytes[3]);
-    if !(2..=64).contains(&length) || bytes[2] == 0xff {
-        bytes.drain(..1);
-        return PacketParse::Skip("discarded malformed status-packet header".to_owned());
-    }
-    let packet_length = length + 4;
-    if bytes.len() < packet_length {
-        return PacketParse::NeedMore;
-    }
-    let packet = bytes.drain(..packet_length).collect::<Vec<_>>();
+        let length = usize::from(bytes[3]);
+        if !(2..=64).contains(&length) || bytes[2] == 0xff {
+            bytes.drain(..1);
+            return PacketParse::Skip("discarded malformed status-packet header".to_owned());
+        }
+        let packet_length = length + 4;
+        if bytes.len() < packet_length {
+            return PacketParse::NeedMore;
+        }
+        let packet = bytes.drain(..packet_length).collect::<Vec<_>>();
 
-    let expected_checksum = checksum(&packet[2..packet_length - 1]);
-    if packet[packet_length - 1] != expected_checksum {
-        return PacketParse::Skip("received a status packet with an invalid checksum".to_owned());
-    }
-    let id = packet[2];
-    if !expected_ids.contains(&id) {
-        return PacketParse::Skip(format!(
-            "received a response from unexpected motor ID {id} while waiting for {}",
-            expected_ids
-                .iter()
-                .map(u8::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    let parameter_count = length - 2;
-    if parameter_count != expected_parameters {
-        return PacketParse::Skip(format!(
-            "motor ID {id} returned {parameter_count} data bytes; expected {expected_parameters}"
-        ));
-    }
-    if packet[4] != 0 {
-        return PacketParse::Skip(format!(
-            "motor ID {id} returned status error 0x{:02x}",
-            packet[4]
-        ));
-    }
+        let expected_checksum = PacketChecksum::calculate(&packet[2..packet_length - 1]);
+        if packet[packet_length - 1] != expected_checksum {
+            return PacketParse::Skip(
+                "received a status packet with an invalid checksum".to_owned(),
+            );
+        }
+        let id = packet[2];
+        if !expected_ids.contains(&id) {
+            return PacketParse::Skip(format!(
+                "received a response from unexpected motor ID {id} while waiting for {}",
+                expected_ids
+                    .iter()
+                    .map(u8::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        let parameter_count = length - 2;
+        if parameter_count != expected_parameters {
+            return PacketParse::Skip(format!(
+                "motor ID {id} returned {parameter_count} data bytes; expected {expected_parameters}"
+            ));
+        }
+        if packet[4] != 0 {
+            return PacketParse::Skip(format!(
+                "motor ID {id} returned status error 0x{:02x}",
+                packet[4]
+            ));
+        }
 
-    PacketParse::Ready((id, packet[5..packet_length - 1].to_vec()))
+        PacketParse::Ready((id, packet[5..packet_length - 1].to_vec()))
+    }
 }
 
 #[cfg(test)]
@@ -977,7 +1017,7 @@ mod tests {
         let length = u8::try_from(parameters.len() + 2).expect("test packets are short");
         let mut packet = vec![0xff, 0xff, id, length, 0x00];
         packet.extend_from_slice(parameters);
-        packet.push(checksum(&packet[2..]));
+        packet.push(PacketChecksum::calculate(&packet[2..]));
         packet
     }
 
@@ -1001,7 +1041,7 @@ mod tests {
     #[test]
     fn failed_enable_always_attempts_release_and_preserves_both_outcomes() {
         let releases = Cell::new(0);
-        let error = compensate_failed_torque_enable(Err(torque_mismatch(true, 0)), || {
+        let error = FeetechError::finish_torque_enable(Err(torque_mismatch(true, 0)), || {
             releases.set(releases.get() + 1);
             Ok(())
         })
@@ -1009,7 +1049,7 @@ mod tests {
         assert_eq!(releases.get(), 1, "torque-off compensation is mandatory");
         assert!(error.to_string().contains("torque-off was verified"));
 
-        let error = compensate_failed_torque_enable(Err(torque_mismatch(true, 0)), || {
+        let error = FeetechError::finish_torque_enable(Err(torque_mismatch(true, 0)), || {
             releases.set(releases.get() + 1);
             Err(torque_mismatch(false, 1))
         })
@@ -1029,7 +1069,7 @@ mod tests {
     #[test]
     fn builds_protocol_zero_read_packet() {
         assert_eq!(
-            instruction_packet(1, INSTRUCTION_READ, &[PRESENT_POSITION_ADDRESS, 2]),
+            InstructionPacket::new(1, INSTRUCTION_READ, &[PRESENT_POSITION_ADDRESS, 2]).as_ref(),
             [0xff, 0xff, 0x01, 0x04, 0x02, 0x38, 0x02, 0xbe]
         );
     }
@@ -1038,16 +1078,16 @@ mod tests {
     fn parses_status_packets_after_noise_and_in_chunks() {
         let mut bytes = vec![0x00, 0x12, 0xff];
         assert!(matches!(
-            take_status_packet(&mut bytes, &[1], 2),
+            StatusPacketBuffer::new(&mut bytes).take(&[1], 2),
             PacketParse::NeedMore
         ));
         bytes.extend_from_slice(&[0xff, 0x01, 0x04, 0x00, 0x34]);
         assert!(matches!(
-            take_status_packet(&mut bytes, &[1], 2),
+            StatusPacketBuffer::new(&mut bytes).take(&[1], 2),
             PacketParse::NeedMore
         ));
         bytes.extend_from_slice(&[0x12, 0xb4]);
-        match take_status_packet(&mut bytes, &[1], 2) {
+        match StatusPacketBuffer::new(&mut bytes).take(&[1], 2) {
             PacketParse::Ready((id, parameters)) => {
                 assert_eq!(id, 1);
                 assert_eq!(parameters, [0x34, 0x12]);
@@ -1060,13 +1100,13 @@ mod tests {
     fn rejects_corrupt_and_error_status_packets() {
         let mut corrupt = vec![0xff, 0xff, 1, 4, 0, 0x34, 0x12, 0];
         assert!(matches!(
-            take_status_packet(&mut corrupt, &[1], 2),
+            StatusPacketBuffer::new(&mut corrupt).take(&[1], 2),
             PacketParse::Skip(detail) if detail.contains("checksum")
         ));
 
         let mut error = vec![0xff, 0xff, 1, 2, 4, 0xf8];
         assert!(matches!(
-            take_status_packet(&mut error, &[1], 0),
+            StatusPacketBuffer::new(&mut error).take(&[1], 0),
             PacketParse::Skip(detail) if detail.contains("0x04")
         ));
     }
@@ -1079,7 +1119,7 @@ mod tests {
 
         let mut collected = BTreeMap::new();
         loop {
-            match take_status_packet(&mut bytes, &[1, 3], 2) {
+            match StatusPacketBuffer::new(&mut bytes).take(&[1, 3], 2) {
                 PacketParse::Ready((id, parameters)) => {
                     collected.insert(id, parameters);
                 }
@@ -1090,41 +1130,43 @@ mod tests {
 
         assert_eq!(collected[&1], [0x34, 0x12]);
         assert_eq!(collected[&3], [0x00, 0x08]);
-        assert_eq!(decode_position(&collected[&1]), 0x1234);
-        assert_eq!(decode_position(&collected[&3]), 2048);
+        assert_eq!(RegisterValues::new(&collected[&1]).position(), 0x1234);
+        assert_eq!(RegisterValues::new(&collected[&3]).position(), 2048);
     }
 
     #[test]
     fn a_response_from_an_unrequested_motor_is_skipped() {
         let mut bytes = status_packet(9, &[0x00, 0x00]);
         assert!(matches!(
-            take_status_packet(&mut bytes, &[1, 3], 2),
+            StatusPacketBuffer::new(&mut bytes).take(&[1, 3], 2),
             PacketParse::Skip(detail) if detail.contains("unexpected motor ID 9")
         ));
     }
 
     #[test]
     fn builds_a_sync_read_packet_for_every_motor() {
-        let packet = instruction_packet(
+        let packet = InstructionPacket::new(
             BROADCAST_ID,
             INSTRUCTION_SYNC_READ,
             &[PRESENT_POSITION_ADDRESS, 2, 1, 2, 3],
         );
 
+        let packet = packet.as_ref();
         // header, broadcast ID, length, instruction, address, size, three IDs,
         // checksum.
         assert_eq!(&packet[..5], &[0xff, 0xff, 0xfe, 0x07, 0x82]);
         assert_eq!(&packet[5..packet.len() - 1], &[0x38, 0x02, 1, 2, 3]);
         assert_eq!(
             *packet.last().unwrap(),
-            checksum(&packet[2..packet.len() - 1])
+            PacketChecksum::calculate(&packet[2..packet.len() - 1])
         );
     }
 
     #[test]
     fn builds_a_sync_write_packet_for_goal_positions() {
         let parameters = [GOAL_POSITION_ADDRESS, 2, 1, 0x00, 0x08, 2, 0xff, 0x0f];
-        let packet = instruction_packet(BROADCAST_ID, INSTRUCTION_SYNC_WRITE, &parameters);
+        let packet = InstructionPacket::new(BROADCAST_ID, INSTRUCTION_SYNC_WRITE, &parameters);
+        let packet = packet.as_ref();
 
         assert_eq!(&packet[..5], &[0xff, 0xff, 0xfe, 0x0a, 0x83]);
         assert_eq!(&packet[5..packet.len() - 1], &parameters);
@@ -1132,9 +1174,9 @@ mod tests {
 
     #[test]
     fn decodes_feetech_sign_magnitude_positions() {
-        assert_eq!(decode_sign_magnitude(0x1234), 0x1234);
-        assert_eq!(decode_sign_magnitude(0x800a), -10);
-        assert_eq!(decode_sign_magnitude(0xffff), -32767);
+        assert_eq!(RegisterValues::sign_magnitude(0x1234), 0x1234);
+        assert_eq!(RegisterValues::sign_magnitude(0x800a), -10);
+        assert_eq!(RegisterValues::sign_magnitude(0xffff), -32767);
     }
 
     #[test]
@@ -1145,14 +1187,14 @@ mod tests {
             .collect::<BTreeMap<_, _>>();
 
         assert!(matches!(
-            motors_from_specs(&specs),
+            Motor::from_specs(&specs),
             Err(FeetechError::TooManyMotors { .. })
         ));
 
         let largest = (0..MAX_SYNC_WRITE_MOTORS as u32)
             .map(|index| (format!("joint_{index}"), spec(index, None)))
             .collect::<BTreeMap<_, _>>();
-        let motors = motors_from_specs(&largest).expect("the largest supported bus is accepted");
+        let motors = Motor::from_specs(&largest).expect("the largest supported bus is accepted");
         let mut parameters = vec![GOAL_POSITION_ADDRESS, 2];
         for motor in &motors {
             parameters.extend_from_slice(&[motor.id, 0, 0]);
@@ -1162,7 +1204,7 @@ mod tests {
 
     #[test]
     fn validates_motor_ids_and_models_and_sorts_by_id() {
-        let motors = motors_from_specs(&BTreeMap::from([
+        let motors = Motor::from_specs(&BTreeMap::from([
             ("elbow".to_owned(), spec(2, Some("sts3215"))),
             ("shoulder".to_owned(), spec(1, None)),
         ]))
@@ -1171,11 +1213,11 @@ mod tests {
         assert_eq!(motors[1].name, "elbow");
 
         assert!(matches!(
-            motors_from_specs(&BTreeMap::from([("joint".to_owned(), spec(254, None))])),
+            Motor::from_specs(&BTreeMap::from([("joint".to_owned(), spec(254, None))])),
             Err(FeetechError::InvalidMotorId { .. })
         ));
         assert!(matches!(
-            motors_from_specs(&BTreeMap::from([(
+            Motor::from_specs(&BTreeMap::from([(
                 "joint".to_owned(),
                 spec(1, Some("dynamixel"))
             )])),
@@ -1206,7 +1248,7 @@ mod tests {
 
     #[test]
     fn a_status_block_decodes_into_physical_units() {
-        let reading = decode_status_block(&status_block());
+        let reading = RegisterValues::new(&status_block()).sample();
 
         assert_eq!(reading.position(), 2048);
         assert_eq!(reading.mechanical().speed_degrees_per_second(), Some(-45.0));
@@ -1220,7 +1262,7 @@ mod tests {
 
     #[test]
     fn a_truncated_block_reports_fewer_readings_rather_than_zeroes() {
-        let reading = decode_status_block(&status_block()[..OFFSET_TEMPERATURE]);
+        let reading = RegisterValues::new(&status_block()[..OFFSET_TEMPERATURE]).sample();
 
         assert_eq!(reading.position(), 2048);
         assert_eq!(reading.electrical().temperature_celsius(), None);
@@ -1237,7 +1279,8 @@ mod tests {
         // a magnitude of 44 with the direction bit set, at bit 10.
         bytes[OFFSET_LOAD..OFFSET_LOAD + 2].copy_from_slice(&1068_u16.to_le_bytes());
 
-        let load = decode_status_block(&bytes)
+        let load = RegisterValues::new(&bytes)
+            .sample()
             .mechanical()
             .load()
             .expect("a load reading");
@@ -1253,7 +1296,10 @@ mod tests {
         bytes[OFFSET_VOLTAGE] = 0;
 
         assert_eq!(
-            decode_status_block(&bytes).electrical().voltage_volts(),
+            RegisterValues::new(&bytes)
+                .sample()
+                .electrical()
+                .voltage_volts(),
             None
         );
     }
@@ -1262,7 +1308,7 @@ mod tests {
     fn the_servo_reports_its_own_faults_and_keeps_the_bits_it_cannot_name() {
         let mut bytes = status_block();
         bytes[OFFSET_STATUS] = MotorFaults::OVERHEAT | MotorFaults::OVERLOAD | 0x40;
-        let faults = decode_status_block(&bytes).faults();
+        let faults = RegisterValues::new(&bytes).sample().faults();
 
         assert!(faults.has_faults());
         assert_eq!(
@@ -1276,7 +1322,7 @@ mod tests {
     fn limits_come_from_the_servos_own_eeprom() {
         let mut bytes = vec![70, 90, 45];
         bytes.extend_from_slice(&1000_u16.to_le_bytes());
-        let limits = decode_limits(&bytes);
+        let limits = RegisterValues::new(&bytes).limits();
 
         assert_eq!(limits.max_temperature_celsius(), Some(70.0));
         assert_eq!(limits.max_voltage_volts(), Some(9.0));
@@ -1286,7 +1332,7 @@ mod tests {
 
     #[test]
     fn an_unset_limit_register_is_not_a_limit_of_zero() {
-        let limits = decode_limits(&[0, 0, 0, 0, 0]);
+        let limits = RegisterValues::new(&[0, 0, 0, 0, 0]).limits();
 
         assert_eq!(limits.max_temperature_celsius(), None);
         assert_eq!(limits.max_voltage_volts(), None);

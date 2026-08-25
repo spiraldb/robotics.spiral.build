@@ -100,7 +100,8 @@ fn command() -> SeekEpisodeCommand {
 }
 
 async fn invalid(port: &FakePort) -> OperationError {
-    seek(port, command())
+    PhysicalSeekActions::new(port)
+        .seek(command())
         .await
         .expect_err("seek must be refused")
 }
@@ -109,15 +110,13 @@ async fn invalid(port: &FakePort) -> OperationError {
 async fn invalid_time_is_refused_before_reading_activity() {
     for seconds in [-1.0, f64::NAN, f64::INFINITY] {
         let port = FakePort::default();
-        let error = seek(
-            &port,
-            SeekEpisodeCommand {
+        let error = PhysicalSeekActions::new(&port)
+            .seek(SeekEpisodeCommand {
                 seconds,
                 ..command()
-            },
-        )
-        .await
-        .unwrap_err();
+            })
+            .await
+            .unwrap_err();
         assert!(matches!(error, OperationError::InvalidInput(_)));
         assert!(port.events.lock().unwrap().is_empty());
     }
@@ -188,7 +187,11 @@ async fn target_must_exist_and_be_an_explicit_follower() {
     let mut uppercase = FakePort::default();
     uppercase.target.as_mut().unwrap().robot_type = Some("SO101_FOLLOWER".to_owned());
     assert_eq!(
-        seek(&uppercase, command()).await.unwrap().state,
+        PhysicalSeekActions::new(&uppercase)
+            .seek(command())
+            .await
+            .unwrap()
+            .state,
         HistoricalSeekState::Seeking
     );
 }
@@ -241,7 +244,11 @@ async fn broken_finished_episode_is_refused_but_matching_paused_partial_is_allow
     partial.episode.problem = Some("recording did not finish".to_owned());
     partial.episode.unfinished = true;
     assert_eq!(
-        seek(&partial, command()).await.unwrap().state,
+        PhysicalSeekActions::new(&partial)
+            .seek(command())
+            .await
+            .unwrap()
+            .state,
         HistoricalSeekState::Seeking
     );
 }
@@ -261,37 +268,43 @@ async fn episode_sample_rate_must_be_finite_and_positive_before_ticketing() {
 
 #[tokio::test]
 async fn recorded_arm_selection_supports_explicit_target_and_single_fallback() {
-    let explicit = seek(
-        &FakePort::default(),
-        SeekEpisodeCommand {
+    let explicit = PhysicalSeekActions::new(&FakePort::default())
+        .seek(SeekEpisodeCommand {
             source_arm: Some("follower".to_owned()),
             ..command()
-        },
-    )
-    .await
-    .unwrap();
+        })
+        .await
+        .unwrap();
     assert_eq!(explicit.source_arm, "follower");
 
-    let target = seek(&FakePort::default(), command()).await.unwrap();
+    let target = PhysicalSeekActions::new(&FakePort::default())
+        .seek(command())
+        .await
+        .unwrap();
     assert_eq!(target.source_arm, "follower");
 
     let mut single = FakePort::default();
     single.episode.arms = vec!["leader".to_owned()];
     single.sample.arms[0].id = "leader".to_owned();
-    assert_eq!(seek(&single, command()).await.unwrap().source_arm, "leader");
+    assert_eq!(
+        PhysicalSeekActions::new(&single)
+            .seek(command())
+            .await
+            .unwrap()
+            .source_arm,
+        "leader"
+    );
 }
 
 #[tokio::test]
 async fn unknown_and_ambiguous_source_arms_are_refused_before_ticketing() {
-    let unknown = seek(
-        &FakePort::default(),
-        SeekEpisodeCommand {
+    let unknown = PhysicalSeekActions::new(&FakePort::default())
+        .seek(SeekEpisodeCommand {
             source_arm: Some("missing".to_owned()),
             ..command()
-        },
-    )
-    .await
-    .unwrap_err();
+        })
+        .await
+        .unwrap_err();
     assert!(matches!(unknown, OperationError::InvalidInput(_)));
 
     let mut ambiguous = FakePort::default();
@@ -300,7 +313,10 @@ async fn unknown_and_ambiguous_source_arms_are_refused_before_ticketing() {
         robot: "other".to_owned(),
         ..command()
     };
-    let error = seek(&ambiguous, command).await.unwrap_err();
+    let error = PhysicalSeekActions::new(&ambiguous)
+        .seek(command)
+        .await
+        .unwrap_err();
     assert!(matches!(error, OperationError::InvalidInput(_)));
     assert!(
         !ambiguous
@@ -345,7 +361,10 @@ async fn sampled_frame_must_contain_a_finite_nonempty_pose_for_the_source() {
 #[tokio::test]
 async fn admission_reservation_sampling_and_commit_stay_in_safe_order() {
     let port = FakePort::default();
-    let result = seek(&port, command()).await.unwrap();
+    let result = PhysicalSeekActions::new(&port)
+        .seek(command())
+        .await
+        .unwrap();
 
     assert_eq!(result.state, HistoricalSeekState::Seeking);
     assert_eq!(result.resolved_seconds, 0.25);
@@ -371,7 +390,11 @@ async fn superseded_ticket_reports_coalesced_without_claiming_motion() {
         ..FakePort::default()
     };
     assert_eq!(
-        seek(&port, command()).await.unwrap().state,
+        PhysicalSeekActions::new(&port)
+            .seek(command())
+            .await
+            .unwrap()
+            .state,
         HistoricalSeekState::Coalesced
     );
     assert!(port.committed.lock().unwrap().is_empty());

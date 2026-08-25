@@ -171,6 +171,29 @@ impl ArtifactIdentity {
         self.tensor_namespace = tensor_namespace.into();
         self
     }
+
+    pub(crate) fn validate_for(
+        &self,
+        expected_run: &str,
+        expected_step: u64,
+    ) -> Result<(), OperationError> {
+        let supported_namespace = matches!(
+            self.tensor_namespace.as_str(),
+            ACT_TENSOR_NAMESPACE | LEGACY_BURN_ACT_TENSOR_NAMESPACE
+        );
+        if self.format != ACT_ARTIFACT_FORMAT || self.purpose != "inference" || !supported_namespace
+        {
+            return Err(OperationError::invalid_input(
+                "checkpoint is not a native Spiral ACT inference artifact",
+            ));
+        }
+        if self.run_id != expected_run || self.step != expected_step {
+            return Err(OperationError::invalid_input(
+                "checkpoint manifest identity does not match the requested run",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl PolicyModelContract {
@@ -262,134 +285,135 @@ impl ResolvedCameraBinding {
     }
 }
 
-pub(crate) fn validate_artifact_identity(
-    actual: &ArtifactIdentity,
-    expected_run: &str,
-    expected_step: u64,
-) -> Result<(), OperationError> {
-    let supported_namespace = matches!(
-        actual.tensor_namespace.as_str(),
-        ACT_TENSOR_NAMESPACE | LEGACY_BURN_ACT_TENSOR_NAMESPACE
-    );
-    if actual.format != ACT_ARTIFACT_FORMAT || actual.purpose != "inference" || !supported_namespace
-    {
-        return invalid("checkpoint is not a native Spiral ACT inference artifact");
-    }
-    if actual.run_id != expected_run || actual.step != expected_step {
-        return invalid("checkpoint manifest identity does not match the requested run");
-    }
-    Ok(())
-}
-
 /// Bind persisted artifact policy, loaded-model shape, and live robot setup.
-pub(crate) fn validate_rollout_contract(
-    data: PolicyDataContract,
-    model: &PolicyModelContract,
-    target: &TargetRobotContract,
-) -> Result<ValidatedRolloutContract, OperationError> {
-    if data.observations.robot_type.trim().is_empty()
-        || data.observations.joint_names.is_empty()
-        || data.observations.camera_streams.is_empty()
-    {
-        return invalid("checkpoint has an empty robot, joint, or camera contract");
-    }
-    if data.observations.value_space != "centered_normalized"
-        || data.images.layout != "chw"
-        || data.images.normalization != "imagenet"
-        || data.images.frame_alignment != "fixed_fps"
-    {
-        return invalid("checkpoint uses an unsupported observation or image contract");
-    }
-    if data.schemas.artifact != data.schemas.supported {
-        return invalid(format!(
-            "checkpoint schema version {} is not supported by runtime version {}",
-            data.schemas.artifact, data.schemas.supported
-        ));
-    }
-    require_unique_nonempty("checkpoint joint", &data.observations.joint_names)?;
-    require_unique_nonempty("checkpoint camera", &data.observations.camera_streams)?;
-    if !data.observations.sample_hz.is_finite()
-        || !(1.0..=100.0).contains(&data.observations.sample_hz)
-    {
-        return invalid("checkpoint sample_hz must be between 1 and 100");
-    }
-    if model.state_dimensions != data.observations.joint_names.len()
-        || model.action_dimensions != data.observations.joint_names.len()
-    {
-        return invalid(format!(
-            "checkpoint joint contract has {} names but the model expects {} state and {} action values",
-            data.observations.joint_names.len(),
-            model.state_dimensions,
-            model.action_dimensions
-        ));
-    }
-    if model.recommended_action_steps == 0
-        || model.recommended_action_steps > model.action_chunk_size
-    {
-        return invalid(format!(
-            "checkpoint recommends {} action steps for chunk size {}",
-            model.recommended_action_steps, model.action_chunk_size
-        ));
-    }
-    if model.image_streams != data.observations.camera_streams {
-        return invalid("checkpoint camera order does not match its configuration");
-    }
-    if target.problem.is_some() || !target.connected || !target.calibrated {
-        return invalid(format!(
-            "robot {:?} must be valid, connected, and calibrated before rollout",
-            target.id
-        ));
-    }
-    if target.robot_type.as_deref() != Some(data.observations.robot_type.as_str()) {
-        return invalid(format!(
-            "checkpoint was trained for {:?}, but robot {:?} is {:?}",
-            data.observations.robot_type, target.id, target.robot_type
-        ));
-    }
-    let configured = target.joint_names.iter().collect::<BTreeSet<_>>();
-    let expected = data
-        .observations
-        .joint_names
-        .iter()
-        .collect::<BTreeSet<_>>();
-    if configured != expected || target.joint_names.len() != data.observations.joint_names.len() {
-        return invalid("checkpoint joint names do not exactly match the target robot");
-    }
-
-    let mut bindings = BTreeMap::new();
-    for binding in &target.camera_bindings {
-        if binding.role.trim().is_empty()
-            || binding.role.trim() != binding.role
-            || binding.camera_id.trim().is_empty()
-            || bindings
-                .insert(binding.role.as_str(), binding.camera_id.as_str())
-                .is_some()
+impl PolicyDataContract {
+    pub(crate) fn validated_with(
+        self,
+        model: &PolicyModelContract,
+        target: &TargetRobotContract,
+    ) -> Result<ValidatedRolloutContract, OperationError> {
+        let data = self;
+        if data.observations.robot_type.trim().is_empty()
+            || data.observations.joint_names.is_empty()
+            || data.observations.camera_streams.is_empty()
         {
-            return invalid("robot camera roles must be non-empty and unique");
+            return Err(OperationError::invalid_input(
+                "checkpoint has an empty robot, joint, or camera contract",
+            ));
         }
-    }
-    let mut resolved = Vec::with_capacity(data.observations.camera_streams.len());
-    for stream in &data.observations.camera_streams {
-        let role = stream.rsplit('.').next().unwrap_or(stream);
-        let camera_id = bindings.get(role).ok_or_else(|| {
-            OperationError::InvalidInput(format!(
-                "robot {:?} has no camera binding for checkpoint stream {stream:?}",
+        if data.observations.value_space != "centered_normalized"
+            || data.images.layout != "chw"
+            || data.images.normalization != "imagenet"
+            || data.images.frame_alignment != "fixed_fps"
+        {
+            return Err(OperationError::invalid_input(
+                "checkpoint uses an unsupported observation or image contract",
+            ));
+        }
+        if data.schemas.artifact != data.schemas.supported {
+            return Err(OperationError::invalid_input(format!(
+                "checkpoint schema version {} is not supported by runtime version {}",
+                data.schemas.artifact, data.schemas.supported
+            )));
+        }
+        data.observations
+            .joint_names
+            .require_unique_nonempty("checkpoint joint")?;
+        data.observations
+            .camera_streams
+            .require_unique_nonempty("checkpoint camera")?;
+        if !data.observations.sample_hz.is_finite()
+            || !(1.0..=100.0).contains(&data.observations.sample_hz)
+        {
+            return Err(OperationError::invalid_input(
+                "checkpoint sample_hz must be between 1 and 100",
+            ));
+        }
+        if model.state_dimensions != data.observations.joint_names.len()
+            || model.action_dimensions != data.observations.joint_names.len()
+        {
+            return Err(OperationError::invalid_input(format!(
+                "checkpoint joint contract has {} names but the model expects {} state and {} action values",
+                data.observations.joint_names.len(),
+                model.state_dimensions,
+                model.action_dimensions
+            )));
+        }
+        if model.recommended_action_steps == 0
+            || model.recommended_action_steps > model.action_chunk_size
+        {
+            return Err(OperationError::invalid_input(format!(
+                "checkpoint recommends {} action steps for chunk size {}",
+                model.recommended_action_steps, model.action_chunk_size
+            )));
+        }
+        if model.image_streams != data.observations.camera_streams {
+            return Err(OperationError::invalid_input(
+                "checkpoint camera order does not match its configuration",
+            ));
+        }
+        if target.problem.is_some() || !target.connected || !target.calibrated {
+            return Err(OperationError::invalid_input(format!(
+                "robot {:?} must be valid, connected, and calibrated before rollout",
                 target.id
-            ))
-        })?;
-        resolved.push(ResolvedCameraBinding {
-            stream: stream.clone(),
-            camera_id: (*camera_id).to_owned(),
-        });
-    }
+            )));
+        }
+        if target.robot_type.as_deref() != Some(data.observations.robot_type.as_str()) {
+            return Err(OperationError::invalid_input(format!(
+                "checkpoint was trained for {:?}, but robot {:?} is {:?}",
+                data.observations.robot_type, target.id, target.robot_type
+            )));
+        }
+        let configured = target.joint_names.iter().collect::<BTreeSet<_>>();
+        let expected = data
+            .observations
+            .joint_names
+            .iter()
+            .collect::<BTreeSet<_>>();
+        if configured != expected || target.joint_names.len() != data.observations.joint_names.len()
+        {
+            return Err(OperationError::invalid_input(
+                "checkpoint joint names do not exactly match the target robot",
+            ));
+        }
 
-    Ok(ValidatedRolloutContract {
-        joint_names: data.observations.joint_names,
-        camera_bindings: resolved,
-        sample_hz: data.observations.sample_hz,
-        sample_period: Duration::from_secs_f64(1.0 / data.observations.sample_hz),
-        action_steps: model.recommended_action_steps.min(MAX_ROLLOUT_ACTION_STEPS),
-    })
+        let mut bindings = BTreeMap::new();
+        for binding in &target.camera_bindings {
+            if binding.role.trim().is_empty()
+                || binding.role.trim() != binding.role
+                || binding.camera_id.trim().is_empty()
+                || bindings
+                    .insert(binding.role.as_str(), binding.camera_id.as_str())
+                    .is_some()
+            {
+                return Err(OperationError::invalid_input(
+                    "robot camera roles must be non-empty and unique",
+                ));
+            }
+        }
+        let mut resolved = Vec::with_capacity(data.observations.camera_streams.len());
+        for stream in &data.observations.camera_streams {
+            let role = stream.rsplit('.').next().unwrap_or(stream);
+            let camera_id = bindings.get(role).ok_or_else(|| {
+                OperationError::InvalidInput(format!(
+                    "robot {:?} has no camera binding for checkpoint stream {stream:?}",
+                    target.id
+                ))
+            })?;
+            resolved.push(ResolvedCameraBinding {
+                stream: stream.clone(),
+                camera_id: (*camera_id).to_owned(),
+            });
+        }
+
+        Ok(ValidatedRolloutContract {
+            joint_names: data.observations.joint_names,
+            camera_bindings: resolved,
+            sample_hz: data.observations.sample_hz,
+            sample_period: Duration::from_secs_f64(1.0 / data.observations.sample_hz),
+            action_steps: model.recommended_action_steps.min(MAX_ROLLOUT_ACTION_STEPS),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -407,22 +431,25 @@ impl ObservationFreshness {
     }
 }
 
-pub(crate) fn require_fresh_observations(
-    observations: &[ObservationFreshness],
-    maximum_age: Duration,
-) -> Result<(), OperationError> {
-    for observation in observations {
-        let age = observation.age.ok_or_else(|| {
-            OperationError::Conflict(format!("camera {:?} has no frame", observation.source))
-        })?;
-        if age > maximum_age {
-            return Err(OperationError::Conflict(format!(
-                "camera {:?} became stale",
-                observation.source
-            )));
+pub(crate) trait ObservationFreshnessCollection {
+    fn require_fresh(&self, maximum_age: Duration) -> Result<(), OperationError>;
+}
+
+impl ObservationFreshnessCollection for [ObservationFreshness] {
+    fn require_fresh(&self, maximum_age: Duration) -> Result<(), OperationError> {
+        for observation in self {
+            let age = observation.age.ok_or_else(|| {
+                OperationError::Conflict(format!("camera {:?} has no frame", observation.source))
+            })?;
+            if age > maximum_age {
+                return Err(OperationError::Conflict(format!(
+                    "camera {:?} became stale",
+                    observation.source
+                )));
+            }
         }
+        Ok(())
     }
-    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -446,6 +473,41 @@ impl PreparedActionGoals {
     pub(crate) fn clamps(&self) -> &[ActionClamp] {
         &self.clamps
     }
+
+    /// Bind one model action to the exact ordered joint contract before
+    /// hardware control.
+    pub(crate) fn from_action(
+        joint_names: &[String],
+        action: &[f32],
+    ) -> Result<Self, OperationError> {
+        if action.len() != joint_names.len() {
+            return Err(OperationError::invalid_input(format!(
+                "policy returned {} action values for {} joints",
+                action.len(),
+                joint_names.len()
+            )));
+        }
+        let mut goals = BTreeMap::new();
+        let mut clamps = Vec::new();
+        for (index, (joint, value)) in joint_names.iter().zip(action).enumerate() {
+            if !value.is_finite() {
+                return Err(OperationError::Conflict(format!(
+                    "policy returned a non-finite action at index {index} for joint {joint:?}"
+                )));
+            }
+            let applied = value.clamp(-1.0, 1.0);
+            if applied != *value {
+                clamps.push(ActionClamp {
+                    index,
+                    joint: joint.clone(),
+                    requested: *value,
+                    applied,
+                });
+            }
+            goals.insert(joint.clone(), f64::from(applied));
+        }
+        Ok(Self { goals, clamps })
+    }
 }
 
 impl ActionClamp {
@@ -463,43 +525,6 @@ impl ActionClamp {
     }
 }
 
-/// Bind one model action to the exact ordered joint contract before hardware.
-///
-/// Finite values outside the normalized range are safe to saturate at the
-/// calibrated endpoint. Shape mismatches and non-finite values remain fatal.
-pub(crate) fn prepare_action_goals(
-    joint_names: &[String],
-    action: &[f32],
-) -> Result<PreparedActionGoals, OperationError> {
-    if action.len() != joint_names.len() {
-        return invalid(format!(
-            "policy returned {} action values for {} joints",
-            action.len(),
-            joint_names.len()
-        ));
-    }
-    let mut goals = BTreeMap::new();
-    let mut clamps = Vec::new();
-    for (index, (joint, value)) in joint_names.iter().zip(action).enumerate() {
-        if !value.is_finite() {
-            return Err(OperationError::Conflict(format!(
-                "policy returned a non-finite action at index {index} for joint {joint:?}"
-            )));
-        }
-        let applied = value.clamp(-1.0, 1.0);
-        if applied != *value {
-            clamps.push(ActionClamp {
-                index,
-                joint: joint.clone(),
-                requested: *value,
-                applied,
-            });
-        }
-        goals.insert(joint.clone(), f64::from(applied));
-    }
-    Ok(PreparedActionGoals { goals, clamps })
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct JointObservation {
     joint: String,
@@ -515,39 +540,42 @@ impl JointObservation {
     }
 }
 
-/// Order live telemetry exactly as the model contract declares it.
-pub(crate) fn prepare_observation_state(
-    joint_names: &[String],
-    observations: &[JointObservation],
-) -> Result<Vec<f32>, OperationError> {
-    let mut values = BTreeMap::new();
-    for observation in observations {
-        if values
-            .insert(observation.joint.as_str(), observation.normalized)
-            .is_some()
-        {
-            return Err(OperationError::Conflict(format!(
-                "joint {:?} appeared more than once in live telemetry",
-                observation.joint
-            )));
+pub(crate) trait JointObservations {
+    fn ordered_state(&self, joint_names: &[String]) -> Result<Vec<f32>, OperationError>;
+}
+
+impl JointObservations for [JointObservation] {
+    /// Order live telemetry exactly as the model contract declares it.
+    fn ordered_state(&self, joint_names: &[String]) -> Result<Vec<f32>, OperationError> {
+        let mut values = BTreeMap::new();
+        for observation in self {
+            if values
+                .insert(observation.joint.as_str(), observation.normalized)
+                .is_some()
+            {
+                return Err(OperationError::Conflict(format!(
+                    "joint {:?} appeared more than once in live telemetry",
+                    observation.joint
+                )));
+            }
         }
+        joint_names
+            .iter()
+            .map(|joint| {
+                values
+                    .get(joint.as_str())
+                    .copied()
+                    .flatten()
+                    .filter(|value| value.is_finite())
+                    .map(|value| value as f32)
+                    .ok_or_else(|| {
+                        OperationError::Conflict(format!(
+                            "joint {joint:?} has no finite calibrated telemetry"
+                        ))
+                    })
+            })
+            .collect()
     }
-    joint_names
-        .iter()
-        .map(|joint| {
-            values
-                .get(joint.as_str())
-                .copied()
-                .flatten()
-                .filter(|value| value.is_finite())
-                .map(|value| value as f32)
-                .ok_or_else(|| {
-                    OperationError::Conflict(format!(
-                        "joint {joint:?} has no finite calibrated telemetry"
-                    ))
-                })
-        })
-        .collect()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -609,18 +637,22 @@ impl ControlOwner {
     }
 }
 
-fn require_unique_nonempty(label: &str, values: &[String]) -> Result<(), OperationError> {
-    let mut seen = BTreeSet::new();
-    for value in values {
-        if value.trim().is_empty() || value.trim() != value || !seen.insert(value) {
-            return invalid(format!("{label} names must be non-empty and unique"));
-        }
-    }
-    Ok(())
+trait UniqueNames {
+    fn require_unique_nonempty(&self, label: &str) -> Result<(), OperationError>;
 }
 
-fn invalid<T>(message: impl Into<String>) -> Result<T, OperationError> {
-    Err(OperationError::InvalidInput(message.into()))
+impl UniqueNames for [String] {
+    fn require_unique_nonempty(&self, label: &str) -> Result<(), OperationError> {
+        let mut seen = BTreeSet::new();
+        for value in self {
+            if value.trim().is_empty() || value.trim() != value || !seen.insert(value) {
+                return Err(OperationError::invalid_input(format!(
+                    "{label} names must be non-empty and unique"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

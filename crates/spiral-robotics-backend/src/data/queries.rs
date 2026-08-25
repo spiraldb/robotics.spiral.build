@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use spiral_robotics_core::OperationError;
+use spiral_robotics_core::identity::EpisodeId;
 
 const MAX_TRACE_BUCKETS: usize = 2_048;
 const MAX_TIMELINE_BUCKETS: usize = 512;
@@ -757,7 +758,13 @@ impl<'a, P: EpisodeQueryPort + ?Sized> EpisodeQueries<'a, P> {
     }
 
     pub(crate) fn authorize_asset(&self, episode: String) -> Result<(), OperationError> {
-        let episode = validate_episode_id(episode)?;
+        let episode = EpisodeId::try_from(episode.as_str())
+            .map(String::from)
+            .map_err(|_| {
+                OperationError::invalid_input(
+                    "an episode ID must be 1 to 64 characters of letters, digits, '-' or '_'",
+                )
+            })?;
         self.port.ensure_episode_exists(&episode)
     }
 
@@ -769,7 +776,13 @@ impl<'a, P: EpisodeQueryPort + ?Sized> EpisodeQueries<'a, P> {
         &self,
         mut query: EpisodeTraceQuery,
     ) -> Result<Vec<Option<f64>>, OperationError> {
-        query.episode = validate_episode_id(query.episode)?;
+        query.episode = EpisodeId::try_from(query.episode.as_str())
+            .map(String::from)
+            .map_err(|_| {
+                OperationError::invalid_input(
+                    "an episode ID must be 1 to 64 characters of letters, digits, '-' or '_'",
+                )
+            })?;
         query.buckets = query.buckets.clamp(1, MAX_TRACE_BUCKETS);
         self.port.follow_error_trace(query)
     }
@@ -778,7 +791,13 @@ impl<'a, P: EpisodeQueryPort + ?Sized> EpisodeQueries<'a, P> {
         &self,
         mut query: EpisodeTraceQuery,
     ) -> Result<TimelineTraceCollection, OperationError> {
-        query.episode = validate_episode_id(query.episode)?;
+        query.episode = EpisodeId::try_from(query.episode.as_str())
+            .map(String::from)
+            .map_err(|_| {
+                OperationError::invalid_input(
+                    "an episode ID must be 1 to 64 characters of letters, digits, '-' or '_'",
+                )
+            })?;
         query.buckets = query.buckets.clamp(1, MAX_TIMELINE_BUCKETS);
         self.port.timeline_traces(query)
     }
@@ -787,14 +806,28 @@ impl<'a, P: EpisodeQueryPort + ?Sized> EpisodeQueries<'a, P> {
         &self,
         episode: String,
     ) -> Result<EpisodeTimelineRecord, OperationError> {
-        self.port.timeline(validate_episode_id(episode)?)
+        let episode = EpisodeId::try_from(episode.as_str())
+            .map(String::from)
+            .map_err(|_| {
+                OperationError::invalid_input(
+                    "an episode ID must be 1 to 64 characters of letters, digits, '-' or '_'",
+                )
+            })?;
+        self.port.timeline(episode)
     }
 
     pub(crate) fn inspection(
         &self,
         episode: String,
     ) -> Result<EpisodeInspectionRecord, OperationError> {
-        self.port.inspection(validate_episode_id(episode)?)
+        let episode = EpisodeId::try_from(episode.as_str())
+            .map(String::from)
+            .map_err(|_| {
+                OperationError::invalid_input(
+                    "an episode ID must be 1 to 64 characters of letters, digits, '-' or '_'",
+                )
+            })?;
+        self.port.inspection(episode)
     }
 
     pub(crate) fn timeline_sample(
@@ -802,7 +835,13 @@ impl<'a, P: EpisodeQueryPort + ?Sized> EpisodeQueries<'a, P> {
         episode: String,
         seconds: f64,
     ) -> Result<TimelineSampleRecord, OperationError> {
-        let episode = validate_episode_id(episode)?;
+        let episode = EpisodeId::try_from(episode.as_str())
+            .map(String::from)
+            .map_err(|_| {
+                OperationError::invalid_input(
+                    "an episode ID must be 1 to 64 characters of letters, digits, '-' or '_'",
+                )
+            })?;
         if !seconds.is_finite() || seconds < 0.0 {
             return Err(OperationError::InvalidInput(
                 "timeline time must be a finite non-negative number".to_owned(),
@@ -810,20 +849,6 @@ impl<'a, P: EpisodeQueryPort + ?Sized> EpisodeQueries<'a, P> {
         }
         self.port.timeline_sample(episode, seconds)
     }
-}
-
-fn validate_episode_id(episode: String) -> Result<String, OperationError> {
-    if episode.is_empty()
-        || episode.len() > 64
-        || !episode
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        return Err(OperationError::InvalidInput(
-            "an episode ID must be 1 to 64 characters of letters, digits, '-' or '_'".to_owned(),
-        ));
-    }
-    Ok(episode)
 }
 
 #[cfg(test)]

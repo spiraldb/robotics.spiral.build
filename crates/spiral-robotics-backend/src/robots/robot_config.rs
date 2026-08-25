@@ -179,6 +179,15 @@ impl Error for ConfigError {
     }
 }
 
+impl ConfigError {
+    fn invalid_json(context: impl Into<String>, message: &str) -> Self {
+        Self::Json {
+            context: context.into(),
+            source: <serde_json::Error as serde::de::Error>::custom(message),
+        }
+    }
+}
+
 impl Default for RobotConfig {
     fn default() -> Self {
         let mut root = Map::new();
@@ -200,7 +209,7 @@ impl RobotConfig {
     #[cfg(test)]
     fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
-        let Some(file) = open_regular_config(path)? else {
+        let Some(file) = ConfigFile::new(path).open_regular()? else {
             return Ok(Self::default());
         };
         let StrictValue(value) =
@@ -229,7 +238,7 @@ impl RobotConfig {
             return Err(ConfigError::RootMustBeObject);
         };
 
-        validate_schema(&root)?;
+        Self::validate_schema(&root)?;
         root.insert(
             "schema_version".to_owned(),
             Value::Number(Number::from(SCHEMA_VERSION)),
@@ -258,7 +267,7 @@ impl RobotConfig {
     where
         T: DeserializeOwned,
     {
-        deserialize_optional(self.calibration(), "in calibration")
+        self.calibration().deserialize_optional("in calibration")
     }
 
     /// Deserialize the existing motor specifications into an
@@ -268,7 +277,7 @@ impl RobotConfig {
     where
         T: DeserializeOwned,
     {
-        deserialize_optional(self.motors(), "in motors")
+        self.motors().deserialize_optional("in motors")
     }
 
     /// Decode domain motor specifications while keeping raw unknown fields in
@@ -284,17 +293,21 @@ impl RobotConfig {
             .iter()
             .map(|(name, value)| {
                 let context = format!("for motor {name:?}");
-                let fields = value.as_object().ok_or_else(|| ConfigError::Json {
-                    context: context.clone(),
-                    source: json_error("motor specification must be an object"),
+                let fields = value.as_object().ok_or_else(|| {
+                    ConfigError::invalid_json(
+                        context.clone(),
+                        "motor specification must be an object",
+                    )
                 })?;
                 let id = fields
                     .get("id")
                     .and_then(Value::as_u64)
                     .and_then(|id| u32::try_from(id).ok())
-                    .ok_or_else(|| ConfigError::Json {
-                        context: context.clone(),
-                        source: json_error("motor id must be a non-negative 32-bit integer"),
+                    .ok_or_else(|| {
+                        ConfigError::invalid_json(
+                            context.clone(),
+                            "motor id must be a non-negative 32-bit integer",
+                        )
                     })?;
                 let direction = match fields.get("direction") {
                     None => MotorDirection::Normal,
@@ -305,20 +318,20 @@ impl RobotConfig {
                         MotorDirection::Reversed
                     }
                     Some(_) => {
-                        return Err(ConfigError::Json {
+                        return Err(ConfigError::invalid_json(
                             context,
-                            source: json_error("motor direction must be 'normal' or 'reversed'"),
-                        });
+                            "motor direction must be 'normal' or 'reversed'",
+                        ));
                     }
                 };
                 let model = match fields.get("model") {
                     None => None,
                     Some(Value::String(model)) => Some(model.clone()),
                     Some(_) => {
-                        return Err(ConfigError::Json {
+                        return Err(ConfigError::invalid_json(
                             context,
-                            source: json_error("motor model must be a string"),
-                        });
+                            "motor model must be a string",
+                        ));
                     }
                 };
                 let specification = model.map_or_else(
@@ -411,7 +424,7 @@ impl RobotConfig {
     /// Serialize the complete document as deterministic pretty JSON ending in
     /// exactly one newline.
     pub(crate) fn to_pretty_json(&self) -> Result<String, ConfigError> {
-        let canonical = canonicalize(Value::Object(self.root.clone()));
+        let canonical = Value::Object(self.root.clone()).canonicalized();
         let mut json =
             serde_json::to_string_pretty(&canonical).map_err(|source| ConfigError::Json {
                 context: "while serializing robot configuration".to_owned(),
@@ -432,7 +445,7 @@ impl RobotConfig {
     #[cfg(test)]
     fn save_atomic(&self, path: impl AsRef<Path>) -> Result<(), ConfigError> {
         let path = path.as_ref();
-        let _lock_guard = acquire_config_lock(path)?;
+        let _lock_guard = ConfigFile::new(path).acquire_lock()?;
         self.save_atomic_unlocked(path)
     }
 
@@ -451,7 +464,7 @@ impl RobotConfig {
         expected: &Self,
     ) -> Result<(), ConfigError> {
         let path = path.as_ref();
-        let _lock_guard = acquire_config_lock(path)?;
+        let _lock_guard = ConfigFile::new(path).acquire_lock()?;
         let current = Self::load(path)?;
         if current != *expected {
             return Err(ConfigError::ConcurrentModification {
@@ -464,7 +477,7 @@ impl RobotConfig {
 
     #[cfg(test)]
     fn save_atomic_unlocked(&self, path: &Path) -> Result<(), ConfigError> {
-        self.save_atomic_unlocked_with_sync(path, sync_parent_directory)
+        self.save_atomic_unlocked_with_sync(path, |parent| ConfigFile::new(parent).sync_directory())
     }
 
     #[cfg(test)]
@@ -476,46 +489,43 @@ impl RobotConfig {
     where
         F: FnOnce(&Path) -> io::Result<()>,
     {
-        validate_schema(&self.root)?;
+        Self::validate_schema(&self.root)?;
 
         let existing_metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => {
-                validate_regular_target(path, &metadata)?;
+                ConfigFile::new(path).validate_regular_target(&metadata)?;
                 Some(metadata)
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(source) => return Err(io_error("inspect", path, source)),
+            Err(source) => return Err(ConfigFile::new(path).io_error("inspect", source)),
         };
 
         let parent = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        let mut temporary = NamedTempFile::new_in(parent)
-            .map_err(|source| io_error("create temporary file in", parent, source))?;
+        let mut temporary = NamedTempFile::new_in(parent).map_err(|source| {
+            ConfigFile::new(parent).io_error("create temporary file in", source)
+        })?;
 
         let json = self.to_pretty_json()?;
         temporary
             .as_file_mut()
             .write_all(json.as_bytes())
-            .map_err(|source| io_error("write temporary file for", path, source))?;
+            .map_err(|source| ConfigFile::new(path).io_error("write temporary file for", source))?;
         temporary
             .as_file_mut()
             .flush()
-            .map_err(|source| io_error("flush temporary file for", path, source))?;
-        set_temporary_permissions(
-            temporary.as_file(),
-            temporary.path(),
-            existing_metadata.as_ref(),
-        )?;
-        temporary
-            .as_file()
-            .sync_all()
-            .map_err(|source| io_error("synchronize temporary file for", path, source))?;
+            .map_err(|source| ConfigFile::new(path).io_error("flush temporary file for", source))?;
+        ConfigFile::new(temporary.path())
+            .set_temporary_permissions(temporary.as_file(), existing_metadata.as_ref())?;
+        temporary.as_file().sync_all().map_err(|source| {
+            ConfigFile::new(path).io_error("synchronize temporary file for", source)
+        })?;
 
         temporary
             .persist(path)
-            .map_err(|error| io_error("atomically replace", path, error.error))?;
+            .map_err(|error| ConfigFile::new(path).io_error("atomically replace", error.error))?;
 
         sync_directory(parent).map_err(|source| ConfigError::CommittedButNotDurable {
             path: path.to_owned(),
@@ -524,163 +534,177 @@ impl RobotConfig {
         })?;
         Ok(())
     }
-}
 
-fn validate_schema(root: &Map<String, Value>) -> Result<(), ConfigError> {
-    let Some(version) = root.get("schema_version") else {
-        return Ok(());
-    };
+    fn validate_schema(root: &Map<String, Value>) -> Result<(), ConfigError> {
+        let Some(version) = root.get("schema_version") else {
+            return Ok(());
+        };
 
-    match version.as_u64() {
-        Some(SCHEMA_VERSION) => Ok(()),
-        _ => Err(ConfigError::InvalidSchemaVersion(version.clone())),
-    }
-}
-
-#[cfg(test)]
-fn validate_regular_target(path: &Path, metadata: &fs::Metadata) -> Result<(), ConfigError> {
-    let file_type = metadata.file_type();
-    if file_type.is_symlink() {
-        return Err(ConfigError::UnsafeTarget {
-            path: path.to_owned(),
-            kind: "a symbolic link",
-        });
-    }
-    if !file_type.is_file() {
-        return Err(ConfigError::UnsafeTarget {
-            path: path.to_owned(),
-            kind: "not a regular file",
-        });
-    }
-    Ok(())
-}
-
-#[cfg(all(test, unix))]
-fn open_regular_config(path: &Path) -> Result<Option<File>, ConfigError> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-
-    let file = match options.open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            if error.raw_os_error() == Some(libc::ELOOP) {
-                return Err(ConfigError::UnsafeTarget {
-                    path: path.to_owned(),
-                    kind: "a symbolic link",
-                });
-            }
-            if let Ok(metadata) = fs::symlink_metadata(path) {
-                validate_regular_target(path, &metadata)?;
-            }
-            return Err(io_error("open", path, error));
+        match version.as_u64() {
+            Some(SCHEMA_VERSION) => Ok(()),
+            _ => Err(ConfigError::InvalidSchemaVersion(version.clone())),
         }
-    };
-
-    let metadata = file
-        .metadata()
-        .map_err(|source| io_error("inspect opened", path, source))?;
-    validate_regular_target(path, &metadata)?;
-    Ok(Some(file))
-}
-
-#[cfg(all(test, not(unix)))]
-fn open_regular_config(path: &Path) -> Result<Option<File>, ConfigError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => return Err(io_error("inspect", path, source)),
-    };
-    validate_regular_target(path, &metadata)?;
-
-    let file = File::open(path).map_err(|source| io_error("open", path, source))?;
-    let opened_metadata = file
-        .metadata()
-        .map_err(|source| io_error("inspect opened", path, source))?;
-    validate_regular_target(path, &opened_metadata)?;
-    Ok(Some(file))
+    }
 }
 
 #[cfg(test)]
-fn companion_lock_path(path: &Path) -> Result<PathBuf, ConfigError> {
-    let Some(file_name) = path.file_name().filter(|name| !name.is_empty()) else {
-        return Err(ConfigError::UnsafeTarget {
-            path: path.to_owned(),
-            kind: "a path without a file name",
-        });
-    };
-
-    let mut lock_name = file_name.to_os_string();
-    lock_name.push(".lock");
-    Ok(path.with_file_name(lock_name))
+struct ConfigFile<'a> {
+    path: &'a Path,
 }
 
 #[cfg(test)]
-fn acquire_config_lock(path: &Path) -> Result<File, ConfigError> {
-    let lock_path = companion_lock_path(path)?;
-    match fs::symlink_metadata(&lock_path) {
-        Ok(metadata) => validate_regular_target(&lock_path, &metadata)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(source) => return Err(io_error("inspect companion lock", &lock_path, source)),
+impl<'a> ConfigFile<'a> {
+    fn new(path: &'a Path) -> Self {
+        Self { path }
     }
 
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        options
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-
-    let lock = match options.open(&lock_path) {
-        Ok(lock) => lock,
-        #[cfg(unix)]
-        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+    fn validate_regular_target(&self, metadata: &fs::Metadata) -> Result<(), ConfigError> {
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
             return Err(ConfigError::UnsafeTarget {
-                path: lock_path,
+                path: self.path.to_owned(),
                 kind: "a symbolic link",
             });
         }
-        Err(source) => return Err(io_error("open companion lock", &lock_path, source)),
-    };
-    let metadata = lock
-        .metadata()
-        .map_err(|source| io_error("inspect opened companion lock", &lock_path, source))?;
-    validate_regular_target(&lock_path, &metadata)?;
-    lock.lock()
-        .map_err(|source| io_error("lock companion file", &lock_path, source))?;
-    Ok(lock)
+        if !file_type.is_file() {
+            return Err(ConfigError::UnsafeTarget {
+                path: self.path.to_owned(),
+                kind: "not a regular file",
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn open_regular(&self) -> Result<Option<File>, ConfigError> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+
+        let file = match options.open(self.path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                if error.raw_os_error() == Some(libc::ELOOP) {
+                    return Err(ConfigError::UnsafeTarget {
+                        path: self.path.to_owned(),
+                        kind: "a symbolic link",
+                    });
+                }
+                if let Ok(metadata) = fs::symlink_metadata(self.path) {
+                    self.validate_regular_target(&metadata)?;
+                }
+                return Err(self.io_error("open", error));
+            }
+        };
+
+        let metadata = file
+            .metadata()
+            .map_err(|source| self.io_error("inspect opened", source))?;
+        self.validate_regular_target(&metadata)?;
+        Ok(Some(file))
+    }
+
+    #[cfg(not(unix))]
+    fn open_regular(&self) -> Result<Option<File>, ConfigError> {
+        let metadata = match fs::symlink_metadata(self.path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(self.io_error("inspect", source)),
+        };
+        self.validate_regular_target(&metadata)?;
+
+        let file = File::open(self.path).map_err(|source| self.io_error("open", source))?;
+        let opened_metadata = file
+            .metadata()
+            .map_err(|source| self.io_error("inspect opened", source))?;
+        self.validate_regular_target(&opened_metadata)?;
+        Ok(Some(file))
+    }
+
+    fn companion_lock_path(&self) -> Result<PathBuf, ConfigError> {
+        let Some(file_name) = self.path.file_name().filter(|name| !name.is_empty()) else {
+            return Err(ConfigError::UnsafeTarget {
+                path: self.path.to_owned(),
+                kind: "a path without a file name",
+            });
+        };
+
+        let mut lock_name = file_name.to_os_string();
+        lock_name.push(".lock");
+        Ok(self.path.with_file_name(lock_name))
+    }
+
+    fn acquire_lock(&self) -> Result<File, ConfigError> {
+        let lock_path = self.companion_lock_path()?;
+        let lock_file = ConfigFile::new(&lock_path);
+        match fs::symlink_metadata(&lock_path) {
+            Ok(metadata) => lock_file.validate_regular_target(&metadata)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(lock_file.io_error("inspect companion lock", source)),
+        }
+
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+
+        let lock = match options.open(&lock_path) {
+            Ok(lock) => lock,
+            #[cfg(unix)]
+            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+                return Err(ConfigError::UnsafeTarget {
+                    path: lock_path,
+                    kind: "a symbolic link",
+                });
+            }
+            Err(source) => return Err(lock_file.io_error("open companion lock", source)),
+        };
+        let metadata = lock
+            .metadata()
+            .map_err(|source| lock_file.io_error("inspect opened companion lock", source))?;
+        lock_file.validate_regular_target(&metadata)?;
+        lock.lock()
+            .map_err(|source| lock_file.io_error("lock companion file", source))?;
+        Ok(lock)
+    }
 }
 
 #[cfg(test)]
-fn deserialize_optional<T>(value: Option<&Value>, context: &str) -> Result<Option<T>, ConfigError>
-where
-    T: DeserializeOwned,
-{
-    if value.is_none_or(Value::is_null) {
-        return Ok(None);
-    }
-
-    value
-        .cloned()
-        .map(|value| {
-            serde_json::from_value(value).map_err(|source| ConfigError::Json {
-                context: context.to_owned(),
-                source,
-            })
-        })
-        .transpose()
+trait OptionalJsonValue {
+    fn deserialize_optional<T>(self, context: &str) -> Result<Option<T>, ConfigError>
+    where
+        T: DeserializeOwned;
 }
 
-fn json_error(message: &str) -> serde_json::Error {
-    <serde_json::Error as serde::de::Error>::custom(message)
+#[cfg(test)]
+impl OptionalJsonValue for Option<&Value> {
+    fn deserialize_optional<T>(self, context: &str) -> Result<Option<T>, ConfigError>
+    where
+        T: DeserializeOwned,
+    {
+        if self.is_none_or(Value::is_null) {
+            return Ok(None);
+        }
+
+        self.cloned()
+            .map(|value| {
+                serde_json::from_value(value).map_err(|source| ConfigError::Json {
+                    context: context.to_owned(),
+                    source,
+                })
+            })
+            .transpose()
+    }
 }
 
 /// A JSON value decoder that refuses duplicate keys recursively.
@@ -776,62 +800,72 @@ impl<'de> Deserialize<'de> for StrictValue {
     }
 }
 
-fn canonicalize(value: Value) -> Value {
-    match value {
-        Value::Object(object) => {
-            let mut fields = object.into_iter().collect::<Vec<_>>();
-            fields.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+trait CanonicalJson {
+    fn canonicalized(self) -> Self;
+}
 
-            let mut sorted = Map::new();
-            for (key, value) in fields {
-                sorted.insert(key, canonicalize(value));
+impl CanonicalJson for Value {
+    fn canonicalized(self) -> Self {
+        match self {
+            Value::Object(object) => {
+                let mut fields = object.into_iter().collect::<Vec<_>>();
+                fields.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+
+                let mut sorted = Map::new();
+                for (key, value) in fields {
+                    sorted.insert(key, value.canonicalized());
+                }
+                Value::Object(sorted)
             }
-            Value::Object(sorted)
+            Value::Array(values) => {
+                Value::Array(values.into_iter().map(Value::canonicalized).collect())
+            }
+            scalar => scalar,
         }
-        Value::Array(values) => Value::Array(values.into_iter().map(canonicalize).collect()),
-        scalar => scalar,
     }
 }
 
 #[cfg(test)]
-fn io_error(operation: &'static str, path: &Path, source: io::Error) -> ConfigError {
-    ConfigError::Io {
-        operation,
-        path: path.to_owned(),
-        source,
+impl ConfigFile<'_> {
+    fn io_error(&self, operation: &'static str, source: io::Error) -> ConfigError {
+        ConfigError::Io {
+            operation,
+            path: self.path.to_owned(),
+            source,
+        }
     }
-}
 
-#[cfg(all(test, unix))]
-fn set_temporary_permissions(
-    file: &File,
-    path: &Path,
-    existing_metadata: Option<&fs::Metadata>,
-) -> Result<(), ConfigError> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    #[cfg(unix)]
+    fn set_temporary_permissions(
+        &self,
+        file: &File,
+        existing_metadata: Option<&fs::Metadata>,
+    ) -> Result<(), ConfigError> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-    let mode = existing_metadata.map_or(0o600, |metadata| metadata.mode() & 0o7777);
-    file.set_permissions(fs::Permissions::from_mode(mode))
-        .map_err(|source| io_error("set permissions on", path, source))
-}
+        let mode = existing_metadata.map_or(0o600, |metadata| metadata.mode() & 0o7777);
+        file.set_permissions(fs::Permissions::from_mode(mode))
+            .map_err(|source| self.io_error("set permissions on", source))
+    }
 
-#[cfg(all(test, not(unix)))]
-fn set_temporary_permissions(
-    _file: &File,
-    _path: &Path,
-    _existing_metadata: Option<&fs::Metadata>,
-) -> Result<(), ConfigError> {
-    Ok(())
-}
+    #[cfg(not(unix))]
+    fn set_temporary_permissions(
+        &self,
+        _file: &File,
+        _existing_metadata: Option<&fs::Metadata>,
+    ) -> Result<(), ConfigError> {
+        Ok(())
+    }
 
-#[cfg(all(test, unix))]
-fn sync_parent_directory(parent: &Path) -> io::Result<()> {
-    File::open(parent).and_then(|directory| directory.sync_all())
-}
+    #[cfg(unix)]
+    fn sync_directory(&self) -> io::Result<()> {
+        File::open(self.path).and_then(|directory| directory.sync_all())
+    }
 
-#[cfg(all(test, not(unix)))]
-fn sync_parent_directory(_parent: &Path) -> io::Result<()> {
-    Ok(())
+    #[cfg(not(unix))]
+    fn sync_directory(&self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

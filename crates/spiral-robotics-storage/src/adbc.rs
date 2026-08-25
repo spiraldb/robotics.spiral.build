@@ -4,7 +4,7 @@
 //! share this connection pool. Nothing below this module falls back to a
 //! filesystem or a second database.
 
-use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use adbc_core::error::Status as AdbcStatus;
 use adbc_core::options::{
@@ -15,9 +15,7 @@ use adbc_driver_spiraldb::{
     Connection as SpiralConnection, Database as SpiralDatabase, Driver as SpiralDriver,
     Statement as SpiralStatement,
 };
-use arrow_array::{
-    Array as _, ListArray, RecordBatch, RecordBatchReader, StringArray, StructArray,
-};
+use arrow_array::{Array as _, ListArray, RecordBatchReader, StringArray, StructArray};
 use arrow_schema::Schema;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -39,6 +37,61 @@ struct RuntimeConnectionConfig {
     endpoint: String,
     spfs_endpoint: String,
     credentials: Option<SpiralCredentials>,
+}
+
+impl RuntimeConnectionConfig {
+    fn from_settings(settings: &RwLock<SpiralConnectionSettings>) -> Result<Self, String> {
+        let settings = settings.read_unpoisoned();
+        let project_id = settings.project_id().ok_or_else(|| {
+            "Spiral project is not configured. Choose a project in Settings → SpiralDB.".to_owned()
+        })?;
+        Ok(Self {
+            project_id: project_id.to_owned(),
+            endpoint: settings.endpoint().to_owned(),
+            spfs_endpoint: settings.spfs_endpoint().to_owned(),
+            credentials: settings.credentials().cloned(),
+        })
+    }
+
+    fn open_database(&self) -> Result<SpiralDatabase, String> {
+        let mut driver = SpiralDriver;
+        let database_uri = format!("spiraldb://?project={}", self.project_id);
+        let mut options = vec![
+            (OptionDatabase::Uri, database_uri.clone().into()),
+            (
+                OptionDatabase::Other("spiral.api_url".to_owned()),
+                self.endpoint.clone().into(),
+            ),
+            (
+                OptionDatabase::Other("spiral.spfs_url".to_owned()),
+                self.spfs_endpoint.clone().into(),
+            ),
+        ];
+        if let Some(credentials) = &self.credentials {
+            options.push((
+                OptionDatabase::Username,
+                credentials.client_id().to_owned().into(),
+            ));
+            options.push((
+                OptionDatabase::Password,
+                credentials.client_secret().to_owned().into(),
+            ));
+        }
+        driver
+            .new_database_with_opts(options)
+            .map_err(|error| format!("opening Spiral ADBC database {database_uri}: {error}"))
+    }
+}
+
+trait BlockingSemaphore {
+    fn acquire_blocking(self: Arc<Self>) -> Result<OwnedSemaphorePermit, String>;
+}
+
+impl BlockingSemaphore for Semaphore {
+    fn acquire_blocking(self: Arc<Self>) -> Result<OwnedSemaphorePermit, String> {
+        futures::executor::block_on(self.acquire_owned())
+            .map_err(|_| "Spiral ADBC connection pool is shutting down".to_owned())
+    }
 }
 
 /// The only connection type visible to Studio code.
@@ -102,50 +155,6 @@ impl StorageConnection {
         let mut statement = self.new_statement()?;
         statement.set_sql_query(sql)?;
         statement.execute()
-    }
-
-    pub fn ensure_dataset_namespace(&mut self, namespace: &str) -> Result<(), String> {
-        crate::manager::ensure_dataset_namespace(self, namespace)
-    }
-
-    pub fn ingest_batch(&mut self, target: &str, batch: RecordBatch) -> Result<(), String> {
-        crate::manager::ingest_batch(self, target, batch)
-    }
-
-    pub fn replace_batches(
-        &mut self,
-        target: &str,
-        batches: Vec<RecordBatch>,
-    ) -> Result<(), String> {
-        crate::manager::replace_batches(self, target, batches)
-    }
-
-    pub fn table_exists(&self, target: &str) -> Result<bool, String> {
-        crate::manager::table_exists(self, target)
-    }
-
-    pub fn execute_update_sql(&mut self, sql: &str) -> Result<(), String> {
-        crate::manager::execute_update_sql(self, sql)
-    }
-
-    pub fn execute_delete_sql(&mut self, sql: &str) -> Result<(), String> {
-        crate::manager::execute_delete_sql(self, sql)
-    }
-
-    pub fn run_query(
-        &mut self,
-        sql: &str,
-        max_rows: usize,
-    ) -> Result<spiral_robotics_api::relations::SpiralQueryResponse, String> {
-        crate::manager::run_query(self, sql, max_rows)
-    }
-
-    pub fn rebuild_video_dataset(
-        &mut self,
-        namespace: &str,
-        recover_existing: bool,
-    ) -> Result<(), String> {
-        crate::manager::rebuild_video_dataset(self, namespace, recover_existing)
     }
 
     pub fn table_schema(&self, table: &str) -> Result<Option<Schema>, String> {
@@ -340,7 +349,7 @@ impl ConnectionPool {
             return Ok(connection);
         }
         if self.database.is_none() {
-            self.database = Some(open_database(config)?);
+            self.database = Some(config.open_database()?);
         }
         self.database
             .as_ref()
@@ -375,11 +384,38 @@ pub struct ProjectStore {
 }
 
 impl ProjectStore {
+    /// Identify the stable operator-facing form so delivery adapters can use
+    /// an availability status instead of misclassifying the failure as input.
+    pub fn is_unavailable_error(message: &str) -> bool {
+        message.starts_with(SPIRAL_UNAVAILABLE_PREFIX)
+    }
+
+    fn present_error(endpoint: &str, error: String) -> String {
+        if Self::is_unavailable_error(&error) {
+            return error;
+        }
+        let normalized = error.to_ascii_lowercase();
+        if !TRANSPORT_FAILURE_MARKERS
+            .iter()
+            .any(|marker| normalized.contains(marker))
+        {
+            return error;
+        }
+        tracing::warn!(spiral_endpoint = endpoint, detail = %error, "SpiralDB transport failed");
+        format!(
+            "{SPIRAL_UNAVAILABLE_PREFIX}{endpoint}. Start the service or update Settings → SpiralDB, then try again."
+        )
+    }
+
+    fn acquire_blocking_slot(&self) -> Result<OwnedSemaphorePermit, String> {
+        self.hosted_slots.clone().acquire_blocking()
+    }
+
     pub fn new(
         connection_settings: SpiralConnectionSettings,
         namespace: String,
     ) -> Result<Self, String> {
-        if !crate::schema::is_identifier(&namespace) {
+        if !crate::schema::StorageSchema::is_identifier(&namespace) {
             return Err("Spiral namespace is not a safe SQL identifier".to_owned());
         }
         Ok(Self {
@@ -392,26 +428,39 @@ impl ProjectStore {
     }
 
     pub fn project_id(&self) -> String {
-        read(&self.connection_settings)
+        self.connection_settings
+            .read_unpoisoned()
             .project_id()
             .unwrap_or_default()
             .to_owned()
     }
 
     pub(crate) fn endpoint(&self) -> String {
-        read(&self.connection_settings).endpoint().to_owned()
+        self.connection_settings
+            .read_unpoisoned()
+            .endpoint()
+            .to_owned()
     }
 
     pub(crate) fn spfs_endpoint(&self) -> String {
-        read(&self.connection_settings).spfs_endpoint().to_owned()
+        self.connection_settings
+            .read_unpoisoned()
+            .spfs_endpoint()
+            .to_owned()
     }
 
     pub(crate) fn credentials(&self) -> Option<SpiralCredentials> {
-        read(&self.connection_settings).credentials().cloned()
+        self.connection_settings
+            .read_unpoisoned()
+            .credentials()
+            .cloned()
     }
 
     pub(crate) fn is_configured(&self) -> bool {
-        read(&self.connection_settings).project_id().is_some()
+        self.connection_settings
+            .read_unpoisoned()
+            .project_id()
+            .is_some()
     }
 
     /// Initialize the shared driver/database and force one authenticated
@@ -430,12 +479,14 @@ impl ProjectStore {
     /// connections are discarded.
     #[cfg(test)]
     pub fn configure_project(&self, project_id: &str) -> Result<(), String> {
-        let _operation = write(&self.operation_gate);
-        let settings = read(&self.connection_settings)
+        let _operation = self.operation_gate.write_unpoisoned();
+        let settings = self
+            .connection_settings
+            .read_unpoisoned()
             .clone()
             .with_project(project_id)?;
-        *write(&self.connection_settings) = settings;
-        lock(&self.hosted).reset();
+        *self.connection_settings.write_unpoisoned() = settings;
+        self.hosted.lock_unpoisoned().reset();
         Ok(())
     }
 
@@ -452,9 +503,9 @@ impl ProjectStore {
                     .to_owned(),
             );
         }
-        let _operation = write(&self.operation_gate);
-        *write(&self.connection_settings) = connection_settings;
-        lock(&self.hosted).reset();
+        let _operation = self.operation_gate.write_unpoisoned();
+        *self.connection_settings.write_unpoisoned() = connection_settings;
+        self.hosted.lock_unpoisoned().reset();
         Ok(())
     }
 
@@ -462,8 +513,8 @@ impl ProjectStore {
     /// Active calls finish normally; their connections are discarded when the
     /// worker-owned checkpoint event reaches Studio.
     pub fn invalidate_idle_connections(&self) {
-        let _operation = write(&self.operation_gate);
-        lock(&self.hosted).available.clear();
+        let _operation = self.operation_gate.write_unpoisoned();
+        self.hosted.lock_unpoisoned().available.clear();
     }
 
     pub fn namespace(&self) -> &str {
@@ -485,12 +536,13 @@ impl ProjectStore {
         let operation_gate = self.operation_gate.clone();
         let connection_settings = self.connection_settings.clone();
         tokio::task::spawn_blocking(move || {
-            let _operation = read(&operation_gate);
-            let connection = connection_config(&connection_settings)?;
+            let _operation = operation_gate.read_unpoisoned();
+            let connection = RuntimeConnectionConfig::from_settings(&connection_settings)?;
             let display_endpoint = connection.endpoint.clone();
-            let connection = lock(&hosted)
+            let connection = hosted
+                .lock_unpoisoned()
                 .checkout(&connection)
-                .map_err(|error| present_error(&display_endpoint, error))?;
+                .map_err(|error| ProjectStore::present_error(&display_endpoint, error))?;
             let mut connection = StorageConnection {
                 inner: connection,
                 reusable: true,
@@ -499,10 +551,10 @@ impl ProjectStore {
             if result.is_ok()
                 && let Some(connection) = connection.into_reusable_inner()
             {
-                lock(&hosted).checkin(connection);
+                hosted.lock_unpoisoned().checkin(connection);
             }
             drop(permit);
-            result.map_err(|error| present_error(&display_endpoint, error))
+            result.map_err(|error| ProjectStore::present_error(&display_endpoint, error))
         })
         .await
         .map_err(|error| format!("Spiral ADBC task failed: {error}"))?
@@ -514,13 +566,15 @@ impl ProjectStore {
         &self,
         operation: impl FnOnce(&mut StorageConnection) -> Result<T, String>,
     ) -> Result<T, String> {
-        let _permit = acquire_blocking(self.hosted_slots.clone())?;
-        let _operation = read(&self.operation_gate);
-        let connection = connection_config(&self.connection_settings)?;
+        let _permit = self.acquire_blocking_slot()?;
+        let _operation = self.operation_gate.read_unpoisoned();
+        let connection = RuntimeConnectionConfig::from_settings(&self.connection_settings)?;
         let endpoint = connection.endpoint.clone();
-        let connection = lock(&self.hosted)
+        let connection = self
+            .hosted
+            .lock_unpoisoned()
             .checkout(&connection)
-            .map_err(|error| present_error(&endpoint, error))?;
+            .map_err(|error| Self::present_error(&endpoint, error))?;
         let mut connection = StorageConnection {
             inner: connection,
             reusable: true,
@@ -529,9 +583,9 @@ impl ProjectStore {
         if result.is_ok()
             && let Some(connection) = connection.into_reusable_inner()
         {
-            lock(&self.hosted).checkin(connection);
+            self.hosted.lock_unpoisoned().checkin(connection);
         }
-        result.map_err(|error| present_error(&endpoint, error))
+        result.map_err(|error| Self::present_error(&endpoint, error))
     }
 
     /// Run a durable mutation after draining project_store readers, with no
@@ -547,20 +601,22 @@ impl ProjectStore {
         &self,
         operation: impl FnOnce(&mut StorageConnection) -> Result<T, String>,
     ) -> Result<T, String> {
-        let _permit = acquire_blocking(self.hosted_slots.clone())?;
-        let _operation = write(&self.operation_gate);
-        let connection = connection_config(&self.connection_settings)?;
+        let _permit = self.acquire_blocking_slot()?;
+        let _operation = self.operation_gate.write_unpoisoned();
+        let connection = RuntimeConnectionConfig::from_settings(&self.connection_settings)?;
         let endpoint = connection.endpoint.clone();
-        lock(&self.hosted).available.clear();
-        let connection = lock(&self.hosted)
+        self.hosted.lock_unpoisoned().available.clear();
+        let connection = self
+            .hosted
+            .lock_unpoisoned()
             .checkout(&connection)
-            .map_err(|error| present_error(&endpoint, error))?;
+            .map_err(|error| Self::present_error(&endpoint, error))?;
         let mut connection = StorageConnection {
             inner: connection,
             reusable: true,
         };
         let result = operation(&mut connection);
-        result.map_err(|error| present_error(&endpoint, error))
+        result.map_err(|error| Self::present_error(&endpoint, error))
     }
 
     /// Run a namespace replacement without allowing another project_store call to
@@ -569,12 +625,12 @@ impl ProjectStore {
         &self,
         operation: impl FnOnce(&mut StorageConnection) -> Result<T, String>,
     ) -> Result<T, String> {
-        let _permit = acquire_blocking(self.hosted_slots.clone())?;
-        let _operation = write(&self.operation_gate);
-        let connection = connection_config(&self.connection_settings)?;
+        let _permit = self.acquire_blocking_slot()?;
+        let _operation = self.operation_gate.write_unpoisoned();
+        let connection = RuntimeConnectionConfig::from_settings(&self.connection_settings)?;
         let endpoint = connection.endpoint.clone();
         let connection = {
-            let mut hosted = lock(&self.hosted);
+            let mut hosted = self.hosted.lock_unpoisoned();
             // The shared ADBC database pins project catalog state as well as
             // its connections. Once the exclusive gate is held there can be
             // no live project_store readers, so reset both layers and start the
@@ -582,7 +638,7 @@ impl ProjectStore {
             hosted.reset();
             hosted
                 .checkout(&connection)
-                .map_err(|error| present_error(&endpoint, error))?
+                .map_err(|error| Self::present_error(&endpoint, error))?
         };
         let mut connection = StorageConnection {
             inner: connection,
@@ -592,99 +648,38 @@ impl ProjectStore {
         if result.is_ok()
             && let Some(connection) = connection.into_reusable_inner()
         {
-            lock(&self.hosted).checkin(connection);
+            self.hosted.lock_unpoisoned().checkin(connection);
         }
-        result.map_err(|error| present_error(&endpoint, error))
+        result.map_err(|error| Self::present_error(&endpoint, error))
     }
 }
 
-/// Identify the stable operator-facing form so delivery adapters can use an
-/// availability status instead of misclassifying the failure as bad input.
-pub fn is_unavailable_error(message: &str) -> bool {
-    message.starts_with(SPIRAL_UNAVAILABLE_PREFIX)
+trait UnpoisonedMutex<T> {
+    fn lock_unpoisoned(&self) -> MutexGuard<'_, T>;
 }
 
-fn present_error(endpoint: &str, error: String) -> String {
-    if is_unavailable_error(&error) {
-        return error;
+impl<T> UnpoisonedMutex<T> for Mutex<T> {
+    fn lock_unpoisoned(&self) -> MutexGuard<'_, T> {
+        self.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-    let normalized = error.to_ascii_lowercase();
-    if !TRANSPORT_FAILURE_MARKERS
-        .iter()
-        .any(|marker| normalized.contains(marker))
-    {
-        return error;
+}
+
+trait UnpoisonedRwLock<T> {
+    fn read_unpoisoned(&self) -> RwLockReadGuard<'_, T>;
+    fn write_unpoisoned(&self) -> RwLockWriteGuard<'_, T>;
+}
+
+impl<T> UnpoisonedRwLock<T> for RwLock<T> {
+    fn read_unpoisoned(&self) -> RwLockReadGuard<'_, T> {
+        self.read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-    tracing::warn!(spiral_endpoint = endpoint, detail = %error, "SpiralDB transport failed");
-    format!(
-        "{SPIRAL_UNAVAILABLE_PREFIX}{endpoint}. Start the service or update Settings → SpiralDB, then try again."
-    )
-}
 
-fn connection_config(
-    settings: &RwLock<SpiralConnectionSettings>,
-) -> Result<RuntimeConnectionConfig, String> {
-    let settings = read(settings);
-    let project_id = settings.project_id().ok_or_else(|| {
-        "Spiral project is not configured. Choose a project in Settings → SpiralDB.".to_owned()
-    })?;
-    Ok(RuntimeConnectionConfig {
-        project_id: project_id.to_owned(),
-        endpoint: settings.endpoint().to_owned(),
-        spfs_endpoint: settings.spfs_endpoint().to_owned(),
-        credentials: settings.credentials().cloned(),
-    })
-}
-
-fn open_database(config: &RuntimeConnectionConfig) -> Result<SpiralDatabase, String> {
-    let mut driver = SpiralDriver;
-    let database_uri = format!("spiraldb://?project={}", config.project_id);
-    let mut options = vec![
-        (OptionDatabase::Uri, database_uri.clone().into()),
-        (
-            OptionDatabase::Other("spiral.api_url".to_owned()),
-            config.endpoint.clone().into(),
-        ),
-        (
-            OptionDatabase::Other("spiral.spfs_url".to_owned()),
-            config.spfs_endpoint.clone().into(),
-        ),
-    ];
-    if let Some(credentials) = &config.credentials {
-        options.push((
-            OptionDatabase::Username,
-            credentials.client_id().to_owned().into(),
-        ));
-        options.push((
-            OptionDatabase::Password,
-            credentials.client_secret().to_owned().into(),
-        ));
+    fn write_unpoisoned(&self) -> RwLockWriteGuard<'_, T> {
+        self.write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-    let database = driver
-        .new_database_with_opts(options)
-        .map_err(|error| format!("opening Spiral ADBC database {database_uri}: {error}"))?;
-    Ok(database)
-}
-
-fn acquire_blocking(semaphore: Arc<Semaphore>) -> Result<OwnedSemaphorePermit, String> {
-    futures::executor::block_on(semaphore.acquire_owned())
-        .map_err(|_| "Spiral ADBC connection pool is shutting down".to_owned())
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-fn read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
-    lock.read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-fn write<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
-    lock.write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -733,7 +728,7 @@ mod tests {
 
     #[test]
     fn transport_failures_become_actionable_without_rewriting_validation() {
-        let unavailable = present_error(
+        let unavailable = ProjectStore::present_error(
             "http://127.0.0.1:4279",
             "pinning project failed: error sending request for url".to_owned(),
         );
@@ -741,11 +736,11 @@ mod tests {
             unavailable,
             "SpiralDB is unavailable at http://127.0.0.1:4279. Start the service or update Settings → SpiralDB, then try again."
         );
-        assert!(is_unavailable_error(&unavailable));
+        assert!(ProjectStore::is_unavailable_error(&unavailable));
 
         let invalid = "episode bundle has the wrong format".to_owned();
         assert_eq!(
-            present_error("http://127.0.0.1:4279", invalid.clone()),
+            ProjectStore::present_error("http://127.0.0.1:4279", invalid.clone()),
             invalid
         );
     }
@@ -763,7 +758,9 @@ mod tests {
         let (finished, receiver) = mpsc::sync_channel(1);
         let waiting = semaphore.clone();
         let worker = std::thread::spawn(move || {
-            let permit = acquire_blocking(waiting).expect("the shared pool remains open");
+            let permit = waiting
+                .acquire_blocking()
+                .expect("the shared pool remains open");
             finished.send(()).unwrap();
             drop(permit);
         });

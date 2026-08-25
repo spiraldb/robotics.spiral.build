@@ -84,7 +84,7 @@ pub struct SpiralSettings {
     /// Spiral control-plane API endpoint.
     endpoint: String,
     /// Spiral File System endpoint used for relation and binary payloads.
-    #[serde(default = "default_spiral_spfs_endpoint")]
+    #[serde(default = "SpiralSettings::default_spfs_endpoint")]
     spfs_endpoint: String,
     project_id: String,
     /// Public half of the client-credentials pair used by the backend.
@@ -113,6 +113,10 @@ impl Default for SpiralSettings {
 }
 
 impl SpiralSettings {
+    fn default_spfs_endpoint() -> String {
+        DEFAULT_SPIRAL_SPFS_ENDPOINT.to_owned()
+    }
+
     pub fn new(
         endpoint: impl Into<String>,
         spfs_endpoint: impl Into<String>,
@@ -206,9 +210,9 @@ impl VideoSettings {
 /// Spiral connection and write-only credential changes from the settings screen.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SpiralConnectionUpdate {
-    #[serde(default = "default_spiral_endpoint")]
+    #[serde(default = "SpiralConnectionUpdate::default_spiral_endpoint")]
     spiral_endpoint: String,
-    #[serde(default = "default_spiral_spfs_endpoint")]
+    #[serde(default = "SpiralConnectionUpdate::default_spiral_spfs_endpoint")]
     spiral_spfs_endpoint: String,
     #[serde(default)]
     project_id: String,
@@ -221,6 +225,14 @@ pub struct SpiralConnectionUpdate {
 }
 
 impl SpiralConnectionUpdate {
+    fn default_spiral_endpoint() -> String {
+        DEFAULT_SPIRAL_ENDPOINT.to_owned()
+    }
+
+    fn default_spiral_spfs_endpoint() -> String {
+        DEFAULT_SPIRAL_SPFS_ENDPOINT.to_owned()
+    }
+
     pub fn new(
         spiral_endpoint: impl Into<String>,
         spiral_spfs_endpoint: impl Into<String>,
@@ -255,8 +267,8 @@ impl SpiralConnectionUpdate {
 impl Default for SpiralConnectionUpdate {
     fn default() -> Self {
         Self::new(
-            default_spiral_endpoint(),
-            default_spiral_spfs_endpoint(),
+            Self::default_spiral_endpoint(),
+            Self::default_spiral_spfs_endpoint(),
             String::new(),
         )
     }
@@ -318,14 +330,6 @@ impl UpdateDataSettingsRequest {
     pub const fn video(&self) -> &VideoSettings {
         &self.video
     }
-}
-
-fn default_spiral_endpoint() -> String {
-    DEFAULT_SPIRAL_ENDPOINT.to_owned()
-}
-
-fn default_spiral_spfs_endpoint() -> String {
-    DEFAULT_SPIRAL_SPFS_ENDPOINT.to_owned()
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

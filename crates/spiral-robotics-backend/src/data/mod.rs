@@ -15,6 +15,38 @@ use spiral_robotics_core::OperationError;
 
 const MAX_QUERY_ROWS: usize = 1_000;
 
+struct HttpEndpoint(String);
+
+impl HttpEndpoint {
+    fn parse(endpoint: &str, label: &str) -> Result<Self, OperationError> {
+        let parsed = Url::parse(endpoint.trim()).map_err(|error| {
+            OperationError::invalid_input(format!(
+                "{label} must be an http:// or https:// URL: {error}"
+            ))
+        })?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            return Err(OperationError::invalid_input(format!(
+                "{label} must be an http:// or https:// URL with a host"
+            )));
+        }
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(OperationError::invalid_input(format!(
+                "{label} must not contain embedded credentials"
+            )));
+        }
+        if parsed.query().is_some() || parsed.fragment().is_some() {
+            return Err(OperationError::invalid_input(format!(
+                "{label} must not contain a query string or fragment"
+            )));
+        }
+        Ok(Self(parsed.as_str().trim_end_matches('/').to_owned()))
+    }
+
+    fn into_string(self) -> String {
+        self.0
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SpiralDestinationSettings {
     endpoint: String,
@@ -369,6 +401,17 @@ impl VideoAssetQuery {
     pub(crate) fn into_parts(self) -> (String, String, Option<u32>) {
         (self.episode, self.stream, self.segment)
     }
+
+    fn validate(&self) -> Result<(), OperationError> {
+        for (label, value) in [("episode", &self.episode), ("stream", &self.stream)] {
+            if value.trim().is_empty() || value.trim() != value || value.contains('\0') {
+                return Err(OperationError::invalid_input(format!(
+                    "{label} must be non-empty, contain no surrounding whitespace, and contain no NUL bytes"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Data-catalog consequences expressed only in capability-owned models.
@@ -395,8 +438,7 @@ impl VideoAssetQuery {
         self,
         port: &P,
     ) -> Result<Vec<u8>, OperationError> {
-        validate_identifier("episode", &self.episode)?;
-        validate_identifier("stream", &self.stream)?;
+        self.validate()?;
         port.video_asset(self).await
     }
 }
@@ -468,15 +510,6 @@ impl StartSpiralReplayCommand {
     }
 }
 
-fn validate_identifier(label: &str, value: &str) -> Result<(), OperationError> {
-    if value.trim().is_empty() || value.trim() != value || value.contains('\0') {
-        return Err(OperationError::InvalidInput(format!(
-            "{label} must be non-empty, contain no surrounding whitespace, and contain no NUL bytes"
-        )));
-    }
-    Ok(())
-}
-
 impl ReplayTrajectory {
     fn validate(&self) -> Result<(), OperationError> {
         if !self.sample_hz.is_finite() || self.sample_hz <= 0.0 {
@@ -504,9 +537,9 @@ impl ReplayTrajectory {
 impl UpdateDataSettingsCommand {
     fn validated(mut self) -> Result<Self, OperationError> {
         self.spiral_endpoint =
-            normalize_spiral_endpoint(&self.spiral_endpoint, "Spiral API endpoint")?;
+            HttpEndpoint::parse(&self.spiral_endpoint, "Spiral API endpoint")?.into_string();
         self.spiral_spfs_endpoint =
-            normalize_spiral_endpoint(&self.spiral_spfs_endpoint, "Spiral SpFS endpoint")?;
+            HttpEndpoint::parse(&self.spiral_spfs_endpoint, "Spiral SpFS endpoint")?.into_string();
         self.project_id = self.project_id.trim().to_owned();
         self.client_id = self.client_id.trim().to_owned();
         self.client_secret = self.client_secret.map(|secret| secret.trim().to_owned());
@@ -535,34 +568,11 @@ impl UpdateDataSettingsCommand {
         }
 
         self.training_endpoint =
-            normalize_spiral_endpoint(&self.training_endpoint, "Training runtime endpoint")?;
+            HttpEndpoint::parse(&self.training_endpoint, "Training runtime endpoint")?
+                .into_string();
 
         Ok(self)
     }
-}
-
-fn normalize_spiral_endpoint(endpoint: &str, label: &str) -> Result<String, OperationError> {
-    let parsed = Url::parse(endpoint.trim()).map_err(|error| {
-        OperationError::InvalidInput(format!(
-            "{label} must be an http:// or https:// URL: {error}"
-        ))
-    })?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
-        return Err(OperationError::InvalidInput(format!(
-            "{label} must be an http:// or https:// URL with a host"
-        )));
-    }
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err(OperationError::InvalidInput(format!(
-            "{label} must not contain embedded credentials"
-        )));
-    }
-    if parsed.query().is_some() || parsed.fragment().is_some() {
-        return Err(OperationError::InvalidInput(format!(
-            "{label} must not contain a query string or fragment"
-        )));
-    }
-    Ok(parsed.as_str().trim_end_matches('/').to_owned())
 }
 
 #[cfg(test)]

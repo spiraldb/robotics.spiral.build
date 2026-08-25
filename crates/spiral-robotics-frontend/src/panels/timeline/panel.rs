@@ -23,9 +23,10 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 use spiral_robotics_core::arm::SO101_JOINTS;
 
-use crate::components::charts::{CharmingChart, downsample_extrema, studio_numeric_tooltip};
-use crate::format::format_clock;
-use crate::panels::timeline::signals::{SignalStore, signal_color};
+use crate::activities::data::workbench::EpisodeIdPresentation;
+use crate::components::charts::{CharmingChart, ChartPoints, StudioTooltip};
+use crate::format::ClockPresentation;
+use crate::panels::timeline::signals::{SignalNamePresentation, SignalStore};
 use crate::shell::activity::{Activity, TimelineSubject, TimelineTarget};
 
 const TIMELINE_CHART_ID: &str = "studio-timeline-signal-chart";
@@ -209,7 +210,7 @@ impl RecordedTimelineTraces {
             TimelineSignalLane {
                 joint: definition.name().to_owned(),
                 label: definition.label().to_owned(),
-                color: signal_color(definition.name()).to_owned(),
+                color: definition.name().signal_color().to_owned(),
                 series,
             }
         })
@@ -249,7 +250,7 @@ impl SignalStore {
             TimelineSignalLane {
                 joint: definition.name().to_owned(),
                 label: definition.label().to_owned(),
-                color: signal_color(definition.name()).to_owned(),
+                color: definition.name().signal_color().to_owned(),
                 series,
             }
         })
@@ -452,21 +453,25 @@ enum TimelineTransportIntent {
     RobotSync(TimelineRobotSyncAction),
 }
 
-fn transport_intent(playback: TimelinePlayback, sync_robot: bool) -> TimelineTransportIntent {
-    match playback {
-        TimelinePlayback::PreviewPlaying => {
-            TimelineTransportIntent::Preview(TimelinePreviewAction::Pause)
+impl TimelinePlayback {
+    fn transport_intent(self, sync_robot: bool) -> TimelineTransportIntent {
+        match self {
+            TimelinePlayback::PreviewPlaying => {
+                TimelineTransportIntent::Preview(TimelinePreviewAction::Pause)
+            }
+            TimelinePlayback::RobotSyncSeeking | TimelinePlayback::RobotSyncPlaying => {
+                TimelineTransportIntent::RobotSync(TimelineRobotSyncAction::Pause)
+            }
+            TimelinePlayback::RobotSyncPaused => {
+                TimelineTransportIntent::RobotSync(TimelineRobotSyncAction::Resume)
+            }
+            TimelinePlayback::Stopped if sync_robot => {
+                TimelineTransportIntent::RobotSync(TimelineRobotSyncAction::Start)
+            }
+            TimelinePlayback::Stopped => {
+                TimelineTransportIntent::Preview(TimelinePreviewAction::Play)
+            }
         }
-        TimelinePlayback::RobotSyncSeeking | TimelinePlayback::RobotSyncPlaying => {
-            TimelineTransportIntent::RobotSync(TimelineRobotSyncAction::Pause)
-        }
-        TimelinePlayback::RobotSyncPaused => {
-            TimelineTransportIntent::RobotSync(TimelineRobotSyncAction::Resume)
-        }
-        TimelinePlayback::Stopped if sync_robot => {
-            TimelineTransportIntent::RobotSync(TimelineRobotSyncAction::Start)
-        }
-        TimelinePlayback::Stopped => TimelineTransportIntent::Preview(TimelinePreviewAction::Play),
     }
 }
 
@@ -558,7 +563,7 @@ pub(crate) fn StudioTimeline(
     let transport_playing = preview_playing || robot_sync_active;
     let follow_live = state.follow_live;
     let range_max = duration.max(0.001);
-    let playhead_percent = percent(shown_playhead, duration);
+    let playhead_percent = shown_playhead.percent_of(duration);
     let sync_robot = capabilities.robot_sync.allowed && state.sync_robot;
     let subject_label = match &state.subject {
         TimelineSubject::Empty { activity, .. } => activity.label(),
@@ -566,10 +571,7 @@ pub(crate) fn StudioTimeline(
         TimelineSubject::Episode { .. } => "Episode",
     };
     let identity_label = match full_episode_id.as_deref() {
-        Some(id) => format!(
-            "{subject_label} {}",
-            crate::activities::data::workbench::short_id(id)
-        ),
+        Some(id) => format!("{subject_label} {}", id.short_episode_id()),
         None => "No episode".to_owned(),
     };
     let empty_reason = match &state.subject {
@@ -581,7 +583,7 @@ pub(crate) fn StudioTimeline(
         _ => state.subject.problem().map(str::to_owned),
     };
     let target = state.subject.target();
-    let ticks = timeline_ticks(duration);
+    let ticks = duration.timeline_ticks();
 
     let record_title = capabilities
         .record
@@ -634,7 +636,7 @@ pub(crate) fn StudioTimeline(
     let preview_episode = state.subject.episode_id().map(str::to_owned);
     let sync_target = target.clone();
     let scrub_sync_episode = preview_episode.clone();
-    let next_transport = transport_intent(playback, sync_robot);
+    let next_transport = playback.transport_intent(sync_robot);
     let capture_episode = recording
         .as_ref()
         .map(|progress| progress.episode().to_owned());
@@ -647,7 +649,7 @@ pub(crate) fn StudioTimeline(
         Activity::Rollout => "Rollout live timeline",
     };
     let signal_chart = signal_lanes.chart(duration);
-    let signal_chart_label = format!("Six robot joint signals over {}", format_clock(duration));
+    let signal_chart_label = format!("Six robot joint signals over {}", duration.clock_label());
 
     rsx! {
         section {
@@ -795,8 +797,8 @@ pub(crate) fn StudioTimeline(
                     }
                 }
                 div { class: "ml-auto flex items-baseline gap-1 font-mono tabular-nums",
-                    span { class: "text-[12px] font-medium", "{format_clock(shown_playhead)}" }
-                    span { class: "text-[10px] text-ink-faint", "/ {format_clock(duration)}" }
+                    span { class: "text-[12px] font-medium", "{shown_playhead.clock_label()}" }
+                    span { class: "text-[10px] text-ink-faint", "/ {duration.clock_label()}" }
                     span { class: "ml-1 text-[10px] text-ink-faint", "{frames} frames" }
                 }
                 if recording.is_some() {
@@ -886,7 +888,7 @@ pub(crate) fn StudioTimeline(
                                 disabled: duration <= 0.0 || !capabilities.seek.allowed,
                                 title: "{seek_title}",
                                 "aria-label": "Episode playhead",
-                                "aria-valuetext": "{format_clock(shown_playhead)} of {format_clock(duration)}",
+                                "aria-valuetext": "{shown_playhead.clock_label()} of {duration.clock_label()}",
                                 oninput: move |event| {
                                     if let Ok(seconds) = event.value().parse::<f64>() {
                                         let beginning_scrub = !scrubbing();
@@ -1039,37 +1041,44 @@ struct TimelineTick {
 
 /// The five divisions of the axis, labelled only once there is a span to label.
 ///
-/// A clock with no episode on it has no scale, and stamping `format_clock(0.0)`
+/// A clock with no episode on it has no scale, and stamping `0.0.clock_label()`
 /// at every division printed `0:00.0` five times across the head of the panel —
 /// a row that looks like a readout stuck at zero rather than an axis waiting for
 /// an episode. The divisions themselves stay, so the lanes keep their grid and
 /// every tick keeps the distinct identity its render key depends on.
-fn timeline_ticks(duration: f64) -> Vec<TimelineTick> {
-    let duration = duration.max(0.0);
-    let scaled = duration > 0.0;
-    (0_u8..=4)
-        .map(|index| {
-            let fraction = f64::from(index) / 4.0;
-            let seconds = duration * fraction;
-            TimelineTick {
-                ordinal: index,
-                seconds,
-                position: fraction * 100.0,
-                label: if scaled {
-                    format_clock(seconds)
-                } else {
-                    String::new()
-                },
-            }
-        })
-        .collect()
+trait TimelineSeconds {
+    fn timeline_ticks(self) -> Vec<TimelineTick>;
+    fn percent_of(self, duration: f64) -> f64;
 }
 
-fn percent(seconds: f64, duration: f64) -> f64 {
-    if !seconds.is_finite() || !duration.is_finite() || duration <= 0.0 {
-        0.0
-    } else {
-        (seconds / duration * 100.0).clamp(0.0, 100.0)
+impl TimelineSeconds for f64 {
+    fn timeline_ticks(self) -> Vec<TimelineTick> {
+        let duration = self.max(0.0);
+        let scaled = self > 0.0;
+        (0_u8..=4)
+            .map(|index| {
+                let fraction = f64::from(index) / 4.0;
+                let seconds = duration * fraction;
+                TimelineTick {
+                    ordinal: index,
+                    seconds,
+                    position: fraction * 100.0,
+                    label: if scaled {
+                        seconds.clock_label()
+                    } else {
+                        String::new()
+                    },
+                }
+            })
+            .collect()
+    }
+
+    fn percent_of(self, duration: f64) -> f64 {
+        if !self.is_finite() || !duration.is_finite() || duration <= 0.0 {
+            0.0
+        } else {
+            (self / duration * 100.0).clamp(0.0, 100.0)
+        }
     }
 }
 
@@ -1081,11 +1090,11 @@ impl TimelineSignalLanes for [TimelineSignalLane; 6] {
     fn chart(&self, duration: f64) -> Chart {
         let mut chart = Chart::new()
             .animation(false)
-            .tooltip(studio_numeric_tooltip(3));
+            .tooltip(StudioTooltip::numeric(3));
 
         for (lane_index, lane) in self.iter().enumerate() {
             let grid_index = lane_index as f64;
-            let (low, high) = signal_bounds(&lane.series).unwrap_or((0.0, 1.0));
+            let (low, high) = lane.signal_bounds().unwrap_or((0.0, 1.0));
             let padding = ((high - low) * 0.08).max(0.5);
             chart = chart
                 .grid(
@@ -1097,12 +1106,12 @@ impl TimelineSignalLanes for [TimelineSignalLane; 6] {
                         .height(TRACE_LANE_HEIGHT),
                 )
                 .x_axis(
-                    hidden_timeline_axis(AxisType::Value, grid_index)
+                    TimelineChartStyle::hidden_axis(AxisType::Value, grid_index)
                         .min(0)
                         .max(duration.max(0.001)),
                 )
                 .y_axis(
-                    hidden_timeline_axis(AxisType::Value, grid_index)
+                    TimelineChartStyle::hidden_axis(AxisType::Value, grid_index)
                         .min(low - padding)
                         .max(high + padding)
                         .scale(true),
@@ -1126,7 +1135,7 @@ impl TimelineSignalLanes for [TimelineSignalLane; 6] {
                                 .opacity(if series_index == 0 { 0.95 } else { 0.52 }),
                         )
                         .emphasis(Emphasis::new().disabled(true))
-                        .data(timeline_series_data(&series.points, TRACE_POINT_BUDGET)),
+                        .data(series.chart_data(TRACE_POINT_BUDGET)),
                 );
             }
         }
@@ -1135,88 +1144,96 @@ impl TimelineSignalLanes for [TimelineSignalLane; 6] {
     }
 }
 
-fn hidden_timeline_axis(kind: AxisType, grid_index: f64) -> Axis {
-    Axis::new()
-        .type_(kind)
-        .grid_index(grid_index)
-        .show(false)
-        .axis_line(AxisLine::new().show(false))
-        .axis_tick(AxisTick::new().show(false))
-        .axis_label(AxisLabel::new().show(false))
-        .split_line(SplitLine::new().show(false))
+struct TimelineChartStyle;
+
+impl TimelineChartStyle {
+    fn hidden_axis(kind: AxisType, grid_index: f64) -> Axis {
+        Axis::new()
+            .type_(kind)
+            .grid_index(grid_index)
+            .show(false)
+            .axis_line(AxisLine::new().show(false))
+            .axis_tick(AxisTick::new().show(false))
+            .axis_label(AxisLabel::new().show(false))
+            .split_line(SplitLine::new().show(false))
+    }
+
+    fn point(x: f64, y: Option<f64>) -> DataPoint {
+        DataPoint::from(vec![CompositeValue::from(x), CompositeValue::from(y)])
+    }
 }
 
 /// Convert gaps to ECharts null points and retain extrema before crossing the
 /// Wasm boundary. Pathological intermittent signals keep their longest valid
 /// runs so the payload remains bounded instead of freezing the operator UI.
-fn timeline_series_data(points: &[TimelineSignalPoint], budget: usize) -> DataFrame {
-    let mut runs = Vec::<Vec<(f64, f64)>>::new();
-    let mut current = Vec::<(f64, f64)>::new();
+impl TimelineSignalSeries {
+    fn chart_data(&self, budget: usize) -> DataFrame {
+        let mut runs = Vec::<Vec<(f64, f64)>>::new();
+        let mut current = Vec::<(f64, f64)>::new();
 
-    for point in points {
-        match point.value.filter(|value| value.is_finite()) {
-            Some(value) if point.seconds.is_finite() => current.push((point.seconds, value)),
-            _ if !current.is_empty() => runs.push(std::mem::take(&mut current)),
-            _ => {}
+        for point in &self.points {
+            match point.value.filter(|value| value.is_finite()) {
+                Some(value) if point.seconds.is_finite() => current.push((point.seconds, value)),
+                _ if !current.is_empty() => runs.push(std::mem::take(&mut current)),
+                _ => {}
+            }
         }
-    }
-    if !current.is_empty() {
-        runs.push(current);
-    }
-    if runs.is_empty() {
-        return Vec::new();
-    }
-
-    let max_runs = (budget / 4).max(1);
-    if runs.len() > max_runs {
-        let mut selected = (0..runs.len()).collect::<Vec<_>>();
-        selected.sort_by_key(|index| std::cmp::Reverse(runs[*index].len()));
-        selected.truncate(max_runs);
-        selected.sort_unstable();
-        runs = selected
-            .into_iter()
-            .map(|index| std::mem::take(&mut runs[index]))
-            .collect();
-    }
-
-    let total_valid = runs.iter().map(Vec::len).sum::<usize>().max(1);
-    let point_budget = budget.saturating_sub(runs.len().saturating_sub(1));
-    let mut data = DataFrame::new();
-    let mut previous_end = None;
-
-    for run in runs {
-        let share =
-            ((run.len() as f64 / total_valid as f64) * point_budget as f64).round() as usize;
-        let share = share.max(4).min(run.len());
-        let reduced = downsample_extrema(&run, share);
-        if let (Some(end), Some((start, _))) = (previous_end, reduced.first()) {
-            data.push(xy_point((end + start) / 2.0, None));
+        if !current.is_empty() {
+            runs.push(current);
         }
-        previous_end = reduced.last().map(|(seconds, _)| *seconds);
-        data.extend(
-            reduced
+        if runs.is_empty() {
+            return Vec::new();
+        }
+
+        let max_runs = (budget / 4).max(1);
+        if runs.len() > max_runs {
+            let mut selected = (0..runs.len()).collect::<Vec<_>>();
+            selected.sort_by_key(|index| std::cmp::Reverse(runs[*index].len()));
+            selected.truncate(max_runs);
+            selected.sort_unstable();
+            runs = selected
                 .into_iter()
-                .map(|(seconds, value)| xy_point(seconds, Some(value))),
-        );
-    }
-
-    data
-}
-
-fn signal_bounds(series: &[TimelineSignalSeries]) -> Option<(f64, f64)> {
-    let mut low = f64::INFINITY;
-    let mut high = f64::NEG_INFINITY;
-    for point in series.iter().flat_map(|series| &series.points) {
-        if let Some(value) = point.value.filter(|value| value.is_finite()) {
-            low = low.min(value);
-            high = high.max(value);
+                .map(|index| std::mem::take(&mut runs[index]))
+                .collect();
         }
+
+        let total_valid = runs.iter().map(Vec::len).sum::<usize>().max(1);
+        let point_budget = budget.saturating_sub(runs.len().saturating_sub(1));
+        let mut data = DataFrame::new();
+        let mut previous_end = None;
+
+        for run in runs {
+            let share =
+                ((run.len() as f64 / total_valid as f64) * point_budget as f64).round() as usize;
+            let share = share.max(4).min(run.len());
+            let reduced = run.downsample_extrema(share);
+            if let (Some(end), Some((start, _))) = (previous_end, reduced.first()) {
+                data.push(TimelineChartStyle::point((end + start) / 2.0, None));
+            }
+            previous_end = reduced.last().map(|(seconds, _)| *seconds);
+            data.extend(
+                reduced
+                    .into_iter()
+                    .map(|(seconds, value)| TimelineChartStyle::point(seconds, Some(value))),
+            );
+        }
+
+        data
     }
-    (low <= high).then_some((low, high))
 }
 
-fn xy_point(x: f64, y: Option<f64>) -> DataPoint {
-    DataPoint::from(vec![CompositeValue::from(x), CompositeValue::from(y)])
+impl TimelineSignalLane {
+    fn signal_bounds(&self) -> Option<(f64, f64)> {
+        let mut low = f64::INFINITY;
+        let mut high = f64::NEG_INFINITY;
+        for point in self.series.iter().flat_map(|series| &series.points) {
+            if let Some(value) = point.value.filter(|value| value.is_finite()) {
+                low = low.min(value);
+                high = high.max(value);
+            }
+        }
+        (low <= high).then_some((low, high))
+    }
 }
 
 #[cfg(test)]
@@ -1225,41 +1242,41 @@ mod tests {
 
     #[test]
     fn percent_is_stable_for_invalid_duration() {
-        assert_eq!(percent(5.0, 10.0), 50.0);
-        assert_eq!(percent(5.0, 0.0), 0.0);
+        assert_eq!(5.0_f64.percent_of(10.0), 50.0);
+        assert_eq!(5.0_f64.percent_of(0.0), 0.0);
     }
 
     #[test]
     fn one_transport_routes_through_the_robot_only_when_sync_is_enabled() {
         assert_eq!(
-            transport_intent(TimelinePlayback::Stopped, false),
+            TimelinePlayback::Stopped.transport_intent(false),
             TimelineTransportIntent::Preview(TimelinePreviewAction::Play)
         );
         assert_eq!(
-            transport_intent(TimelinePlayback::Stopped, true),
+            TimelinePlayback::Stopped.transport_intent(true),
             TimelineTransportIntent::RobotSync(TimelineRobotSyncAction::Start)
         );
         assert_eq!(
-            transport_intent(TimelinePlayback::PreviewPlaying, false),
+            TimelinePlayback::PreviewPlaying.transport_intent(false),
             TimelineTransportIntent::Preview(TimelinePreviewAction::Pause)
         );
         assert_eq!(
-            transport_intent(TimelinePlayback::RobotSyncPlaying, true),
+            TimelinePlayback::RobotSyncPlaying.transport_intent(true),
             TimelineTransportIntent::RobotSync(TimelineRobotSyncAction::Pause)
         );
         assert_eq!(
-            transport_intent(TimelinePlayback::RobotSyncSeeking, true),
+            TimelinePlayback::RobotSyncSeeking.transport_intent(true),
             TimelineTransportIntent::RobotSync(TimelineRobotSyncAction::Pause)
         );
         assert_eq!(
-            transport_intent(TimelinePlayback::RobotSyncPaused, true),
+            TimelinePlayback::RobotSyncPaused.transport_intent(true),
             TimelineTransportIntent::RobotSync(TimelineRobotSyncAction::Resume)
         );
     }
 
     #[test]
     fn empty_timeline_ticks_keep_unique_render_identities() {
-        let ticks = timeline_ticks(0.0);
+        let ticks = 0.0_f64.timeline_ticks();
         let identities = ticks
             .iter()
             .map(|tick| tick.ordinal)
@@ -1272,11 +1289,14 @@ mod tests {
     #[test]
     fn an_unscaled_axis_is_unlabelled_and_a_scaled_one_is_not() {
         assert!(
-            timeline_ticks(0.0).iter().all(|tick| tick.label.is_empty()),
+            0.0_f64
+                .timeline_ticks()
+                .iter()
+                .all(|tick| tick.label.is_empty()),
             "an axis with no episode on it has no times to print"
         );
 
-        let ticks = timeline_ticks(8.0);
+        let ticks = 8.0_f64.timeline_ticks();
         assert!(ticks.iter().all(|tick| !tick.label.is_empty()));
         assert_eq!(ticks.last().map(|tick| tick.seconds), Some(8.0));
     }
@@ -1292,7 +1312,11 @@ mod tests {
         points[250].value = Some(90.0);
         points[400].value = None;
 
-        let data = timeline_series_data(&points, TRACE_POINT_BUDGET);
+        let data = TimelineSignalSeries {
+            arm: "test".to_owned(),
+            points,
+        }
+        .chart_data(TRACE_POINT_BUDGET);
         let data = serde_json::to_value(data).expect("trace data should serialize");
         let rows = data.as_array().expect("trace data should be an array");
 

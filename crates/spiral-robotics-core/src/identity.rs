@@ -8,6 +8,11 @@ pub struct DatasetId(String);
 
 impl DatasetId {
     pub const MAX_BYTES: usize = 96;
+
+    /// Whether a string is already in the canonical persisted form.
+    pub fn is_canonical(value: &str) -> bool {
+        Self::try_from(value).is_ok_and(|identity| identity.as_str() == value)
+    }
 }
 
 impl TryFrom<&str> for DatasetId {
@@ -49,6 +54,54 @@ impl fmt::Display for InvalidDatasetId {
 }
 
 impl std::error::Error for InvalidDatasetId {}
+
+/// A validated persisted episode identifier.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct EpisodeId(String);
+
+impl EpisodeId {
+    pub const MAX_BYTES: usize = 64;
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Parse the sequence number from Studio's generated `episode_NNNNNN` IDs.
+    pub fn sequence_number(&self) -> Option<u64> {
+        self.0.strip_prefix("episode_")?.parse().ok()
+    }
+}
+
+impl TryFrom<&str> for EpisodeId {
+    type Error = InvalidEpisodeId;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        (!value.is_empty()
+            && value.len() <= Self::MAX_BYTES
+            && value.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            }))
+        .then(|| Self(value.to_owned()))
+        .ok_or(InvalidEpisodeId)
+    }
+}
+
+impl From<EpisodeId> for String {
+    fn from(value: EpisodeId) -> Self {
+        value.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidEpisodeId;
+
+impl fmt::Display for InvalidEpisodeId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("episode ID must use 1–64 letters, numbers, '_' or '-' characters")
+    }
+}
+
+impl std::error::Error for InvalidEpisodeId {}
 
 /// One SQL-safe generated-name component derived from an immutable external ID.
 #[derive(Clone, Debug, Eq, PartialEq)]

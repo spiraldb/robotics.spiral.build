@@ -29,13 +29,6 @@ pub const MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION: usize = 80;
 pub const MAX_WORKFLOW_AGENT_CONVERSATION_TITLE_CHARS: usize = 64;
 pub const MAX_WORKFLOW_AGENT_QUERY_ROWS: usize = 50;
 
-pub fn derived_feature_cache_relation(source_relation: &str) -> String {
-    format!(
-        "workflow.features_{}",
-        spiral_robotics_core::identity::SqlNameComponent::from(source_relation).as_str()
-    )
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowSpec {
     id: String,
@@ -113,7 +106,7 @@ pub enum WorkflowNodeConfig {
     },
     Query {
         sql: String,
-        #[serde(default = "default_workflow_query_rows")]
+        #[serde(default = "WorkflowNodeConfig::default_query_rows")]
         max_rows: usize,
     },
     Result,
@@ -189,6 +182,19 @@ impl WorkflowFeatureDefinition {
 }
 
 impl WorkflowFeatureApplicability {
+    /// Derive the server-owned feature cache relation for a source relation.
+    pub fn derived_cache_relation(source_relation: &str) -> String {
+        format!(
+            "workflow.features_{}",
+            spiral_robotics_core::identity::SqlNameComponent::from(source_relation).as_str()
+        )
+    }
+
+    /// Derive this applicability's server-owned feature cache relation.
+    pub fn cache_relation(&self) -> String {
+        Self::derived_cache_relation(&self.source_relation)
+    }
+
     pub fn new(source_relation: impl Into<String>, media_field: impl Into<String>) -> Self {
         Self {
             source_relation: source_relation.into(),
@@ -219,11 +225,11 @@ pub struct WorkflowFeatureApplicability {
     stream_ids: Vec<String>,
 }
 
-fn default_workflow_query_rows() -> usize {
-    100
-}
-
 impl WorkflowNodeConfig {
+    const fn default_query_rows() -> usize {
+        100
+    }
+
     pub const fn kind(&self) -> WorkflowNodeKind {
         match self {
             Self::Table { .. } => WorkflowNodeKind::Table,
@@ -1970,10 +1976,9 @@ impl WorkflowSpec {
                 if table_sources.len() != 1 {
                     report.errors.push(WorkflowValidationIssue::new("model_source_count", "A Model feature cache must belong to exactly one authoritative source relation.", "Build the candidate Query from one source Table; join other evidence only after the Model.").with_node_id(&node.id));
                 } else if let Some(source) = table_sources.first() {
-                    if feature_cache_relation
-                        .as_ref()
-                        .is_some_and(|output| output != &derived_feature_cache_relation(source))
-                    {
+                    if feature_cache_relation.as_ref().is_some_and(|output| {
+                        output != &WorkflowFeatureApplicability::derived_cache_relation(source)
+                    }) {
                         report.errors.push(WorkflowValidationIssue::new("invalid_model_output", "The Model feature-cache relation is not derived from its source relation.", "Apply the workflow again so the server can derive the source-scoped cache.").with_node_id(&node.id));
                     }
                     if features
@@ -2766,7 +2771,7 @@ mod tests {
     #[test]
     fn feature_cache_relation_is_server_owned_and_stable() {
         assert_eq!(
-            derived_feature_cache_relation("pick/place"),
+            WorkflowFeatureApplicability::derived_cache_relation("pick/place"),
             format!(
                 "workflow.features_{}",
                 spiral_robotics_core::identity::SqlNameComponent::from("pick/place").as_str()
@@ -2902,9 +2907,11 @@ mod tests {
                         ),
                         feature("pick_place.camera_frames", "is_gripper_feature", "gripper"),
                     ],
-                    feature_cache_relation: Some(derived_feature_cache_relation(
-                        "pick_place.camera_frames",
-                    )),
+                    feature_cache_relation: Some(
+                        WorkflowFeatureApplicability::derived_cache_relation(
+                            "pick_place.camera_frames",
+                        ),
+                    ),
                 },
             },
         );
@@ -2977,7 +2984,7 @@ mod tests {
                             "is_holding_cube_feature",
                             "holding cube",
                         )],
-                        feature_cache_relation: Some(derived_feature_cache_relation("pick_place.video_manifest")),
+                        feature_cache_relation: Some(WorkflowFeatureApplicability::derived_cache_relation("pick_place.video_manifest")),
                     },
                 },
                 WorkflowNodeSpec {

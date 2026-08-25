@@ -2,8 +2,9 @@
 //!
 //! Probing an unknown video node can hang or take a driver down with it, so
 //! discovery runs in a short-lived copy of the current executable and is
-//! killed if it overruns. Any binary that calls [`discover`] must hand control to
-//! [`run_worker`] at startup when [`worker_mode`] returns a mode.
+//! killed if it overruns. Any binary that calls [`ProbeOutcome::discover`] must
+//! hand control to [`CameraWorkerMode::run`] at startup when
+//! [`CameraWorkerMode::from_environment`] returns a mode.
 //!
 //! Live streaming runs in the calling thread instead: by the time an operator
 //! asks for a preview, the device has already survived discovery, and piping
@@ -50,7 +51,7 @@ pub struct DetectedCamera {
 impl DetectedCamera {
     /// Stable identifier for this camera, as stored in robot files and URLs.
     pub fn identifier(&self) -> String {
-        camera_identifier(self.info.index())
+        self.info.stable_identifier()
     }
 
     /// Human-readable device name.
@@ -93,6 +94,23 @@ enum ProbeResponse {
     UnsupportedVideoNode,
 }
 
+impl ProbeResponse {
+    fn probe_in_worker(info: CameraInfo) -> Result<Self> {
+        let workspace = WorkerWorkspace::create("spiral-robotics-camera-probe-")?;
+        let request = workspace.request();
+        let response = workspace.response();
+
+        request.write(&info)?;
+        WorkerInvocation {
+            mode: "probe",
+            request: &request,
+            response: &response,
+        }
+        .invoke(CAMERA_PROBE_TIMEOUT)?;
+        response.read()
+    }
+}
+
 /// The result of scanning every video device the operating system reports.
 #[derive(Debug, Default)]
 pub struct ProbeOutcome {
@@ -104,7 +122,37 @@ pub struct ProbeOutcome {
     failures: Vec<String>,
 }
 
+/// An isolated camera operation requested through the process environment.
+pub struct CameraWorkerMode(String);
+
+/// Operating-system camera permission initialization.
+pub struct CameraAccess;
+
 impl ProbeOutcome {
+    /// Probe every camera the operating system reports, one isolated child at
+    /// a time.
+    pub fn discover() -> Result<Self> {
+        let mut candidates = query(ApiBackend::Auto)?;
+        candidates.sort_by(|left, right| left.index().cmp(right.index()));
+
+        let mut outcome = Self::default();
+        for info in candidates {
+            let identifier = info.stable_identifier();
+            let human_name = info.human_name();
+            match ProbeResponse::probe_in_worker(info) {
+                Ok(ProbeResponse::Camera(camera)) => outcome.cameras.push(camera),
+                Ok(ProbeResponse::UnsupportedVideoNode) => {
+                    outcome.skipped.push(format!("{identifier} ({human_name})"));
+                }
+                Err(error) => outcome
+                    .failures
+                    .push(format!("{identifier} ({human_name}): {error}")),
+            }
+        }
+
+        Ok(outcome)
+    }
+
     /// Split discovery into the usable devices and the two diagnostic classes.
     pub fn into_parts(self) -> (Vec<DetectedCamera>, Vec<String>, Vec<String>) {
         (self.cameras, self.skipped, self.failures)
@@ -121,6 +169,21 @@ pub struct JpegFrame {
 }
 
 impl JpegFrame {
+    fn new(bytes: Vec<u8>, sequence: u64) -> Self {
+        Self { bytes, sequence }
+    }
+
+    fn encode_rgb(image: &RgbImage, quality: u8, sequence: u64) -> Result<Self> {
+        let mut bytes = Vec::new();
+        JpegEncoder::new_with_quality(&mut bytes, quality.clamp(1, 100)).encode(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            ExtendedColorType::Rgb8,
+        )?;
+        Ok(Self::new(bytes, sequence))
+    }
+
     pub fn into_bytes(self) -> Vec<u8> {
         self.bytes
     }
@@ -130,46 +193,48 @@ impl JpegFrame {
     }
 }
 
-/// Return the worker mode this process was launched with, if any.
-///
-/// Binaries that discover or capture from cameras must check this before
-/// parsing their own arguments and hand the mode to [`run_worker`].
-pub fn worker_mode() -> Result<Option<String>> {
-    match env::var(WORKER_MODE_ENV) {
-        Ok(mode) => Ok(Some(mode)),
-        Err(env::VarError::NotPresent) => Ok(None),
-        Err(env::VarError::NotUnicode(_)) => {
-            Err(format!("{WORKER_MODE_ENV} contains non-Unicode data").into())
+impl CameraWorkerMode {
+    /// Return the worker mode this process was launched with, if any.
+    ///
+    /// Binaries that discover or capture from cameras must check this before
+    /// parsing their own arguments and run the returned mode.
+    pub fn from_environment() -> Result<Option<Self>> {
+        match env::var(WORKER_MODE_ENV) {
+            Ok(mode) => Ok(Some(Self(mode))),
+            Err(env::VarError::NotPresent) => Ok(None),
+            Err(env::VarError::NotUnicode(_)) => {
+                Err(format!("{WORKER_MODE_ENV} contains non-Unicode data").into())
+            }
         }
     }
-}
 
-/// Run the isolated camera operation this process was launched to perform.
-pub fn run_worker(mode: &str) -> Result<()> {
-    let request_path = required_worker_path(WORKER_REQUEST_ENV)?;
-    let response_path = required_worker_path(WORKER_RESPONSE_ENV)?;
+    /// Run the isolated camera operation this process was launched to perform.
+    pub fn run(&self) -> Result<()> {
+        let request = WorkerFile::from_environment(WORKER_REQUEST_ENV)?;
+        let response = WorkerFile::from_environment(WORKER_RESPONSE_ENV)?;
 
-    let result = (|| match mode {
-        "probe" => {
-            let info: CameraInfo = read_json(&request_path)?;
-            let response = if is_supported_video_capture_node(&info)? {
-                let stream_format = probe_camera(&info)?;
-                ProbeResponse::Camera(DetectedCamera {
-                    info,
-                    stream_format,
-                })
-            } else {
-                ProbeResponse::UnsupportedVideoNode
-            };
-            write_json(&response_path, &response)
+        let result = (|| match self.0.as_str() {
+            "probe" => {
+                let info: CameraInfo = request.read()?;
+                let probe = if info.supports_video_capture()? {
+                    let stream_format = info.probe_format()?;
+                    ProbeResponse::Camera(DetectedCamera {
+                        info,
+                        stream_format,
+                    })
+                } else {
+                    ProbeResponse::UnsupportedVideoNode
+                };
+                response.write(&probe)
+            }
+            mode => Err(format!("unknown internal camera worker mode '{mode}'").into()),
+        })();
+
+        if let Err(error) = &result {
+            let _ = response.write_failure(error.as_ref());
         }
-        _ => Err(format!("unknown internal camera worker mode '{mode}'").into()),
-    })();
-
-    if let Err(error) = &result {
-        let _ = fs::write(response_path, error.to_string());
+        result
     }
-    result
 }
 
 /// Ask the operating system for camera permission, where it is required.
@@ -177,57 +242,37 @@ pub fn run_worker(mode: &str) -> Result<()> {
 /// On macOS this must run before any camera is opened, and it blocks until the
 /// operator answers the system prompt.
 #[cfg(target_os = "macos")]
-pub fn initialize_camera_access() -> Result<()> {
-    use std::sync::mpsc;
+impl CameraAccess {
+    pub fn initialize() -> Result<()> {
+        use std::sync::mpsc;
 
-    let (sender, receiver) = mpsc::channel();
-    nokhwa::nokhwa_initialize(move |granted| {
-        let _ = sender.send(granted);
-    });
+        let (sender, receiver) = mpsc::channel();
+        nokhwa::nokhwa_initialize(move |granted| {
+            let _ = sender.send(granted);
+        });
 
-    match receiver.recv_timeout(Duration::from_secs(120)) {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(
-            "camera access was denied; allow access in System Settings > Privacy & Security > Camera"
-                .into(),
-        ),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            Err("timed out after 120 seconds while requesting camera access".into())
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            Err("camera permission request ended without a result".into())
+        match receiver.recv_timeout(Duration::from_secs(120)) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(
+                "camera access was denied; allow access in System Settings > Privacy & Security > Camera"
+                    .into(),
+            ),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                Err("timed out after 120 seconds while requesting camera access".into())
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err("camera permission request ended without a result".into())
+            }
         }
     }
 }
 
 /// Ask the operating system for camera permission, where it is required.
 #[cfg(not(target_os = "macos"))]
-pub fn initialize_camera_access() -> Result<()> {
-    Ok(())
-}
-
-/// Probe every camera the operating system reports, one isolated child at a
-/// time.
-pub fn discover() -> Result<ProbeOutcome> {
-    let mut candidates = query(ApiBackend::Auto)?;
-    candidates.sort_by(|left, right| left.index().cmp(right.index()));
-
-    let mut outcome = ProbeOutcome::default();
-    for info in candidates {
-        let identifier = camera_identifier(info.index());
-        let human_name = info.human_name();
-        match probe_in_worker(info) {
-            Ok(ProbeResponse::Camera(camera)) => outcome.cameras.push(camera),
-            Ok(ProbeResponse::UnsupportedVideoNode) => {
-                outcome.skipped.push(format!("{identifier} ({human_name})"));
-            }
-            Err(error) => outcome
-                .failures
-                .push(format!("{identifier} ({human_name}): {error}")),
-        }
+impl CameraAccess {
+    pub fn initialize() -> Result<()> {
+        Ok(())
     }
-
-    Ok(outcome)
 }
 
 impl DetectedCamera {
@@ -241,7 +286,7 @@ impl DetectedCamera {
     {
         let requested =
             RequestedFormat::new::<RgbFormat>(RequestedFormatType::Exact(self.stream_format));
-        let mut camera = Camera::new(camera_open_index(&self.info), requested)?;
+        let mut camera = Camera::new(self.info.open_index(), requested)?;
         camera.open_stream()?;
 
         let mut sequence = 0_u64;
@@ -254,11 +299,12 @@ impl DetectedCamera {
                     break;
                 }
             };
-            let bytes = match frame.source_frame_format() {
-                FrameFormat::MJPEG => frame.buffer().to_vec(),
+            sequence += 1;
+            let frame = match frame.source_frame_format() {
+                FrameFormat::MJPEG => JpegFrame::new(frame.buffer().to_vec(), sequence),
                 _ => match frame.decode_image::<RgbFormat>() {
-                    Ok(image) => match encode_jpeg(&image, config.quality) {
-                        Ok(bytes) => bytes,
+                    Ok(image) => match JpegFrame::encode_rgb(&image, config.quality, sequence) {
+                        Ok(frame) => frame,
                         Err(error) => {
                             result = Err(error);
                             break;
@@ -270,9 +316,7 @@ impl DetectedCamera {
                     }
                 },
             };
-
-            sequence += 1;
-            sink(JpegFrame { bytes, sequence });
+            sink(frame);
         }
 
         // Always release the device, even when the loop failed.
@@ -281,89 +325,77 @@ impl DetectedCamera {
     }
 }
 
-/// Identifier a camera is known by, matching the names LeRobot prints.
-fn camera_identifier(index: &CameraIndex) -> String {
-    #[cfg(target_os = "linux")]
-    if let CameraIndex::Index(index) = index {
-        return format!("/dev/video{index}");
+trait CameraInfoExt {
+    fn stable_identifier(&self) -> String;
+    fn open_index(&self) -> CameraIndex;
+    fn probe_format(&self) -> Result<CameraFormat>;
+    fn supports_video_capture(&self) -> Result<bool>;
+}
+
+impl CameraInfoExt for CameraInfo {
+    /// Identifier a camera is known by, matching the names LeRobot prints.
+    fn stable_identifier(&self) -> String {
+        #[cfg(target_os = "linux")]
+        if let CameraIndex::Index(index) = self.index() {
+            return format!("/dev/video{index}");
+        }
+
+        self.index().as_string()
     }
 
-    index.as_string()
-}
+    fn open_index(&self) -> CameraIndex {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let device_id = self.misc();
+            if !device_id.is_empty() {
+                return CameraIndex::String(device_id);
+            }
+        }
 
-fn encode_jpeg(image: &RgbImage, quality: u8) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    JpegEncoder::new_with_quality(&mut bytes, quality.clamp(1, 100)).encode(
-        image.as_raw(),
-        image.width(),
-        image.height(),
-        ExtendedColorType::Rgb8,
-    )?;
-    Ok(bytes)
-}
-
-fn probe_in_worker(info: CameraInfo) -> Result<ProbeResponse> {
-    let workspace = private_workspace(None, "spiral-robotics-camera-probe-")?;
-    let request_path = workspace.path().join("request.json");
-    let response_path = workspace.path().join("response.json");
-
-    write_json(&request_path, &info)?;
-    WorkerInvocation {
-        mode: "probe",
-        request_path: &request_path,
-        response_path: &response_path,
+        self.index().clone()
     }
-    .invoke(CAMERA_PROBE_TIMEOUT)?;
-    read_json(&response_path)
-}
 
-fn probe_camera(info: &CameraInfo) -> Result<CameraFormat> {
-    let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::None);
-    let mut camera = Camera::new(camera_open_index(info), requested)?;
+    fn probe_format(&self) -> Result<CameraFormat> {
+        let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::None);
+        let mut camera = Camera::new(self.open_index(), requested)?;
 
-    // Opening the stream filters out V4L metadata-only nodes and busy devices.
-    camera.open_stream()?;
-    let stream_format = camera.camera_format();
-    camera.stop_stream()?;
+        // Opening the stream filters out V4L metadata-only nodes and busy devices.
+        camera.open_stream()?;
+        let stream_format = camera.camera_format();
+        camera.stop_stream()?;
 
-    Ok(stream_format)
-}
+        Ok(stream_format)
+    }
 
-#[cfg(target_os = "linux")]
-fn is_supported_video_capture_node(info: &CameraInfo) -> Result<bool> {
-    use v4l::capability::Flags;
+    fn supports_video_capture(&self) -> Result<bool> {
+        #[cfg(target_os = "linux")]
+        {
+            use v4l::capability::Flags;
 
-    let CameraIndex::Index(index) = info.index() else {
-        return Ok(true);
-    };
-    let device = v4l::Device::new(usize::try_from(*index)?)?;
-    let capabilities = device.query_caps()?.capabilities;
-    Ok(capabilities.contains(Flags::VIDEO_CAPTURE | Flags::STREAMING))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn is_supported_video_capture_node(_info: &CameraInfo) -> Result<bool> {
-    Ok(true)
-}
-
-fn camera_open_index(info: &CameraInfo) -> CameraIndex {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    {
-        let device_id = info.misc();
-        if !device_id.is_empty() {
-            return CameraIndex::String(device_id);
+            let CameraIndex::Index(index) = self.index() else {
+                return Ok(true);
+            };
+            let device = v4l::Device::new(usize::try_from(*index)?)?;
+            let capabilities = device.query_caps()?.capabilities;
+            Ok(capabilities.contains(Flags::VIDEO_CAPTURE | Flags::STREAMING))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(true)
         }
     }
-
-    info.index().clone()
 }
 
 struct WorkerChild(Child);
 
+struct WorkerFile(PathBuf);
+
+struct WorkerWorkspace(TempDir);
+
 struct WorkerInvocation<'a> {
     mode: &'a str,
-    request_path: &'a Path,
-    response_path: &'a Path,
+    request: &'a WorkerFile,
+    response: &'a WorkerFile,
 }
 
 impl Drop for WorkerChild {
@@ -386,19 +418,21 @@ impl WorkerInvocation<'_> {
         let mut command = Command::new(env::current_exe()?);
         command
             .env(WORKER_MODE_ENV, self.mode)
-            .env(WORKER_REQUEST_ENV, self.request_path)
-            .env(WORKER_RESPONSE_ENV, self.response_path)
+            .env(WORKER_REQUEST_ENV, self.request.path())
+            .env(WORKER_RESPONSE_ENV, self.response.path())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let mut child = WorkerChild(command.spawn()?);
 
-        let status = wait_for_child(&mut child.0, timeout)?;
+        let status = child.wait(timeout)?;
         if status.success() {
             return Ok(());
         }
 
-        let detail = fs::read_to_string(self.response_path)
+        let detail = self
+            .response
+            .read_failure()
             .ok()
             .filter(|message| !message.trim().is_empty())
             .unwrap_or_else(|| format!("camera worker exited with {status}"));
@@ -406,69 +440,98 @@ impl WorkerInvocation<'_> {
     }
 }
 
-fn wait_for_child(child: &mut Child, timeout: Duration) -> Result<ExitStatus> {
-    let started = Instant::now();
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
-        }
-
-        let elapsed = started.elapsed();
-        if elapsed >= timeout {
-            match child.kill() {
-                Ok(()) => {
-                    child.wait()?;
-                }
-                Err(kill_error) => {
-                    if let Some(status) = child.try_wait()? {
-                        return Ok(status);
-                    }
-                    return Err(
-                        format!("failed to stop timed-out camera worker: {kill_error}").into(),
-                    );
-                }
+impl WorkerChild {
+    fn wait(&mut self, timeout: Duration) -> Result<ExitStatus> {
+        let started = Instant::now();
+        loop {
+            if let Some(status) = self.0.try_wait()? {
+                return Ok(status);
             }
-            return Err(format!("camera operation timed out after {timeout:.1?}").into());
+
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                match self.0.kill() {
+                    Ok(()) => {
+                        self.0.wait()?;
+                    }
+                    Err(kill_error) => {
+                        if let Some(status) = self.0.try_wait()? {
+                            return Ok(status);
+                        }
+                        return Err(format!(
+                            "failed to stop timed-out camera worker: {kill_error}"
+                        )
+                        .into());
+                    }
+                }
+                return Err(format!("camera operation timed out after {timeout:.1?}").into());
+            }
+
+            thread::sleep(CHILD_POLL_INTERVAL.min(timeout.saturating_sub(elapsed)));
+        }
+    }
+}
+
+impl WorkerFile {
+    fn from_environment(variable: &str) -> Result<Self> {
+        env::var_os(variable)
+            .map(PathBuf::from)
+            .map(Self)
+            .ok_or_else(|| format!("internal camera worker is missing {variable}").into())
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+
+    fn read<T>(&self) -> Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        Ok(serde_json::from_slice(&fs::read(&self.0)?)?)
+    }
+
+    fn write<T>(&self, value: &T) -> Result<()>
+    where
+        T: Serialize,
+    {
+        fs::write(&self.0, serde_json::to_vec(value)?)?;
+        Ok(())
+    }
+
+    fn read_failure(&self) -> std::io::Result<String> {
+        fs::read_to_string(&self.0)
+    }
+
+    fn write_failure(&self, error: &(dyn Error + Send + Sync)) -> std::io::Result<()> {
+        fs::write(&self.0, error.to_string())
+    }
+}
+
+impl WorkerWorkspace {
+    fn create(prefix: &str) -> Result<Self> {
+        let mut builder = TempDirBuilder::new();
+        builder.prefix(prefix);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            builder.permissions(fs::Permissions::from_mode(0o700));
         }
 
-        thread::sleep(CHILD_POLL_INTERVAL.min(timeout.saturating_sub(elapsed)));
-    }
-}
-
-fn required_worker_path(variable: &str) -> Result<PathBuf> {
-    env::var_os(variable)
-        .map(PathBuf::from)
-        .ok_or_else(|| format!("internal camera worker is missing {variable}").into())
-}
-
-fn read_json<T>(path: &Path) -> Result<T>
-where
-    T: for<'de> Deserialize<'de>,
-{
-    Ok(serde_json::from_slice(&fs::read(path)?)?)
-}
-
-fn write_json<T>(path: &Path, value: &T) -> Result<()>
-where
-    T: Serialize,
-{
-    fs::write(path, serde_json::to_vec(value)?)?;
-    Ok(())
-}
-
-fn private_workspace(directory: Option<&Path>, prefix: &str) -> Result<TempDir> {
-    let mut builder = TempDirBuilder::new();
-    builder.prefix(prefix);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        builder.permissions(fs::Permissions::from_mode(0o700));
+        Ok(Self(builder.tempdir()?))
     }
 
-    match directory {
-        Some(directory) => Ok(builder.tempdir_in(directory)?),
-        None => Ok(builder.tempdir()?),
+    fn path(&self) -> &Path {
+        self.0.path()
+    }
+
+    fn request(&self) -> WorkerFile {
+        WorkerFile(self.path().join("request.json"))
+    }
+
+    fn response(&self) -> WorkerFile {
+        WorkerFile(self.path().join("response.json"))
     }
 }
 
@@ -480,9 +543,9 @@ mod tests {
 
     #[test]
     fn creates_distinct_private_workspaces() {
-        let first = private_workspace(None, "spiral-robotics-camera-test-")
+        let first = WorkerWorkspace::create("spiral-robotics-camera-test-")
             .expect("first workspace should be created");
-        let second = private_workspace(None, "spiral-robotics-camera-test-")
+        let second = WorkerWorkspace::create("spiral-robotics-camera-test-")
             .expect("second workspace should be created");
         assert_ne!(first.path(), second.path());
 
@@ -502,20 +565,24 @@ mod tests {
 
     #[test]
     fn stops_and_reaps_a_timed_out_worker() {
-        let mut child = Command::new(env::current_exe().expect("test executable should exist"))
-            .args(["--exact", "cameras::tests::sleeping_child_fixture"])
-            .env(SLEEPING_CHILD_ENV, "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("test worker should start");
+        let mut child = WorkerChild(
+            Command::new(env::current_exe().expect("test executable should exist"))
+                .args(["--exact", "cameras::tests::sleeping_child_fixture"])
+                .env(SLEEPING_CHILD_ENV, "1")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("test worker should start"),
+        );
 
-        let error = wait_for_child(&mut child, Duration::from_millis(100))
+        let error = child
+            .wait(Duration::from_millis(100))
             .expect_err("the sleeping worker should time out");
         assert!(error.to_string().contains("timed out"));
         assert!(
             child
+                .0
                 .try_wait()
                 .expect("reaped child status should be available")
                 .is_some()
@@ -534,7 +601,7 @@ mod tests {
     fn opens_camera_by_stable_native_identifier() {
         let info = CameraInfo::new("Camera", "", "stable-id", CameraIndex::Index(2));
         assert_eq!(
-            camera_open_index(&info),
+            info.open_index(),
             CameraIndex::String("stable-id".to_owned())
         );
     }
@@ -543,7 +610,7 @@ mod tests {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     fn preserves_camera_index_without_native_string_support() {
         let info = CameraInfo::new("Camera", "", "stable-id", CameraIndex::Index(2));
-        assert_eq!(camera_open_index(&info), CameraIndex::Index(2));
+        assert_eq!(info.open_index(), CameraIndex::Index(2));
     }
 
     #[test]
@@ -552,7 +619,9 @@ mod tests {
             image::Rgb([(x * 8) as u8, (y * 16) as u8, 128])
         });
 
-        let bytes = encode_jpeg(&image, DEFAULT_JPEG_QUALITY).expect("encode");
+        let bytes = JpegFrame::encode_rgb(&image, DEFAULT_JPEG_QUALITY, 1)
+            .expect("encode")
+            .into_bytes();
 
         assert_eq!(&bytes[..2], &[0xff, 0xd8], "JPEG start-of-image marker");
         let decoded = image::load_from_memory(&bytes).expect("decode");

@@ -1,30 +1,36 @@
 use super::*;
 use crate::data::catalog_lease::{CatalogLeaseOwner, CatalogLeaseToken, CatalogMutationLease};
 use crate::recording::{RecordingDraftRequest, ReplayTrajectoryRequest};
+use spiral_robotics_storage::episodes::EpisodeArmCollection as _;
 
-pub(super) fn router() -> Router<AppState> {
-    Router::new()
-        .route("/episodes", get(list_episodes))
-        .route("/episodes/record", post(start_recording))
-        .route("/episodes/record/pause", post(set_recording_paused))
-        .route("/episodes/record/stop", post(stop_recording))
-        .route("/episodes/replay", post(start_replay))
-        .route("/episodes/replay/pause", post(set_replay_paused))
-        .route("/episodes/{id}", axum::routing::delete(delete_episode))
-        .route("/episodes/{id}/judge", post(judge_episode))
-        .route("/episodes/{id}/trace", get(episode_trace))
-        .route("/episodes/{id}/inspection", get(episode_inspection))
-        .route("/episodes/{id}/timeline", get(episode_timeline))
-        .route(
-            "/episodes/{id}/timeline/traces",
-            get(episode_timeline_traces),
-        )
-        .route(
-            "/episodes/{id}/timeline/sample",
-            get(episode_timeline_sample),
-        )
-        .route("/episodes/{id}/seek", post(seek_episode))
-        .route("/episodes/{id}/videos/{stream}", get(episode_video))
+impl AppState {
+    pub(super) fn recording_router() -> Router<Self> {
+        Router::new()
+            .route("/episodes", get(Self::list_episodes))
+            .route("/episodes/record", post(Self::start_recording))
+            .route("/episodes/record/pause", post(Self::set_recording_paused))
+            .route("/episodes/record/stop", post(Self::stop_recording))
+            .route("/episodes/replay", post(Self::start_replay))
+            .route("/episodes/replay/pause", post(Self::set_replay_paused))
+            .route(
+                "/episodes/{id}",
+                axum::routing::delete(Self::delete_episode),
+            )
+            .route("/episodes/{id}/judge", post(Self::judge_episode))
+            .route("/episodes/{id}/trace", get(Self::episode_trace))
+            .route("/episodes/{id}/inspection", get(Self::episode_inspection))
+            .route("/episodes/{id}/timeline", get(Self::episode_timeline))
+            .route(
+                "/episodes/{id}/timeline/traces",
+                get(Self::episode_timeline_traces),
+            )
+            .route(
+                "/episodes/{id}/timeline/sample",
+                get(Self::episode_timeline_sample),
+            )
+            .route("/episodes/{id}/seek", post(Self::seek_episode))
+            .route("/episodes/{id}/videos/{stream}", get(Self::episode_video))
+    }
 }
 
 /// Concrete recording/replay adapters kept at the delivery edge.
@@ -76,7 +82,7 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     type MediaOutput = Vec<VideoAsset>;
 
     fn reserve_recording_start(&self) -> Result<Option<CatalogLeaseToken>, OperationError> {
-        reserve_recording_catalog_mutation(self.state.catalog_lease(), || {
+        self.state.catalog_lease().reserve_recording(|| {
             (
                 self.state.workflow().is_active(),
                 self.state.workflow_agent().is_active(),
@@ -174,7 +180,7 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
         &self,
         request: RecordingDraftRequest,
     ) -> Result<RecordingDraft, OperationError> {
-        create_recording_draft(self.state, request)
+        self.state.create_recording_draft(request)
     }
 
     fn draft_episode(&self, draft: &Self::RecordingDraft) -> String {
@@ -186,7 +192,7 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
         episode: &str,
         arms: &[String],
     ) -> Result<Option<Self::MediaCapture>, OperationError> {
-        start_recording_media_at_edge(self.state, episode, arms).await
+        self.state.start_recording_media(episode, arms).await
     }
 
     async fn begin_recording(
@@ -239,7 +245,7 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     }
 
     async fn finish_recording_media(&self, capture: Self::MediaCapture) -> Self::MediaOutput {
-        finish_video_capture(self.state, capture).await
+        self.state.finish_video_capture(capture).await
     }
 
     fn empty_media_output(&self) -> Self::MediaOutput {
@@ -318,30 +324,34 @@ impl RecordingPort for RecordingHttpAdapter<'_> {
     }
 }
 
-fn reserve_recording_catalog_mutation(
-    lease: &CatalogMutationLease,
-    activity: impl FnOnce() -> (bool, bool),
-) -> Result<Option<CatalogLeaseToken>, OperationError> {
-    let Some(token) = lease.try_acquire(CatalogLeaseOwner::Recording) else {
-        return Ok(None);
-    };
-    let (workflow_active, assistant_active) = activity();
-    let conflict = if workflow_active {
-        Some("Wait for the active Workflow run to finish before recording a new take.")
-    } else if assistant_active {
-        Some("Wait for the active Workflow Assistant turn to finish before recording a new take.")
-    } else {
-        None
-    };
-    if let Some(message) = conflict {
-        let released = lease.release(token);
-        debug_assert!(
-            released,
-            "rejected recording admission releases its exact catalog lease"
-        );
-        return Err(OperationError::Conflict(message.to_owned()));
+impl CatalogMutationLease {
+    fn reserve_recording(
+        &self,
+        activity: impl FnOnce() -> (bool, bool),
+    ) -> Result<Option<CatalogLeaseToken>, OperationError> {
+        let Some(token) = self.try_acquire(CatalogLeaseOwner::Recording) else {
+            return Ok(None);
+        };
+        let (workflow_active, assistant_active) = activity();
+        let conflict = if workflow_active {
+            Some("Wait for the active Workflow run to finish before recording a new take.")
+        } else if assistant_active {
+            Some(
+                "Wait for the active Workflow Assistant turn to finish before recording a new take.",
+            )
+        } else {
+            None
+        };
+        if let Some(message) = conflict {
+            let released = self.release(token);
+            debug_assert!(
+                released,
+                "rejected recording admission releases its exact catalog lease"
+            );
+            return Err(OperationError::Conflict(message.to_owned()));
+        }
+        Ok(Some(token))
     }
-    Ok(Some(token))
 }
 
 impl ReplayPort for RecordingHttpAdapter<'_> {
@@ -1051,329 +1061,332 @@ impl PhysicalSeekPort for SeekHttpAdapter<'_> {
     }
 }
 
-async fn list_episodes(State(state): State<AppState>) -> Json<EpisodeCatalogResponse> {
-    // A paused take has a readable SpiralDB checkpoint. Hide its catalog row
-    // here because live recording state is delivered through telemetry.
-    let recording = state
-        .hardware()
-        .state()
-        .telemetry()
-        .recording()
-        .as_ref()
-        .map(|progress| progress.episode().to_owned());
-    let episodes = EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
-        .list()
-        .into_iter()
-        .filter(|episode| Some(episode.id()) != recording.as_deref())
-        .map(Into::into)
-        .collect();
-    let mut issues = state.episodes().issues();
-    let datasets = match state.storage().datasets().await {
-        Ok(datasets) => datasets,
-        Err(error) => {
-            issues.push(format!("dataset catalog: {error}"));
-            Vec::new()
-        }
-    };
-    Json(EpisodeCatalogResponse::new(datasets, episodes, issues))
-}
+impl AppState {
+    async fn list_episodes(State(state): State<Self>) -> Json<EpisodeCatalogResponse> {
+        // A paused take has a readable SpiralDB checkpoint. Hide its catalog row
+        // here because live recording state is delivered through telemetry.
+        let recording = state
+            .hardware()
+            .state()
+            .telemetry()
+            .recording()
+            .as_ref()
+            .map(|progress| progress.episode().to_owned());
+        let episodes = EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
+            .list()
+            .into_iter()
+            .filter(|episode| Some(episode.id()) != recording.as_deref())
+            .map(Into::into)
+            .collect();
+        let mut issues = state.episodes().issues();
+        let datasets = match state.storage().datasets().await {
+            Ok(datasets) => datasets,
+            Err(error) => {
+                issues.push(format!("dataset catalog: {error}"));
+                Vec::new()
+            }
+        };
+        Json(EpisodeCatalogResponse::new(datasets, episodes, issues))
+    }
 
-/// Begin a take.
-///
-/// Record is the session-level command: it chooses the configured pair, enters
-/// teleoperation, and only then opens the take. If opening the take fails, the
-/// mode change is rolled back so a failed recording cannot leave an unnoticed
-/// teleoperation session running.
-async fn start_recording(
-    State(state): State<AppState>,
-    Json(request): Json<StartRecordingRequest>,
-) -> Result<Json<EpisodeSummary>, Failure> {
-    let adapter = RecordingHttpAdapter::new(&state);
-    let result = recording::start_recording(
-        &adapter,
-        StartRecordingCommand::new(
-            request.dataset_id(),
-            request.arms().to_vec(),
-            request.note().map(str::to_owned),
-        ),
-    )
-    .await?;
-    Ok(Json(adapter.present_recording(result)?))
-}
-
-/// Assemble a storage draft from authoritative live telemetry.
-///
-/// Eligibility, sample-rate admission, consequential ordering, and cleanup
-/// belong to the capability action. This adapter only translates live backend
-/// structures into the episode writer's concrete representation.
-fn create_recording_draft(
-    state: &AppState,
-    request: RecordingDraftRequest,
-) -> Result<RecordingDraft, OperationError> {
-    let (command, source, wanted, sample_hz) = request.into_parts();
-    let (dataset_id, _requested_arms, note) = command.into_parts();
-    let hardware = state.hardware().state();
-    let connected = hardware
-        .telemetry()
-        .robots()
-        .iter()
-        .filter(|robot| {
-            hardware
-                .connections()
-                .get(robot.id())
-                .is_some_and(|connection| connection.connected())
-        })
-        .collect::<Vec<_>>();
-
-    let arms = wanted
-        .iter()
-        .map(|id| {
-            let robot = connected
-                .iter()
-                .find(|robot| robot.id() == id)
-                .ok_or_else(|| {
-                    OperationError::Conflict(format!(
-                        "robot {id:?} disconnected while the recording was opening"
-                    ))
-                })?;
-            Ok((
-                id.clone(),
-                robot
-                    .joints()
-                    .iter()
-                    .map(|joint| joint.name().to_owned())
-                    .collect::<Vec<_>>(),
+    /// Begin a take.
+    ///
+    /// Record is the session-level command: it chooses the configured pair, enters
+    /// teleoperation, and only then opens the take. If opening the take fails, the
+    /// mode change is rolled back so a failed recording cannot leave an unnoticed
+    /// teleoperation session running.
+    async fn start_recording(
+        State(state): State<Self>,
+        Json(request): Json<StartRecordingRequest>,
+    ) -> Result<Json<EpisodeSummary>, Failure> {
+        let adapter = RecordingHttpAdapter::new(&state);
+        let result = RecordingActions::new(&adapter)
+            .start(StartRecordingCommand::new(
+                request.dataset_id(),
+                request.arms().to_vec(),
+                request.note().map(str::to_owned),
             ))
-        })
-        .collect::<Result<Vec<_>, OperationError>>()?;
-    let arms = build_arms(&arms)
-        .map_err(OperationError::from)?
-        .into_iter()
-        .map(|arm| {
-            let robot_type = state
-                .workspace()
-                .get(arm.id())
-                .ok()
-                .and_then(|robot| robot.robot_type());
-            spiral_robotics_api::recording::EpisodeArm::new(
-                arm.id(),
-                robot_type,
-                arm.joints().to_vec(),
-            )
-        })
-        .collect::<Vec<_>>();
+            .await?;
+        Ok(Json(adapter.present_recording(result)?))
+    }
 
-    // What the motors were like as the take opened. Recorded once here rather
-    // than on every frame: these move over seconds, and the footer's extremes
-    // close the story the header starts.
-    let condition = arms
-        .iter()
-        .filter_map(|arm| {
-            let robot = connected.iter().find(|robot| robot.id() == arm.id())?;
-            let limits = hardware.limits().get(arm.id());
-            let joint = |name: &str| robot.joints().iter().find(|joint| joint.name() == name);
-            Some(
-                ArmCondition::new(arm.id().to_owned())
-                    .with_measurements(
-                        arm.joints()
-                            .iter()
-                            .map(|name| joint(name).and_then(|joint| joint.temperature_celsius()))
-                            .collect(),
-                        arm.joints()
-                            .iter()
-                            .map(|name| joint(name).and_then(|joint| joint.voltage_volts()))
-                            .collect(),
-                    )
-                    .with_limits(
-                        arm.joints()
-                            .iter()
-                            .map(|name| {
-                                limits
-                                    .and_then(|limits| limits.get(name))
-                                    .copied()
-                                    .unwrap_or_default()
-                            })
-                            .collect(),
-                    ),
-            )
-        })
-        .collect();
-
-    let writer = state
-        .episodes()
-        .begin_in_dataset(
-            EpisodeRecordingRequest::new(dataset_id.clone(), source.clone(), sample_hz)
-                .with_note(note)
-                .with_arms(arms.clone(), condition),
-        )
-        .map_err(OperationError::from)?;
-    let id = writer.id().to_owned();
-    let started_ms = writer.started_ms();
-    let summary = EpisodeSummary::new(
-        EpisodeIdentity::new(id, dataset_id, arms.clone()).with_source(source),
-        EpisodeTimeline::new(0, 0.0, sample_hz).with_started_ms(started_ms),
-        EpisodeAssessment::new(false, None, None),
-    );
-    Ok(RecordingDraft {
-        writer,
-        arms,
-        summary,
-    })
-}
-
-/// Assemble camera capture for an already-created episode draft.
-async fn start_recording_media_at_edge(
-    state: &AppState,
-    episode: &str,
-    wanted: &[String],
-) -> Result<Option<VideoCapture>, OperationError> {
-    let video_settings = state.preferences().get().video().clone();
-    if video_settings.enabled() {
-        let snapshot = state.snapshot();
-        let camera_status = snapshot
-            .cameras()
-            .iter()
-            .map(|camera| (camera.id(), camera))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let mut seen = BTreeSet::new();
-        let mut cameras = Vec::new();
-        for robot in snapshot
+    /// Assemble a storage draft from authoritative live telemetry.
+    ///
+    /// Eligibility, sample-rate admission, consequential ordering, and cleanup
+    /// belong to the capability action. This adapter only translates live backend
+    /// structures into the episode writer's concrete representation.
+    fn create_recording_draft(
+        &self,
+        request: RecordingDraftRequest,
+    ) -> Result<RecordingDraft, OperationError> {
+        let (command, source, wanted, sample_hz) = request.into_parts();
+        let (dataset_id, _requested_arms, note) = command.into_parts();
+        let hardware = self.hardware().state();
+        let connected = hardware
+            .telemetry()
             .robots()
             .iter()
-            .filter(|robot| wanted.iter().any(|id| id == robot.id()))
-        {
-            for camera in robot.cameras() {
-                if !seen.insert(camera.id().to_owned()) {
-                    continue;
-                }
-                let Some(status) = camera_status.get(camera.id()) else {
-                    continue;
-                };
-                cameras.push(CameraCaptureSpec::new(
-                    format!("{}.camera.{}", robot.id(), camera.name()),
-                    camera.id(),
-                    (status.width(), status.height(), status.fps()),
-                ));
-            }
-        }
-        VideoCapture::start(
-            state.cameras().clone(),
-            VideoCaptureRequest::new(episode, cameras),
-            state.video_encoder(),
-        )
-        .await
-        .map_err(|error| OperationError::InvalidInput(error.to_string()))
-    } else {
-        Ok(None)
+            .filter(|robot| {
+                hardware
+                    .connections()
+                    .get(robot.id())
+                    .is_some_and(|connection| connection.connected())
+            })
+            .collect::<Vec<_>>();
+
+        let arms = wanted
+            .iter()
+            .map(|id| {
+                let robot = connected
+                    .iter()
+                    .find(|robot| robot.id() == id)
+                    .ok_or_else(|| {
+                        OperationError::Conflict(format!(
+                            "robot {id:?} disconnected while the recording was opening"
+                        ))
+                    })?;
+                Ok((
+                    id.clone(),
+                    robot
+                        .joints()
+                        .iter()
+                        .map(|joint| joint.name().to_owned())
+                        .collect::<Vec<_>>(),
+                ))
+            })
+            .collect::<Result<Vec<_>, OperationError>>()?;
+        let arms = spiral_robotics_api::recording::EpisodeArm::from_joint_lists(&arms)
+            .map_err(OperationError::from)?
+            .into_iter()
+            .map(|arm| {
+                let robot_type = self
+                    .workspace()
+                    .get(arm.id())
+                    .ok()
+                    .and_then(|robot| robot.robot_type());
+                spiral_robotics_api::recording::EpisodeArm::new(
+                    arm.id(),
+                    robot_type,
+                    arm.joints().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        // What the motors were like as the take opened. Recorded once here rather
+        // than on every frame: these move over seconds, and the footer's extremes
+        // close the story the header starts.
+        let condition = arms
+            .iter()
+            .filter_map(|arm| {
+                let robot = connected.iter().find(|robot| robot.id() == arm.id())?;
+                let limits = hardware.limits().get(arm.id());
+                let joint = |name: &str| robot.joints().iter().find(|joint| joint.name() == name);
+                Some(
+                    ArmCondition::new(arm.id().to_owned())
+                        .with_measurements(
+                            arm.joints()
+                                .iter()
+                                .map(|name| {
+                                    joint(name).and_then(|joint| joint.temperature_celsius())
+                                })
+                                .collect(),
+                            arm.joints()
+                                .iter()
+                                .map(|name| joint(name).and_then(|joint| joint.voltage_volts()))
+                                .collect(),
+                        )
+                        .with_limits(
+                            arm.joints()
+                                .iter()
+                                .map(|name| {
+                                    limits
+                                        .and_then(|limits| limits.get(name))
+                                        .copied()
+                                        .unwrap_or_default()
+                                })
+                                .collect(),
+                        ),
+                )
+            })
+            .collect();
+
+        let writer = self
+            .episodes()
+            .begin_in_dataset(
+                EpisodeRecordingRequest::new(dataset_id.clone(), source.clone(), sample_hz)
+                    .with_note(note)
+                    .with_arms(arms.clone(), condition),
+            )
+            .map_err(OperationError::from)?;
+        let id = writer.id().to_owned();
+        let started_ms = writer.started_ms();
+        let summary = EpisodeSummary::new(
+            EpisodeIdentity::new(id, dataset_id, arms.clone()).with_source(source),
+            EpisodeTimeline::new(0, 0.0, sample_hz).with_started_ms(started_ms),
+            EpisodeAssessment::new(false, None, None),
+        );
+        Ok(RecordingDraft {
+            writer,
+            arms,
+            summary,
+        })
     }
-}
 
-async fn stop_recording(
-    State(state): State<AppState>,
-    Json(request): Json<StopRecordingRequest>,
-) -> Result<Json<EpisodeSummary>, Failure> {
-    let adapter = RecordingHttpAdapter::new(&state);
-    let result =
-        recording::stop_recording(&adapter, StopRecordingCommand::new(request.keep())).await?;
-    Ok(Json(adapter.present_recording(result)?))
-}
+    /// Assemble camera capture for an already-created episode draft.
+    async fn start_recording_media(
+        &self,
+        episode: &str,
+        wanted: &[String],
+    ) -> Result<Option<VideoCapture>, OperationError> {
+        let video_settings = self.preferences().get().video().clone();
+        if video_settings.enabled() {
+            let snapshot = self.snapshot();
+            let camera_status = snapshot
+                .cameras()
+                .iter()
+                .map(|camera| (camera.id(), camera))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            let mut seen = BTreeSet::new();
+            let mut cameras = Vec::new();
+            for robot in snapshot
+                .robots()
+                .iter()
+                .filter(|robot| wanted.iter().any(|id| id == robot.id()))
+            {
+                for camera in robot.cameras() {
+                    if !seen.insert(camera.id().to_owned()) {
+                        continue;
+                    }
+                    let Some(status) = camera_status.get(camera.id()) else {
+                        continue;
+                    };
+                    cameras.push(CameraCaptureSpec::new(
+                        format!("{}.camera.{}", robot.id(), camera.name()),
+                        camera.id(),
+                        (status.width(), status.height(), status.fps()),
+                    ));
+                }
+            }
+            VideoCapture::start(
+                self.cameras().clone(),
+                VideoCaptureRequest::new(episode, cameras),
+                self.video_encoder(),
+            )
+            .await
+            .map_err(|error| OperationError::InvalidInput(error.to_string()))
+        } else {
+            Ok(None)
+        }
+    }
 
-/// Suspend or resume capture without closing the episode writer.
-///
-/// Pause acknowledges only after every accepted sample has crossed the writer
-/// checkpoint barrier and the episode has been committed to SpiralDB. That
-/// makes timeline reads deterministic while the operator scrubs. Hardware owns
-/// restoring the exact control mode on resume; the route brackets it with video
-/// capture so paused camera frames are omitted as well.
-async fn set_recording_paused(
-    State(state): State<AppState>,
-    Json(request): Json<SetRecordingPausedRequest>,
-) -> Result<StatusCode, Failure> {
-    recording::set_recording_paused(
-        &RecordingHttpAdapter::new(&state),
-        SetRecordingPausedCommand::new(request.paused()),
-    )
-    .await?;
-    Ok(StatusCode::NO_CONTENT)
-}
+    async fn stop_recording(
+        State(state): State<Self>,
+        Json(request): Json<StopRecordingRequest>,
+    ) -> Result<Json<EpisodeSummary>, Failure> {
+        let adapter = RecordingHttpAdapter::new(&state);
+        let result = RecordingActions::new(&adapter)
+            .stop(StopRecordingCommand::new(request.keep()))
+            .await?;
+        Ok(Json(adapter.present_recording(result)?))
+    }
 
-async fn judge_episode(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(request): Json<JudgeEpisodeRequest>,
-) -> Result<Json<EpisodeSummary>, Failure> {
-    let result = episode_catalog::judge(
-        &EpisodeHttpAdapter::catalog(&state),
-        JudgeEpisodeCommand::new(id, request.discarded()),
-    )
-    .await?;
-    Ok(Json(state.episodes().get(result.episode())?))
-}
+    /// Suspend or resume capture without closing the episode writer.
+    ///
+    /// Pause acknowledges only after every accepted sample has crossed the writer
+    /// checkpoint barrier and the episode has been committed to SpiralDB. That
+    /// makes timeline reads deterministic while the operator scrubs. Hardware owns
+    /// restoring the exact control mode on resume; the route brackets it with video
+    /// capture so paused camera frames are omitted as well.
+    async fn set_recording_paused(
+        State(state): State<Self>,
+        Json(request): Json<SetRecordingPausedRequest>,
+    ) -> Result<StatusCode, Failure> {
+        RecordingActions::new(&RecordingHttpAdapter::new(&state))
+            .set_paused(SetRecordingPausedCommand::new(request.paused()))
+            .await?;
+        Ok(StatusCode::NO_CONTENT)
+    }
 
-async fn delete_episode(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, Failure> {
-    episode_catalog::delete(
-        &EpisodeHttpAdapter::catalog(&state),
-        DeleteEpisodeCommand::new(id),
-    )
-    .await?;
-    Ok(StatusCode::NO_CONTENT)
+    async fn judge_episode(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+        Json(request): Json<JudgeEpisodeRequest>,
+    ) -> Result<Json<EpisodeSummary>, Failure> {
+        let catalog = EpisodeHttpAdapter::catalog(&state);
+        let result = EpisodeCatalogActions::new(&catalog)
+            .judge(JudgeEpisodeCommand::new(id, request.discarded()))
+            .await?;
+        Ok(Json(state.episodes().get(result.episode())?))
+    }
+
+    async fn delete_episode(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+    ) -> Result<StatusCode, Failure> {
+        let catalog = EpisodeHttpAdapter::catalog(&state);
+        EpisodeCatalogActions::new(&catalog)
+            .delete(DeleteEpisodeCommand::new(id))
+            .await?;
+        Ok(StatusCode::NO_CONTENT)
+    }
 }
 
 /// How many points a trace is reduced to before it is sent.
 #[derive(Debug, Deserialize)]
 struct TraceQuery {
-    #[serde(default = "default_trace_buckets")]
+    #[serde(default = "TraceQuery::default_buckets")]
     buckets: usize,
 }
 
-fn default_trace_buckets() -> usize {
-    240
+impl TraceQuery {
+    fn default_buckets() -> usize {
+        240
+    }
 }
 
-async fn episode_trace(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Query(query): Query<TraceQuery>,
-) -> Result<Json<Vec<Option<f64>>>, Failure> {
-    let trace = tokio::task::spawn_blocking(move || {
-        EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
-            .follow_error_trace(EpisodeTraceQuery::new(id, query.buckets))
-    })
-    .await
-    .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
-    Ok(Json(trace))
-}
+impl AppState {
+    async fn episode_trace(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+        Query(query): Query<TraceQuery>,
+    ) -> Result<Json<Vec<Option<f64>>>, Failure> {
+        let trace = tokio::task::spawn_blocking(move || {
+            EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
+                .follow_error_trace(EpisodeTraceQuery::new(id, query.buckets))
+        })
+        .await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+        Ok(Json(trace))
+    }
 
-async fn episode_timeline_traces(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Query(query): Query<TraceQuery>,
-) -> Result<Json<TimelineTraces>, Failure> {
-    let traces = tokio::task::spawn_blocking(move || {
-        EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
-            .timeline_traces(EpisodeTraceQuery::new(id, query.buckets))
-            .map(Into::into)
-    })
-    .await
-    .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
-    Ok(Json(traces))
-}
+    async fn episode_timeline_traces(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+        Query(query): Query<TraceQuery>,
+    ) -> Result<Json<TimelineTraces>, Failure> {
+        let traces = tokio::task::spawn_blocking(move || {
+            EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
+                .timeline_traces(EpisodeTraceQuery::new(id, query.buckets))
+                .map(Into::into)
+        })
+        .await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+        Ok(Json(traces))
+    }
 
-async fn episode_inspection(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<EpisodeInspectionSnapshot>, Failure> {
-    let inspection = tokio::task::spawn_blocking(move || {
-        EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
-            .inspection(id)
-            .map(Into::into)
-    })
-    .await
-    .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
-    Ok(Json(inspection))
+    async fn episode_inspection(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+    ) -> Result<Json<EpisodeInspectionSnapshot>, Failure> {
+        let inspection = tokio::task::spawn_blocking(move || {
+            EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
+                .inspection(id)
+                .map(Into::into)
+        })
+        .await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+        Ok(Json(inspection))
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1383,26 +1396,29 @@ struct EpisodeTimelineResponse {
     videos: Vec<VideoAssetMetadata>,
 }
 
-async fn episode_timeline(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<EpisodeTimelineResponse>, Failure> {
-    let result = tokio::task::spawn_blocking(move || {
-        let timeline = EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state)).timeline(id)?;
-        let (episode, samples, videos) = timeline.into_parts();
-        Ok::<_, Failure>(EpisodeTimelineResponse {
-            episode: episode.into(),
-            samples: TimelineMetadata::new(
-                samples.samples(),
-                samples.first_seconds(),
-                samples.last_seconds(),
-            ),
-            videos: videos.into_iter().map(Into::into).collect(),
+impl AppState {
+    async fn episode_timeline(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+    ) -> Result<Json<EpisodeTimelineResponse>, Failure> {
+        let result = tokio::task::spawn_blocking(move || {
+            let timeline =
+                EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state)).timeline(id)?;
+            let (episode, samples, videos) = timeline.into_parts();
+            Ok::<_, Failure>(EpisodeTimelineResponse {
+                episode: episode.into(),
+                samples: TimelineMetadata::new(
+                    samples.samples(),
+                    samples.first_seconds(),
+                    samples.last_seconds(),
+                ),
+                videos: videos.into_iter().map(Into::into).collect(),
+            })
         })
-    })
-    .await
-    .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
-    Ok(Json(result))
+        .await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+        Ok(Json(result))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1410,19 +1426,21 @@ struct TimelineSampleQuery {
     at: f64,
 }
 
-async fn episode_timeline_sample(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Query(query): Query<TimelineSampleQuery>,
-) -> Result<Json<TimelineSample>, Failure> {
-    let sample = tokio::task::spawn_blocking(move || {
-        EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
-            .timeline_sample(id, query.at)
-            .map(Into::into)
-    })
-    .await
-    .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
-    Ok(Json(sample))
+impl AppState {
+    async fn episode_timeline_sample(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+        Query(query): Query<TimelineSampleQuery>,
+    ) -> Result<Json<TimelineSample>, Failure> {
+        let sample = tokio::task::spawn_blocking(move || {
+            EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state))
+                .timeline_sample(id, query.at)
+                .map(Into::into)
+        })
+        .await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+        Ok(Json(sample))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1451,29 +1469,32 @@ struct HistoricalSeekResponse {
 /// timeout, and disconnect handling. A ticket drops stale requests that finish
 /// a SpiralDB read after a newer scrub; the one remaining pose enters the controller
 /// as a one-frame replay, so no route can bypass those protections.
-async fn seek_episode(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(request): Json<HistoricalSeekRequest>,
-) -> Result<Json<HistoricalSeekResponse>, Failure> {
-    let result = episode_seek::seek(
-        &SeekHttpAdapter { state: &state },
-        SeekEpisodeCommand::new(id, request.robot, request.seconds)
-            .with_source_arm(request.source_arm),
-    )
-    .await?;
-    Ok(Json(HistoricalSeekResponse {
-        state: match result.state() {
-            HistoricalSeekState::Seeking => "seeking",
-            HistoricalSeekState::Coalesced => "coalesced",
-        },
-        episode: result.episode().to_owned(),
-        robot: result.robot().to_owned(),
-        source_arm: result.source_arm().to_owned(),
-        requested_seconds: result.requested_seconds(),
-        resolved_seconds: result.resolved_seconds(),
-        frame: result.frame(),
-    }))
+impl AppState {
+    async fn seek_episode(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+        Json(request): Json<HistoricalSeekRequest>,
+    ) -> Result<Json<HistoricalSeekResponse>, Failure> {
+        let adapter = SeekHttpAdapter { state: &state };
+        let result = PhysicalSeekActions::new(&adapter)
+            .seek(
+                SeekEpisodeCommand::new(id, request.robot, request.seconds)
+                    .with_source_arm(request.source_arm),
+            )
+            .await?;
+        Ok(Json(HistoricalSeekResponse {
+            state: match result.state() {
+                HistoricalSeekState::Seeking => "seeking",
+                HistoricalSeekState::Coalesced => "coalesced",
+            },
+            episode: result.episode().to_owned(),
+            robot: result.robot().to_owned(),
+            source_arm: result.source_arm().to_owned(),
+            requested_seconds: result.requested_seconds(),
+            resolved_seconds: result.resolved_seconds(),
+            frame: result.frame(),
+        }))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1489,158 +1510,160 @@ impl ByteRange {
     }
 }
 
+impl ByteRange {
+    pub(super) fn parse(value: &str, length: u64) -> Option<Self> {
+        if length == 0 {
+            return None;
+        }
+        let value = value.trim().strip_prefix("bytes=")?;
+        if value.contains(',') {
+            return None;
+        }
+        let (start, end) = value.split_once('-')?;
+        if start.trim().is_empty() {
+            let suffix = end.trim().parse::<u64>().ok()?;
+            if suffix == 0 {
+                return None;
+            }
+            return Some(Self {
+                start: length.saturating_sub(suffix.min(length)),
+                end: length - 1,
+            });
+        }
+        let start = start.trim().parse::<u64>().ok()?;
+        if start >= length {
+            return None;
+        }
+        let end = if end.trim().is_empty() {
+            length - 1
+        } else {
+            end.trim().parse::<u64>().ok()?.min(length - 1)
+        };
+        (end >= start).then_some(Self { start, end })
+    }
+
+    fn unsatisfied_response(length: u64) -> Response {
+        Response::builder()
+            .status(StatusCode::RANGE_NOT_SATISFIABLE)
+            .header(header::CONTENT_RANGE, format!("bytes */{length}"))
+            .header(header::ACCEPT_RANGES, "bytes")
+            .body(Body::empty())
+            .expect("valid unsatisfied range response")
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 struct LocalVideoQuery {
     #[serde(default)]
     segment: Option<u32>,
 }
 
-async fn episode_video(
-    State(state): State<AppState>,
-    (Path((id, stream)), Query(query), headers): (
-        Path<(String, String)>,
-        Query<LocalVideoQuery>,
-        HeaderMap,
-    ),
-) -> Result<Response, Failure> {
-    // Looking up the episode first prevents an orphaned media row from becoming
-    // an independent serving namespace.
-    EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state)).authorize_asset(id.clone())?;
-    let asset = VideoAssetKey::new(id, stream, query.segment);
-    let length = state
-        .storage()
-        .video_asset_size(&asset)
-        .await
-        .map_err(|error| Failure(StatusCode::NOT_FOUND, error))?;
-    let requested_range = match headers.get(header::RANGE) {
-        None => None,
-        Some(value) => match value
-            .to_str()
-            .ok()
-            .and_then(|value| parse_byte_range(value, length))
-        {
-            Some(range) => Some(range),
-            None => return Ok(range_not_satisfiable(length)),
-        },
-    };
-    let range = requested_range.unwrap_or(ByteRange {
-        start: 0,
-        end: length.saturating_sub(1),
-    });
-    let content_length = if length == 0 {
-        0
-    } else {
-        range.end - range.start + 1
-    };
-    let body = if content_length == 0 {
-        Bytes::new()
-    } else {
-        let payload = state
+impl AppState {
+    async fn episode_video(
+        State(state): State<Self>,
+        (Path((id, stream)), Query(query), headers): (
+            Path<(String, String)>,
+            Query<LocalVideoQuery>,
+            HeaderMap,
+        ),
+    ) -> Result<Response, Failure> {
+        // Looking up the episode first prevents an orphaned media row from becoming
+        // an independent serving namespace.
+        EpisodeQueries::new(&EpisodeHttpAdapter::catalog(&state)).authorize_asset(id.clone())?;
+        let asset = VideoAssetKey::new(id, stream, query.segment);
+        let length = state
             .storage()
-            .video_asset_range(&asset, VideoByteRange::new(range.start, content_length))
+            .video_asset_size(&asset)
             .await
             .map_err(|error| Failure(StatusCode::NOT_FOUND, error))?;
-        if payload.len() as u64 != content_length {
-            return Err(Failure(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!(
-                    "Spiral returned {} video bytes for requested range {}-{} (expected {content_length})",
-                    payload.len(),
-                    range.start,
-                    range.end,
-                ),
-            ));
-        }
-        Bytes::from(payload)
-    };
-    let mut response = Response::builder()
-        .status(if requested_range.is_some() {
-            StatusCode::PARTIAL_CONTENT
-        } else {
-            StatusCode::OK
-        })
-        .header(header::CONTENT_TYPE, "video/mp4")
-        .header(header::ACCEPT_RANGES, "bytes")
-        .header(header::CONTENT_LENGTH, content_length)
-        .header(header::CACHE_CONTROL, "private, no-store");
-    if requested_range.is_some() {
-        response = response.header(
-            header::CONTENT_RANGE,
-            format!("bytes {}-{}/{}", range.start, range.end, length),
-        );
-    }
-    Ok(response
-        .body(Body::from(body))
-        .expect("valid Spiral video response"))
-}
-
-pub(super) fn parse_byte_range(value: &str, length: u64) -> Option<ByteRange> {
-    if length == 0 {
-        return None;
-    }
-    let value = value.trim().strip_prefix("bytes=")?;
-    if value.contains(',') {
-        return None;
-    }
-    let (start, end) = value.split_once('-')?;
-    if start.trim().is_empty() {
-        let suffix = end.trim().parse::<u64>().ok()?;
-        if suffix == 0 {
-            return None;
-        }
-        return Some(ByteRange {
-            start: length.saturating_sub(suffix.min(length)),
-            end: length - 1,
+        let requested_range = match headers.get(header::RANGE) {
+            None => None,
+            Some(value) => match value
+                .to_str()
+                .ok()
+                .and_then(|value| ByteRange::parse(value, length))
+            {
+                Some(range) => Some(range),
+                None => return Ok(ByteRange::unsatisfied_response(length)),
+            },
+        };
+        let range = requested_range.unwrap_or(ByteRange {
+            start: 0,
+            end: length.saturating_sub(1),
         });
+        let content_length = if length == 0 {
+            0
+        } else {
+            range.end - range.start + 1
+        };
+        let body = if content_length == 0 {
+            Bytes::new()
+        } else {
+            let payload = state
+                .storage()
+                .video_asset_range(&asset, VideoByteRange::new(range.start, content_length))
+                .await
+                .map_err(|error| Failure(StatusCode::NOT_FOUND, error))?;
+            if payload.len() as u64 != content_length {
+                return Err(Failure(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!(
+                        "Spiral returned {} video bytes for requested range {}-{} (expected {content_length})",
+                        payload.len(),
+                        range.start,
+                        range.end,
+                    ),
+                ));
+            }
+            Bytes::from(payload)
+        };
+        let mut response = Response::builder()
+            .status(if requested_range.is_some() {
+                StatusCode::PARTIAL_CONTENT
+            } else {
+                StatusCode::OK
+            })
+            .header(header::CONTENT_TYPE, "video/mp4")
+            .header(header::ACCEPT_RANGES, "bytes")
+            .header(header::CONTENT_LENGTH, content_length)
+            .header(header::CACHE_CONTROL, "private, no-store");
+        if requested_range.is_some() {
+            response = response.header(
+                header::CONTENT_RANGE,
+                format!("bytes {}-{}/{}", range.start, range.end, length),
+            );
+        }
+        Ok(response
+            .body(Body::from(body))
+            .expect("valid Spiral video response"))
     }
-    let start = start.trim().parse::<u64>().ok()?;
-    if start >= length {
-        return None;
+
+    async fn start_replay(
+        State(state): State<Self>,
+        Json(request): Json<StartReplayRequest>,
+    ) -> Result<StatusCode, Failure> {
+        ReplayActions::new(&RecordingHttpAdapter::new(&state))
+            .start(
+                StartReplayCommand::new(
+                    request.episode(),
+                    request.robot(),
+                    request.source_arm().map(str::to_owned),
+                )
+                .starting_at(request.start_seconds()),
+            )
+            .await?;
+        Ok(StatusCode::NO_CONTENT)
     }
-    let end = if end.trim().is_empty() {
-        length - 1
-    } else {
-        end.trim().parse::<u64>().ok()?.min(length - 1)
-    };
-    (end >= start).then_some(ByteRange { start, end })
-}
 
-fn range_not_satisfiable(length: u64) -> Response {
-    Response::builder()
-        .status(StatusCode::RANGE_NOT_SATISFIABLE)
-        .header(header::CONTENT_RANGE, format!("bytes */{length}"))
-        .header(header::ACCEPT_RANGES, "bytes")
-        .body(Body::empty())
-        .expect("valid unsatisfied range response")
-}
-
-async fn start_replay(
-    State(state): State<AppState>,
-    Json(request): Json<StartReplayRequest>,
-) -> Result<StatusCode, Failure> {
-    recording::start_replay(
-        &RecordingHttpAdapter::new(&state),
-        StartReplayCommand::new(
-            request.episode(),
-            request.robot(),
-            request.source_arm().map(str::to_owned),
-        )
-        .starting_at(request.start_seconds()),
-    )
-    .await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn set_replay_paused(
-    State(state): State<AppState>,
-    Json(request): Json<SetReplayPausedRequest>,
-) -> Result<StatusCode, Failure> {
-    recording::set_replay_paused(
-        &RecordingHttpAdapter::new(&state),
-        SetReplayPausedCommand::new(request.paused()),
-    )
-    .await?;
-    Ok(StatusCode::NO_CONTENT)
+    async fn set_replay_paused(
+        State(state): State<Self>,
+        Json(request): Json<SetReplayPausedRequest>,
+    ) -> Result<StatusCode, Failure> {
+        ReplayActions::new(&RecordingHttpAdapter::new(&state))
+            .set_paused(SetReplayPausedCommand::new(request.paused()))
+            .await?;
+        Ok(StatusCode::NO_CONTENT)
+    }
 }
 
 #[cfg(test)]
@@ -1662,7 +1685,8 @@ mod admission_tests {
             ),
         ] {
             let lease = CatalogMutationLease::default();
-            let error = reserve_recording_catalog_mutation(&lease, || activity)
+            let error = lease
+                .reserve_recording(|| activity)
                 .expect_err("published activity must block a later recording");
             assert!(error.to_string().contains(expected));
 
@@ -1676,7 +1700,8 @@ mod admission_tests {
     #[test]
     fn admitted_recording_blocks_later_workflow_and_assistant_admission() {
         let lease = CatalogMutationLease::default();
-        let recording = reserve_recording_catalog_mutation(&lease, || (false, false))
+        let recording = lease
+            .reserve_recording(|| (false, false))
             .expect("idle activity check")
             .expect("recording admission");
 

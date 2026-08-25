@@ -5,15 +5,15 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct SpiralQueryRequest {
     sql: String,
-    #[serde(default = "default_query_rows")]
+    #[serde(default = "SpiralQueryRequest::default_max_rows")]
     max_rows: usize,
 }
 
-fn default_query_rows() -> usize {
-    100
-}
-
 impl SpiralQueryRequest {
+    const fn default_max_rows() -> usize {
+        100
+    }
+
     pub fn new(sql: impl Into<String>, max_rows: usize) -> Self {
         Self {
             sql: sql.into(),

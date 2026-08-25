@@ -8,11 +8,11 @@ use spiral_robotics_api::rollout::{
     MAX_ROLLOUT_ACTION_STEPS, MAX_ROLLOUT_DURATION_SECONDS, RolloutPhase, RolloutSnapshot,
     StartRolloutRequest,
 };
-use spiral_robotics_api::training::{TrainingRun, TrainingSnapshot};
+use spiral_robotics_api::training::{TrainingCheckpoint, TrainingRun, TrainingSnapshot};
 
 use crate::activities::rollout::state::rollout_controller;
 use crate::client::http as api;
-use crate::format::format_loss;
+use crate::format::LossPresentation;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::studio;
 
@@ -53,15 +53,20 @@ enum PendingRolloutAction {
 
 /// Rollout never asks the operator to choose a target. The configured follower
 /// role is the only arm this activity is allowed to command.
-pub(crate) fn follower(robots: &[RobotSummary]) -> Option<RobotSummary> {
-    robots
-        .iter()
-        .find(|robot| {
-            robot
-                .robot_type()
-                .is_some_and(|kind| kind.to_ascii_lowercase().contains("follower"))
-        })
-        .cloned()
+pub(crate) trait RobotFleet {
+    fn follower(&self) -> Option<RobotSummary>;
+}
+
+impl RobotFleet for [RobotSummary] {
+    fn follower(&self) -> Option<RobotSummary> {
+        self.iter()
+            .find(|robot| {
+                robot
+                    .robot_type()
+                    .is_some_and(|kind| kind.to_ascii_lowercase().contains("follower"))
+            })
+            .cloned()
+    }
 }
 
 #[component]
@@ -72,7 +77,7 @@ pub(crate) fn RolloutWorkbench() -> Element {
     let snapshot = studio.snapshot().read().to_owned();
     let training = studio.training().read().to_owned();
     let rollout = studio.rollout().read().to_owned();
-    let checkpoints = checkpoint_choices(&training);
+    let checkpoints = training.checkpoint_choices();
     let selected_key = controller
         .checkpoint()
         .filter(|key| checkpoints.iter().any(|choice| &choice.identity.key == key))
@@ -86,11 +91,11 @@ pub(crate) fn RolloutWorkbench() -> Element {
             .iter()
             .find(|choice| &choice.identity.key == key)
     });
-    let follower = follower(snapshot.robots());
+    let follower = snapshot.robots().follower();
     let arm_ready = follower.as_ref().is_some_and(|robot| {
         robot.connection().connected() && robot.calibrated() && robot.problem().is_none()
     });
-    let camera_summary = rollout_camera_summary(
+    let camera_summary = RolloutCameraSummary::inspect(
         follower.as_ref(),
         selected.map(|choice| choice.policy.camera_roles.as_slice()),
         snapshot.cameras(),
@@ -138,7 +143,7 @@ pub(crate) fn RolloutWorkbench() -> Element {
     let control_rate = selected.map_or(0.0, |choice| choice.policy.sample_hz);
     let validation_loss = selected
         .and_then(|choice| choice.validation_loss)
-        .map(format_loss)
+        .map(LossPresentation::loss_label)
         .unwrap_or_else(|| "—".to_owned());
 
     rsx! {
@@ -159,7 +164,7 @@ pub(crate) fn RolloutWorkbench() -> Element {
                         for choice in &checkpoints {
                             option {
                                 value: choice.identity.key.clone(),
-                                "{choice.identity.run_name} · step {format_count(choice.step)}"
+                                "{choice.identity.run_name} · step {choice.step.rollout_count()}"
                                 if choice.identity.run_active { " · training" }
                             }
                         }
@@ -176,7 +181,7 @@ pub(crate) fn RolloutWorkbench() -> Element {
                     }
                 } else if let Some(run) = training.active_run() {
                     p { class: "rollout-empty-copy",
-                        "Checkpoints appear every {format_count(run.config().checkpoint_every())} steps."
+                        "Checkpoints appear every {run.config().checkpoint_every().rollout_count()} steps."
                     }
                 } else {
                     p { class: "rollout-empty-copy", "Train a policy to create a checkpoint." }
@@ -194,7 +199,7 @@ pub(crate) fn RolloutWorkbench() -> Element {
                     div { class: "rollout-target-row",
                         span {
                             class: "live-robot-accent",
-                            style: "background: {crate::panels::scene::accent_css(studio.position_of(&robot.id()))}",
+                            style: "background: {crate::panels::scene::ScenePalette::accent_css(studio.position_of(&robot.id()))}",
                         }
                         div {
                             strong { "{robot.id()}" }
@@ -248,13 +253,13 @@ pub(crate) fn RolloutWorkbench() -> Element {
 
             div { class: "rollout-action-area",
                 div {
-                    class: runtime_note_class(&rollout),
+                    class: rollout.runtime_note_class(),
                     role: "status",
                     span { class: "rollout-runtime-dot", "aria-hidden": "true" }
                     div {
                         div { class: "rollout-runtime-summary",
-                            strong { "{runtime_title(&rollout, blocker.as_deref())}" }
-                            small { "{runtime_detail(&rollout)}" }
+                            strong { "{rollout.runtime_title(blocker.as_deref())}" }
+                            small { "{rollout.runtime_detail()}" }
                         }
                         if let Some(warning) = rollout.warning().as_ref() {
                             small { class: "rollout-runtime-warning", "{warning}" }
@@ -293,7 +298,7 @@ pub(crate) fn RolloutWorkbench() -> Element {
                                 )
                                 .with_duration(duration_seconds);
                                 spawn(async move {
-                                    let result = api::send_json::<_, RolloutSnapshot>(
+                                    let result = api::Http::send_json::<_, RolloutSnapshot>(
                                         Method::POST,
                                         "/api/rollout",
                                         Some(&request),
@@ -328,7 +333,7 @@ pub(crate) fn RolloutWorkbench() -> Element {
                             pending_action.set(Some(PendingRolloutAction::Stop));
                             let mut pending_action = pending_action;
                             spawn(async move {
-                                if let Err(error) = api::post("/api/rollout/stop").await {
+                                if let Err(error) = api::Http::post("/api/rollout/stop").await {
                                     studio.report_from(MessageSource::Rollout, error);
                                 }
                                 pending_action.set(None);
@@ -352,57 +357,59 @@ pub(crate) fn RolloutWorkbench() -> Element {
     }
 }
 
-fn rollout_camera_summary(
-    follower: Option<&RobotSummary>,
-    expected_roles: Option<&[String]>,
-    camera_statuses: &[CameraStatus],
-) -> RolloutCameraSummary {
-    let Some(follower) = follower else {
-        return RolloutCameraSummary {
-            ready: false,
-            detail: "no cameras".to_owned(),
+impl RolloutCameraSummary {
+    fn inspect(
+        follower: Option<&RobotSummary>,
+        expected_roles: Option<&[String]>,
+        camera_statuses: &[CameraStatus],
+    ) -> Self {
+        let Some(follower) = follower else {
+            return Self {
+                ready: false,
+                detail: "no cameras".to_owned(),
+            };
         };
-    };
-    let camera_roles = expected_roles
-        .filter(|roles| !roles.is_empty())
-        .map(|roles| roles.to_vec())
-        .unwrap_or_else(|| {
-            follower
-                .cameras()
-                .iter()
-                .map(|binding| binding.name().to_owned())
-                .collect()
-        });
-    let total = camera_roles.len();
-    if total == 0 {
-        return RolloutCameraSummary {
-            ready: false,
-            detail: "no cameras".to_owned(),
-        };
-    }
+        let camera_roles = expected_roles
+            .filter(|roles| !roles.is_empty())
+            .map(|roles| roles.to_vec())
+            .unwrap_or_else(|| {
+                follower
+                    .cameras()
+                    .iter()
+                    .map(|binding| binding.name().to_owned())
+                    .collect()
+            });
+        let total = camera_roles.len();
+        if total == 0 {
+            return Self {
+                ready: false,
+                detail: "no cameras".to_owned(),
+            };
+        }
 
-    let available = camera_roles
-        .iter()
-        .filter(|role| {
-            follower
-                .cameras()
-                .iter()
-                .find(|binding| binding.name() == role.as_str())
-                .is_some_and(|binding| {
-                    camera_statuses
-                        .iter()
-                        .any(|status| status.id() == binding.id() && status.error().is_none())
-                })
-        })
-        .count();
-    let ready = available == total;
-    let detail = match (total, available) {
-        (1, 1) => format!("{} available", camera_roles[0]),
-        (1, _) => format!("{} unavailable", camera_roles[0]),
-        (_, available) if ready => format!("{available} cameras available"),
-        _ => format!("{available} of {total} cameras available"),
-    };
-    RolloutCameraSummary { ready, detail }
+        let available = camera_roles
+            .iter()
+            .filter(|role| {
+                follower
+                    .cameras()
+                    .iter()
+                    .find(|binding| binding.name() == role.as_str())
+                    .is_some_and(|binding| {
+                        camera_statuses
+                            .iter()
+                            .any(|status| status.id() == binding.id() && status.error().is_none())
+                    })
+            })
+            .count();
+        let ready = available == total;
+        let detail = match (total, available) {
+            (1, 1) => format!("{} available", camera_roles[0]),
+            (1, _) => format!("{} unavailable", camera_roles[0]),
+            (_, available) if ready => format!("{available} cameras available"),
+            _ => format!("{available} of {total} cameras available"),
+        };
+        Self { ready, detail }
+    }
 }
 
 #[component]
@@ -410,8 +417,8 @@ pub(crate) fn InferencePanel() -> Element {
     let studio = studio();
     let rollout = studio.rollout().read().to_owned();
     let metrics = &rollout.metrics();
-    let latency = format_metric(metrics.last_latency_ms());
-    let model = format_metric(metrics.last_model_ms());
+    let latency = metrics.last_latency_ms().rollout_metric();
+    let model = metrics.last_model_ms().rollout_metric();
     let misses = metrics.missed_deadlines().to_string();
     rsx! {
         section { class: "rollout-inference",
@@ -427,9 +434,9 @@ pub(crate) fn InferencePanel() -> Element {
                 }
             } else {
                 div { class: "rollout-inference-empty",
-                    strong { "{format_count(metrics.command_count())} commands" }
+                    strong { "{metrics.command_count().rollout_count()} commands" }
                     p {
-                        "{format_count(metrics.inference_count())} chunks · mean {format_metric(metrics.mean_latency_ms())} ms · max {format_metric(metrics.max_latency_ms())} ms"
+                        "{metrics.inference_count().rollout_count()} chunks · mean {metrics.mean_latency_ms().rollout_metric()} ms · max {metrics.max_latency_ms().rollout_metric()} ms"
                     }
                 }
             }
@@ -447,33 +454,53 @@ fn InferenceMetric(label: &'static str, value: String, unit: &'static str) -> El
     }
 }
 
-fn checkpoint_choices(snapshot: &TrainingSnapshot) -> Vec<CheckpointChoice> {
-    let mut choices = snapshot
-        .runs()
-        .iter()
-        .flat_map(checkpoints_for_run)
-        .collect::<Vec<_>>();
-    choices.sort_by_key(|choice| std::cmp::Reverse(choice.step));
-    choices
+pub(crate) trait TrainingSnapshotRollout {
+    fn selected_checkpoint_camera_roles(&self, selected_key: Option<&str>) -> Vec<String>;
 }
 
-pub(crate) fn selected_checkpoint_camera_roles(
-    snapshot: &TrainingSnapshot,
-    selected_key: Option<&str>,
-) -> Vec<String> {
-    let choices = checkpoint_choices(snapshot);
-    selected_key
-        .and_then(|key| choices.iter().find(|choice| choice.identity.key == key))
-        .or_else(|| choices.first())
-        .map(|choice| choice.policy.camera_roles.clone())
-        .unwrap_or_default()
+trait TrainingSnapshotCheckpointChoices {
+    fn checkpoint_choices(&self) -> Vec<CheckpointChoice>;
 }
 
-fn checkpoints_for_run(run: &TrainingRun) -> impl Iterator<Item = CheckpointChoice> + '_ {
-    run.checkpoints()
-        .iter()
-        .filter(|checkpoint| checkpoint.inference_ready())
-        .map(|checkpoint| CheckpointChoice {
+impl TrainingSnapshotCheckpointChoices for TrainingSnapshot {
+    fn checkpoint_choices(&self) -> Vec<CheckpointChoice> {
+        let mut choices = self
+            .runs()
+            .iter()
+            .flat_map(TrainingRunRollout::checkpoint_choices)
+            .collect::<Vec<_>>();
+        choices.sort_by_key(|choice| std::cmp::Reverse(choice.step));
+        choices
+    }
+}
+
+impl TrainingSnapshotRollout for TrainingSnapshot {
+    fn selected_checkpoint_camera_roles(&self, selected_key: Option<&str>) -> Vec<String> {
+        let choices = self.checkpoint_choices();
+        selected_key
+            .and_then(|key| choices.iter().find(|choice| choice.identity.key == key))
+            .or_else(|| choices.first())
+            .map(|choice| choice.policy.camera_roles.clone())
+            .unwrap_or_default()
+    }
+}
+
+trait TrainingRunRollout {
+    fn checkpoint_choices(&self) -> Vec<CheckpointChoice>;
+}
+
+impl TrainingRunRollout for TrainingRun {
+    fn checkpoint_choices(&self) -> Vec<CheckpointChoice> {
+        self.checkpoints()
+            .iter()
+            .filter_map(|checkpoint| CheckpointChoice::for_checkpoint(self, checkpoint))
+            .collect()
+    }
+}
+
+impl CheckpointChoice {
+    fn for_checkpoint(run: &TrainingRun, checkpoint: &TrainingCheckpoint) -> Option<Self> {
+        checkpoint.inference_ready().then(|| Self {
             identity: CheckpointIdentity {
                 key: format!("{}::{}", run.id(), checkpoint.step()),
                 run_id: run.id().to_owned(),
@@ -492,20 +519,27 @@ fn checkpoints_for_run(run: &TrainingRun) -> impl Iterator<Item = CheckpointChoi
                 })
                 .min(MAX_ROLLOUT_ACTION_STEPS),
                 sample_hz: checkpoint.sample_hz(),
-                camera_roles: camera_roles(run.config().act().camera_streams()),
+                camera_roles: run.config().act().camera_streams().camera_roles(),
             },
         })
+    }
 }
 
-fn camera_roles(streams: &[String]) -> Vec<String> {
-    let mut roles = Vec::with_capacity(streams.len());
-    for stream in streams {
-        let role = stream.rsplit('.').next().unwrap_or(stream).to_owned();
-        if !roles.contains(&role) {
-            roles.push(role);
+trait CameraStreamRoles {
+    fn camera_roles(&self) -> Vec<String>;
+}
+
+impl CameraStreamRoles for [String] {
+    fn camera_roles(&self) -> Vec<String> {
+        let mut roles = Vec::with_capacity(self.len());
+        for stream in self {
+            let role = stream.rsplit('.').next().unwrap_or(stream).to_owned();
+            if !roles.contains(&role) {
+                roles.push(role);
+            }
         }
+        roles
     }
-    roles
 }
 
 struct RolloutPreconditions<'a> {
@@ -545,52 +579,70 @@ impl RolloutPreconditions<'_> {
     }
 }
 
-fn runtime_title(rollout: &RolloutSnapshot, blocker: Option<&str>) -> &'static str {
-    match rollout.phase() {
-        RolloutPhase::Idle if rollout.finished_ms().is_some() => "Policy stopped",
-        RolloutPhase::Idle if blocker.is_some() => "Rollout unavailable",
-        RolloutPhase::Idle => "Ready",
-        RolloutPhase::Loading => "Loading checkpoint",
-        RolloutPhase::WarmingUp => "Preparing policy",
-        RolloutPhase::Running => "Policy active",
-        RolloutPhase::Stopping => "Stopping policy",
-        RolloutPhase::Failed => "Rollout stopped",
-    }
+trait RolloutRuntimePresentation {
+    fn runtime_title(&self, blocker: Option<&str>) -> &'static str;
+    fn runtime_detail(&self) -> String;
+    fn runtime_note_class(&self) -> &'static str;
 }
 
-fn runtime_detail(rollout: &RolloutSnapshot) -> String {
-    rollout
-        .message()
-        .map(str::to_owned)
-        .unwrap_or_else(|| "Safety limits and hold-on-stop are active.".to_owned())
-}
-
-fn runtime_note_class(rollout: &RolloutSnapshot) -> &'static str {
-    match rollout.phase() {
-        RolloutPhase::Running if rollout.warning().is_some() => {
-            "rollout-runtime-note rollout-runtime-note-warning"
+impl RolloutRuntimePresentation for RolloutSnapshot {
+    fn runtime_title(&self, blocker: Option<&str>) -> &'static str {
+        match self.phase() {
+            RolloutPhase::Idle if self.finished_ms().is_some() => "Policy stopped",
+            RolloutPhase::Idle if blocker.is_some() => "Rollout unavailable",
+            RolloutPhase::Idle => "Ready",
+            RolloutPhase::Loading => "Loading checkpoint",
+            RolloutPhase::WarmingUp => "Preparing policy",
+            RolloutPhase::Running => "Policy active",
+            RolloutPhase::Stopping => "Stopping policy",
+            RolloutPhase::Failed => "Rollout stopped",
         }
-        RolloutPhase::Running => "rollout-runtime-note rollout-runtime-note-active",
-        RolloutPhase::Failed => "rollout-runtime-note rollout-runtime-note-failed",
-        _ => "rollout-runtime-note",
+    }
+
+    fn runtime_detail(&self) -> String {
+        self.message()
+            .map(str::to_owned)
+            .unwrap_or_else(|| "Safety limits and hold-on-stop are active.".to_owned())
+    }
+
+    fn runtime_note_class(&self) -> &'static str {
+        match self.phase() {
+            RolloutPhase::Running if self.warning().is_some() => {
+                "rollout-runtime-note rollout-runtime-note-warning"
+            }
+            RolloutPhase::Running => "rollout-runtime-note rollout-runtime-note-active",
+            RolloutPhase::Failed => "rollout-runtime-note rollout-runtime-note-failed",
+            _ => "rollout-runtime-note",
+        }
     }
 }
 
-fn format_metric(value: Option<f64>) -> String {
-    value
-        .filter(|value| value.is_finite())
-        .map(|value| format!("{value:.1}"))
-        .unwrap_or_else(|| "—".to_owned())
+trait RolloutMetricPresentation {
+    fn rollout_metric(self) -> String;
 }
 
-fn format_count(value: u64) -> String {
-    let text = value.to_string();
-    text.as_bytes()
-        .rchunks(3)
-        .rev()
-        .map(|chunk| std::str::from_utf8(chunk).unwrap_or_default())
-        .collect::<Vec<_>>()
-        .join(",")
+impl RolloutMetricPresentation for Option<f64> {
+    fn rollout_metric(self) -> String {
+        self.filter(|value| value.is_finite())
+            .map(|value| format!("{value:.1}"))
+            .unwrap_or_else(|| "—".to_owned())
+    }
+}
+
+trait RolloutCountPresentation {
+    fn rollout_count(self) -> String;
+}
+
+impl RolloutCountPresentation for u64 {
+    fn rollout_count(self) -> String {
+        let text = self.to_string();
+        text.as_bytes()
+            .rchunks(3)
+            .rev()
+            .map(|chunk| std::str::from_utf8(chunk).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
 }
 
 #[cfg(test)]
@@ -609,8 +661,8 @@ mod tests {
     };
 
     use super::{
-        RolloutCameraSummary, RolloutPreconditions, camera_roles, checkpoints_for_run, follower,
-        rollout_camera_summary, runtime_note_class, runtime_title,
+        CameraStreamRoles, RobotFleet, RolloutCameraSummary, RolloutPreconditions,
+        RolloutRuntimePresentation, TrainingRunRollout,
     };
 
     fn robot(id: &str, role: &str) -> RobotSummary {
@@ -628,7 +680,7 @@ mod tests {
             robot("follower", "so101_follower"),
         ];
         assert_eq!(
-            follower(&robots).map(|robot| robot.id().to_owned()),
+            robots.follower().map(|robot| robot.id().to_owned()),
             Some("follower".to_owned())
         );
     }
@@ -637,10 +689,10 @@ mod tests {
     fn blocked_idle_rollout_never_claims_to_be_ready() {
         let rollout = RolloutSnapshot::default();
         assert_eq!(
-            runtime_title(&rollout, Some("Select a checkpoint.")),
+            rollout.runtime_title(Some("Select a checkpoint.")),
             "Rollout unavailable"
         );
-        assert_eq!(runtime_title(&rollout, None), "Ready");
+        assert_eq!(rollout.runtime_title(None), "Ready");
     }
 
     #[test]
@@ -653,7 +705,7 @@ mod tests {
         );
 
         assert_eq!(
-            runtime_note_class(&rollout),
+            rollout.runtime_note_class(),
             "rollout-runtime-note rollout-runtime-note-warning"
         );
     }
@@ -671,7 +723,7 @@ mod tests {
         };
 
         assert_eq!(
-            rollout_camera_summary(
+            RolloutCameraSummary::inspect(
                 Some(&follower),
                 Some(&["gripper".to_owned(), "top".to_owned()]),
                 &[camera("camera-1", None), camera("camera-2", None)],
@@ -682,7 +734,7 @@ mod tests {
             }
         );
         assert_eq!(
-            rollout_camera_summary(
+            RolloutCameraSummary::inspect(
                 Some(&follower),
                 Some(&["gripper".to_owned(), "top".to_owned()]),
                 &[
@@ -700,10 +752,11 @@ mod tests {
     #[test]
     fn rollout_camera_roles_follow_the_recorded_stream_contract() {
         assert_eq!(
-            camera_roles(&[
+            [
                 "follower.camera.gripper".to_owned(),
                 "follower.camera.top".to_owned(),
-            ]),
+            ]
+            .camera_roles(),
             ["gripper", "top"]
         );
     }
@@ -727,7 +780,7 @@ mod tests {
             ),
         );
 
-        let choices = checkpoints_for_run(&run).collect::<Vec<_>>();
+        let choices = run.checkpoint_choices();
 
         assert_eq!(choices.len(), 1);
         assert_eq!(choices[0].step, 20_000);

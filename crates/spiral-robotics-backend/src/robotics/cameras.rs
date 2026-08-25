@@ -72,8 +72,63 @@ struct Stream {
 }
 
 impl Stream {
+    fn spawn(camera: DetectedCamera) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        // Drop the initial receiver so `receiver_count` only counts real viewers.
+        let (frames, initial) = watch::channel(None);
+        drop(initial);
+        let frames = Arc::new(frames);
+        let status = Arc::new(Mutex::new(StreamStatus {
+            running: true,
+            frames: 0,
+            error: None,
+        }));
+
+        let thread = {
+            let (stop, frames, status) = (stop.clone(), frames.clone(), status.clone());
+            thread::Builder::new()
+                .name(format!("spiral-robotics-camera-{}", camera.identifier()))
+                .spawn(move || {
+                    let mut idle_since: Option<Instant> = None;
+                    let result = camera.stream_jpeg_frames(
+                        cameras::JpegStreamConfig::new(&stop, DEFAULT_JPEG_QUALITY),
+                        |frame| {
+                            let sequence = frame.sequence();
+                            frames.send_replace(Some(Arc::new(Frame {
+                                bytes: Bytes::from(frame.into_bytes()),
+                                sequence,
+                                captured_at: Instant::now(),
+                            })));
+                            status.recover().frames = sequence;
+
+                            if frames.receiver_count() == 0 {
+                                let since = *idle_since.get_or_insert_with(Instant::now);
+                                if since.elapsed() >= IDLE_TIMEOUT {
+                                    stop.store(true, Ordering::Relaxed);
+                                }
+                            } else {
+                                idle_since = None;
+                            }
+                        },
+                    );
+
+                    let mut status = status.recover();
+                    status.running = false;
+                    status.error = result.err().map(|error| error.to_string());
+                })
+                .expect("a camera capture thread must start")
+        };
+
+        Self {
+            stop,
+            frames,
+            status,
+            thread: Some(thread),
+        }
+    }
+
     fn is_running(&self) -> bool {
-        lock(&self.status).running
+        self.status.recover().running
     }
 
     /// Ask the capture thread to stop and wait for it to release the device.
@@ -124,7 +179,7 @@ impl CameraManager {
     /// Probing spawns short-lived child processes, so this must not run on an
     /// async runtime thread.
     pub(crate) fn refresh_blocking(&self) {
-        let (discovered, issues) = match cameras::discover() {
+        let (discovered, issues) = match cameras::ProbeOutcome::discover() {
             Ok(outcome) => {
                 let (cameras, skipped, failures) = outcome.into_parts();
                 let mut issues = Vec::new();
@@ -155,7 +210,7 @@ impl CameraManager {
     fn apply_discovery(&self, discovered: BTreeMap<String, DetectedCamera>, issues: Vec<String>) {
         // Streams for cameras that vanished must not keep holding a device.
         let stale = {
-            let mut state = lock(&self.state);
+            let mut state = self.state.recover();
             state.issues = issues;
             let stale = state
                 .streams
@@ -173,7 +228,7 @@ impl CameraManager {
 
     /// Cameras found by the last refresh, with their current stream state.
     pub(crate) fn statuses(&self) -> Vec<CameraStatus> {
-        let state = lock(&self.state);
+        let state = self.state.recover();
         state
             .discovered
             .values()
@@ -181,7 +236,7 @@ impl CameraManager {
                 let id = camera.identifier();
                 let (streaming, frames, error) = match state.streams.get(&id) {
                     Some(stream) => {
-                        let status = lock(&stream.status);
+                        let status = stream.status.recover();
                         (status.running, status.frames, status.error.clone())
                     }
                     None => (false, 0, None),
@@ -202,12 +257,12 @@ impl CameraManager {
     /// enumerate and their streams still open, but no frame ever arrives, so
     /// without this the operator would see an empty preview and no reason.
     pub(crate) fn note_issue(&self, message: impl Into<String>) {
-        lock(&self.state).persistent_issues.push(message.into());
+        self.state.recover().persistent_issues.push(message.into());
     }
 
     /// Non-fatal problems worth showing the operator.
     pub(crate) fn issues(&self) -> Vec<String> {
-        let state = lock(&self.state);
+        let state = self.state.recover();
         let mut issues = state.persistent_issues.clone();
         issues.extend(state.issues.iter().cloned());
         issues
@@ -218,7 +273,7 @@ impl CameraManager {
         &self,
         id: &str,
     ) -> Result<watch::Receiver<Option<Arc<Frame>>>, String> {
-        let mut state = lock(&self.state);
+        let mut state = self.state.recover();
         if let Some(stream) = state.streams.get_mut(id) {
             if stream.is_running() {
                 return Ok(stream.frames.subscribe());
@@ -233,7 +288,7 @@ impl CameraManager {
             .get(id)
             .cloned()
             .ok_or_else(|| format!("no camera with id {id:?}; refresh the camera list"))?;
-        let stream = spawn_stream(camera);
+        let stream = Stream::spawn(camera);
         let frames = stream.frames.subscribe();
         state.streams.insert(id.to_owned(), stream);
         Ok(frames)
@@ -241,7 +296,7 @@ impl CameraManager {
 
     /// Stop a camera's capture thread and release the device.
     pub(crate) fn close(&self, id: &str) {
-        let stream = lock(&self.state).streams.remove(id);
+        let stream = self.state.recover().streams.remove(id);
         if let Some(mut stream) = stream {
             stream.shutdown();
         }
@@ -249,7 +304,7 @@ impl CameraManager {
 
     /// Stop every capture thread.
     pub(crate) fn shutdown(&self) {
-        let streams = std::mem::take(&mut lock(&self.state).streams);
+        let streams = std::mem::take(&mut self.state.recover().streams);
         for (_, mut stream) in streams {
             stream.shutdown();
         }
@@ -262,69 +317,19 @@ impl Drop for CameraManager {
     }
 }
 
-fn spawn_stream(camera: DetectedCamera) -> Stream {
-    let stop = Arc::new(AtomicBool::new(false));
-    // Drop the initial receiver so `receiver_count` only counts real viewers.
-    let (frames, initial) = watch::channel(None);
-    drop(initial);
-    let frames = Arc::new(frames);
-    let status = Arc::new(Mutex::new(StreamStatus {
-        running: true,
-        frames: 0,
-        error: None,
-    }));
-
-    let thread = {
-        let (stop, frames, status) = (stop.clone(), frames.clone(), status.clone());
-        thread::Builder::new()
-            .name(format!("spiral-robotics-camera-{}", camera.identifier()))
-            .spawn(move || {
-                let mut idle_since: Option<Instant> = None;
-                let result = camera.stream_jpeg_frames(
-                    cameras::JpegStreamConfig::new(&stop, DEFAULT_JPEG_QUALITY),
-                    |frame| {
-                        let sequence = frame.sequence();
-                        frames.send_replace(Some(Arc::new(Frame {
-                            bytes: Bytes::from(frame.into_bytes()),
-                            sequence,
-                            captured_at: Instant::now(),
-                        })));
-                        lock(&status).frames = sequence;
-
-                        if frames.receiver_count() == 0 {
-                            let since = *idle_since.get_or_insert_with(Instant::now);
-                            if since.elapsed() >= IDLE_TIMEOUT {
-                                stop.store(true, Ordering::Relaxed);
-                            }
-                        } else {
-                            idle_since = None;
-                        }
-                    },
-                );
-
-                let mut status = lock(&status);
-                status.running = false;
-                status.error = result.err().map(|error| error.to_string());
-            })
-            .expect("a camera capture thread must start")
-    };
-
-    Stream {
-        stop,
-        frames,
-        status,
-        thread: Some(thread),
-    }
-}
-
 /// Lock a mutex, treating poisoning as recoverable.
 ///
 /// Every guarded value here is plain bookkeeping: a panic mid-update can leave
 /// a frame count stale but cannot make it unsafe to read.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+trait RecoverMutex<T> {
+    fn recover(&self) -> MutexGuard<'_, T>;
+}
+
+impl<T> RecoverMutex<T> for Mutex<T> {
+    fn recover(&self) -> MutexGuard<'_, T> {
+        self.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 #[cfg(test)]

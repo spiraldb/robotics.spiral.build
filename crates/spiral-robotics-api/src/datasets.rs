@@ -118,12 +118,16 @@ impl HuggingFaceDatasetFormat {
 pub struct HuggingFaceDatasetRequest {
     dataset_id: String,
     repository: String,
-    #[serde(default = "default_huggingface_revision")]
+    #[serde(default = "HuggingFaceDatasetRequest::default_revision")]
     revision: String,
     format: HuggingFaceDatasetFormat,
 }
 
 impl HuggingFaceDatasetRequest {
+    fn default_revision() -> String {
+        "main".to_owned()
+    }
+
     pub fn new(
         dataset_id: impl Into<String>,
         repository: impl Into<String>,
@@ -132,7 +136,7 @@ impl HuggingFaceDatasetRequest {
         Self {
             dataset_id: dataset_id.into(),
             repository: repository.into(),
-            revision: default_huggingface_revision(),
+            revision: Self::default_revision(),
             format,
         }
     }
@@ -152,10 +156,6 @@ impl HuggingFaceDatasetRequest {
     pub const fn format(&self) -> HuggingFaceDatasetFormat {
         self.format
     }
-}
-
-fn default_huggingface_revision() -> String {
-    "main".to_owned()
 }
 
 /// One immutable repository file selected for import.
@@ -388,10 +388,4 @@ impl HuggingFaceDatasetImportSummary {
     pub fn warnings(&self) -> &[String] {
         &self.warnings
     }
-}
-
-/// Stable fallback for old recordings and clients created before datasets
-/// became first-class rows.
-pub(crate) fn default_dataset_id() -> String {
-    "default".to_owned()
 }

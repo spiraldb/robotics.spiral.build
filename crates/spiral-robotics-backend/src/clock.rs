@@ -1,6 +1,21 @@
 //! Capability-owned wall-clock and timestamped-ID boundaries.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub(crate) trait SystemTimeMillis {
+    fn unix_millis(self) -> u64;
+}
+
+impl SystemTimeMillis for SystemTime {
+    fn unix_millis(self) -> u64 {
+        self.duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX)
+    }
+}
 
 /// Supplies backend-level wall time.
 ///

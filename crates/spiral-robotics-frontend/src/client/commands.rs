@@ -12,14 +12,17 @@ use spiral_robotics_api::recording::{
 };
 use spiral_robotics_api::robots::ModeSelection;
 
+use crate::activities::data::workbench::EpisodeIdPresentation;
 use crate::client::http as api;
-use crate::format::format_clock;
+use crate::format::ClockPresentation;
 use crate::shell::state::Studio;
 
 impl Studio {
     pub(crate) fn recording_blocker(self) -> Option<String> {
         let studio = self;
-        if !spiral_robotics_api::catalog::is_dataset_id(studio.selected_dataset().read().trim()) {
+        if !spiral_robotics_core::identity::DatasetId::is_canonical(
+            studio.selected_dataset().read().trim(),
+        ) {
             Some("Choose a dataset ID using letters, numbers, '.', '_' or '-'.".to_owned())
         } else if matches!(studio.mode(), ModeSelection::Replay { .. }) {
             Some("Stop replay before recording.".to_owned())
@@ -45,7 +48,7 @@ impl Studio {
         }
         let request = StartRecordingRequest::new(studio.selected_dataset().read().trim());
         studio.run("", async move {
-            api::send_json::<_, EpisodeSummary>(
+            api::Http::send_json::<_, EpisodeSummary>(
                 Method::POST,
                 "/api/episodes/record",
                 Some(&request),
@@ -68,7 +71,7 @@ impl Studio {
         }
         let request = SetRecordingPausedRequest::new(paused);
         let future = async move {
-            api::send(Method::POST, "/api/episodes/record/pause", Some(&request)).await
+            api::Http::send(Method::POST, "/api/episodes/record/pause", Some(&request)).await
         };
         if paused {
             studio.run_safety("Recording paused. The episode remains open.", future);
@@ -99,7 +102,7 @@ impl Studio {
             "Recording discarded. Teleoperation stopped."
         };
         studio.run_safety(message, async move {
-            let summary = api::send_json::<_, EpisodeSummary>(
+            let summary = api::Http::send_json::<_, EpisodeSummary>(
                 Method::POST,
                 "/api/episodes/record/stop",
                 Some(&request),
@@ -110,9 +113,9 @@ impl Studio {
                 studio.report_episode_success(
                     format!(
                         "Episode {} saved to Data · {} — {}, {} frames.",
-                        crate::activities::data::workbench::short_id(summary.id()),
+                        summary.id().short_episode_id(),
                         summary.dataset_id(),
-                        format_clock(summary.duration_seconds()),
+                        summary.duration_seconds().clock_label(),
                         summary.frames()
                     ),
                     summary.id().to_owned(),
@@ -192,7 +195,7 @@ impl Studio {
             .with_source_arm(source_arm)
             .starting_at(start_seconds);
         studio.run("", async move {
-            api::send(Method::POST, "/api/episodes/replay", Some(&request)).await
+            api::Http::send(Method::POST, "/api/episodes/replay", Some(&request)).await
         });
     }
 
@@ -204,7 +207,7 @@ impl Studio {
         }
         let request = SetReplayPausedRequest::new(paused);
         let future = async move {
-            api::send(Method::POST, "/api/episodes/replay/pause", Some(&request)).await
+            api::Http::send(Method::POST, "/api/episodes/replay/pause", Some(&request)).await
         };
         if paused {
             studio.run_safety("Robot replay paused at the current frame.", future);
@@ -221,7 +224,7 @@ impl Studio {
         }
         studio.run_safety(
             "Robot replay stopped. Motors may still be holding position.",
-            async move { api::send(Method::POST, "/api/mode", Some(&ModeSelection::Idle)).await },
+            async move { api::Http::send(Method::POST, "/api/mode", Some(&ModeSelection::Idle)).await },
         );
     }
 }
@@ -259,26 +262,28 @@ impl Studio {
         let studio = self;
         let path = format!("/api/episodes/{episode}/seek");
         studio.run("", async move {
-            api::send_json::<_, serde_json::Value>(Method::POST, &path, Some(&request))
+            api::Http::send_json::<_, serde_json::Value>(Method::POST, &path, Some(&request))
                 .await
                 .map(|_| ())
         });
     }
 }
 
-/// Whether global transport shortcuts may act without stealing a text-editing
-/// keystroke.
-pub(crate) fn shortcuts_enabled() -> bool {
-    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
-        return false;
-    };
-    document
-        .active_element()
-        .map(|element| {
-            !matches!(
-                element.tag_name().to_uppercase().as_str(),
-                "INPUT" | "TEXTAREA" | "SELECT"
-            )
-        })
-        .unwrap_or(true)
+impl Studio {
+    /// Whether global transport shortcuts may act without stealing a text-editing
+    /// keystroke.
+    pub(crate) fn shortcuts_enabled(self) -> bool {
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return false;
+        };
+        document
+            .active_element()
+            .map(|element| {
+                !matches!(
+                    element.tag_name().to_uppercase().as_str(),
+                    "INPUT" | "TEXTAREA" | "SELECT"
+                )
+            })
+            .unwrap_or(true)
+    }
 }

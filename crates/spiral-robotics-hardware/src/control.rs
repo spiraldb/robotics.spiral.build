@@ -47,8 +47,6 @@ use spiral_robotics_api::robots::{
     RobotTelemetry, TelemetryFrame,
 };
 #[cfg(test)]
-use spiral_robotics_core::arm;
-#[cfg(test)]
 use spiral_robotics_core::calibration::MotorDirection;
 use spiral_robotics_core::calibration::{
     Calibration, CalibrationError, CalibrationInput, MotorRangeTracker, MotorSpec,
@@ -2128,14 +2126,14 @@ impl Controller {
             );
             message
         })?;
-        validate_motor_read_keys(&spec.motors, &positions, "initial position read").inspect_err(
-            |message| {
+        spec.motors
+            .validate_read_keys(&positions, "initial position read")
+            .inspect_err(|message| {
                 self.published.connections.insert(
                     spec.id.clone(),
                     ConnectionStatus::new(false, Some(message.clone())),
                 );
-            },
-        )?;
+            })?;
 
         // A newly opened bus has no trustworthy logical torque state. Establish
         // and verify release before publishing the robot as connected; otherwise
@@ -2487,7 +2485,10 @@ impl Controller {
             .bus
             .read_positions()
             .map_err(|error| error.to_string())?;
-        validate_motor_read_keys(&robot.spec.motors, &positions, "calibration position read")?;
+        robot
+            .spec
+            .motors
+            .validate_read_keys(&positions, "calibration position read")?;
         robot.motion.positions = positions.clone();
         robot.follow_measured_positions();
         robot.sweep = Some(MotorRangeTracker::new(positions).map_err(|error| error.to_string())?);
@@ -2559,8 +2560,10 @@ impl Controller {
     fn poll(robot: &mut ConnectedRobot) {
         match robot.bus.read_samples() {
             Ok(samples) => {
-                if let Err(error) =
-                    validate_motor_read_keys(&robot.spec.motors, &samples, "telemetry read")
+                if let Err(error) = robot
+                    .spec
+                    .motors
+                    .validate_read_keys(&samples, "telemetry read")
                 {
                     robot.health.failures += 1;
                     robot.health.error = Some(error);
@@ -3052,21 +3055,31 @@ impl Controller {
     }
 }
 
-fn validate_motor_read_keys<T>(
-    configured: &BTreeMap<String, MotorSpec>,
-    readings: &BTreeMap<String, T>,
-    context: &str,
-) -> Result<(), String> {
-    let expected = configured.keys().cloned().collect::<BTreeSet<_>>();
-    let actual = readings.keys().cloned().collect::<BTreeSet<_>>();
-    if actual == expected {
-        return Ok(());
+trait MotorSpecMapExt {
+    fn validate_read_keys<T>(
+        &self,
+        readings: &BTreeMap<String, T>,
+        context: &str,
+    ) -> Result<(), String>;
+}
+
+impl MotorSpecMapExt for BTreeMap<String, MotorSpec> {
+    fn validate_read_keys<T>(
+        &self,
+        readings: &BTreeMap<String, T>,
+        context: &str,
+    ) -> Result<(), String> {
+        let expected = self.keys().cloned().collect::<BTreeSet<_>>();
+        let actual = readings.keys().cloned().collect::<BTreeSet<_>>();
+        if actual == expected {
+            return Ok(());
+        }
+        let missing = expected.difference(&actual).cloned().collect::<Vec<_>>();
+        let unexpected = actual.difference(&expected).cloned().collect::<Vec<_>>();
+        Err(format!(
+            "{context} did not match the configured motor set; missing={missing:?}, unexpected={unexpected:?}"
+        ))
     }
-    let missing = expected.difference(&actual).cloned().collect::<Vec<_>>();
-    let unexpected = actual.difference(&expected).cloned().collect::<Vec<_>>();
-    Err(format!(
-        "{context} did not match the configured motor set; missing={missing:?}, unexpected={unexpected:?}"
-    ))
 }
 
 #[cfg(test)]
@@ -3079,7 +3092,7 @@ mod tests {
     use super::*;
 
     fn motors() -> BTreeMap<String, MotorSpec> {
-        arm::so101_motor_specs()
+        spiral_robotics_core::calibration::MotorSpec::so101_arm()
     }
 
     fn calibration(center: i64, span: i64) -> Calibration {
@@ -3194,15 +3207,15 @@ mod tests {
             .keys()
             .map(|name| (name.clone(), 0_i64))
             .collect::<BTreeMap<_, _>>();
-        assert!(validate_motor_read_keys(&configured, &exact, "test").is_ok());
+        assert!(configured.validate_read_keys(&exact, "test").is_ok());
 
         let mut missing = exact.clone();
         missing.remove(configured.keys().next().unwrap());
-        assert!(validate_motor_read_keys(&configured, &missing, "test").is_err());
+        assert!(configured.validate_read_keys(&missing, "test").is_err());
 
         let mut extra = exact;
         extra.insert("phantom".to_owned(), 0);
-        assert!(validate_motor_read_keys(&configured, &extra, "test").is_err());
+        assert!(configured.validate_read_keys(&extra, "test").is_err());
     }
 
     #[test]

@@ -116,6 +116,21 @@ impl ActiveRecording {
             paused,
         }
     }
+
+    fn seek_blocker(&self, episode: &str) -> Option<String> {
+        if !self.paused {
+            return Some(
+                "pause the active recording before moving a physical arm through history"
+                    .to_owned(),
+            );
+        }
+        (self.episode != episode).then(|| {
+            format!(
+                "paused take {:?} is the only episode available for physical scrubbing",
+                self.episode
+            )
+        })
+    }
 }
 
 impl SeekActivity {
@@ -139,6 +154,12 @@ impl SeekTarget {
         self.calibrated = calibrated;
         self.problem = problem;
         self
+    }
+
+    fn is_follower(&self) -> bool {
+        self.robot_type
+            .as_deref()
+            .is_some_and(|kind| kind.to_ascii_lowercase().contains("follower"))
     }
 }
 
@@ -280,157 +301,154 @@ pub(crate) trait PhysicalSeekPort {
     async fn commit_if_current(&self, plan: PhysicalSeekPlan) -> Result<bool, OperationError>;
 }
 
-pub(crate) async fn seek<P: PhysicalSeekPort + ?Sized>(
-    port: &P,
-    command: SeekEpisodeCommand,
-) -> Result<HistoricalSeekResult, OperationError> {
-    if !command.seconds.is_finite() || command.seconds < 0.0 {
-        return Err(OperationError::InvalidInput(
-            "historical seek time must be a finite, non-negative number of seconds".to_owned(),
-        ));
+pub(crate) struct PhysicalSeekActions<'a, P: ?Sized> {
+    port: &'a P,
+}
+
+impl<'a, P: PhysicalSeekPort + ?Sized> PhysicalSeekActions<'a, P> {
+    pub(crate) fn new(port: &'a P) -> Self {
+        Self { port }
     }
 
-    let activity = port.activity();
-    let paused_current = activity
-        .recording
-        .as_ref()
-        .is_some_and(|recording| recording.paused && recording.episode == command.episode);
-    if let Some(reason) = recording_blocker(activity.recording.as_ref(), &command.episode) {
-        return Err(OperationError::Conflict(reason));
-    }
-    if !matches!(
-        activity.mode,
-        SeekControlMode::Idle | SeekControlMode::Replay
-    ) {
-        return Err(OperationError::Conflict(
-            "stop the active control mode before moving a physical arm through history".to_owned(),
-        ));
-    }
+    pub(crate) async fn seek(
+        &self,
+        command: SeekEpisodeCommand,
+    ) -> Result<HistoricalSeekResult, OperationError> {
+        let port = self.port;
+        if !command.seconds.is_finite() || command.seconds < 0.0 {
+            return Err(OperationError::InvalidInput(
+                "historical seek time must be a finite, non-negative number of seconds".to_owned(),
+            ));
+        }
 
-    let target = port.target(&command.robot)?.ok_or_else(|| {
-        OperationError::InvalidInput(format!("no robot named {:?}", command.robot))
-    })?;
-    if !is_follower(target.robot_type.as_deref()) {
-        return Err(OperationError::InvalidInput(format!(
-            "historical seek only drives an explicitly configured follower; robot {:?} is {:?}",
-            command.robot, target.robot_type
-        )));
-    }
-    if !target.connected {
-        return Err(OperationError::Conflict(format!(
-            "connect follower {:?} before seeking",
-            command.robot
-        )));
-    }
-    if !target.calibrated {
-        return Err(OperationError::Conflict(format!(
-            "calibrate follower {:?} before seeking",
-            command.robot
-        )));
-    }
-    if let Some(problem) = target.problem {
-        return Err(OperationError::Conflict(format!(
-            "follower {:?} cannot be driven: {problem}",
-            command.robot
-        )));
-    }
+        let activity = port.activity();
+        let paused_current = activity
+            .recording
+            .as_ref()
+            .is_some_and(|recording| recording.paused && recording.episode == command.episode);
+        if let Some(reason) = activity
+            .recording
+            .as_ref()
+            .and_then(|recording| recording.seek_blocker(&command.episode))
+        {
+            return Err(OperationError::Conflict(reason));
+        }
+        if !matches!(
+            activity.mode,
+            SeekControlMode::Idle | SeekControlMode::Replay
+        ) {
+            return Err(OperationError::Conflict(
+                "stop the active control mode before moving a physical arm through history"
+                    .to_owned(),
+            ));
+        }
 
-    let episode = port.episode(&command.episode)?;
-    if let Some(problem) = &episode.problem {
-        let paused_live_partial =
-            paused_current && episode.unfinished && problem == "recording did not finish";
-        if !paused_live_partial {
+        let target = port.target(&command.robot)?.ok_or_else(|| {
+            OperationError::InvalidInput(format!("no robot named {:?}", command.robot))
+        })?;
+        if !target.is_follower() {
             return Err(OperationError::InvalidInput(format!(
-                "take {:?} can be inspected but cannot drive hardware: {problem}",
+                "historical seek only drives an explicitly configured follower; robot {:?} is {:?}",
+                command.robot, target.robot_type
+            )));
+        }
+        if !target.connected {
+            return Err(OperationError::Conflict(format!(
+                "connect follower {:?} before seeking",
+                command.robot
+            )));
+        }
+        if !target.calibrated {
+            return Err(OperationError::Conflict(format!(
+                "calibrate follower {:?} before seeking",
+                command.robot
+            )));
+        }
+        if let Some(problem) = target.problem {
+            return Err(OperationError::Conflict(format!(
+                "follower {:?} cannot be driven: {problem}",
+                command.robot
+            )));
+        }
+
+        let episode = port.episode(&command.episode)?;
+        if let Some(problem) = &episode.problem {
+            let paused_live_partial =
+                paused_current && episode.unfinished && problem == "recording did not finish";
+            if !paused_live_partial {
+                return Err(OperationError::InvalidInput(format!(
+                    "take {:?} can be inspected but cannot drive hardware: {problem}",
+                    command.episode
+                )));
+            }
+        }
+        if !episode.sample_hz.is_finite() || episode.sample_hz <= 0.0 {
+            return Err(OperationError::InvalidInput(format!(
+                "take {:?} has an unusable sample rate of {} Hz",
+                command.episode, episode.sample_hz
+            )));
+        }
+        let source = RecordedArms::new(&episode.id, &episode.arms, &command.robot)
+            .select(command.source_arm.as_deref())?;
+
+        // Tickets are reserved before slow sample I/O. The adapter makes the last
+        // ticket check and hardware handoff atomic under its serialization gate.
+        let ticket = port.reserve_seek(&command.robot);
+        let sample = port.sample_at(&command.episode, command.seconds).await?;
+        if !sample.seconds.is_finite() || sample.seconds < 0.0 {
+            return Err(OperationError::InvalidInput(format!(
+                "take {:?} returned an invalid historical sample time",
                 command.episode
             )));
         }
-    }
-    if !episode.sample_hz.is_finite() || episode.sample_hz <= 0.0 {
-        return Err(OperationError::InvalidInput(format!(
-            "take {:?} has an unusable sample rate of {} Hz",
-            command.episode, episode.sample_hz
-        )));
-    }
-    let source = RecordedArms::new(&episode.id, &episode.arms, &command.robot)
-        .select(command.source_arm.as_deref())?;
+        let arm = sample
+            .arms
+            .iter()
+            .find(|arm| arm.id == source)
+            .ok_or_else(|| {
+                OperationError::InvalidInput(format!(
+                    "take {:?} did not record an arm named {source:?}",
+                    command.episode
+                ))
+            })?;
+        let pose = arm
+            .normalized
+            .iter()
+            .filter_map(|(joint, value)| value.map(|value| (joint.clone(), value)))
+            .collect::<BTreeMap<_, _>>();
+        if pose.is_empty() {
+            return Err(OperationError::InvalidInput(format!(
+                "take {:?} has no calibrated positions for {source:?} at {:.3}s",
+                command.episode, sample.seconds
+            )));
+        }
+        if pose.values().any(|value| !value.is_finite()) {
+            return Err(OperationError::InvalidInput(format!(
+                "take {:?} has a non-finite calibrated position for {source:?} at {:.3}s",
+                command.episode, sample.seconds
+            )));
+        }
 
-    // Tickets are reserved before slow sample I/O. The adapter makes the last
-    // ticket check and hardware handoff atomic under its serialization gate.
-    let ticket = port.reserve_seek(&command.robot);
-    let sample = port.sample_at(&command.episode, command.seconds).await?;
-    if !sample.seconds.is_finite() || sample.seconds < 0.0 {
-        return Err(OperationError::InvalidInput(format!(
-            "take {:?} returned an invalid historical sample time",
-            command.episode
-        )));
-    }
-    let arm = sample
-        .arms
-        .iter()
-        .find(|arm| arm.id == source)
-        .ok_or_else(|| {
-            OperationError::InvalidInput(format!(
-                "take {:?} did not record an arm named {source:?}",
-                command.episode
-            ))
-        })?;
-    let pose = arm
-        .normalized
-        .iter()
-        .filter_map(|(joint, value)| value.map(|value| (joint.clone(), value)))
-        .collect::<BTreeMap<_, _>>();
-    if pose.is_empty() {
-        return Err(OperationError::InvalidInput(format!(
-            "take {:?} has no calibrated positions for {source:?} at {:.3}s",
-            command.episode, sample.seconds
-        )));
-    }
-    if pose.values().any(|value| !value.is_finite()) {
-        return Err(OperationError::InvalidInput(format!(
-            "take {:?} has a non-finite calibrated position for {source:?} at {:.3}s",
-            command.episode, sample.seconds
-        )));
-    }
+        let committed = port
+            .commit_if_current(
+                PhysicalSeekPlan::new(ticket, command.robot.clone(), command.episode.clone())
+                    .with_trajectory(pose, episode.sample_hz),
+            )
+            .await?;
 
-    let committed = port
-        .commit_if_current(
-            PhysicalSeekPlan::new(ticket, command.robot.clone(), command.episode.clone())
-                .with_trajectory(pose, episode.sample_hz),
+        Ok(HistoricalSeekResult::new(
+            if committed {
+                HistoricalSeekState::Seeking
+            } else {
+                HistoricalSeekState::Coalesced
+            },
+            command.episode,
+            command.robot,
         )
-        .await?;
-
-    Ok(HistoricalSeekResult::new(
-        if committed {
-            HistoricalSeekState::Seeking
-        } else {
-            HistoricalSeekState::Coalesced
-        },
-        command.episode,
-        command.robot,
-    )
-    .with_source_arm(source)
-    .with_times(command.seconds, sample.seconds)
-    .with_frame(sample.frame))
-}
-
-fn recording_blocker(recording: Option<&ActiveRecording>, episode: &str) -> Option<String> {
-    let recording = recording?;
-    if !recording.paused {
-        return Some(
-            "pause the active recording before moving a physical arm through history".to_owned(),
-        );
+        .with_source_arm(source)
+        .with_times(command.seconds, sample.seconds)
+        .with_frame(sample.frame))
     }
-    (recording.episode != episode).then(|| {
-        format!(
-            "paused take {:?} is the only episode available for physical scrubbing",
-            recording.episode
-        )
-    })
-}
-
-fn is_follower(robot_type: Option<&str>) -> bool {
-    robot_type.is_some_and(|kind| kind.to_ascii_lowercase().contains("follower"))
 }
 
 #[cfg(test)]

@@ -10,6 +10,33 @@ const DEFAULT_ROBOT_BAUD_RATE: u32 = 1_000_000;
 const MAX_ROBOT_ID_LENGTH: usize = 64;
 const MAX_CAMERA_ROLE_LENGTH: usize = 64;
 
+struct PlainName(String);
+
+impl PlainName {
+    fn parse(
+        label: &str,
+        value: impl Into<String>,
+        maximum: usize,
+    ) -> Result<Self, OperationError> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > maximum
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(OperationError::invalid_input(format!(
+                "{label} must be 1 to {maximum} characters of letters, digits, '-', or '_'"
+            )));
+        }
+        Ok(Self(value))
+    }
+
+    fn into_string(self) -> String {
+        self.0
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SerialPortConfiguration {
     path: String,
@@ -84,6 +111,16 @@ impl SerialPortConfiguration {
     }
     pub(crate) const fn baud_rate(&self) -> u32 {
         self.baud_rate
+    }
+
+    fn validated(path: String, baud_rate: u32) -> Result<Self, OperationError> {
+        let path = path.trim().to_owned();
+        if path.is_empty() || path.contains('\0') || baud_rate == 0 {
+            return Err(OperationError::invalid_input(
+                "a port needs a non-empty path without NUL bytes and a positive baud rate",
+            ));
+        }
+        Ok(Self { path, baud_rate })
     }
 }
 
@@ -251,167 +288,197 @@ pub(crate) trait RobotConnectionPort {
     async fn forget(&self, robot: &str) -> Result<(), OperationError>;
 }
 
-pub(crate) fn create<R: RobotStore + ?Sized>(
-    store: &R,
-    mut command: CreateRobotCommand,
-) -> Result<SavedRobot, OperationError> {
-    command.id = command.id.trim().to_owned();
-    validate_plain_name("robot id", &command.id, MAX_ROBOT_ID_LENGTH)?;
-    let port = match (command.port, command.baud_rate) {
-        (None, None) => None,
-        (None, Some(_)) => {
-            return Err(OperationError::InvalidInput(
-                "a baud rate can only be set with a serial port".to_owned(),
-            ));
-        }
-        (Some(path), baud_rate) => Some(validated_port(
-            path,
-            baud_rate.unwrap_or(DEFAULT_ROBOT_BAUD_RATE),
-        )?),
-    };
-    store.create(NewRobot {
-        id: command.id,
-        robot_type: command.robot_type,
-        port,
-    })
+pub(crate) struct RobotCatalogActions<'a, R: RobotStore + ?Sized> {
+    store: &'a R,
 }
 
-pub(crate) fn import_configuration<R: RobotStore + ?Sized>(
-    store: &R,
-) -> Result<SavedRobot, OperationError> {
-    store.import_configuration()
-}
-
-/// Select saved robot identities for a read presenter.
-pub(crate) fn list<R: RobotStore + ?Sized>(store: &R) -> Vec<SavedRobot> {
-    store
-        .saved_robot_ids()
-        .into_iter()
-        .map(|id| SavedRobot { id })
-        .collect()
-}
-
-/// Admit one saved identity before an outer presenter hydrates its view.
-pub(crate) fn get<R: RobotStore + ?Sized>(
-    store: &R,
-    robot: String,
-) -> Result<SavedRobot, OperationError> {
-    validate_plain_name("robot id", &robot, MAX_ROBOT_ID_LENGTH)?;
-    store.ensure_exists(&robot)?;
-    Ok(SavedRobot { id: robot })
-}
-
-pub(crate) fn export_configuration<R: RobotStore + ?Sized>(
-    store: &R,
-    robot: &str,
-) -> Result<ExportedRobotDocument, OperationError> {
-    store.export_configuration(robot)
-}
-
-pub(crate) fn update<R, C>(
-    store: &R,
-    control: &C,
-    mut command: UpdateRobotCommand,
-) -> Result<SavedRobot, OperationError>
-where
-    R: RobotStore + ?Sized,
-    C: RobotConnectionPort + ?Sized,
-{
-    if let Some(port) = command.port.take() {
-        command.port = Some(validated_port(port.path, port.baud_rate)?);
-        if control.is_connected(&command.id) {
-            return Err(OperationError::Conflict(format!(
-                "disconnect robot {:?} before changing its serial port",
-                command.id
-            )));
-        }
+impl<'a, R: RobotStore + ?Sized> RobotCatalogActions<'a, R> {
+    pub(crate) const fn new(store: &'a R) -> Self {
+        Self { store }
     }
-    let cameras = match command.cameras {
-        Some(mut assignments) => {
-            let mut roles = std::collections::BTreeSet::new();
-            for assignment in &mut assignments {
-                assignment.role = assignment.role.trim().to_owned();
-                assignment.device_id = assignment.device_id.trim().to_owned();
-                validate_plain_name("camera role", &assignment.role, MAX_CAMERA_ROLE_LENGTH)?;
-                if !roles.insert(assignment.role.clone()) {
-                    return Err(OperationError::InvalidInput(format!(
-                        "camera role {:?} is used more than once",
-                        assignment.role
-                    )));
-                }
-                if assignment.device_id.is_empty() || assignment.device_id.contains('\0') {
-                    return Err(OperationError::InvalidInput(format!(
-                        "camera role {:?} needs a device id without NUL bytes",
-                        assignment.role
-                    )));
-                }
+
+    pub(crate) fn create(
+        &self,
+        mut command: CreateRobotCommand,
+    ) -> Result<SavedRobot, OperationError> {
+        command.id = PlainName::parse(
+            "robot id",
+            command.id.trim().to_owned(),
+            MAX_ROBOT_ID_LENGTH,
+        )?
+        .into_string();
+        let port = match (command.port, command.baud_rate) {
+            (None, None) => None,
+            (None, Some(_)) => {
+                return Err(OperationError::InvalidInput(
+                    "a baud rate can only be set with a serial port".to_owned(),
+                ));
             }
-            Some(store.camera_configuration(&command.id, &assignments)?)
+            (Some(path), baud_rate) => Some(SerialPortConfiguration::validated(
+                path,
+                baud_rate.unwrap_or(DEFAULT_ROBOT_BAUD_RATE),
+            )?),
+        };
+        self.store.create(NewRobot {
+            id: command.id,
+            robot_type: command.robot_type,
+            port,
+        })
+    }
+
+    pub(crate) fn import_configuration(&self) -> Result<SavedRobot, OperationError> {
+        self.store.import_configuration()
+    }
+
+    /// Select saved robot identities for a read presenter.
+    pub(crate) fn list(&self) -> Vec<SavedRobot> {
+        self.store
+            .saved_robot_ids()
+            .into_iter()
+            .map(SavedRobot::new)
+            .collect()
+    }
+
+    /// Admit one saved identity before an outer presenter hydrates its view.
+    pub(crate) fn get(&self, robot: String) -> Result<SavedRobot, OperationError> {
+        let robot = PlainName::parse("robot id", robot, MAX_ROBOT_ID_LENGTH)?.into_string();
+        self.store.ensure_exists(&robot)?;
+        Ok(SavedRobot::new(robot))
+    }
+
+    pub(crate) fn export_configuration(
+        &self,
+        robot: &str,
+    ) -> Result<ExportedRobotDocument, OperationError> {
+        self.store.export_configuration(robot)
+    }
+}
+
+pub(crate) struct RobotActions<'a, R: RobotStore + ?Sized, C: RobotConnectionPort + ?Sized> {
+    store: &'a R,
+    control: &'a C,
+}
+
+impl<'a, R, C> RobotActions<'a, R, C>
+where
+    R: RobotStore + ?Sized,
+    C: RobotConnectionPort + ?Sized,
+{
+    pub(crate) const fn new(store: &'a R, control: &'a C) -> Self {
+        Self { store, control }
+    }
+
+    pub(crate) fn update(
+        &self,
+        mut command: UpdateRobotCommand,
+    ) -> Result<SavedRobot, OperationError> {
+        if let Some(port) = command.port.take() {
+            command.port = Some(SerialPortConfiguration::validated(
+                port.path,
+                port.baud_rate,
+            )?);
+            if self.control.is_connected(&command.id) {
+                return Err(OperationError::Conflict(format!(
+                    "disconnect robot {:?} before changing its serial port",
+                    command.id
+                )));
+            }
         }
-        None => None,
-    };
-    store.update(RobotUpdate {
-        id: command.id,
-        robot_type: command.robot_type,
-        port: command.port,
-        cameras,
-    })
-}
-
-fn validated_port(path: String, baud_rate: u32) -> Result<SerialPortConfiguration, OperationError> {
-    let path = path.trim().to_owned();
-    if path.is_empty() || path.contains('\0') || baud_rate == 0 {
-        return Err(OperationError::InvalidInput(
-            "a port needs a non-empty path without NUL bytes and a positive baud rate".to_owned(),
-        ));
+        let cameras = match command.cameras {
+            Some(mut assignments) => {
+                let mut roles = std::collections::BTreeSet::new();
+                for assignment in &mut assignments {
+                    assignment.role = PlainName::parse(
+                        "camera role",
+                        assignment.role.trim().to_owned(),
+                        MAX_CAMERA_ROLE_LENGTH,
+                    )?
+                    .into_string();
+                    assignment.device_id = assignment.device_id.trim().to_owned();
+                    if !roles.insert(assignment.role.clone()) {
+                        return Err(OperationError::InvalidInput(format!(
+                            "camera role {:?} is used more than once",
+                            assignment.role
+                        )));
+                    }
+                    if assignment.device_id.is_empty() || assignment.device_id.contains('\0') {
+                        return Err(OperationError::InvalidInput(format!(
+                            "camera role {:?} needs a device id without NUL bytes",
+                            assignment.role
+                        )));
+                    }
+                }
+                Some(self.store.camera_configuration(&command.id, &assignments)?)
+            }
+            None => None,
+        };
+        self.store.update(RobotUpdate {
+            id: command.id,
+            robot_type: command.robot_type,
+            port: command.port,
+            cameras,
+        })
     }
-    Ok(SerialPortConfiguration { path, baud_rate })
-}
 
-fn validate_plain_name(label: &str, value: &str, maximum: usize) -> Result<(), OperationError> {
-    if value.is_empty()
-        || value.len() > maximum
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        return Err(OperationError::InvalidInput(format!(
-            "{label} must be 1 to {maximum} characters of letters, digits, '-', or '_'"
-        )));
+    /// Forget live hardware before removing its durable configuration.
+    ///
+    /// The existence check happens first so a missing configuration cannot unexpectedly
+    /// tear down a bus. Once it passes, failure is deliberately biased toward a
+    /// saved-but-disconnected robot: deleting the SpiralDB row first could leave a
+    /// live bus that no configuration or UI card can identify and stop.
+    pub(crate) async fn delete(&self, robot: &str) -> Result<(), OperationError> {
+        self.store.ensure_exists(robot)?;
+        self.control.forget(robot).await?;
+        self.store.delete(robot)
     }
-    Ok(())
+
+    pub(crate) async fn connect(&self, robot: &str) -> Result<(), OperationError> {
+        let specification = self.store.connection_spec(robot)?;
+        self.control.connect(specification).await
+    }
+
+    /// Try one saved robot without turning an unavailable or incomplete arm into
+    /// a failure for the persistence action that introduced it.
+    pub(crate) async fn auto_connect_robot(&self, robot: String) -> AutoConnectOutcome {
+        let specification = match self.store.connection_spec(&robot) {
+            Ok(specification) => specification,
+            Err(error) => {
+                return AutoConnectOutcome {
+                    robot,
+                    status: AutoConnectStatus::Skipped(error.to_string()),
+                };
+            }
+        };
+        let status = match self.control.connect(specification).await {
+            Ok(()) => AutoConnectStatus::Connected,
+            Err(error) => AutoConnectStatus::Failed(error.to_string()),
+        };
+        AutoConnectOutcome { robot, status }
+    }
+
+    /// Try every saved robot independently; one invalid or absent arm must not
+    /// prevent other usable arms or the Studio itself from starting.
+    pub(crate) async fn auto_connect(&self) -> Vec<AutoConnectOutcome> {
+        let mut outcomes = Vec::new();
+        for robot in self.store.saved_robot_ids() {
+            outcomes.push(self.auto_connect_robot(robot).await);
+        }
+        outcomes
+    }
 }
 
-/// Forget live hardware before removing its durable configuration.
-///
-/// The existence check happens first so a missing configuration cannot unexpectedly
-/// tear down a bus. Once it passes, failure is deliberately biased toward a
-/// saved-but-disconnected robot: deleting the SpiralDB row first could leave a
-/// live bus that no configuration or UI card can identify and stop.
-pub(crate) async fn delete<R, C>(store: &R, control: &C, robot: &str) -> Result<(), OperationError>
-where
-    R: RobotStore + ?Sized,
-    C: RobotConnectionPort + ?Sized,
-{
-    store.ensure_exists(robot)?;
-    control.forget(robot).await?;
-    store.delete(robot)
+pub(crate) struct RobotConnectionActions<'a, C: RobotConnectionPort + ?Sized> {
+    control: &'a C,
 }
 
-pub(crate) async fn connect<R, C>(store: &R, control: &C, robot: &str) -> Result<(), OperationError>
-where
-    R: RobotStore + ?Sized,
-    C: RobotConnectionPort + ?Sized,
-{
-    let specification = store.connection_spec(robot)?;
-    control.connect(specification).await
-}
+impl<'a, C: RobotConnectionPort + ?Sized> RobotConnectionActions<'a, C> {
+    pub(crate) const fn new(control: &'a C) -> Self {
+        Self { control }
+    }
 
-pub(crate) async fn disconnect<C: RobotConnectionPort + ?Sized>(
-    control: &C,
-    robot: &str,
-) -> Result<(), OperationError> {
-    control.disconnect(robot).await
+    pub(crate) async fn disconnect(&self, robot: &str) -> Result<(), OperationError> {
+        self.control.disconnect(robot).await
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -431,47 +498,6 @@ impl AutoConnectOutcome {
     pub(crate) fn into_parts(self) -> (String, AutoConnectStatus) {
         (self.robot, self.status)
     }
-}
-
-/// Try one saved robot without turning an unavailable or incomplete arm into
-/// a failure for the persistence action that introduced it.
-pub(crate) async fn auto_connect_robot<R, C>(
-    store: &R,
-    control: &C,
-    robot: String,
-) -> AutoConnectOutcome
-where
-    R: RobotStore + ?Sized,
-    C: RobotConnectionPort + ?Sized,
-{
-    let specification = match store.connection_spec(&robot) {
-        Ok(specification) => specification,
-        Err(error) => {
-            return AutoConnectOutcome {
-                robot,
-                status: AutoConnectStatus::Skipped(error.to_string()),
-            };
-        }
-    };
-    let status = match control.connect(specification).await {
-        Ok(()) => AutoConnectStatus::Connected,
-        Err(error) => AutoConnectStatus::Failed(error.to_string()),
-    };
-    AutoConnectOutcome { robot, status }
-}
-
-/// Try every saved robot independently; one invalid or absent arm must not
-/// prevent other usable arms or the Studio itself from starting.
-pub(crate) async fn auto_connect<R, C>(store: &R, control: &C) -> Vec<AutoConnectOutcome>
-where
-    R: RobotStore + ?Sized,
-    C: RobotConnectionPort + ?Sized,
-{
-    let mut outcomes = Vec::new();
-    for robot in store.saved_robot_ids() {
-        outcomes.push(auto_connect_robot(store, control, robot).await);
-    }
-    outcomes
 }
 
 #[cfg(test)]
@@ -655,7 +681,10 @@ mod tests {
     async fn deletion_forgets_live_state_before_removing_the_configuration() {
         let (store, control, events) = setup();
 
-        delete(&store, &control, "arm").await.unwrap();
+        RobotActions::new(&store, &control)
+            .delete("arm")
+            .await
+            .unwrap();
 
         assert_eq!(
             *events.lock().unwrap(),
@@ -668,7 +697,10 @@ mod tests {
         let (store, mut control, events) = setup();
         control.fail_forget = true;
 
-        delete(&store, &control, "arm").await.unwrap_err();
+        RobotActions::new(&store, &control)
+            .delete("arm")
+            .await
+            .unwrap_err();
 
         assert_eq!(*events.lock().unwrap(), ["exists:arm", "forget:arm"]);
     }
@@ -678,7 +710,10 @@ mod tests {
         let (mut store, control, events) = setup();
         store.fail_delete = true;
 
-        delete(&store, &control, "arm").await.unwrap_err();
+        RobotActions::new(&store, &control)
+            .delete("arm")
+            .await
+            .unwrap_err();
 
         assert_eq!(
             *events.lock().unwrap(),
@@ -690,10 +725,8 @@ mod tests {
     fn changing_a_live_port_is_refused_before_persistence() {
         let (store, mut control, events) = setup();
         control.connected = true;
-        let error = update(
-            &store,
-            &control,
-            UpdateRobotCommand {
+        let error = RobotActions::new(&store, &control)
+            .update(UpdateRobotCommand {
                 id: "arm".to_owned(),
                 robot_type: None,
                 port: Some(SerialPortConfiguration {
@@ -701,9 +734,8 @@ mod tests {
                     baud_rate: 1_000_000,
                 }),
                 cameras: None,
-            },
-        )
-        .unwrap_err();
+            })
+            .unwrap_err();
 
         assert!(matches!(error, OperationError::Conflict(_)));
         assert!(events.lock().unwrap().is_empty());
@@ -723,16 +755,12 @@ mod tests {
         ] {
             let (store, control, events) = setup();
             assert!(matches!(
-                update(
-                    &store,
-                    &control,
-                    UpdateRobotCommand {
-                        id: "arm".to_owned(),
-                        robot_type: None,
-                        port: Some(port),
-                        cameras: None,
-                    }
-                ),
+                RobotActions::new(&store, &control).update(UpdateRobotCommand {
+                    id: "arm".to_owned(),
+                    robot_type: None,
+                    port: Some(port),
+                    cameras: None,
+                }),
                 Err(OperationError::InvalidInput(_))
             ));
             assert!(events.lock().unwrap().is_empty());
@@ -750,7 +778,7 @@ mod tests {
         store.invalid = Some("invalid".to_owned());
         control.fail_connect = Some("absent".to_owned());
 
-        let outcomes = auto_connect(&store, &control).await;
+        let outcomes = RobotActions::new(&store, &control).auto_connect().await;
 
         assert!(matches!(outcomes[0].status, AutoConnectStatus::Skipped(_)));
         assert!(matches!(outcomes[1].status, AutoConnectStatus::Failed(_)));
@@ -772,7 +800,9 @@ mod tests {
         let (mut store, control, events) = setup();
         store.invalid = Some("arm".to_owned());
 
-        let outcome = auto_connect_robot(&store, &control, "arm".to_owned()).await;
+        let outcome = RobotActions::new(&store, &control)
+            .auto_connect_robot("arm".to_owned())
+            .await;
 
         assert!(matches!(outcome.status, AutoConnectStatus::Skipped(_)));
         assert_eq!(outcome.robot, "arm");
@@ -783,8 +813,14 @@ mod tests {
     async fn connect_loads_saved_configuration_and_disconnect_targets_the_live_robot() {
         let (store, control, events) = setup();
 
-        connect(&store, &control, "arm").await.unwrap();
-        disconnect(&control, "arm").await.unwrap();
+        RobotActions::new(&store, &control)
+            .connect("arm")
+            .await
+            .unwrap();
+        RobotConnectionActions::new(&control)
+            .disconnect("arm")
+            .await
+            .unwrap();
 
         assert_eq!(
             *events.lock().unwrap(),
@@ -796,10 +832,8 @@ mod tests {
     fn update_persists_plain_changes_when_the_robot_is_disconnected() {
         let (store, control, events) = setup();
 
-        let robot = update(
-            &store,
-            &control,
-            UpdateRobotCommand {
+        let robot = RobotActions::new(&store, &control)
+            .update(UpdateRobotCommand {
                 id: "arm".to_owned(),
                 robot_type: Some("so101_leader".to_owned()),
                 port: Some(SerialPortConfiguration {
@@ -810,9 +844,8 @@ mod tests {
                     role: " wrist ".to_owned(),
                     device_id: " camera-1 ".to_owned(),
                 }]),
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
 
         assert_eq!(
             robot,
@@ -830,28 +863,30 @@ mod tests {
     fn simple_configuration_actions_delegate_without_learning_serialization_or_storage() {
         let (store, _control, events) = setup();
         assert_eq!(
-            create(
-                &store,
-                CreateRobotCommand {
+            RobotCatalogActions::new(&store)
+                .create(CreateRobotCommand {
                     id: "arm".to_owned(),
                     robot_type: None,
                     port: None,
                     baud_rate: None,
-                },
-            )
-            .unwrap(),
+                })
+                .unwrap(),
             SavedRobot {
                 id: "arm".to_owned()
             }
         );
         assert_eq!(
-            import_configuration(&store).unwrap(),
+            RobotCatalogActions::new(&store)
+                .import_configuration()
+                .unwrap(),
             SavedRobot {
                 id: "imported".to_owned()
             }
         );
         assert_eq!(
-            export_configuration(&store, "arm").unwrap(),
+            RobotCatalogActions::new(&store)
+                .export_configuration("arm")
+                .unwrap(),
             ExportedRobotDocument {
                 bytes: b"configuration:arm".to_vec()
             }
@@ -865,16 +900,14 @@ mod tests {
     #[test]
     fn creation_normalizes_identity_and_applies_the_default_baud() {
         let (store, _control, events) = setup();
-        let robot = create(
-            &store,
-            CreateRobotCommand {
+        let robot = RobotCatalogActions::new(&store)
+            .create(CreateRobotCommand {
                 id: " arm_1 ".to_owned(),
                 robot_type: None,
                 port: Some(" /dev/robot ".to_owned()),
                 baud_rate: None,
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
         assert_eq!(
             robot,
             SavedRobot {
@@ -908,7 +941,7 @@ mod tests {
         ] {
             let (store, _control, events) = setup();
             assert!(matches!(
-                create(&store, command),
+                RobotCatalogActions::new(&store).create(command),
                 Err(OperationError::InvalidInput(_))
             ));
             assert!(events.lock().unwrap().is_empty());
@@ -939,16 +972,12 @@ mod tests {
         ] {
             let (store, control, events) = setup();
             assert!(matches!(
-                update(
-                    &store,
-                    &control,
-                    UpdateRobotCommand {
-                        id: "arm".to_owned(),
-                        robot_type: None,
-                        port: None,
-                        cameras: Some(cameras),
-                    }
-                ),
+                RobotActions::new(&store, &control).update(UpdateRobotCommand {
+                    id: "arm".to_owned(),
+                    robot_type: None,
+                    port: None,
+                    cameras: Some(cameras),
+                }),
                 Err(OperationError::InvalidInput(_))
             ));
             assert!(events.lock().unwrap().is_empty());

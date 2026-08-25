@@ -85,7 +85,7 @@ pub(crate) fn WorkflowWorkspace() -> Element {
     rsx! {
         PanelWorkspace {
             panels,
-            initial_layout: default_workflow_layout(),
+            initial_layout: WorkflowWorkspaceLayout::initial(),
             layout_scope: Some(WORKFLOW_LAYOUT_SCOPE.to_owned()),
             active_panel: controller.active_panel(),
             on_layout_change: move |_layout: PanelLayout| {},
@@ -95,21 +95,25 @@ pub(crate) fn WorkflowWorkspace() -> Element {
     }
 }
 
-pub(crate) fn default_workflow_layout() -> PanelLayout {
-    let right = LayoutNode::split(
-        "workflow-right-rows",
-        SplitAxis::Vertical,
-        0.66,
-        LayoutNode::tile("workflow-canvas", [CANVAS_PANEL_ID]),
-        LayoutNode::tile("workflow-results", [RESULTS_PANEL_ID]),
-    );
-    PanelLayout::new(LayoutNode::split(
-        "workflow-columns",
-        SplitAxis::Horizontal,
-        0.30,
-        LayoutNode::tile("workflow-left", [ASSISTANT_PANEL_ID, NODE_PANEL_ID]),
-        right,
-    ))
+struct WorkflowWorkspaceLayout;
+
+impl WorkflowWorkspaceLayout {
+    fn initial() -> PanelLayout {
+        let right = LayoutNode::split(
+            "workflow-right-rows",
+            SplitAxis::Vertical,
+            0.66,
+            LayoutNode::tile("workflow-canvas", [CANVAS_PANEL_ID]),
+            LayoutNode::tile("workflow-results", [RESULTS_PANEL_ID]),
+        );
+        PanelLayout::new(LayoutNode::split(
+            "workflow-columns",
+            SplitAxis::Horizontal,
+            0.30,
+            LayoutNode::tile("workflow-left", [ASSISTANT_PANEL_ID, NODE_PANEL_ID]),
+            right,
+        ))
+    }
 }
 
 #[component]
@@ -125,7 +129,7 @@ fn WorkflowAssistant() -> Element {
     use_effect(move || {
         let accepted = accepted_draft.read().to_owned();
         if let Some(accepted) = accepted {
-            clear_accepted_draft(&mut drafts.write(), &accepted);
+            accepted.clear_from(&mut drafts.write());
             accepted_draft.set(None);
         }
     });
@@ -249,7 +253,7 @@ fn WorkflowAssistant() -> Element {
                                 option {
                                     value: "{conversation.conversation_id()}",
                                     selected: conversation.conversation_id() == state.active_conversation_id(),
-                                    "{conversation_option_label(conversation)}"
+                                    "{conversation.option_label()}"
                                 }
                             }
                         }
@@ -322,13 +326,13 @@ fn WorkflowAssistant() -> Element {
                                     }
                                 }
                                 if !message.text().is_empty() {
-                                    {render_assistant_text(message.text())}
+                                    {AssistantDocument::parse(message.text()).render()}
                                 }
                                 if !message.tools().is_empty() {
                                     details {
                                         class: "workflow-agent-tools-disclosure",
                                         open: message.phase() == WorkflowAgentMessagePhase::Failed,
-                                        summary { "{tool_trace_summary(message.tools(), message.phase())}" }
+                                        summary { "{message.tools().trace_summary(message.phase())}" }
                                         ul { class: "workflow-agent-tools", "aria-label": "Assistant execution trace",
                                         for tool in message.tools().to_owned() {
                                             li { class: match tool.phase() { WorkflowAgentToolPhase::Running => "is-running", WorkflowAgentToolPhase::Complete => "is-complete", WorkflowAgentToolPhase::Failed => "is-failed" },
@@ -473,60 +477,66 @@ fn WorkflowAssistant() -> Element {
     }
 }
 
-fn clear_accepted_draft(
-    drafts: &mut BTreeMap<AgentDraftKey, String>,
-    accepted: &AcceptedAgentDraft,
-) -> bool {
-    let key = AgentDraftKey::new(accepted.scope_id(), accepted.conversation_id());
-    if drafts.get(&key).map(String::as_str) != Some(accepted.text()) {
-        return false;
+impl AcceptedAgentDraft {
+    fn clear_from(&self, drafts: &mut BTreeMap<AgentDraftKey, String>) -> bool {
+        let key = AgentDraftKey::new(self.scope_id(), self.conversation_id());
+        if drafts.get(&key).map(String::as_str) != Some(self.text()) {
+            return false;
+        }
+        drafts.remove(&key);
+        true
     }
-    drafts.remove(&key);
-    true
 }
 
-fn conversation_option_label(conversation: &WorkflowAgentConversationSummary) -> String {
-    if conversation.message_count() == 0 {
-        return conversation.title().to_owned();
-    }
-    let noun = if conversation.message_count() == 1 {
-        "message"
-    } else {
-        "messages"
-    };
-    format!(
-        "{} · {} {noun}",
-        conversation.title(),
-        conversation.message_count()
-    )
+trait ConversationPresentation {
+    fn option_label(&self) -> String;
 }
 
-fn tool_trace_summary(
-    tools: &[WorkflowAgentToolSummary],
-    message_phase: WorkflowAgentMessagePhase,
-) -> String {
-    if let Some(tool) = tools
-        .iter()
-        .rev()
-        .find(|tool| tool.phase() == WorkflowAgentToolPhase::Running)
-    {
-        return format!("Working · {}", tool.summary());
-    }
-    let failed = tools
-        .iter()
-        .filter(|tool| tool.phase() == WorkflowAgentToolPhase::Failed)
-        .count();
-    if failed > 0 {
-        let label = match message_phase {
-            WorkflowAgentMessagePhase::Complete => "recovered",
-            WorkflowAgentMessagePhase::Streaming => "recovering",
-            WorkflowAgentMessagePhase::Failed | WorkflowAgentMessagePhase::Cancelled => "failed",
+impl ConversationPresentation for WorkflowAgentConversationSummary {
+    fn option_label(&self) -> String {
+        if self.message_count() == 0 {
+            return self.title().to_owned();
+        }
+        let noun = if self.message_count() == 1 {
+            "message"
+        } else {
+            "messages"
         };
-        let noun = if tools.len() == 1 { "step" } else { "steps" };
-        return format!("{} {noun} · {failed} {label}", tools.len());
+        format!("{} · {} {noun}", self.title(), self.message_count())
     }
-    let noun = if tools.len() == 1 { "step" } else { "steps" };
-    format!("{} {noun} completed", tools.len())
+}
+
+trait ToolTracePresentation {
+    fn trace_summary(&self, message_phase: WorkflowAgentMessagePhase) -> String;
+}
+
+impl ToolTracePresentation for [WorkflowAgentToolSummary] {
+    fn trace_summary(&self, message_phase: WorkflowAgentMessagePhase) -> String {
+        if let Some(tool) = self
+            .iter()
+            .rev()
+            .find(|tool| tool.phase() == WorkflowAgentToolPhase::Running)
+        {
+            return format!("Working · {}", tool.summary());
+        }
+        let failed = self
+            .iter()
+            .filter(|tool| tool.phase() == WorkflowAgentToolPhase::Failed)
+            .count();
+        if failed > 0 {
+            let label = match message_phase {
+                WorkflowAgentMessagePhase::Complete => "recovered",
+                WorkflowAgentMessagePhase::Streaming => "recovering",
+                WorkflowAgentMessagePhase::Failed | WorkflowAgentMessagePhase::Cancelled => {
+                    "failed"
+                }
+            };
+            let noun = if self.len() == 1 { "step" } else { "steps" };
+            return format!("{} {noun} · {failed} {label}", self.len());
+        }
+        let noun = if self.len() == 1 { "step" } else { "steps" };
+        format!("{} {noun} completed", self.len())
+    }
 }
 
 struct AssistantAvailability {
@@ -582,180 +592,193 @@ impl AssistantComposerState {
     }
 }
 
-fn render_assistant_text(text: &str) -> Element {
-    let blocks = parse_assistant_blocks(text);
-    rsx! {
-        div { class: "workflow-agent-message-body",
-            for (index, block) in blocks.into_iter().enumerate() {
-                {render_assistant_block(index, block)}
-            }
-        }
-    }
-}
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AssistantDocument(Vec<AssistantBlock>);
 
-fn render_assistant_block(index: usize, block: AssistantBlock) -> Element {
-    match block {
-        AssistantBlock::Paragraph(inlines) => rsx! {
-            p { key: "paragraph-{index}", {render_assistant_inlines(inlines)} }
-        },
-        AssistantBlock::List(items) => rsx! {
-            ul { key: "list-{index}",
-                for (item_index, item) in items.into_iter().enumerate() {
-                    li { key: "item-{item_index}", {render_assistant_inlines(item)} }
+impl AssistantDocument {
+    fn parse(text: &str) -> Self {
+        let lines = text.lines().collect::<Vec<_>>();
+        let mut document = Self(Vec::new());
+        let mut paragraph = Vec::new();
+        let mut index = 0;
+        while index < lines.len() {
+            let line = lines[index];
+            if let Some(language) = line.trim_start().strip_prefix("```") {
+                document.flush_paragraph(&mut paragraph);
+                let language = language.bounded_markdown_language();
+                index += 1;
+                let mut code = Vec::new();
+                while index < lines.len() && !lines[index].trim_start().starts_with("```") {
+                    code.push(lines[index]);
+                    index += 1;
+                }
+                if index < lines.len() {
+                    index += 1;
+                }
+                document.0.push(AssistantBlock::Code {
+                    language,
+                    text: code.join("\n"),
+                });
+                continue;
+            }
+            if let Some(item) = line.assistant_list_item() {
+                document.flush_paragraph(&mut paragraph);
+                let mut items = vec![AssistantInline::parse(item)];
+                index += 1;
+                while index < lines.len() {
+                    let Some(item) = lines[index].assistant_list_item() else {
+                        break;
+                    };
+                    items.push(AssistantInline::parse(item));
+                    index += 1;
+                }
+                document.0.push(AssistantBlock::List(items));
+                continue;
+            }
+            if line.trim().is_empty() {
+                document.flush_paragraph(&mut paragraph);
+            } else {
+                paragraph.push(line.trim());
+            }
+            index += 1;
+        }
+        document.flush_paragraph(&mut paragraph);
+        document
+    }
+
+    fn flush_paragraph(&mut self, lines: &mut Vec<&str>) {
+        if lines.is_empty() {
+            return;
+        }
+        self.0
+            .push(AssistantBlock::Paragraph(AssistantInline::parse(
+                &lines.join(" "),
+            )));
+        lines.clear();
+    }
+
+    fn render(self) -> Element {
+        rsx! {
+            div { class: "workflow-agent-message-body",
+                for (index, block) in self.0.into_iter().enumerate() {
+                    {block.render(index)}
                 }
             }
-        },
-        AssistantBlock::Code { language, text } => rsx! {
-            pre { key: "code-{index}",
-                if let Some(language) = language {
-                    span { class: "workflow-agent-code-language", "{language}" }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn into_blocks(self) -> Vec<AssistantBlock> {
+        self.0
+    }
+}
+
+impl AssistantBlock {
+    fn render(self, index: usize) -> Element {
+        match self {
+            Self::Paragraph(inlines) => rsx! {
+                p { key: "paragraph-{index}", {AssistantInline::render_all(inlines)} }
+            },
+            Self::List(items) => rsx! {
+                ul { key: "list-{index}",
+                    for (item_index, item) in items.into_iter().enumerate() {
+                        li { key: "item-{item_index}", {AssistantInline::render_all(item)} }
+                    }
                 }
-                code { "{text}" }
-            }
-        },
-    }
-}
-
-fn render_assistant_inlines(inlines: Vec<AssistantInline>) -> Element {
-    rsx! {
-        for (index, inline) in inlines.into_iter().enumerate() {
-            match inline {
-                AssistantInline::Text(text) => rsx! { span { key: "text-{index}", "{text}" } },
-                AssistantInline::Strong(text) => rsx! { strong { key: "strong-{index}", "{text}" } },
-                AssistantInline::Code(text) => rsx! { code { key: "code-{index}", "{text}" } },
-            }
+            },
+            Self::Code { language, text } => rsx! {
+                pre { key: "code-{index}",
+                    if let Some(language) = language {
+                        span { class: "workflow-agent-code-language", "{language}" }
+                    }
+                    code { "{text}" }
+                }
+            },
         }
     }
 }
 
-fn parse_assistant_blocks(text: &str) -> Vec<AssistantBlock> {
-    let lines = text.lines().collect::<Vec<_>>();
-    let mut blocks = Vec::new();
-    let mut paragraph = Vec::new();
-    let mut index = 0;
-    while index < lines.len() {
-        let line = lines[index];
-        if let Some(language) = line.trim_start().strip_prefix("```") {
-            flush_assistant_paragraph(&mut blocks, &mut paragraph);
-            let language = bounded_markdown_language(language);
-            index += 1;
-            let mut code = Vec::new();
-            while index < lines.len() && !lines[index].trim_start().starts_with("```") {
-                code.push(lines[index]);
-                index += 1;
+impl AssistantInline {
+    fn parse(source: &str) -> Vec<Self> {
+        let mut output = Vec::new();
+        let mut remaining = source;
+        while !remaining.is_empty() {
+            if let Some(strong) = remaining.strip_prefix("**")
+                && let Some(end) = strong.find("**")
+            {
+                Self::push_merged(&mut output, Self::Strong(strong[..end].to_owned()));
+                remaining = &strong[end + 2..];
+                continue;
             }
-            if index < lines.len() {
-                index += 1;
+            if let Some(code) = remaining.strip_prefix('`')
+                && let Some(end) = code.find('`')
+            {
+                Self::push_merged(&mut output, Self::Code(code[..end].to_owned()));
+                remaining = &code[end + 1..];
+                continue;
             }
-            blocks.push(AssistantBlock::Code {
-                language,
-                text: code.join("\n"),
-            });
-            continue;
-        }
-        if let Some(item) = assistant_list_item(line) {
-            flush_assistant_paragraph(&mut blocks, &mut paragraph);
-            let mut items = vec![parse_assistant_inlines(item)];
-            index += 1;
-            while index < lines.len() {
-                let Some(item) = assistant_list_item(lines[index]) else {
-                    break;
-                };
-                items.push(parse_assistant_inlines(item));
-                index += 1;
+            let next = [remaining.find("**"), remaining.find('`')]
+                .into_iter()
+                .flatten()
+                .filter(|index| *index > 0)
+                .min()
+                .unwrap_or(remaining.len());
+            if next == remaining.len() {
+                Self::push_merged(&mut output, Self::Text(remaining.to_owned()));
+                break;
             }
-            blocks.push(AssistantBlock::List(items));
-            continue;
+            Self::push_merged(&mut output, Self::Text(remaining[..next].to_owned()));
+            remaining = &remaining[next..];
+            if remaining.starts_with("**") && !remaining[2..].contains("**") {
+                Self::push_merged(&mut output, Self::Text("**".to_owned()));
+                remaining = &remaining[2..];
+            } else if remaining.starts_with('`') && !remaining[1..].contains('`') {
+                Self::push_merged(&mut output, Self::Text("`".to_owned()));
+                remaining = &remaining[1..];
+            }
         }
-        if line.trim().is_empty() {
-            flush_assistant_paragraph(&mut blocks, &mut paragraph);
-        } else {
-            paragraph.push(line.trim());
-        }
-        index += 1;
+        output
     }
-    flush_assistant_paragraph(&mut blocks, &mut paragraph);
-    blocks
-}
 
-fn flush_assistant_paragraph(blocks: &mut Vec<AssistantBlock>, lines: &mut Vec<&str>) {
-    if lines.is_empty() {
-        return;
-    }
-    blocks.push(AssistantBlock::Paragraph(parse_assistant_inlines(
-        &lines.join(" "),
-    )));
-    lines.clear();
-}
-
-fn assistant_list_item(line: &str) -> Option<&str> {
-    let line = line.trim_start();
-    line.strip_prefix("- ").or_else(|| line.strip_prefix("* "))
-}
-
-fn bounded_markdown_language(language: &str) -> Option<String> {
-    let language = language
-        .trim()
-        .chars()
-        .take(24)
-        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-        .collect::<String>();
-    (!language.is_empty()).then_some(language)
-}
-
-fn parse_assistant_inlines(source: &str) -> Vec<AssistantInline> {
-    let mut output = Vec::new();
-    let mut remaining = source;
-    while !remaining.is_empty() {
-        if let Some(strong) = remaining.strip_prefix("**")
-            && let Some(end) = strong.find("**")
-        {
-            push_assistant_inline(
-                &mut output,
-                AssistantInline::Strong(strong[..end].to_owned()),
-            );
-            remaining = &strong[end + 2..];
-            continue;
-        }
-        if let Some(code) = remaining.strip_prefix('`')
-            && let Some(end) = code.find('`')
-        {
-            push_assistant_inline(&mut output, AssistantInline::Code(code[..end].to_owned()));
-            remaining = &code[end + 1..];
-            continue;
-        }
-        let next = [remaining.find("**"), remaining.find('`')]
-            .into_iter()
-            .flatten()
-            .filter(|index| *index > 0)
-            .min()
-            .unwrap_or(remaining.len());
-        if next == remaining.len() {
-            push_assistant_inline(&mut output, AssistantInline::Text(remaining.to_owned()));
-            break;
-        }
-        push_assistant_inline(
-            &mut output,
-            AssistantInline::Text(remaining[..next].to_owned()),
-        );
-        remaining = &remaining[next..];
-        if remaining.starts_with("**") && !remaining[2..].contains("**") {
-            push_assistant_inline(&mut output, AssistantInline::Text("**".to_owned()));
-            remaining = &remaining[2..];
-        } else if remaining.starts_with('`') && !remaining[1..].contains('`') {
-            push_assistant_inline(&mut output, AssistantInline::Text("`".to_owned()));
-            remaining = &remaining[1..];
+    fn push_merged(output: &mut Vec<Self>, inline: Self) {
+        match (output.last_mut(), inline) {
+            (Some(Self::Text(existing)), Self::Text(next)) => existing.push_str(&next),
+            (_, inline) => output.push(inline),
         }
     }
-    output
+
+    fn render_all(inlines: Vec<Self>) -> Element {
+        rsx! {
+            for (index, inline) in inlines.into_iter().enumerate() {
+                match inline {
+                    Self::Text(text) => rsx! { span { key: "text-{index}", "{text}" } },
+                    Self::Strong(text) => rsx! { strong { key: "strong-{index}", "{text}" } },
+                    Self::Code(text) => rsx! { code { key: "code-{index}", "{text}" } },
+                }
+            }
+        }
+    }
 }
 
-fn push_assistant_inline(output: &mut Vec<AssistantInline>, inline: AssistantInline) {
-    match (output.last_mut(), inline) {
-        (Some(AssistantInline::Text(existing)), AssistantInline::Text(next)) => {
-            existing.push_str(&next);
-        }
-        (_, inline) => output.push(inline),
+trait AssistantMarkdownLine {
+    fn assistant_list_item(&self) -> Option<&str>;
+    fn bounded_markdown_language(&self) -> Option<String>;
+}
+
+impl AssistantMarkdownLine for str {
+    fn assistant_list_item(&self) -> Option<&str> {
+        let line = self.trim_start();
+        line.strip_prefix("- ").or_else(|| line.strip_prefix("* "))
+    }
+
+    fn bounded_markdown_language(&self) -> Option<String> {
+        let language = self
+            .trim()
+            .chars()
+            .take(24)
+            .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+            .collect::<String>();
+        (!language.is_empty()).then_some(language)
     }
 }
 
@@ -1142,7 +1165,7 @@ fn WorkflowCanvas() -> Element {
     let run_label = if complete_with_warnings {
         "Complete with warnings"
     } else {
-        run_phase_label(snapshot.phase())
+        snapshot.phase().run_label()
     };
 
     use_effect(move || {
@@ -1171,7 +1194,7 @@ fn WorkflowCanvas() -> Element {
             // terminal nodes off-screen.
             gloo_timers::future::TimeoutFuture::new(80).await;
             if *canvas_resize_revision.peek() == revision {
-                fit_workflow_view(flow, 160);
+                flow.fit_workflow_view(160);
             }
         });
     });
@@ -1186,7 +1209,7 @@ fn WorkflowCanvas() -> Element {
             // Give a new card one rendered frame so dioxus-flow includes its
             // measured bounds in layered layout and the accompanying fit.
             gloo_timers::future::TimeoutFuture::new(48).await;
-            flow.auto_layout(&workflow_layout_options());
+            flow.auto_layout(&WorkflowCanvasLayout::options());
         });
     });
 
@@ -1208,7 +1231,7 @@ fn WorkflowCanvas() -> Element {
                 // canvas rather than its former hidden bounds.
                 gloo_timers::future::TimeoutFuture::new(48).await;
                 if needs_layout {
-                    flow.auto_layout(&workflow_layout_options());
+                    flow.auto_layout(&WorkflowCanvasLayout::options());
                 } else {
                     flow.fit_view(300);
                 }
@@ -1221,7 +1244,7 @@ fn WorkflowCanvas() -> Element {
             header { class: "workflow-canvas-toolbar",
                 div {
                     strong { class: if dirty { "workflow-edit-badge is-modified" } else { "workflow-edit-badge" }, "{edit_label}" }
-                    strong { class: run_badge_class(snapshot.phase(), complete_with_warnings), "{run_label}" }
+                    strong { class: snapshot.phase().badge_class(complete_with_warnings), "{run_label}" }
                     span { "{spec.nodes().len()} nodes · {spec.edges().len()} connections" }
                 }
                 if !spec.nodes().is_empty() {
@@ -1250,7 +1273,7 @@ fn WorkflowCanvas() -> Element {
                     class: "workflow-fit-action",
                     disabled: empty,
                     title: if empty { "The workflow canvas is empty" } else { "Fit the workflow graph in the canvas" },
-                    onclick: move |_| fit_workflow_view(flow, 300),
+                    onclick: move |_| flow.fit_workflow_view(300),
                     FitViewIcon {}
                     "Fit"
                 }
@@ -1353,55 +1376,49 @@ fn WorkflowCanvas() -> Element {
     }
 }
 
-fn workflow_layout_options() -> LayoutOptions {
-    LayoutOptions::default()
-        .direction(LayoutDirection::LeftToRight)
-        // Smooth-step edges reserve a 20 px stub at both ends. Keep the rank
-        // gap safely above 40 px so those stubs never overlap and detour into
-        // the visibly twisted paths seen in the prototype.
-        .gaps(32.0, 56.0)
-}
+struct WorkflowCanvasLayout;
 
-fn fit_workflow_view(flow: FlowHandle<WorkflowNodeData>, duration_ms: u64) {
-    flow.fit_view(duration_ms);
-    spawn(async move {
-        gloo_timers::future::TimeoutFuture::new(duration_ms.saturating_add(16) as u32).await;
-        let Some(viewport) = flow.viewport() else {
-            return;
-        };
-        if viewport.zoom >= WORKFLOW_MIN_ZOOM {
-            return;
-        }
-        let Some(core) = flow.core() else {
-            return;
-        };
-        let rect = *core.container.peek();
-        let center = Point::new(rect.width / 2.0, rect.height / 2.0);
-        flow.set_viewport(
-            viewport.zoom_about(
-                WORKFLOW_MIN_ZOOM,
-                center,
-                WORKFLOW_MIN_ZOOM,
-                WORKFLOW_MAX_ZOOM,
-            ),
-            0,
-        );
-    });
-}
-
-fn run_badge_class(phase: WorkflowRunPhase, complete_with_warnings: bool) -> &'static str {
-    if complete_with_warnings {
-        return "workflow-run-badge is-warning";
+impl WorkflowCanvasLayout {
+    fn options() -> LayoutOptions {
+        LayoutOptions::default()
+            .direction(LayoutDirection::LeftToRight)
+            // Smooth-step edges reserve a 20 px stub at both ends. Keep the rank
+            // gap safely above 40 px so those stubs never overlap and detour into
+            // the visibly twisted paths seen in the prototype.
+            .gaps(32.0, 56.0)
     }
-    match phase {
-        WorkflowRunPhase::Validating | WorkflowRunPhase::Running | WorkflowRunPhase::Cancelling => {
-            "workflow-run-badge is-active"
-        }
-        WorkflowRunPhase::Completed => "workflow-run-badge is-complete",
-        WorkflowRunPhase::Failed => "workflow-run-badge is-failed",
-        WorkflowRunPhase::Idle | WorkflowRunPhase::Cancelled | WorkflowRunPhase::Interrupted => {
-            "workflow-run-badge"
-        }
+}
+
+trait WorkflowFlowPresentation {
+    fn fit_workflow_view(self, duration_ms: u64);
+}
+
+impl WorkflowFlowPresentation for FlowHandle<WorkflowNodeData> {
+    fn fit_workflow_view(self, duration_ms: u64) {
+        self.fit_view(duration_ms);
+        spawn(async move {
+            gloo_timers::future::TimeoutFuture::new(duration_ms.saturating_add(16) as u32).await;
+            let Some(viewport) = self.viewport() else {
+                return;
+            };
+            if viewport.zoom >= WORKFLOW_MIN_ZOOM {
+                return;
+            }
+            let Some(core) = self.core() else {
+                return;
+            };
+            let rect = *core.container.peek();
+            let center = Point::new(rect.width / 2.0, rect.height / 2.0);
+            self.set_viewport(
+                viewport.zoom_about(
+                    WORKFLOW_MIN_ZOOM,
+                    center,
+                    WORKFLOW_MIN_ZOOM,
+                    WORKFLOW_MAX_ZOOM,
+                ),
+                0,
+            );
+        });
     }
 }
 
@@ -1535,16 +1552,14 @@ fn WorkflowResults() -> Element {
     } else {
         None
     };
-    let (empty_title, empty_detail) = workflow_empty_result_copy(
-        snapshot.phase(),
-        controller.validation().valid(),
-        empty_workflow,
-    );
+    let (empty_title, empty_detail) = snapshot
+        .phase()
+        .empty_result_copy(controller.validation().valid(), empty_workflow);
 
     rsx! {
         section { class: "workflow-results", "aria-label": "Workflow results",
             header { class: "workflow-results-meta",
-                span { "{run_phase_label(snapshot.phase())}" }
+                span { "{snapshot.phase().run_label()}" }
                 if let Some(result) = &snapshot.result() {
                     span { class: "font-mono tabular-nums", "{result.rows().len()} rows · {result.elapsed_ms()} ms" }
                     if result.truncated() { span { class: "chip chip-caution", "Truncated" } }
@@ -1562,7 +1577,7 @@ fn WorkflowResults() -> Element {
             if snapshot.result_stale() {
                 div { class: "workflow-results-stale", role: "status",
                     strong { "Previous run" }
-                    span { "{stale_result_copy(snapshot.phase())}" }
+                    span { "{snapshot.phase().stale_result_copy()}" }
                 }
             }
             if snapshot.result().is_some() && snapshot.error().is_some() {
@@ -1591,76 +1606,105 @@ fn WorkflowResults() -> Element {
     }
 }
 
-fn workflow_empty_result_copy(
-    phase: WorkflowRunPhase,
-    configured: bool,
-    empty_workflow: bool,
-) -> (&'static str, &'static str) {
-    if empty_workflow {
-        return (
-            "No workflow yet",
-            "Ask the Assistant to build a workflow. Results will appear here after it runs.",
-        );
+trait WorkflowRunPresentation {
+    fn badge_class(self, complete_with_warnings: bool) -> &'static str;
+    fn empty_result_copy(
+        self,
+        configured: bool,
+        empty_workflow: bool,
+    ) -> (&'static str, &'static str);
+    fn stale_result_copy(self) -> &'static str;
+    fn run_label(self) -> &'static str;
+}
+
+impl WorkflowRunPresentation for WorkflowRunPhase {
+    fn badge_class(self, complete_with_warnings: bool) -> &'static str {
+        if complete_with_warnings {
+            return "workflow-run-badge is-warning";
+        }
+        match self {
+            WorkflowRunPhase::Validating
+            | WorkflowRunPhase::Running
+            | WorkflowRunPhase::Cancelling => "workflow-run-badge is-active",
+            WorkflowRunPhase::Completed => "workflow-run-badge is-complete",
+            WorkflowRunPhase::Failed => "workflow-run-badge is-failed",
+            WorkflowRunPhase::Idle
+            | WorkflowRunPhase::Cancelled
+            | WorkflowRunPhase::Interrupted => "workflow-run-badge",
+        }
     }
-    match phase {
-        WorkflowRunPhase::Idle if configured => (
-            "Ready for a result",
-            "Run the saved graph from the canvas to produce authoritative rows.",
-        ),
-        WorkflowRunPhase::Idle => (
-            "Configure the workflow",
-            "Choose qualified Spiral relations and fix graph validation before running.",
-        ),
-        WorkflowRunPhase::Cancelled => (
-            "Run cancelled",
-            "No terminal result was published. Uncommitted feature work was discarded; any cache publication that completed before cancellation remains authoritative.",
-        ),
-        WorkflowRunPhase::Interrupted => (
-            "Run interrupted",
-            "Studio recovered an unfinished run without pretending it completed. The saved graph is unchanged.",
-        ),
-        WorkflowRunPhase::Failed => (
-            "Run failed",
-            "Review the affected node, then run the unchanged saved graph again.",
-        ),
-        WorkflowRunPhase::Completed => (
-            "No terminal payload",
-            "The run completed without publishing a Result payload.",
-        ),
-        WorkflowRunPhase::Validating | WorkflowRunPhase::Running | WorkflowRunPhase::Cancelling => {
-            (
+
+    fn empty_result_copy(
+        self,
+        configured: bool,
+        empty_workflow: bool,
+    ) -> (&'static str, &'static str) {
+        if empty_workflow {
+            return (
+                "No workflow yet",
+                "Ask the Assistant to build a workflow. Results will appear here after it runs.",
+            );
+        }
+        match self {
+            WorkflowRunPhase::Idle if configured => (
+                "Ready for a result",
+                "Run the saved graph from the canvas to produce authoritative rows.",
+            ),
+            WorkflowRunPhase::Idle => (
+                "Configure the workflow",
+                "Choose qualified Spiral relations and fix graph validation before running.",
+            ),
+            WorkflowRunPhase::Cancelled => (
+                "Run cancelled",
+                "No terminal result was published. Uncommitted feature work was discarded; any cache publication that completed before cancellation remains authoritative.",
+            ),
+            WorkflowRunPhase::Interrupted => (
+                "Run interrupted",
+                "Studio recovered an unfinished run without pretending it completed. The saved graph is unchanged.",
+            ),
+            WorkflowRunPhase::Failed => (
+                "Run failed",
+                "Review the affected node, then run the unchanged saved graph again.",
+            ),
+            WorkflowRunPhase::Completed => (
+                "No terminal payload",
+                "The run completed without publishing a Result payload.",
+            ),
+            WorkflowRunPhase::Validating
+            | WorkflowRunPhase::Running
+            | WorkflowRunPhase::Cancelling => (
                 "Workflow in progress",
                 "Results will appear when the backend publishes the terminal payload.",
-            )
+            ),
         }
     }
-}
 
-fn stale_result_copy(phase: WorkflowRunPhase) -> &'static str {
-    match phase {
-        WorkflowRunPhase::Cancelled => {
-            "The latest run was cancelled. These rows remain evidence from the previous completed run."
+    fn stale_result_copy(self) -> &'static str {
+        match self {
+            WorkflowRunPhase::Cancelled => {
+                "The latest run was cancelled. These rows remain evidence from the previous completed run."
+            }
+            WorkflowRunPhase::Interrupted => {
+                "The latest run was interrupted. These rows remain evidence from the previous completed run."
+            }
+            WorkflowRunPhase::Failed => {
+                "The latest run failed. These rows remain evidence from the previous completed run."
+            }
+            _ => "These rows remain stale until the current saved graph completes.",
         }
-        WorkflowRunPhase::Interrupted => {
-            "The latest run was interrupted. These rows remain evidence from the previous completed run."
-        }
-        WorkflowRunPhase::Failed => {
-            "The latest run failed. These rows remain evidence from the previous completed run."
-        }
-        _ => "These rows remain stale until the current saved graph completes.",
     }
-}
 
-fn run_phase_label(phase: WorkflowRunPhase) -> &'static str {
-    match phase {
-        WorkflowRunPhase::Idle => "Saved",
-        WorkflowRunPhase::Validating => "Validating",
-        WorkflowRunPhase::Running => "Running",
-        WorkflowRunPhase::Cancelling => "Cancelling",
-        WorkflowRunPhase::Completed => "Complete",
-        WorkflowRunPhase::Failed => "Failed",
-        WorkflowRunPhase::Cancelled => "Cancelled",
-        WorkflowRunPhase::Interrupted => "Interrupted",
+    fn run_label(self) -> &'static str {
+        match self {
+            WorkflowRunPhase::Idle => "Saved",
+            WorkflowRunPhase::Validating => "Validating",
+            WorkflowRunPhase::Running => "Running",
+            WorkflowRunPhase::Cancelling => "Cancelling",
+            WorkflowRunPhase::Completed => "Complete",
+            WorkflowRunPhase::Failed => "Failed",
+            WorkflowRunPhase::Cancelled => "Cancelled",
+            WorkflowRunPhase::Interrupted => "Interrupted",
+        }
     }
 }
 
@@ -1683,7 +1727,7 @@ mod tests {
 
     #[test]
     fn workflow_registers_the_approved_four_panel_composition() {
-        let layout = default_workflow_layout();
+        let layout = WorkflowWorkspaceLayout::initial();
         let mut tiles = Vec::new();
         collect_tiles(&layout.root, &mut tiles);
         assert_eq!(
@@ -1741,9 +1785,10 @@ mod tests {
     #[test]
     fn assistant_parser_handles_safe_structure_and_incomplete_streams() {
         assert_eq!(
-            parse_assistant_blocks(
+            AssistantDocument::parse(
                 "Saved **Holding evidence** with `score_cube`.\n\n- Camera frames\n* Joint state\n\n```sql\nSELECT * FROM scores\n```"
-            ),
+            )
+            .into_blocks(),
             vec![
                 AssistantBlock::Paragraph(vec![
                     AssistantInline::Text("Saved ".to_owned()),
@@ -1763,13 +1808,13 @@ mod tests {
             ]
         );
         assert_eq!(
-            parse_assistant_blocks("Streaming **unfinished"),
+            AssistantDocument::parse("Streaming **unfinished").into_blocks(),
             vec![AssistantBlock::Paragraph(vec![AssistantInline::Text(
                 "Streaming **unfinished".to_owned()
             )])]
         );
         assert_eq!(
-            parse_assistant_blocks("```sql\nSELECT 1"),
+            AssistantDocument::parse("```sql\nSELECT 1").into_blocks(),
             vec![AssistantBlock::Code {
                 language: Some("sql".to_owned()),
                 text: "SELECT 1".to_owned(),
@@ -1781,26 +1826,23 @@ mod tests {
     fn conversation_and_tool_summaries_stay_specific_without_exposing_provider_plumbing() {
         let conversation =
             WorkflowAgentConversationSummary::new("", "Gripper evidence", 0).with_activity(0, 4);
-        assert_eq!(
-            conversation_option_label(&conversation),
-            "Gripper evidence · 4 messages"
-        );
-        let tools = vec![WorkflowAgentToolSummary::new(
+        assert_eq!(conversation.option_label(), "Gripper evidence · 4 messages");
+        let tools = [WorkflowAgentToolSummary::new(
             "call-1",
             "get_relations",
             "Inspecting camera relations",
         )];
         assert_eq!(
-            tool_trace_summary(&tools, WorkflowAgentMessagePhase::Streaming),
+            tools.trace_summary(WorkflowAgentMessagePhase::Streaming),
             "Working · Inspecting camera relations"
         );
         let mut recovered_tool =
             WorkflowAgentToolSummary::new("call-2", "run_query", "Couldn’t inspect query results");
         recovered_tool.set_phase(WorkflowAgentToolPhase::Failed);
         recovered_tool.set_error(Some("Unsupported extension".to_owned()));
-        let recovered = vec![recovered_tool];
+        let recovered = [recovered_tool];
         assert_eq!(
-            tool_trace_summary(&recovered, WorkflowAgentMessagePhase::Complete),
+            recovered.trace_summary(WorkflowAgentMessagePhase::Complete),
             "1 step · 1 recovered"
         );
         let production = include_str!("workspace.rs")
@@ -1850,10 +1892,10 @@ mod tests {
                 .unwrap(),
             "first request"
         );
-        assert!(!clear_accepted_draft(
-            &mut drafts,
-            &AcceptedAgentDraft::new("project-a", "conversation-a", "stale request")
-        ));
+        assert!(
+            !AcceptedAgentDraft::new("project-a", "conversation-a", "stale request")
+                .clear_from(&mut drafts)
+        );
         assert_eq!(drafts.len(), 3);
         assert_eq!(
             drafts
@@ -1862,10 +1904,10 @@ mod tests {
             "other project draft",
             "a rejected/stale project-a acceptance cannot clear project-b text"
         );
-        assert!(clear_accepted_draft(
-            &mut drafts,
-            &AcceptedAgentDraft::new("project-a", "conversation-a", "first request")
-        ));
+        assert!(
+            AcceptedAgentDraft::new("project-a", "conversation-a", "first request")
+                .clear_from(&mut drafts)
+        );
         assert_eq!(
             drafts
                 .get(&AgentDraftKey::new("project-b", "conversation-a"))
@@ -1900,19 +1942,19 @@ mod tests {
     #[test]
     fn run_badges_never_color_cancelled_or_interrupted_as_success() {
         assert_eq!(
-            run_badge_class(WorkflowRunPhase::Cancelled, false),
+            WorkflowRunPhase::Cancelled.badge_class(false),
             "workflow-run-badge"
         );
         assert_eq!(
-            run_badge_class(WorkflowRunPhase::Interrupted, false),
+            WorkflowRunPhase::Interrupted.badge_class(false),
             "workflow-run-badge"
         );
         assert_eq!(
-            run_badge_class(WorkflowRunPhase::Completed, false),
+            WorkflowRunPhase::Completed.badge_class(false),
             "workflow-run-badge is-complete"
         );
         assert_eq!(
-            run_badge_class(WorkflowRunPhase::Completed, true),
+            WorkflowRunPhase::Completed.badge_class(true),
             "workflow-run-badge is-warning"
         );
     }

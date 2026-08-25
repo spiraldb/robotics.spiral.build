@@ -164,20 +164,24 @@ impl<P: CalibrationHistoryPort + ?Sized> Drop for CalibrationHistoryReservation<
     }
 }
 
-/// Begin a hand-guided calibration sweep.
-pub(crate) async fn start<C>(control: &C, robot: &str) -> Result<(), OperationError>
-where
-    C: CalibrationControlPort + ?Sized,
-{
-    control.start_calibration(robot).await
+pub(crate) struct CalibrationControlActions<'a, C: CalibrationControlPort + ?Sized> {
+    control: &'a C,
 }
 
-/// Abandon a calibration sweep and return the robot to normal operation.
-pub(crate) async fn cancel<C>(control: &C, robot: &str) -> Result<(), OperationError>
-where
-    C: CalibrationControlPort + ?Sized,
-{
-    control.cancel_calibration(robot).await
+impl<'a, C: CalibrationControlPort + ?Sized> CalibrationControlActions<'a, C> {
+    pub(crate) const fn new(control: &'a C) -> Self {
+        Self { control }
+    }
+
+    /// Begin a hand-guided calibration sweep.
+    pub(crate) async fn start(&self, robot: &str) -> Result<(), OperationError> {
+        self.control.start_calibration(robot).await
+    }
+
+    /// Abandon a calibration sweep and return the robot to normal operation.
+    pub(crate) async fn cancel(&self, robot: &str) -> Result<(), OperationError> {
+        self.control.cancel_calibration(robot).await
+    }
 }
 
 /// A calibration was durably saved. Any warning concerns only its live refresh.
@@ -193,101 +197,129 @@ impl FinishCalibrationOutput {
     }
 }
 
-/// Finish a sweep, validate its domain result, persist it, then refresh live control.
-///
-/// The ordering is part of the product contract: a read/build/write failure
-/// keeps the sweep alive so the operator does not lose collected motion. Once
-/// persistence succeeds, later adapter failures become warnings because the
-/// next connection can load the already-correct SpiralDB row.
-pub(crate) async fn finish<R, C>(
-    store: &R,
-    control: &C,
-    robot: &str,
-) -> Result<FinishCalibrationOutput, OperationError>
+pub(crate) struct CalibrationActions<
+    'a,
+    R: RobotCalibrationStore + ?Sized,
+    C: CalibrationControlPort + ?Sized,
+> {
+    store: &'a R,
+    control: &'a C,
+}
+
+impl<'a, R, C> CalibrationActions<'a, R, C>
 where
     R: RobotCalibrationStore + ?Sized,
     C: CalibrationControlPort + ?Sized,
 {
-    let motors = store.motor_specs(robot)?;
-    let input = control.calibration_input(robot).await?;
-    let calibration = input
-        .build(&motors)
-        .map_err(|error| OperationError::InvalidInput(error.to_string()))?;
-    store.save_calibration(robot, CalibrationUpdate::new(&motors, &calibration))?;
+    pub(crate) const fn new(store: &'a R, control: &'a C) -> Self {
+        Self { store, control }
+    }
 
-    let cancel_warning = control
-        .cancel_calibration(robot)
-        .await
-        .err()
-        .map(|error| format!("could not close the completed sweep: {error}"));
-    let apply_warning = control
-        .apply_calibration(robot, calibration.clone())
-        .await
-        .err()
-        .map(|error| format!("could not refresh the live robot: {error}"));
-    let live_warning = match (cancel_warning, apply_warning) {
-        (None, None) => None,
-        (Some(warning), None) | (None, Some(warning)) => Some(warning),
-        (Some(first), Some(second)) => Some(format!("{first}; {second}")),
-    };
+    /// Finish a sweep, validate its domain result, persist it, then refresh live control.
+    ///
+    /// The ordering is part of the product contract: a read/build/write failure
+    /// keeps the sweep alive so the operator does not lose collected motion. Once
+    /// persistence succeeds, later adapter failures become warnings because the
+    /// next connection can load the already-correct SpiralDB row.
+    pub(crate) async fn finish(
+        &self,
+        robot: &str,
+    ) -> Result<FinishCalibrationOutput, OperationError> {
+        let motors = self.store.motor_specs(robot)?;
+        let input = self.control.calibration_input(robot).await?;
+        let calibration = input
+            .build(&motors)
+            .map_err(|error| OperationError::InvalidInput(error.to_string()))?;
+        self.store
+            .save_calibration(robot, CalibrationUpdate::new(&motors, &calibration))?;
 
-    Ok(FinishCalibrationOutput {
-        calibration,
-        live_warning,
-    })
+        let cancel_warning = self
+            .control
+            .cancel_calibration(robot)
+            .await
+            .err()
+            .map(|error| format!("could not close the completed sweep: {error}"));
+        let apply_warning = self
+            .control
+            .apply_calibration(robot, calibration.clone())
+            .await
+            .err()
+            .map(|error| format!("could not refresh the live robot: {error}"));
+        let live_warning = match (cancel_warning, apply_warning) {
+            (None, None) => None,
+            (Some(warning), None) | (None, Some(warning)) => Some(warning),
+            (Some(first), Some(second)) => Some(format!("{first}; {second}")),
+        };
+
+        Ok(FinishCalibrationOutput {
+            calibration,
+            live_warning,
+        })
+    }
 }
 
-/// Reinterpret every matching completed take from raw encoder counts.
-///
-/// The current calibration is read once after catalog admission, local files
-/// are replaced atomically, and only then are changed takes queued for remote
-/// synchronization. Actions remain untouched because old takes do not retain
-/// the raw commanded goal needed to transform them faithfully.
-pub(crate) async fn reapply_history<P>(
-    port: &P,
-    robot: &str,
-) -> Result<ReapplyCalibrationOutput, OperationError>
-where
-    P: CalibrationHistoryPort + ?Sized,
-{
-    let Some(token) = port.reserve_catalog_mutation()? else {
-        return Err(OperationError::Conflict(
-            "another recording or dataset mutation is active; wait for it to finish".to_owned(),
-        ));
-    };
-    let _reservation = CalibrationHistoryReservation { port, token };
-    let activity = port.activity();
-    if let Some(episode) = activity.recording {
-        return Err(OperationError::Conflict(format!(
-            "take {episode:?} is still recording; stop it before reapplying calibration"
-        )));
+pub(crate) struct CalibrationHistoryActions<'a, P: CalibrationHistoryPort + ?Sized> {
+    port: &'a P,
+}
+
+impl<'a, P: CalibrationHistoryPort + ?Sized> CalibrationHistoryActions<'a, P> {
+    pub(crate) const fn new(port: &'a P) -> Self {
+        Self { port }
     }
-    if let Some(episode) = activity.replaying {
-        return Err(OperationError::Conflict(format!(
-            "take {episode:?} is driving an arm; stop replay before reapplying calibration"
-        )));
+
+    /// Reinterpret every matching completed take from raw encoder counts.
+    ///
+    /// The current calibration is read once after catalog admission, local files
+    /// are replaced atomically, and only then are changed takes queued for remote
+    /// synchronization. Actions remain untouched because old takes do not retain
+    /// the raw commanded goal needed to transform them faithfully.
+    pub(crate) async fn reapply(
+        &self,
+        robot: &str,
+    ) -> Result<ReapplyCalibrationOutput, OperationError> {
+        let Some(token) = self.port.reserve_catalog_mutation()? else {
+            return Err(OperationError::Conflict(
+                "another recording or dataset mutation is active; wait for it to finish".to_owned(),
+            ));
+        };
+        let _reservation = CalibrationHistoryReservation {
+            port: self.port,
+            token,
+        };
+        let activity = self.port.activity();
+        if let Some(episode) = activity.recording {
+            return Err(OperationError::Conflict(format!(
+                "take {episode:?} is still recording; stop it before reapplying calibration"
+            )));
+        }
+        if let Some(episode) = activity.replaying {
+            return Err(OperationError::Conflict(format!(
+                "take {episode:?} is driving an arm; stop replay before reapplying calibration"
+            )));
+        }
+        if activity.training_active {
+            return Err(OperationError::Conflict(
+                "training is reading the episode dataset; stop it before reapplying calibration"
+                    .to_owned(),
+            ));
+        }
+        let calibration = self.port.current_calibration(robot)?.ok_or_else(|| {
+            OperationError::InvalidInput(format!(
+                "robot {robot:?} must have a saved calibration before positions can be reapplied"
+            ))
+        })?;
+        let updated = self
+            .port
+            .reapply_positions(robot.to_owned(), calibration)
+            .await?;
+        Ok(ReapplyCalibrationOutput {
+            episodes_updated: updated.updated_episode_ids.len() as u64,
+            frames_updated: updated.frames_updated,
+            episodes_unchanged: updated.episodes_unchanged,
+            episodes_skipped: updated.episodes_skipped,
+            warnings: updated.warnings,
+        })
     }
-    if activity.training_active {
-        return Err(OperationError::Conflict(
-            "training is reading the episode dataset; stop it before reapplying calibration"
-                .to_owned(),
-        ));
-    }
-    let calibration = port.current_calibration(robot)?.ok_or_else(|| {
-        OperationError::InvalidInput(format!(
-            "robot {robot:?} must have a saved calibration before positions can be reapplied"
-        ))
-    })?;
-    let updated = port
-        .reapply_positions(robot.to_owned(), calibration)
-        .await?;
-    Ok(ReapplyCalibrationOutput {
-        episodes_updated: updated.updated_episode_ids.len() as u64,
-        frames_updated: updated.frames_updated,
-        episodes_unchanged: updated.episodes_unchanged,
-        episodes_skipped: updated.episodes_skipped,
-        warnings: updated.warnings,
-    })
 }
 
 #[cfg(test)]
@@ -405,8 +437,9 @@ mod tests {
     #[tokio::test]
     async fn begin_and_cancel_are_transport_neutral_actions() {
         let (_repository, control) = setup(false, Ok(input()));
-        start(&control, "arm").await.unwrap();
-        cancel(&control, "arm").await.unwrap();
+        let actions = CalibrationControlActions::new(&control);
+        actions.start("arm").await.unwrap();
+        actions.cancel("arm").await.unwrap();
         assert_eq!(*control.events.lock().unwrap(), ["start", "cancel"]);
     }
 
@@ -414,7 +447,10 @@ mod tests {
     async fn begin_refusal_propagates_without_compensation() {
         let (_repository, mut control) = setup(false, Ok(input()));
         control.fail_start = true;
-        let error = start(&control, "arm").await.unwrap_err();
+        let error = CalibrationControlActions::new(&control)
+            .start("arm")
+            .await
+            .unwrap_err();
         assert_eq!(error, OperationError::Conflict("robot is busy".to_owned()));
         assert_eq!(*control.events.lock().unwrap(), ["start"]);
     }
@@ -422,7 +458,10 @@ mod tests {
     #[tokio::test]
     async fn persistence_failure_keeps_the_sweep_alive() {
         let (store, control) = setup(true, Ok(input()));
-        let error = finish(&store, &control, "arm").await.unwrap_err();
+        let error = CalibrationActions::new(&store, &control)
+            .finish("arm")
+            .await
+            .unwrap_err();
         assert_eq!(error, OperationError::Internal("Spiral is busy".to_owned()));
         assert_eq!(*store.events.lock().unwrap(), ["specs", "save"]);
         assert_eq!(*control.events.lock().unwrap(), ["input"]);
@@ -436,7 +475,10 @@ mod tests {
         };
         motors.clear();
         let (store, control) = setup(false, Ok(incomplete));
-        let error = finish(&store, &control, "arm").await.unwrap_err();
+        let error = CalibrationActions::new(&store, &control)
+            .finish("arm")
+            .await
+            .unwrap_err();
         assert!(matches!(error, OperationError::InvalidInput(_)));
         assert_eq!(*store.events.lock().unwrap(), ["specs"]);
         assert_eq!(*control.events.lock().unwrap(), ["input"]);
@@ -447,7 +489,10 @@ mod tests {
         let (store, mut control) = setup(false, Ok(input()));
         control.fail_cancel = true;
         control.fail_apply = true;
-        let output = finish(&store, &control, "arm").await.unwrap();
+        let output = CalibrationActions::new(&store, &control)
+            .finish("arm")
+            .await
+            .unwrap();
         assert!(output.live_warning.as_deref().is_some_and(|warning| {
             warning.contains("control stopped") && warning.contains("robot left")
         }));
@@ -522,7 +567,10 @@ mod tests {
     #[tokio::test]
     async fn historical_state_is_rewritten_directly_in_spiral() {
         let history = history();
-        let output = reapply_history(&history, "arm").await.unwrap();
+        let output = CalibrationHistoryActions::new(&history)
+            .reapply("arm")
+            .await
+            .unwrap();
 
         assert_eq!(output.episodes_updated, 2);
         assert_eq!(output.frames_updated, 120);
@@ -549,7 +597,10 @@ mod tests {
         ] {
             let mut history = history();
             history.activity = activity;
-            let error = reapply_history(&history, "arm").await.unwrap_err();
+            let error = CalibrationHistoryActions::new(&history)
+                .reapply("arm")
+                .await
+                .unwrap_err();
             assert!(matches!(error, OperationError::Conflict(_)));
             assert!(!history.lease.is_held());
         }

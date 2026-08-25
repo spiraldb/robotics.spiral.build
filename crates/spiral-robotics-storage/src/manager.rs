@@ -34,16 +34,13 @@ use spiral_robotics_core::workflow::QualifiedRelation;
 
 use crate::adbc::{ProjectStore, StorageConnection};
 use crate::bundle;
-use crate::checkpoints::{
-    CheckpointArtifact, CheckpointFuture, CheckpointKey, CheckpointStore,
-    validate_checkpoint_artifact_size,
-};
+use crate::checkpoints::{CheckpointArtifact, CheckpointFuture, CheckpointKey, CheckpointStore};
 use crate::episode_schema::{
     JointSampleRows, SpiralEpisodeEncoder, VideoStreamProperties, VideoStreamRow, VideoStreamRows,
 };
 use crate::episodes::CompletedEpisode;
 use crate::settings::{SpiralConnectionSettings, StoredStudioPreferences};
-use crate::sql::{self, ReadOnlyQueryMode};
+use crate::sql::{ReadOnlyQueryMode, SpiralSql};
 use crate::video::{VideoAsset, VideoAssetKey, VideoByteRange};
 
 const MAX_QUERY_ROWS: usize = 1_000;
@@ -182,16 +179,13 @@ impl JsonDocumentWrite {
 
     fn save(self, connection: &mut StorageConnection) -> Result<(), String> {
         let Self { target, json } = self;
-        if table_exists(connection, &target.relation)? {
-            execute_delete_sql(
-                connection,
-                &format!(
-                    "DELETE FROM {} WHERE {} = {}",
-                    target.relation,
-                    db::RUN_ID,
-                    sql::string_literal(&target.key)
-                ),
-            )?;
+        if connection.table_exists(&target.relation)? {
+            connection.execute_delete_sql(&format!(
+                "DELETE FROM {} WHERE {} = {}",
+                target.relation,
+                db::RUN_ID,
+                SpiralSql::string_literal(&target.key)
+            ))?;
         }
         let schema = Arc::new(Schema::new(vec![
             Field::new(db::RUN_ID, DataType::Utf8, false),
@@ -203,11 +197,11 @@ impl JsonDocumentWrite {
             vec![
                 Arc::new(StringArray::from(vec![target.key])) as ArrayRef,
                 Arc::new(StringArray::from(vec![json])) as ArrayRef,
-                Arc::new(Int64Array::from(vec![unix_millis()])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![StorageClock::unix_millis()])) as ArrayRef,
             ],
         )
         .map_err(|error| format!("building {} snapshot batch: {error}", target.table))?;
-        ingest_batch(connection, &target.relation, batch)
+        connection.ingest_batch(&target.relation, batch)
     }
 }
 
@@ -274,7 +268,7 @@ impl StorageManager {
         self.project_store.prewarm().await?;
         let namespace = self.project_store.namespace().to_owned();
         self.project_store
-            .run(move |connection| ensure_video_assets_blob_relation(connection, &namespace))
+            .run(move |connection| connection.ensure_video_assets_blob_relation(&namespace))
             .await
     }
 
@@ -363,7 +357,7 @@ impl StorageManager {
             .map_err(|error| format!("encoding Workflow runs snapshot: {error}"))?;
         self.project_store
             .run_exclusive_blocking(move |connection| {
-                ensure_dataset_namespace(connection, &namespace)?;
+                connection.ensure_dataset_namespace(&namespace)?;
                 connection.set_autocommit(false)?;
                 let mutation = JsonDocumentWrite::new(
                     JsonDocumentTarget::new(Table::WorkflowRuns, &relation, "agent:default"),
@@ -421,11 +415,8 @@ impl StorageManager {
         self.project_store.run_exclusive_blocking(move |connection| {
             connection.set_autocommit(false)?;
             let mutation = (|| {
-                let current = load_json_document_raw_optional_on_connection(
-                    connection,
-                    &relation,
-                    "agent:default",
-                )?
+                let current = connection
+                    .load_json_document_raw_optional(&relation, "agent:default")?
                 .ok_or_else(|| {
                     "Assistant history changed before reset. Reload the current project."
                         .to_owned()
@@ -472,11 +463,10 @@ impl StorageManager {
         }
         let relation = Table::StudioSettings.qualified_name(self.project_store.namespace());
         self.project_store.run_blocking(move |connection| {
-            if !table_exists(connection, &relation)? {
+            if !connection.table_exists(&relation)? {
                 return Ok(StoredStudioPreferences::default());
             }
-            let result = run_query(
-                connection,
+            let result = connection.run_query(
                 &format!(
                     "SELECT {} FROM {relation} WHERE {} = 'preferences' ORDER BY {} DESC LIMIT 1",
                     db::VALUE_JSON,
@@ -507,13 +497,13 @@ impl StorageManager {
         let json = serde_json::to_string(preferences)
             .map_err(|error| format!("encoding Studio preferences: {error}"))?;
         self.project_store.run_blocking(move |connection| {
-            ensure_dataset_namespace(connection, &namespace)?;
-            ensure_video_assets_blob_relation(connection, &namespace)?;
-            if table_exists(connection, &relation)? {
-                execute_delete_sql(
-                    connection,
-                    &format!("DELETE FROM {relation} WHERE {} = 'preferences'", db::KEY),
-                )?;
+            connection.ensure_dataset_namespace(&namespace)?;
+            connection.ensure_video_assets_blob_relation(&namespace)?;
+            if connection.table_exists(&relation)? {
+                connection.execute_delete_sql(&format!(
+                    "DELETE FROM {relation} WHERE {} = 'preferences'",
+                    db::KEY
+                ))?;
             }
             let schema = Arc::new(Schema::new(vec![
                 Field::new(db::KEY, DataType::Utf8, false),
@@ -525,11 +515,11 @@ impl StorageManager {
                 vec![
                     Arc::new(StringArray::from(vec!["preferences"])) as ArrayRef,
                     Arc::new(StringArray::from(vec![json])) as ArrayRef,
-                    Arc::new(Int64Array::from(vec![unix_millis()])) as ArrayRef,
+                    Arc::new(Int64Array::from(vec![StorageClock::unix_millis()])) as ArrayRef,
                 ],
             )
             .map_err(|error| format!("building Studio preferences batch: {error}"))?;
-            ingest_batch(connection, &relation, batch)
+            connection.ingest_batch(&relation, batch)
         })
     }
 
@@ -589,13 +579,12 @@ impl StorageManager {
         T: DeserializeOwned + Default,
     {
         let relation = table.qualified_name(self.project_store.namespace());
-        let key = sql::string_literal(key);
+        let key = SpiralSql::string_literal(key);
         self.project_store.run_blocking(move |connection| {
-            if !table_exists(connection, &relation)? {
+            if !connection.table_exists(&relation)? {
                 return Ok(T::default());
             }
-            let result = run_query(
-                connection,
+            let result = connection.run_query(
                 &format!(
                     "SELECT {} FROM {relation} WHERE {} = {key} ORDER BY {} DESC LIMIT 1",
                     db::SNAPSHOT_JSON,
@@ -625,7 +614,7 @@ impl StorageManager {
         let relation = table.qualified_name(self.project_store.namespace());
         let key = key.to_owned();
         self.project_store.run_blocking(move |connection| {
-            load_json_document_raw_optional_on_connection(connection, &relation, &key)
+            connection.load_json_document_raw_optional(&relation, &key)
         })
     }
 
@@ -643,16 +632,14 @@ impl StorageManager {
         let relation = table.qualified_name(self.project_store.namespace());
         let key = key.to_owned();
         self.project_store.run_exclusive_blocking(move |connection| {
-            if !table_exists(connection, &relation)? {
+            if !connection.table_exists(&relation)? {
                 return Ok(T::default());
             }
-            let result = run_query(
-                connection,
-                &format!(
+            let result = connection.run_query(&format!(
                     "SELECT {} FROM {relation} WHERE {} = {} ORDER BY {} DESC LIMIT 1",
                     db::SNAPSHOT_JSON,
                     db::RUN_ID,
-                    sql::string_literal(&key),
+                    SpiralSql::string_literal(&key),
                     db::UPDATED_MS,
                 ),
                 1,
@@ -665,7 +652,7 @@ impl StorageManager {
             else {
                 return Ok(T::default());
             };
-            let (document, incompatible) = decode_json_document_or_default(value);
+            let (document, incompatible) = value.decode_json_or_default();
             if !incompatible {
                 return Ok(document);
             }
@@ -713,7 +700,7 @@ impl StorageManager {
         let json = serde_json::to_string(value)
             .map_err(|error| format!("encoding {} snapshot: {error}", document.table))?;
         self.project_store.run_blocking(move |connection| {
-            ensure_dataset_namespace(connection, &namespace)?;
+            connection.ensure_dataset_namespace(&namespace)?;
             JsonDocumentWrite::new(target, json).save(connection)
         })
     }
@@ -748,7 +735,7 @@ impl StorageManager {
     }
 
     pub async fn query(&self, sql: &str, max_rows: usize) -> Result<SpiralQueryResponse, String> {
-        sql::ensure_read_only(sql, ReadOnlyQueryMode::Preview)?;
+        SpiralSql::ensure_read_only(sql, ReadOnlyQueryMode::Preview)?;
         let sql = sql.to_owned();
         self.project_store
             .run(move |connection| {
@@ -765,12 +752,10 @@ impl StorageManager {
         let relation = Table::Datasets.qualified_name(self.project_store.namespace());
         self.project_store
             .run(move |connection| {
-                if !table_exists(connection, &relation)? {
+                if !connection.table_exists(&relation)? {
                     return Ok(Vec::new());
                 }
-                let result = run_query(
-                    connection,
-                    &format!(
+                let result = connection.run_query(&format!(
                         "SELECT {id}, {name}, {created}, {description} FROM {relation} ORDER BY {created}, {id}",
                         id = db::DATASET_ID,
                         name = db::NAME,
@@ -918,7 +903,7 @@ impl StorageManager {
                 let mut uncounted = 0_usize;
                 for entry in catalog {
                     let (relation_name, relation_type) = entry.into_parts();
-                    if !is_user_project_relation(&relation_name, &namespace) {
+                    if !Self::is_user_project_relation(&relation_name, &namespace) {
                         continue;
                     }
                     if QualifiedRelation::try_from(relation_name.as_str()).is_err() {
@@ -946,7 +931,7 @@ impl StorageManager {
                             ));
                         }
                     };
-                    let row_count = relation_row_count(connection, &relation_name).map_or_else(
+                    let row_count = connection.relation_row_count(&relation_name).map_or_else(
                         |_| {
                             uncounted += 1;
                             None
@@ -1004,10 +989,13 @@ impl StorageManager {
         &self,
         key: CheckpointKey,
     ) -> Result<CheckpointArtifact, String> {
-        let query =
-            sql::training_checkpoint(self.project_store.namespace(), key.run_id(), key.step());
+        let query = SpiralSql::training_checkpoint(
+            self.project_store.namespace(),
+            key.run_id(),
+            key.step(),
+        );
         self.project_store
-            .run(move |connection| run_training_checkpoint_query(connection, &query))
+            .run(move |connection| connection.run_training_checkpoint_query(&query))
             .await
     }
 
@@ -1015,16 +1003,16 @@ impl StorageManager {
         let target = Table::TrainingCheckpoints.qualified_name(self.project_store.namespace());
         self.project_store
             .run(move |connection| {
-                if !table_exists(connection, &target)? {
+                if !connection.table_exists(&target)? {
                     return Ok(());
                 }
-                execute_delete_sql(connection, &sql::delete_training_run(&target, &run_id)).map_err(
-                    |error| {
+                connection
+                    .execute_delete_sql(&SpiralSql::delete_training_run(&target, &run_id))
+                    .map_err(|error| {
                         format!(
                             "deleting training run {run_id:?} checkpoints from {target}: {error}"
                         )
-                    },
-                )
+                    })
             })
             .await
     }
@@ -1034,24 +1022,24 @@ impl StorageManager {
         episode: &str,
         stream: &str,
     ) -> Result<(f64, Vec<BTreeMap<String, f64>>), String> {
-        let sql = sql::trajectory(self.project_store.namespace(), episode, stream);
+        let sql = SpiralSql::trajectory(self.project_store.namespace(), episode, stream);
         let result = self
             .project_store
-            .run(move |connection| run_query(connection, &sql, MAX_REPLAY_ROWS))
+            .run(move |connection| connection.run_query(&sql, MAX_REPLAY_ROWS))
             .await?;
         if result.truncated() {
             return Err(format!(
                 "Spiral trajectory exceeds the replay safety limit of {MAX_REPLAY_ROWS} rows"
             ));
         }
-        decode_trajectory(result.into_rows())
+        DecodedTrajectory::decode(result.into_rows()).map(DecodedTrajectory::into_parts)
     }
 
     /// Read the authoritative MP4 size without materializing its bytes.
     pub async fn video_asset_size(&self, asset: &VideoAssetKey) -> Result<u64, String> {
-        let sql = sql::video_asset_size(self.project_store.namespace(), asset);
+        let sql = SpiralSql::video_asset_size(self.project_store.namespace(), asset);
         self.project_store
-            .run(move |connection| run_u64_query(connection, &sql, db::BYTE_SIZE))
+            .run(move |connection| connection.run_u64_query(&sql, db::BYTE_SIZE))
             .await
     }
 
@@ -1065,9 +1053,9 @@ impl StorageManager {
         asset: &VideoAssetKey,
         range: VideoByteRange,
     ) -> Result<Vec<u8>, String> {
-        let sql = sql::video_asset_range(self.project_store.namespace(), asset, range);
+        let sql = SpiralSql::video_asset_range(self.project_store.namespace(), asset, range);
         self.project_store
-            .run(move |connection| run_binary_query(connection, &sql))
+            .run(move |connection| connection.run_binary_query(&sql))
             .await
     }
 
@@ -1079,100 +1067,134 @@ impl StorageManager {
         self.video_asset_range(&asset, VideoByteRange::new(0, size))
             .await
     }
-}
 
-fn load_json_document_raw_optional_on_connection(
-    connection: &mut StorageConnection,
-    relation: &str,
-    key: &str,
-) -> Result<Option<String>, String> {
-    if !table_exists(connection, relation)? {
-        return Ok(None);
+    fn is_user_project_relation(relation: &str, namespace: &str) -> bool {
+        if relation == namespace
+            || relation == SpiralSql::video_sources_relation(namespace)
+            || relation == SpiralSql::video_dataset_relation(namespace)
+            || relation == SpiralSql::video_dataset_output(namespace)
+            || relation.starts_with("workflow.")
+        {
+            return false;
+        }
+        ![
+            Table::Robots,
+            Table::StudioSettings,
+            Table::TrainingCheckpoints,
+            Table::TrainingRuns,
+            Table::RolloutRuns,
+            Table::WorkflowRuns,
+        ]
+        .into_iter()
+        .any(|table| relation == table.qualified_name(namespace))
     }
-    let result = run_query(
-        connection,
-        &format!(
-            "SELECT {} FROM {relation} WHERE {} = {} ORDER BY {} DESC LIMIT 1",
-            db::SNAPSHOT_JSON,
-            db::RUN_ID,
-            sql::string_literal(key),
-            db::UPDATED_MS,
-        ),
-        1,
-    )?;
-    Ok(result
-        .rows()
-        .first()
-        .and_then(|row| row.get(db::SNAPSHOT_JSON))
-        .and_then(JsonValue::as_str)
-        .map(str::to_owned))
 }
 
-fn decode_json_document_or_default<T>(value: &str) -> (T, bool)
-where
-    T: DeserializeOwned + Default,
-{
-    match serde_json::from_str(value) {
-        Ok(document) => (document, false),
-        Err(_) => (T::default(), true),
+impl StorageConnection {
+    fn load_json_document_raw_optional(
+        &mut self,
+        relation: &str,
+        key: &str,
+    ) -> Result<Option<String>, String> {
+        if !self.table_exists(relation)? {
+            return Ok(None);
+        }
+        let result = self.run_query(
+            &format!(
+                "SELECT {} FROM {relation} WHERE {} = {} ORDER BY {} DESC LIMIT 1",
+                db::SNAPSHOT_JSON,
+                db::RUN_ID,
+                SpiralSql::string_literal(key),
+                db::UPDATED_MS,
+            ),
+            1,
+        )?;
+        Ok(result
+            .rows()
+            .first()
+            .and_then(|row| row.get(db::SNAPSHOT_JSON))
+            .and_then(JsonValue::as_str)
+            .map(str::to_owned))
+    }
+}
+
+trait JsonDocumentDecode {
+    fn decode_json_or_default<T>(&self) -> (T, bool)
+    where
+        T: DeserializeOwned + Default;
+}
+
+impl JsonDocumentDecode for str {
+    fn decode_json_or_default<T>(&self) -> (T, bool)
+    where
+        T: DeserializeOwned + Default,
+    {
+        match serde_json::from_str(self) {
+            Ok(document) => (document, false),
+            Err(_) => (T::default(), true),
+        }
     }
 }
 
 /// Decode remote replay data without dropping malformed joints or inventing a
 /// clock. Physical replay is all-or-nothing: every row must declare the same
 /// finite sample rate and one exact, unique, finite pose.
-fn decode_trajectory(
-    rows: Vec<JsonMap<String, JsonValue>>,
-) -> Result<(f64, Vec<BTreeMap<String, f64>>), String> {
-    let mut sample_hz: Option<f64> = None;
-    let mut trajectory = Vec::with_capacity(rows.len());
-    for (row_index, row) in rows.into_iter().enumerate() {
-        let row_hz = row
-            .get(db::SAMPLE_HZ)
-            .and_then(JsonValue::as_f64)
-            .filter(|value| value.is_finite() && *value > 0.0)
-            .ok_or_else(|| {
-                format!(
-                    "Spiral trajectory row {row_index} has no finite positive {}",
-                    db::SAMPLE_HZ
-                )
-            })?;
-        if sample_hz.is_some_and(|expected| expected.to_bits() != row_hz.to_bits()) {
-            return Err(format!(
-                "Spiral trajectory row {row_index} changed {}",
-                db::SAMPLE_HZ
-            ));
-        }
-        sample_hz.get_or_insert(row_hz);
+struct DecodedTrajectory {
+    sample_hz: f64,
+    frames: Vec<BTreeMap<String, f64>>,
+}
 
-        let names = row
-            .get(db::JOINT_NAMES)
-            .and_then(JsonValue::as_array)
-            .ok_or_else(|| {
-                format!(
-                    "Spiral trajectory row {row_index} is missing {}",
-                    db::JOINT_NAMES
-                )
-            })?;
-        let values = row
-            .get(db::REPLAY_POSITION)
-            .and_then(JsonValue::as_array)
-            .ok_or_else(|| {
-                format!(
-                    "Spiral trajectory row {row_index} is missing {}",
-                    db::REPLAY_POSITION
-                )
-            })?;
-        if names.is_empty() || names.len() != values.len() {
-            return Err(format!(
-                "Spiral trajectory row {row_index} has {} joint names but {} positions",
-                names.len(),
-                values.len()
-            ));
-        }
-        let mut pose = BTreeMap::new();
-        for (joint_index, (name, value)) in names.iter().zip(values).enumerate() {
-            let name = name
+impl DecodedTrajectory {
+    fn decode(rows: Vec<JsonMap<String, JsonValue>>) -> Result<Self, String> {
+        let mut sample_hz: Option<f64> = None;
+        let mut trajectory = Vec::with_capacity(rows.len());
+        for (row_index, row) in rows.into_iter().enumerate() {
+            let row_hz = row
+                .get(db::SAMPLE_HZ)
+                .and_then(JsonValue::as_f64)
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .ok_or_else(|| {
+                    format!(
+                        "Spiral trajectory row {row_index} has no finite positive {}",
+                        db::SAMPLE_HZ
+                    )
+                })?;
+            if sample_hz.is_some_and(|expected| expected.to_bits() != row_hz.to_bits()) {
+                return Err(format!(
+                    "Spiral trajectory row {row_index} changed {}",
+                    db::SAMPLE_HZ
+                ));
+            }
+            sample_hz.get_or_insert(row_hz);
+
+            let names = row
+                .get(db::JOINT_NAMES)
+                .and_then(JsonValue::as_array)
+                .ok_or_else(|| {
+                    format!(
+                        "Spiral trajectory row {row_index} is missing {}",
+                        db::JOINT_NAMES
+                    )
+                })?;
+            let values = row
+                .get(db::REPLAY_POSITION)
+                .and_then(JsonValue::as_array)
+                .ok_or_else(|| {
+                    format!(
+                        "Spiral trajectory row {row_index} is missing {}",
+                        db::REPLAY_POSITION
+                    )
+                })?;
+            if names.is_empty() || names.len() != values.len() {
+                return Err(format!(
+                    "Spiral trajectory row {row_index} has {} joint names but {} positions",
+                    names.len(),
+                    values.len()
+                ));
+            }
+            let mut pose = BTreeMap::new();
+            for (joint_index, (name, value)) in names.iter().zip(values).enumerate() {
+                let name = name
                 .as_str()
                 .filter(|name| !name.trim().is_empty())
                 .ok_or_else(|| {
@@ -1180,7 +1202,7 @@ fn decode_trajectory(
                         "Spiral trajectory row {row_index} joint {joint_index} has no valid name"
                     )
                 })?;
-            let value = value
+                let value = value
                 .as_f64()
                 .filter(|value| value.is_finite())
                 .ok_or_else(|| {
@@ -1188,17 +1210,25 @@ fn decode_trajectory(
                         "Spiral trajectory row {row_index} joint {name:?} has no finite position"
                     )
                 })?;
-            if pose.insert(name.to_owned(), value).is_some() {
-                return Err(format!(
-                    "Spiral trajectory row {row_index} repeats joint {name:?}"
-                ));
+                if pose.insert(name.to_owned(), value).is_some() {
+                    return Err(format!(
+                        "Spiral trajectory row {row_index} repeats joint {name:?}"
+                    ));
+                }
             }
+            trajectory.push(pose);
         }
-        trajectory.push(pose);
+        let sample_hz =
+            sample_hz.ok_or_else(|| "Spiral returned no commandable trajectory rows".to_owned())?;
+        Ok(Self {
+            sample_hz,
+            frames: trajectory,
+        })
     }
-    let sample_hz =
-        sample_hz.ok_or_else(|| "Spiral returned no commandable trajectory rows".to_owned())?;
-    Ok((sample_hz, trajectory))
+
+    fn into_parts(self) -> (f64, Vec<BTreeMap<String, f64>>) {
+        (self.sample_hz, self.frames)
+    }
 }
 
 impl CheckpointStore for StorageManager {
@@ -1236,19 +1266,19 @@ impl<'a> EpisodeReplacement<'a> {
             episode,
             videos,
         } = self;
-        ensure_dataset_namespace(connection, namespace)?;
+        connection.ensure_dataset_namespace(namespace)?;
         if !videos.is_empty() {
-            ensure_video_assets_blob_relation(connection, namespace)?;
+            connection.ensure_video_assets_blob_relation(namespace)?;
         }
-        let had_video = episode_has_video_assets(connection, namespace, episode.start().id())?;
+        let had_video = connection.episode_has_video_assets(namespace, episode.start().id())?;
         let video_rows_changed = had_video || !videos.is_empty();
         let dataset_exists = if video_rows_changed {
-            video_dataset_exists(connection, namespace)?
+            connection.video_dataset_exists(namespace)?
         } else {
             false
         };
         let previous_video_episodes = if video_rows_changed {
-            stored_video_episode_ids(connection, namespace)?
+            connection.stored_video_episode_ids(namespace)?
         } else {
             BTreeSet::new()
         };
@@ -1257,16 +1287,15 @@ impl<'a> EpisodeReplacement<'a> {
                 .iter()
                 .any(|episode_id| episode_id != episode.start().id());
         if !dataset_exists && !previous_video_episodes.is_empty() && has_video_rows {
-            retarget_stored_video_media_relations(connection, namespace)?;
+            connection.retarget_stored_video_media_relations(namespace)?;
         }
         // Replacement is idempotent. Clear any earlier complete row and partial
         // children before writing, so a retry after a process or network failure
         // can finish without duplicating already-landed rows.
-        clear_episode_rows_only(connection, namespace, episode.start().id())?;
+        connection.clear_episode_rows_only(namespace, episode.start().id())?;
         let datasets = Table::Datasets.qualified_name(namespace);
-        if !table_has_dataset(connection, &datasets, episode.start().dataset_id())? {
-            ingest_batch(
-                connection,
+        if !connection.table_has_dataset(&datasets, episode.start().dataset_id())? {
+            connection.ingest_batch(
                 &datasets,
                 episode
                     .start()
@@ -1274,8 +1303,7 @@ impl<'a> EpisodeReplacement<'a> {
                     .map_err(|error| error.to_string())?,
             )?;
         }
-        ingest_batch(
-            connection,
+        connection.ingest_batch(
             &Table::EpisodeStreams.qualified_name(namespace),
             episode
                 .start()
@@ -1302,8 +1330,7 @@ impl<'a> EpisodeReplacement<'a> {
                 .collect::<BTreeMap<_, _>>()
                 .into_values()
                 .collect::<Vec<_>>();
-            ingest_batch(
-                connection,
+            connection.ingest_batch(
                 &Table::EpisodeStreams.qualified_name(namespace),
                 streams.batch().map_err(|error| error.to_string())?,
             )?;
@@ -1315,42 +1342,30 @@ impl<'a> EpisodeReplacement<'a> {
             rows.extend(encoder.encode(sample).map_err(|error| error.to_string())?);
             if rows.len() >= JOINT_BATCH_ROWS {
                 let batch = rows.batch().map_err(|error| error.to_string())?;
-                ingest_batch(
-                    connection,
-                    &Table::JointSamples.qualified_name(namespace),
-                    batch,
-                )?;
+                connection.ingest_batch(&Table::JointSamples.qualified_name(namespace), batch)?;
                 rows.clear();
             }
         }
         if !rows.is_empty() {
             let batch = rows.batch().map_err(|error| error.to_string())?;
-            ingest_batch(
-                connection,
-                &Table::JointSamples.qualified_name(namespace),
-                batch,
-            )?;
+            connection.ingest_batch(&Table::JointSamples.qualified_name(namespace), batch)?;
         }
         if !videos.is_empty() {
-            let media_relation = sql::video_dataset_output(namespace);
-            let batch = video_assets_batch(episode.start().id(), videos, &media_relation)?;
-            ingest_batch(
-                connection,
-                &Table::VideoAssets.qualified_name(namespace),
-                batch,
-            )?;
+            let media_relation = SpiralSql::video_dataset_output(namespace);
+            let batch =
+                VideoAsset::publication_batch(episode.start().id(), videos, &media_relation)?;
+            connection.ingest_batch(&Table::VideoAssets.qualified_name(namespace), batch)?;
         }
         if video_rows_changed {
             if has_video_rows {
-                rebuild_video_dataset(connection, namespace, dataset_exists)?;
+                connection.rebuild_video_dataset(namespace, dataset_exists)?;
             } else {
-                drop_video_dataset(connection, namespace)?;
+                connection.drop_video_dataset(namespace)?;
             }
         }
         // Inserted last: readers never see an episode whose streams or media only
         // partially arrived.
-        ingest_batch(
-            connection,
+        connection.ingest_batch(
             &Table::Episodes.qualified_name(namespace),
             episode
                 .completion()
@@ -1367,246 +1382,237 @@ impl<'a> EpisodeReplacement<'a> {
 /// Project import replaces those source rows in place, so merely observing an
 /// existing output does not prove that its video index matches the imported
 /// payloads.
-pub(crate) fn rebuild_video_dataset(
-    connection: &mut StorageConnection,
-    namespace: &str,
-    dataset_exists: bool,
-) -> Result<(), String> {
-    // One unfiltered view and Dataset cover the whole Studio namespace. The
-    // output preserves episode and stream IDs, so consumers select individual
-    // media without multiplying catalog resources by episode count.
-    let sources = sql::video_sources_relation(namespace);
-    let assets = Table::VideoAssets.qualified_name(namespace);
-    let dataset = sql::video_dataset_relation(namespace);
-    execute_update_sql(connection, &sql::create_video_sources(&sources, &assets))
-        .map_err(|error| format!("creating Spiral video source view: {error}"))?;
-    if !dataset_exists {
-        execute_update_sql(connection, &sql::create_video_dataset(&dataset, &sources))
-            .map_err(|error| format!("creating Spiral MP4 dataset: {error}"))?;
-    }
-    execute_update_sql(connection, &sql::refresh_dataset(&dataset))
-        .map_err(|error| format!("refreshing Spiral MP4 dataset: {error}"))
-}
-
-pub(crate) fn video_dataset_exists(
-    connection: &mut StorageConnection,
-    namespace: &str,
-) -> Result<bool, String> {
-    let dataset = sql::video_dataset_relation(namespace);
-    match run_query(connection, &format!("DESCRIBE {dataset}"), 1) {
-        Ok(_) => Ok(true),
-        Err(error)
-            if error.contains("unknown resource")
-                || error.contains("does not exist")
-                || error.contains("unknown relation") =>
-        {
-            Ok(false)
+impl StorageConnection {
+    pub fn rebuild_video_dataset(
+        &mut self,
+        namespace: &str,
+        dataset_exists: bool,
+    ) -> Result<(), String> {
+        let connection = self;
+        // One unfiltered view and Dataset cover the whole Studio namespace. The
+        // output preserves episode and stream IDs, so consumers select individual
+        // media without multiplying catalog resources by episode count.
+        let sources = SpiralSql::video_sources_relation(namespace);
+        let assets = Table::VideoAssets.qualified_name(namespace);
+        let dataset = SpiralSql::video_dataset_relation(namespace);
+        connection
+            .execute_update_sql(&SpiralSql::create_video_sources(&sources, &assets))
+            .map_err(|error| format!("creating Spiral video source view: {error}"))?;
+        if !dataset_exists {
+            connection
+                .execute_update_sql(&SpiralSql::create_video_dataset(&dataset, &sources))
+                .map_err(|error| format!("creating Spiral MP4 dataset: {error}"))?;
         }
-        Err(error) => Err(format!("checking Spiral MP4 dataset: {error}")),
+        connection
+            .execute_update_sql(&SpiralSql::refresh_dataset(&dataset))
+            .map_err(|error| format!("refreshing Spiral MP4 dataset: {error}"))
     }
-}
 
-pub(crate) fn drop_video_dataset(
-    connection: &mut StorageConnection,
-    namespace: &str,
-) -> Result<(), String> {
-    let dataset = sql::video_dataset_relation(namespace);
-    QualifiedRelation::try_from(dataset.as_str())
-        .map_err(|error| format!("refusing to drop an invalid Spiral MP4 Dataset: {error}"))?;
-    execute_update_sql(connection, &sql::drop_video_dataset(&dataset))
-        .map_err(|error| format!("dropping Spiral MP4 dataset with CASCADE: {error}"))?;
-    execute_update_sql(
-        connection,
-        &sql::drop_video_sources(&sql::video_sources_relation(namespace)),
-    )
-    .map_err(|error| format!("dropping Spiral video source view: {error}"))
-}
+    pub(crate) fn video_dataset_exists(&mut self, namespace: &str) -> Result<bool, String> {
+        let connection = self;
+        let dataset = SpiralSql::video_dataset_relation(namespace);
+        match connection.run_query(&format!("DESCRIBE {dataset}"), 1) {
+            Ok(_) => Ok(true),
+            Err(error)
+                if error.contains("unknown resource")
+                    || error.contains("does not exist")
+                    || error.contains("unknown relation") =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(format!("checking Spiral MP4 dataset: {error}")),
+        }
+    }
 
-/// Spiral's managed catalog is a resource tree: `spiral_robotics.episodes` can only
-/// be created after a live `spiral_robotics` parent exists. Until the catalog exposes
-/// a standalone namespace resource, a tiny durable root table is the parent
-/// container for every Spiral Robotics table, view, and managed Dataset.
-pub(crate) fn ensure_dataset_namespace(
-    connection: &mut StorageConnection,
-    dataset: &str,
-) -> Result<(), String> {
-    match connection.table_schema(dataset) {
-        Ok(Some(schema))
-            if schema
-                .field_with_name(spiral::DATASET_NAMESPACE_MARKER)
-                .is_ok() =>
-        {
+    pub(crate) fn drop_video_dataset(&mut self, namespace: &str) -> Result<(), String> {
+        let connection = self;
+        let dataset = SpiralSql::video_dataset_relation(namespace);
+        QualifiedRelation::try_from(dataset.as_str())
+            .map_err(|error| format!("refusing to drop an invalid Spiral MP4 Dataset: {error}"))?;
+        connection
+            .execute_update_sql(&SpiralSql::drop_video_dataset(&dataset))
+            .map_err(|error| format!("dropping Spiral MP4 dataset with CASCADE: {error}"))?;
+        connection
+            .execute_update_sql(&SpiralSql::drop_video_sources(
+                &SpiralSql::video_sources_relation(namespace),
+            ))
+            .map_err(|error| format!("dropping Spiral video source view: {error}"))
+    }
+
+    /// Spiral's managed catalog is a resource tree: `spiral_robotics.episodes` can only
+    /// be created after a live `spiral_robotics` parent exists. Until the catalog exposes
+    /// a standalone namespace resource, a tiny durable root table is the parent
+    /// container for every Spiral Robotics table, view, and managed Dataset.
+    pub fn ensure_dataset_namespace(&mut self, dataset: &str) -> Result<(), String> {
+        let connection = self;
+        match connection.table_schema(dataset) {
+            Ok(Some(schema))
+                if schema
+                    .field_with_name(spiral::DATASET_NAMESPACE_MARKER)
+                    .is_ok() =>
+            {
+                return Ok(());
+            }
+            Ok(Some(_)) => {
+                return Err(format!(
+                    "SpiralDB namespace {dataset} exists but is not managed by Spiral Robotics; choose a new namespace or remove that resource"
+                ));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Err(format!("checking SpiralDB namespace {dataset}: {error}"));
+            }
+        }
+        connection
+            .execute_update_sql(&SpiralSql::create_dataset_namespace(dataset))
+            .map_err(|error| format!("creating SpiralDB namespace {dataset}: {error}"))
+    }
+
+    pub(crate) fn clear_episode_rows(
+        &mut self,
+        namespace: &str,
+        episode_id: &str,
+    ) -> Result<(), String> {
+        let connection = self;
+        let previous_video_episodes = connection.stored_video_episode_ids(namespace)?;
+        let had_video = previous_video_episodes.contains(episode_id);
+        let dataset_exists = if had_video {
+            connection.video_dataset_exists(namespace)?
+        } else {
+            false
+        };
+        if had_video && !dataset_exists && previous_video_episodes.len() > 1 {
+            connection.retarget_stored_video_media_relations(namespace)?;
+        }
+        connection.clear_episode_rows_only(namespace, episode_id)?;
+        if !had_video {
             return Ok(());
         }
-        Ok(Some(_)) => {
+        if previous_video_episodes.len() == 1 {
+            connection.drop_video_dataset(namespace)?;
+        } else {
+            connection.rebuild_video_dataset(namespace, dataset_exists)?;
+        }
+        Ok(())
+    }
+
+    fn clear_episode_rows_only(&mut self, namespace: &str, episode_id: &str) -> Result<(), String> {
+        let connection = self;
+        for table in Table::EPISODE_RELATIONS {
+            let target = table.qualified_name(namespace);
+            if !connection.table_exists(&target)? {
+                continue;
+            }
+            connection
+                .execute_delete_sql(&SpiralSql::delete_episode(&target, episode_id))
+                .map_err(|error| format!("clearing prior Spiral rows in {target}: {error}"))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn stored_video_episode_ids(
+        &mut self,
+        namespace: &str,
+    ) -> Result<BTreeSet<String>, String> {
+        let connection = self;
+        const MAX_VIDEO_EPISODES: usize = 100_000;
+
+        let assets = Table::VideoAssets.qualified_name(namespace);
+        if !connection.table_exists(&assets)? {
+            return Ok(BTreeSet::new());
+        }
+        let result = connection.run_query(
+            &format!(
+                "SELECT DISTINCT {episode_id} FROM {assets}",
+                episode_id = db::EPISODE_ID
+            ),
+            MAX_VIDEO_EPISODES,
+        )?;
+        if result.truncated() {
             return Err(format!(
-                "SpiralDB namespace {dataset} exists but is not managed by Spiral Robotics; choose a new namespace or remove that resource"
+                "project has more than {MAX_VIDEO_EPISODES} video episodes; refusing incomplete video-resource reconciliation"
             ));
         }
-        Ok(None) => {}
-        Err(error) => {
-            return Err(format!("checking SpiralDB namespace {dataset}: {error}"));
+        result
+            .into_rows()
+            .into_iter()
+            .map(|row| {
+                row.get(db::EPISODE_ID)
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| "stored video asset has no valid episode ID".to_owned())
+            })
+            .collect()
+    }
+
+    fn episode_has_video_assets(
+        &mut self,
+        namespace: &str,
+        episode_id: &str,
+    ) -> Result<bool, String> {
+        let connection = self;
+        let assets = Table::VideoAssets.qualified_name(namespace);
+        if !connection.table_exists(&assets)? {
+            return Ok(false);
         }
-    }
-    execute_update_sql(connection, &sql::create_dataset_namespace(dataset))
-        .map_err(|error| format!("creating SpiralDB namespace {dataset}: {error}"))
-}
-
-pub(crate) fn clear_episode_rows(
-    connection: &mut StorageConnection,
-    namespace: &str,
-    episode_id: &str,
-) -> Result<(), String> {
-    let previous_video_episodes = stored_video_episode_ids(connection, namespace)?;
-    let had_video = previous_video_episodes.contains(episode_id);
-    let dataset_exists = if had_video {
-        video_dataset_exists(connection, namespace)?
-    } else {
-        false
-    };
-    if had_video && !dataset_exists && previous_video_episodes.len() > 1 {
-        retarget_stored_video_media_relations(connection, namespace)?;
-    }
-    clear_episode_rows_only(connection, namespace, episode_id)?;
-    if !had_video {
-        return Ok(());
-    }
-    if previous_video_episodes.len() == 1 {
-        drop_video_dataset(connection, namespace)?;
-    } else {
-        rebuild_video_dataset(connection, namespace, dataset_exists)?;
-    }
-    Ok(())
-}
-
-fn clear_episode_rows_only(
-    connection: &mut StorageConnection,
-    namespace: &str,
-    episode_id: &str,
-) -> Result<(), String> {
-    for table in Table::EPISODE_RELATIONS {
-        let target = table.qualified_name(namespace);
-        if !table_exists(connection, &target)? {
-            continue;
-        }
-        execute_delete_sql(connection, &sql::delete_episode(&target, episode_id))
-            .map_err(|error| format!("clearing prior Spiral rows in {target}: {error}"))?;
-    }
-    Ok(())
-}
-
-pub(crate) fn stored_video_episode_ids(
-    connection: &mut StorageConnection,
-    namespace: &str,
-) -> Result<BTreeSet<String>, String> {
-    const MAX_VIDEO_EPISODES: usize = 100_000;
-
-    let assets = Table::VideoAssets.qualified_name(namespace);
-    if !table_exists(connection, &assets)? {
-        return Ok(BTreeSet::new());
-    }
-    let result = run_query(
-        connection,
-        &format!(
-            "SELECT DISTINCT {episode_id} FROM {assets}",
-            episode_id = db::EPISODE_ID
-        ),
-        MAX_VIDEO_EPISODES,
-    )?;
-    if result.truncated() {
-        return Err(format!(
-            "project has more than {MAX_VIDEO_EPISODES} video episodes; refusing incomplete video-resource reconciliation"
-        ));
-    }
-    result
-        .into_rows()
-        .into_iter()
-        .map(|row| {
-            row.get(db::EPISODE_ID)
-                .and_then(JsonValue::as_str)
-                .map(str::to_owned)
-                .ok_or_else(|| "stored video asset has no valid episode ID".to_owned())
-        })
-        .collect()
-}
-
-fn episode_has_video_assets(
-    connection: &mut StorageConnection,
-    namespace: &str,
-    episode_id: &str,
-) -> Result<bool, String> {
-    let assets = Table::VideoAssets.qualified_name(namespace);
-    if !table_exists(connection, &assets)? {
-        return Ok(false);
-    }
-    let result = run_query(
-        connection,
+        let result = connection.run_query(
         &format!(
             "SELECT {episode_column} FROM {assets} WHERE {episode_column} = {episode_id} LIMIT 1",
             episode_column = db::EPISODE_ID,
-            episode_id = sql::string_literal(episode_id),
+            episode_id = SpiralSql::string_literal(episode_id),
         ),
         1,
     )?;
-    Ok(!result.rows().is_empty())
-}
-
-pub(crate) fn retarget_stored_video_media_relations(
-    connection: &mut StorageConnection,
-    namespace: &str,
-) -> Result<(), String> {
-    let assets = Table::VideoAssets.qualified_name(namespace);
-    let output = sql::video_dataset_output(namespace);
-    execute_update_sql(
-        connection,
-        &format!(
-            "UPDATE {assets} SET {media_relation} = {output}",
-            media_relation = db::MEDIA_RELATION,
-            output = sql::string_literal(&output),
-        ),
-    )
-    .map_err(|error| format!("retargeting stored video media relations: {error}"))
-}
-
-fn table_has_dataset(
-    connection: &mut StorageConnection,
-    target: &str,
-    dataset_id: &str,
-) -> Result<bool, String> {
-    if !table_exists(connection, target)? {
-        return Ok(false);
+        Ok(!result.rows().is_empty())
     }
-    let result = run_query(connection, &sql::dataset_exists(target, dataset_id), 1)?;
-    Ok(!result.rows().is_empty())
+
+    pub(crate) fn retarget_stored_video_media_relations(
+        &mut self,
+        namespace: &str,
+    ) -> Result<(), String> {
+        let connection = self;
+        let assets = Table::VideoAssets.qualified_name(namespace);
+        let output = SpiralSql::video_dataset_output(namespace);
+        connection
+            .execute_update_sql(&format!(
+                "UPDATE {assets} SET {media_relation} = {output}",
+                media_relation = db::MEDIA_RELATION,
+                output = SpiralSql::string_literal(&output),
+            ))
+            .map_err(|error| format!("retargeting stored video media relations: {error}"))
+    }
+
+    fn table_has_dataset(&mut self, target: &str, dataset_id: &str) -> Result<bool, String> {
+        let connection = self;
+        if !connection.table_exists(target)? {
+            return Ok(false);
+        }
+        let result = connection.run_query(&SpiralSql::dataset_exists(target, dataset_id), 1)?;
+        Ok(!result.rows().is_empty())
+    }
 }
 
-pub(crate) fn ingest_batch(
-    connection: &mut StorageConnection,
-    target: &str,
-    batch: RecordBatch,
-) -> Result<(), String> {
-    ingest_batches(connection, target, vec![batch])
-}
+impl StorageConnection {
+    pub fn ingest_batch(&mut self, target: &str, batch: RecordBatch) -> Result<(), String> {
+        self.ingest_batches(target, vec![batch])
+    }
 
-pub(crate) fn ingest_batches(
-    connection: &mut StorageConnection,
-    target: &str,
-    batches: Vec<RecordBatch>,
-) -> Result<(), String> {
-    BatchWrite::new(target, batches, BatchWriteMode::Append).save(connection)
-}
+    pub(crate) fn ingest_batches(
+        &mut self,
+        target: &str,
+        batches: Vec<RecordBatch>,
+    ) -> Result<(), String> {
+        BatchWrite::new(target, batches, BatchWriteMode::Append).save(self)
+    }
 
-/// Atomically replace one complete Arbor relation from a single Arrow stream.
-///
-/// Whole-project restore owns the complete incoming relation and therefore uses
-/// hosted Arbor's replacement path. Incremental recording and episode import
-/// deliberately continue through the internal `ingest_batches` path.
-pub(crate) fn replace_batches(
-    connection: &mut StorageConnection,
-    target: &str,
-    batches: Vec<RecordBatch>,
-) -> Result<(), String> {
-    BatchWrite::new(target, batches, BatchWriteMode::Replace).save(connection)
+    /// Atomically replace one complete Arbor relation from a single Arrow stream.
+    pub fn replace_batches(
+        &mut self,
+        target: &str,
+        batches: Vec<RecordBatch>,
+    ) -> Result<(), String> {
+        BatchWrite::new(target, batches, BatchWriteMode::Replace).save(self)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1663,348 +1669,347 @@ impl<'a> BatchWrite<'a> {
     }
 }
 
-pub(crate) fn table_exists(connection: &StorageConnection, target: &str) -> Result<bool, String> {
-    connection
-        .table_schema(target)
-        .map(|schema| schema.is_some())
-        .map_err(|error| format!("checking Spiral table {target}: {error}"))
+impl StorageConnection {
+    pub fn table_exists(&self, target: &str) -> Result<bool, String> {
+        self.table_schema(target)
+            .map(|schema| schema.is_some())
+            .map_err(|error| format!("checking Spiral table {target}: {error}"))
+    }
 }
 
 #[cfg(test)]
-fn training_checkpoint_schema() -> Arc<Schema> {
-    Arc::new(Schema::new(vec![
-        Field::new(db::RUN_ID, DataType::Utf8, false),
-        Field::new(db::RUN_NAME, DataType::Utf8, false),
-        Field::new(db::POLICY, DataType::Utf8, false),
-        Field::new(db::STEP, DataType::UInt64, false),
-        Field::new(db::CREATED_MS, DataType::Int64, false),
-        Field::new(db::VALIDATION_LOSS, DataType::Float64, true),
-        Field::new(db::CONFIG_JSON, DataType::Utf8, false),
-        Field::new(db::CHECKPOINT, DataType::LargeBinary, false),
-    ]))
+struct TrainingCheckpointStorage;
+
+#[cfg(test)]
+impl TrainingCheckpointStorage {
+    fn schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new(db::RUN_ID, DataType::Utf8, false),
+            Field::new(db::RUN_NAME, DataType::Utf8, false),
+            Field::new(db::POLICY, DataType::Utf8, false),
+            Field::new(db::STEP, DataType::UInt64, false),
+            Field::new(db::CREATED_MS, DataType::Int64, false),
+            Field::new(db::VALIDATION_LOSS, DataType::Float64, true),
+            Field::new(db::CONFIG_JSON, DataType::Utf8, false),
+            Field::new(db::CHECKPOINT, DataType::LargeBinary, false),
+        ]))
+    }
 }
 
-pub(crate) fn execute_update_sql(
-    connection: &mut StorageConnection,
-    sql: &str,
-) -> Result<(), String> {
-    let mut statement = connection
-        .new_statement()
-        .map_err(|error| format!("opening Spiral SQL statement: {error}"))?;
-    statement
-        .set_sql_query(sql)
-        .and_then(|()| statement.execute_update())
-        .map(|_| ())
-        .map_err(|error| error.to_string())
-}
+impl StorageConnection {
+    pub fn execute_update_sql(&mut self, sql: &str) -> Result<(), String> {
+        let mut statement = self
+            .new_statement()
+            .map_err(|error| format!("opening Spiral SQL statement: {error}"))?;
+        statement
+            .set_sql_query(sql)
+            .and_then(|()| statement.execute_update())
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
 
-/// Finish a Spiral transaction, rebasing its optimistic project mutation when
-/// a concurrently published managed artifact advances the project head.
-pub(crate) fn commit_catalog_transaction(connection: &mut StorageConnection) -> Result<(), String> {
-    const MAX_COMMIT_ATTEMPTS: usize = 16;
+    /// Finish a Spiral transaction, rebasing its optimistic project mutation when
+    /// a concurrently published managed artifact advances the project head.
+    pub(crate) fn commit_catalog_transaction(&mut self) -> Result<(), String> {
+        const MAX_COMMIT_ATTEMPTS: usize = 16;
 
-    for attempt in 1..=MAX_COMMIT_ATTEMPTS {
-        match connection.commit() {
-            Ok(()) => return Ok(()),
-            Err(error)
-                if error.contains("project namespace compare-and-swap conflict")
-                    && attempt < MAX_COMMIT_ATTEMPTS =>
-            {
-                std::thread::yield_now();
+        for attempt in 1..=MAX_COMMIT_ATTEMPTS {
+            match self.commit() {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if error.contains("project namespace compare-and-swap conflict")
+                        && attempt < MAX_COMMIT_ATTEMPTS =>
+                {
+                    std::thread::yield_now();
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
+        }
+        unreachable!("the bounded commit loop returns on its final attempt")
+    }
+
+    /// Spiral reports a no-op DELETE as an execution error. Replacement and
+    /// cleanup callers intentionally treat that driver-specific result as success.
+    pub fn execute_delete_sql(&mut self, sql: &str) -> Result<(), String> {
+        match self.execute_update_sql(sql) {
+            Err(error) if error.contains("without any affected rows") => Ok(()),
+            result => result,
         }
     }
-    unreachable!("the bounded commit loop returns on its final attempt")
 }
 
-/// Spiral reports a no-op DELETE as an execution error. Replacement and
-/// cleanup callers intentionally treat that driver-specific result as success.
-pub(crate) fn execute_delete_sql(
-    connection: &mut StorageConnection,
-    sql: &str,
-) -> Result<(), String> {
-    match execute_update_sql(connection, sql) {
-        Err(error) if error.contains("without any affected rows") => Ok(()),
-        result => result,
+impl VideoAsset {
+    pub(crate) fn storage_publication_batch(
+        episode_id: &str,
+        assets: &[Self],
+        media_relation: &str,
+    ) -> Result<RecordBatch, String> {
+        let videos = assets;
+        let payloads = videos.iter().map(VideoAsset::payload).collect::<Vec<_>>();
+        let timeline_offsets = videos
+            .iter()
+            .map(|video| {
+                video
+                    .segment()
+                    .timeline_offset_seconds()
+                    .map(|seconds| {
+                        if !seconds.is_finite() || seconds < 0.0 {
+                            return Err(format!(
+                                "video timeline offset for {} must be finite and non-negative",
+                                video.stream_id()
+                            ));
+                        }
+                        let nanos = seconds * 1_000_000_000.0;
+                        if nanos > u64::MAX as f64 {
+                            return Err(format!(
+                                "video timeline offset for {} is too large",
+                                video.stream_id()
+                            ));
+                        }
+                        Ok(nanos.round() as u64)
+                    })
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let schema = VideoAssetStorage::schema();
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from_iter_values(
+                videos.iter().map(|_| episode_id),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                videos.iter().map(VideoAsset::stream_id),
+            )),
+            Arc::new(UInt32Array::from_iter_values(
+                videos.iter().map(|video| video.segment().index()),
+            )),
+            Arc::new(UInt64Array::from(timeline_offsets)),
+            Arc::new(StringArray::from_iter_values(
+                videos.iter().map(VideoAsset::camera_id),
+            )),
+            VideoAssetStorage::inline_blob_array(&payloads)?,
+            Arc::new(UInt64Array::from_iter_values(
+                payloads.iter().map(|payload| payload.len() as u64),
+            )),
+            Arc::new(UInt32Array::from_iter_values(
+                videos.iter().map(|video| video.size().width()),
+            )),
+            Arc::new(UInt32Array::from_iter_values(
+                videos.iter().map(|video| video.size().height()),
+            )),
+            Arc::new(UInt32Array::from_iter_values(
+                videos.iter().map(|video| video.timing().fps()),
+            )),
+            Arc::new(UInt64Array::from_iter_values(
+                videos.iter().map(|video| video.timing().frames()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                videos.iter().map(|_| media_relation),
+            )),
+        ];
+        RecordBatch::try_new(schema, columns)
+            .map_err(|error| format!("building Spiral video batch: {error}"))
     }
 }
 
-pub(crate) fn video_assets_batch(
-    episode_id: &str,
-    videos: &[VideoAsset],
-    media_relation: &str,
-) -> Result<RecordBatch, String> {
-    let payloads = videos.iter().map(VideoAsset::payload).collect::<Vec<_>>();
-    let timeline_offsets = videos
-        .iter()
-        .map(|video| {
-            video
-                .segment()
-                .timeline_offset_seconds()
-                .map(|seconds| {
-                    if !seconds.is_finite() || seconds < 0.0 {
-                        return Err(format!(
-                            "video timeline offset for {} must be finite and non-negative",
-                            video.stream_id()
-                        ));
-                    }
-                    let nanos = seconds * 1_000_000_000.0;
-                    if nanos > u64::MAX as f64 {
-                        return Err(format!(
-                            "video timeline offset for {} is too large",
-                            video.stream_id()
-                        ));
-                    }
-                    Ok(nanos.round() as u64)
-                })
-                .transpose()
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let schema = video_assets_schema();
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from_iter_values(
-            videos.iter().map(|_| episode_id),
-        )),
-        Arc::new(StringArray::from_iter_values(
-            videos.iter().map(VideoAsset::stream_id),
-        )),
-        Arc::new(UInt32Array::from_iter_values(
-            videos.iter().map(|video| video.segment().index()),
-        )),
-        Arc::new(UInt64Array::from(timeline_offsets)),
-        Arc::new(StringArray::from_iter_values(
-            videos.iter().map(VideoAsset::camera_id),
-        )),
-        inline_video_blob_array(&payloads)?,
-        Arc::new(UInt64Array::from_iter_values(
-            payloads.iter().map(|payload| payload.len() as u64),
-        )),
-        Arc::new(UInt32Array::from_iter_values(
-            videos.iter().map(|video| video.size().width()),
-        )),
-        Arc::new(UInt32Array::from_iter_values(
-            videos.iter().map(|video| video.size().height()),
-        )),
-        Arc::new(UInt32Array::from_iter_values(
-            videos.iter().map(|video| video.timing().fps()),
-        )),
-        Arc::new(UInt64Array::from_iter_values(
-            videos.iter().map(|video| video.timing().frames()),
-        )),
-        Arc::new(StringArray::from_iter_values(
-            videos.iter().map(|_| media_relation),
-        )),
-    ];
-    RecordBatch::try_new(schema, columns)
-        .map_err(|error| format!("building Spiral video batch: {error}"))
-}
+struct VideoAssetStorage;
 
-fn video_assets_schema() -> Arc<Schema> {
-    Arc::new(Schema::new(vec![
-        Field::new(db::EPISODE_ID, DataType::Utf8, false),
-        Field::new(db::STREAM_ID, DataType::Utf8, false),
-        Field::new(db::SEGMENT_INDEX, DataType::UInt32, false),
-        Field::new(db::TIMELINE_OFFSET_NS, DataType::UInt64, true),
-        Field::new(db::CAMERA_ID, DataType::Utf8, false),
-        video_blob_field(db::PAYLOAD),
-        Field::new(db::BYTE_SIZE, DataType::UInt64, false),
-        Field::new(db::WIDTH, DataType::UInt32, false),
-        Field::new(db::HEIGHT, DataType::UInt32, false),
-        Field::new(db::FPS, DataType::UInt32, false),
-        Field::new(db::FRAMES, DataType::UInt64, false),
-        Field::new(db::MEDIA_RELATION, DataType::Utf8, false),
-    ]))
-}
-
-fn video_blob_storage_fields() -> Fields {
-    vec![
-        Field::new("bytes", DataType::BinaryView, true),
-        Field::new("uri", DataType::Utf8View, true),
-        Field::new("offset", DataType::UInt64, true),
-        Field::new("size", DataType::UInt64, true),
-        Field::new("mime_type", DataType::Utf8View, true),
-        Field::new("etag", DataType::Utf8View, true),
-        Field::new("version_id", DataType::Utf8View, true),
-        Field::new("generation", DataType::Utf8View, true),
-        Field::new("md5", DataType::Utf8View, true),
-        Field::new("sha1", DataType::Utf8View, true),
-        Field::new("sha256", DataType::Utf8View, true),
-        Field::new("manifest_digest", DataType::Utf8View, true),
-    ]
-    .into()
-}
-
-fn video_blob_field(name: &str) -> Field {
-    Field::new(name, DataType::Struct(video_blob_storage_fields()), true).with_metadata(
-        [(
-            EXTENSION_TYPE_NAME_KEY.to_owned(),
-            BLOB_EXTENSION_NAME.to_owned(),
-        )]
-        .into(),
-    )
-}
-
-fn inline_video_blob_array(payloads: &[&[u8]]) -> Result<ArrayRef, String> {
-    let len = payloads.len();
-    let fields = video_blob_storage_fields();
-    let null_text = || Arc::new(StringViewArray::from(vec![None::<&str>; len])) as ArrayRef;
-    let null_u64 = || Arc::new(UInt64Array::from(vec![None::<u64>; len])) as ArrayRef;
-    let sha256 = Arc::new(StringViewArray::from_iter_values(payloads.iter().map(
-        |payload| {
-            let digest = Sha256::digest(payload);
-            digest
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        },
-    ))) as ArrayRef;
-    let values = vec![
-        Arc::new(BinaryViewArray::from_iter_values(payloads.iter().copied())) as ArrayRef,
-        null_text(),
-        null_u64(),
-        Arc::new(UInt64Array::from_iter_values(
-            payloads.iter().map(|payload| payload.len() as u64),
-        )) as ArrayRef,
-        Arc::new(StringViewArray::from(vec![Some("video/mp4"); len])) as ArrayRef,
-        null_text(),
-        null_text(),
-        null_text(),
-        null_text(),
-        null_text(),
-        sha256,
-        null_text(),
-    ];
-    StructArray::try_new(fields, values, None)
-        .map(|array| Arc::new(array) as ArrayRef)
-        .map_err(|error| format!("building Spiral video Blob array: {error}"))
-}
-
-pub(crate) fn normalize_video_asset_batch(batch: RecordBatch) -> Result<RecordBatch, String> {
-    let payload_index = batch
-        .schema()
-        .index_of(db::PAYLOAD)
-        .map_err(|error| format!("video asset batch is missing {}: {error}", db::PAYLOAD))?;
-    let batch_schema = batch.schema();
-    let payload_field = batch_schema.field(payload_index);
-    if payload_field
-        .metadata()
-        .get(EXTENSION_TYPE_NAME_KEY)
-        .is_some_and(|name| name == BLOB_EXTENSION_NAME)
-    {
-        return Ok(batch);
+impl VideoAssetStorage {
+    fn schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new(db::EPISODE_ID, DataType::Utf8, false),
+            Field::new(db::STREAM_ID, DataType::Utf8, false),
+            Field::new(db::SEGMENT_INDEX, DataType::UInt32, false),
+            Field::new(db::TIMELINE_OFFSET_NS, DataType::UInt64, true),
+            Field::new(db::CAMERA_ID, DataType::Utf8, false),
+            Self::blob_field(db::PAYLOAD),
+            Field::new(db::BYTE_SIZE, DataType::UInt64, false),
+            Field::new(db::WIDTH, DataType::UInt32, false),
+            Field::new(db::HEIGHT, DataType::UInt32, false),
+            Field::new(db::FPS, DataType::UInt32, false),
+            Field::new(db::FRAMES, DataType::UInt64, false),
+            Field::new(db::MEDIA_RELATION, DataType::Utf8, false),
+        ]))
     }
-    let payload = batch.column(payload_index);
-    let values = if let Some(payload) = payload.as_any().downcast_ref::<BinaryArray>() {
-        payload.iter().collect::<Vec<_>>()
-    } else if let Some(payload) = payload.as_any().downcast_ref::<LargeBinaryArray>() {
-        payload.iter().collect::<Vec<_>>()
-    } else if let Some(payload) = payload.as_any().downcast_ref::<BinaryViewArray>() {
-        payload.iter().collect::<Vec<_>>()
-    } else {
-        return Err(format!(
-            "video asset {} must be a Spiral Blob or Arrow binary, got {}",
-            db::PAYLOAD,
-            payload.data_type(),
+
+    fn blob_storage_fields() -> Fields {
+        vec![
+            Field::new("bytes", DataType::BinaryView, true),
+            Field::new("uri", DataType::Utf8View, true),
+            Field::new("offset", DataType::UInt64, true),
+            Field::new("size", DataType::UInt64, true),
+            Field::new("mime_type", DataType::Utf8View, true),
+            Field::new("etag", DataType::Utf8View, true),
+            Field::new("version_id", DataType::Utf8View, true),
+            Field::new("generation", DataType::Utf8View, true),
+            Field::new("md5", DataType::Utf8View, true),
+            Field::new("sha1", DataType::Utf8View, true),
+            Field::new("sha256", DataType::Utf8View, true),
+            Field::new("manifest_digest", DataType::Utf8View, true),
+        ]
+        .into()
+    }
+
+    fn blob_field(name: &str) -> Field {
+        Field::new(name, DataType::Struct(Self::blob_storage_fields()), true).with_metadata(
+            [(
+                EXTENSION_TYPE_NAME_KEY.to_owned(),
+                BLOB_EXTENSION_NAME.to_owned(),
+            )]
+            .into(),
+        )
+    }
+
+    fn inline_blob_array(payloads: &[&[u8]]) -> Result<ArrayRef, String> {
+        let len = payloads.len();
+        let fields = Self::blob_storage_fields();
+        let null_text = || Arc::new(StringViewArray::from(vec![None::<&str>; len])) as ArrayRef;
+        let null_u64 = || Arc::new(UInt64Array::from(vec![None::<u64>; len])) as ArrayRef;
+        let sha256 = Arc::new(StringViewArray::from_iter_values(payloads.iter().map(
+            |payload| {
+                let digest = Sha256::digest(payload);
+                digest
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            },
+        ))) as ArrayRef;
+        let values = vec![
+            Arc::new(BinaryViewArray::from_iter_values(payloads.iter().copied())) as ArrayRef,
+            null_text(),
+            null_u64(),
+            Arc::new(UInt64Array::from_iter_values(
+                payloads.iter().map(|payload| payload.len() as u64),
+            )) as ArrayRef,
+            Arc::new(StringViewArray::from(vec![Some("video/mp4"); len])) as ArrayRef,
+            null_text(),
+            null_text(),
+            null_text(),
+            null_text(),
+            null_text(),
+            sha256,
+            null_text(),
+        ];
+        StructArray::try_new(fields, values, None)
+            .map(|array| Arc::new(array) as ArrayRef)
+            .map_err(|error| format!("building Spiral video Blob array: {error}"))
+    }
+}
+
+pub(crate) trait VideoAssetRecordBatch {
+    fn normalize_video_asset(self) -> Result<RecordBatch, String>;
+}
+
+impl VideoAssetRecordBatch for RecordBatch {
+    fn normalize_video_asset(self) -> Result<RecordBatch, String> {
+        let batch = self;
+        let payload_index = batch
+            .schema()
+            .index_of(db::PAYLOAD)
+            .map_err(|error| format!("video asset batch is missing {}: {error}", db::PAYLOAD))?;
+        let batch_schema = batch.schema();
+        let payload_field = batch_schema.field(payload_index);
+        if payload_field
+            .metadata()
+            .get(EXTENSION_TYPE_NAME_KEY)
+            .is_some_and(|name| name == BLOB_EXTENSION_NAME)
+        {
+            return Ok(batch);
+        }
+        let payload = batch.column(payload_index);
+        let values = if let Some(payload) = payload.as_any().downcast_ref::<BinaryArray>() {
+            payload.iter().collect::<Vec<_>>()
+        } else if let Some(payload) = payload.as_any().downcast_ref::<LargeBinaryArray>() {
+            payload.iter().collect::<Vec<_>>()
+        } else if let Some(payload) = payload.as_any().downcast_ref::<BinaryViewArray>() {
+            payload.iter().collect::<Vec<_>>()
+        } else {
+            return Err(format!(
+                "video asset {} must be a Spiral Blob or Arrow binary, got {}",
+                db::PAYLOAD,
+                payload.data_type(),
+            ));
+        };
+        if values.iter().any(Option::is_none) {
+            return Err("video asset payload cannot be null".to_owned());
+        }
+        let payloads = values.into_iter().flatten().collect::<Vec<_>>();
+        let mut fields = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        fields[payload_index] = VideoAssetStorage::blob_field(db::PAYLOAD);
+        let schema = Arc::new(Schema::new_with_metadata(
+            fields,
+            batch.schema().metadata().clone(),
         ));
-    };
-    if values.iter().any(Option::is_none) {
-        return Err("video asset payload cannot be null".to_owned());
+        let mut columns = batch.columns().to_vec();
+        columns[payload_index] = VideoAssetStorage::inline_blob_array(&payloads)?;
+        RecordBatch::try_new(schema, columns)
+            .map_err(|error| format!("normalizing video asset Blob batch: {error}"))
     }
-    let payloads = values.into_iter().flatten().collect::<Vec<_>>();
-    let mut fields = batch
-        .schema()
-        .fields()
-        .iter()
-        .map(|field| field.as_ref().clone())
-        .collect::<Vec<_>>();
-    fields[payload_index] = video_blob_field(db::PAYLOAD);
-    let schema = Arc::new(Schema::new_with_metadata(
-        fields,
-        batch.schema().metadata().clone(),
-    ));
-    let mut columns = batch.columns().to_vec();
-    columns[payload_index] = inline_video_blob_array(&payloads)?;
-    RecordBatch::try_new(schema, columns)
-        .map_err(|error| format!("normalizing video asset Blob batch: {error}"))
 }
 
-pub(crate) fn ensure_video_assets_blob_relation(
-    connection: &mut StorageConnection,
-    namespace: &str,
-) -> Result<(), String> {
-    let assets = Table::VideoAssets.qualified_name(namespace);
-    let Some(schema) = connection.table_schema(&assets)? else {
-        return Ok(());
-    };
-    let payload = schema
-        .field_with_name(db::PAYLOAD)
-        .map_err(|error| format!("stored video assets are missing {}: {error}", db::PAYLOAD))?;
-    if payload
-        .metadata()
-        .get(EXTENSION_TYPE_NAME_KEY)
-        .is_some_and(|name| name == BLOB_EXTENSION_NAME)
-    {
-        return Ok(());
-    }
-    if !matches!(
-        payload.data_type(),
-        DataType::Binary | DataType::LargeBinary | DataType::BinaryView
-    ) {
-        return Err(format!(
-            "stored video asset {} must be a Spiral Blob or Arrow binary, got {}",
-            db::PAYLOAD,
+impl StorageConnection {
+    pub(crate) fn ensure_video_assets_blob_relation(
+        &mut self,
+        namespace: &str,
+    ) -> Result<(), String> {
+        let connection = self;
+        let assets = Table::VideoAssets.qualified_name(namespace);
+        let Some(schema) = connection.table_schema(&assets)? else {
+            return Ok(());
+        };
+        let payload = schema
+            .field_with_name(db::PAYLOAD)
+            .map_err(|error| format!("stored video assets are missing {}: {error}", db::PAYLOAD))?;
+        if payload
+            .metadata()
+            .get(EXTENSION_TYPE_NAME_KEY)
+            .is_some_and(|name| name == BLOB_EXTENSION_NAME)
+        {
+            return Ok(());
+        }
+        if !matches!(
             payload.data_type(),
-        ));
+            DataType::Binary | DataType::LargeBinary | DataType::BinaryView
+        ) {
+            return Err(format!(
+                "stored video asset {} must be a Spiral Blob or Arrow binary, got {}",
+                db::PAYLOAD,
+                payload.data_type(),
+            ));
+        }
+        connection
+            .execute_update_sql(&SpiralSql::migrate_video_assets_to_blob(&assets))
+            .map_err(|error| format!("migrating video assets from Binary to Blob: {error}"))
     }
-    execute_update_sql(connection, &sql::migrate_video_assets_to_blob(&assets))
-        .map_err(|error| format!("migrating video assets from Binary to Blob: {error}"))
 }
 
-pub(crate) fn run_query(
-    connection: &mut StorageConnection,
-    sql: &str,
-    max_rows: usize,
-) -> Result<SpiralQueryResponse, String> {
-    QueryExecution::new(
-        sql,
-        QueryLimits::new(max_rows, MAX_INTERNAL_QUERY_RESPONSE_BYTES),
-    )
-    .run(connection)
-}
-
-fn relation_row_count(connection: &mut StorageConnection, relation: &str) -> Result<u64, String> {
-    let result = run_query(connection, &sql::count_rows(relation), 1)?;
-    let value = result
-        .rows()
-        .first()
-        .and_then(|row| row.get("rows"))
-        .ok_or_else(|| format!("Spiral returned no row count for {relation}"))?;
-    value
-        .as_u64()
-        .or_else(|| value.as_i64().and_then(|count| count.try_into().ok()))
-        .ok_or_else(|| format!("Spiral returned a non-integer row count for {relation}"))
-}
-
-fn is_user_project_relation(relation: &str, namespace: &str) -> bool {
-    if relation == namespace
-        || relation == sql::video_sources_relation(namespace)
-        || relation == sql::video_dataset_relation(namespace)
-        || relation == sql::video_dataset_output(namespace)
-        || relation.starts_with("workflow.")
-    {
-        return false;
+impl StorageConnection {
+    pub fn run_query(&mut self, sql: &str, max_rows: usize) -> Result<SpiralQueryResponse, String> {
+        QueryExecution::new(
+            sql,
+            QueryLimits::new(max_rows, MAX_INTERNAL_QUERY_RESPONSE_BYTES),
+        )
+        .run(self)
     }
-    ![
-        Table::Robots,
-        Table::StudioSettings,
-        Table::TrainingCheckpoints,
-        Table::TrainingRuns,
-        Table::RolloutRuns,
-        Table::WorkflowRuns,
-    ]
-    .into_iter()
-    .any(|table| relation == table.qualified_name(namespace))
+}
+
+impl StorageConnection {
+    fn relation_row_count(&mut self, relation: &str) -> Result<u64, String> {
+        let result = self.run_query(&SpiralSql::count_rows(relation), 1)?;
+        let value = result
+            .rows()
+            .first()
+            .and_then(|row| row.get("rows"))
+            .ok_or_else(|| format!("Spiral returned no row count for {relation}"))?;
+        value
+            .as_u64()
+            .or_else(|| value.as_i64().and_then(|count| count.try_into().ok()))
+            .ok_or_else(|| format!("Spiral returned a non-integer row count for {relation}"))
+    }
 }
 
 impl QueryExecution<'_> {
@@ -2067,8 +2072,8 @@ impl QueryExecution<'_> {
                     .min(batch.num_rows() - offset)
                     .min(fetch - inspected);
                 let chunk = batch.slice(offset, count);
-                let preview = query_preview_batch(&chunk)?;
-                for row in batch_to_json(&preview)? {
+                let preview = chunk.query_preview()?;
+                for row in preview.to_json_rows()? {
                     inspected += 1;
                     if rows.values.len() >= self.limits.rows {
                         truncated = true;
@@ -2093,156 +2098,201 @@ impl QueryExecution<'_> {
 /// data URLs before Arrow's JSON writer expands every pixel into a number.
 /// The response schema is captured from the original batch, so callers still
 /// receive the real Arrow physical and semantic types.
-fn query_preview_batch(batch: &RecordBatch) -> Result<RecordBatch, String> {
-    let mut fields = Vec::with_capacity(batch.num_columns());
-    let mut columns = Vec::with_capacity(batch.num_columns());
-    let mut changed = false;
-    for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
-        let semantic_type = field
-            .metadata()
-            .get(EXTENSION_TYPE_NAME_KEY)
-            .map(String::as_str);
-        let preview = match semantic_type {
-            Some(IMAGE_EXTENSION_NAME) => Some(image_preview_array(column.as_ref())?),
-            Some(VARIABLE_TENSOR_EXTENSION_NAME) => tensor_preview_array(column.as_ref())?,
-            _ => None,
-        };
-        if let Some(preview) = preview {
-            fields.push(Field::new(
-                field.name(),
-                DataType::Utf8,
-                field.is_nullable(),
+trait RecordBatchPresentation {
+    fn query_preview(&self) -> Result<RecordBatch, String>;
+    fn to_json_rows(&self) -> Result<Vec<JsonMap<String, JsonValue>>, String>;
+}
+
+impl RecordBatchPresentation for RecordBatch {
+    fn query_preview(&self) -> Result<RecordBatch, String> {
+        let batch = self;
+        let mut fields = Vec::with_capacity(batch.num_columns());
+        let mut columns = Vec::with_capacity(batch.num_columns());
+        let mut changed = false;
+        for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
+            let semantic_type = field
+                .metadata()
+                .get(EXTENSION_TYPE_NAME_KEY)
+                .map(String::as_str);
+            let preview = match semantic_type {
+                Some(IMAGE_EXTENSION_NAME) => Some(column.as_ref().image_preview()?),
+                Some(VARIABLE_TENSOR_EXTENSION_NAME) => column.as_ref().tensor_preview()?,
+                _ => None,
+            };
+            if let Some(preview) = preview {
+                fields.push(Field::new(
+                    field.name(),
+                    DataType::Utf8,
+                    field.is_nullable(),
+                ));
+                columns.push(preview);
+                changed = true;
+            } else {
+                fields.push(field.as_ref().clone());
+                columns.push(column.clone());
+            }
+        }
+        if !changed {
+            return Ok(batch.clone());
+        }
+        RecordBatch::try_new(
+            Arc::new(Schema::new_with_metadata(
+                fields,
+                batch.schema().metadata().clone(),
+            )),
+            columns,
+        )
+        .map_err(|error| format!("building Spiral image previews: {error}"))
+    }
+
+    fn to_json_rows(&self) -> Result<Vec<JsonMap<String, JsonValue>>, String> {
+        let batch = self;
+        let mut bytes = Vec::new();
+        let mut writer = WriterBuilder::new()
+            .with_explicit_nulls(true)
+            .build::<_, JsonArray>(&mut bytes);
+        writer
+            .write_batches(&[batch])
+            .map_err(|error| format!("encoding Spiral rows: {error}"))?;
+        writer
+            .finish()
+            .map_err(|error| format!("finishing Spiral rows: {error}"))?;
+        drop(writer);
+        let values: Vec<JsonValue> = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("decoding Spiral rows: {error}"))?;
+        values
+            .into_iter()
+            .map(|value| match value {
+                JsonValue::Object(row) => Ok(row),
+                _ => Err("Spiral returned a non-object row".to_owned()),
+            })
+            .collect()
+    }
+}
+
+trait ArrowArrayPreview {
+    fn image_preview(&self) -> Result<ArrayRef, String>;
+    fn tensor_preview(&self) -> Result<Option<ArrayRef>, String>;
+    fn list_u8(&self, row: usize) -> Option<Vec<u8>>;
+}
+
+impl ArrowArrayPreview for dyn arrow_array::Array {
+    fn image_preview(&self) -> Result<ArrayRef, String> {
+        let array = self;
+        let values = array
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .ok_or_else(|| "Spiral Image column did not use struct storage".to_owned())?;
+        let data = values
+            .column_by_name("data")
+            .ok_or_else(|| "Spiral Image column has no data field".to_owned())?;
+        let widths = values
+            .column_by_name("width")
+            .and_then(|column| column.as_any().downcast_ref::<UInt32Array>())
+            .ok_or_else(|| "Spiral Image column has no UInt32 width field".to_owned())?;
+        let heights = values
+            .column_by_name("height")
+            .and_then(|column| column.as_any().downcast_ref::<UInt32Array>())
+            .ok_or_else(|| "Spiral Image column has no UInt32 height field".to_owned())?;
+        let formats = values
+            .column_by_name("pixel_format")
+            .and_then(|column| column.as_any().downcast_ref::<UInt8Array>())
+            .ok_or_else(|| "Spiral Image column has no UInt8 pixel_format field".to_owned())?;
+        let mut previews = Vec::with_capacity(values.len());
+        for row in 0..values.len() {
+            if values.is_null(row) {
+                previews.push(None);
+                continue;
+            }
+            if widths.is_null(row) || heights.is_null(row) || formats.is_null(row) {
+                return Err("Spiral Image dimensions and pixel format cannot be null".to_owned());
+            }
+            let pixels = data
+                .as_ref()
+                .list_u8(row)
+                .ok_or_else(|| "Spiral Image data must be a List<UInt8>".to_owned())?;
+            previews.push(Some(
+                QueryImage::new(
+                    &pixels,
+                    ImageDimensions::new(widths.value(row), heights.value(row)),
+                    formats.value(row),
+                )
+                .encode()?,
             ));
-            columns.push(preview);
-            changed = true;
+        }
+        Ok(Arc::new(StringArray::from(previews)))
+    }
+
+    /// Render only the canonical HWC UInt8 tensor shape used by
+    /// `spql.image.to_tensor(image, 'hwc', 'none')`. Other tensors retain their
+    /// ordinary JSON representation instead of being mislabeled as imagery.
+    fn tensor_preview(&self) -> Result<Option<ArrayRef>, String> {
+        let array = self;
+        let Some(values) = array.as_any().downcast_ref::<StructArray>() else {
+            return Ok(None);
+        };
+        let Some(data) = values.column_by_name("data") else {
+            return Ok(None);
+        };
+        let Some(shapes) = values
+            .column_by_name("shape")
+            .and_then(|column| column.as_any().downcast_ref::<FixedSizeListArray>())
+        else {
+            return Ok(None);
+        };
+        if shapes.value_length() != 3 {
+            return Ok(None);
+        }
+        let mut previews = Vec::with_capacity(values.len());
+        for row in 0..values.len() {
+            if values.is_null(row) {
+                previews.push(None);
+                continue;
+            }
+            let shape_value = shapes.value(row);
+            let Some(shape) = shape_value.as_any().downcast_ref::<Int32Array>() else {
+                return Ok(None);
+            };
+            let [height, width, channels] = shape.values().as_ref() else {
+                return Ok(None);
+            };
+            if *height <= 0 || *width <= 0 || !matches!(*channels, 3 | 4) {
+                return Ok(None);
+            }
+            let Some(pixels) = data.as_ref().list_u8(row) else {
+                return Ok(None);
+            };
+            previews.push(Some(
+                QueryImage::new(
+                    &pixels,
+                    ImageDimensions::new(
+                        u32::try_from(*width)
+                            .map_err(|_| "Spiral image tensor width overflowed u32")?,
+                        u32::try_from(*height)
+                            .map_err(|_| "Spiral image tensor height overflowed u32")?,
+                    ),
+                    if *channels == 3 { 1 } else { 2 },
+                )
+                .encode()?,
+            ));
+        }
+        Ok(Some(Arc::new(StringArray::from(previews))))
+    }
+
+    fn list_u8(&self, row: usize) -> Option<Vec<u8>> {
+        let array = self;
+        if array.is_null(row) {
+            return None;
+        }
+        let value = if let Some(values) = array.as_any().downcast_ref::<ListArray>() {
+            values.value(row)
         } else {
-            fields.push(field.as_ref().clone());
-            columns.push(column.clone());
-        }
-    }
-    if !changed {
-        return Ok(batch.clone());
-    }
-    RecordBatch::try_new(
-        Arc::new(Schema::new_with_metadata(
-            fields,
-            batch.schema().metadata().clone(),
-        )),
-        columns,
-    )
-    .map_err(|error| format!("building Spiral image previews: {error}"))
-}
-
-fn image_preview_array(array: &dyn arrow_array::Array) -> Result<ArrayRef, String> {
-    let values = array
-        .as_any()
-        .downcast_ref::<StructArray>()
-        .ok_or_else(|| "Spiral Image column did not use struct storage".to_owned())?;
-    let data = values
-        .column_by_name("data")
-        .ok_or_else(|| "Spiral Image column has no data field".to_owned())?;
-    let widths = values
-        .column_by_name("width")
-        .and_then(|column| column.as_any().downcast_ref::<UInt32Array>())
-        .ok_or_else(|| "Spiral Image column has no UInt32 width field".to_owned())?;
-    let heights = values
-        .column_by_name("height")
-        .and_then(|column| column.as_any().downcast_ref::<UInt32Array>())
-        .ok_or_else(|| "Spiral Image column has no UInt32 height field".to_owned())?;
-    let formats = values
-        .column_by_name("pixel_format")
-        .and_then(|column| column.as_any().downcast_ref::<UInt8Array>())
-        .ok_or_else(|| "Spiral Image column has no UInt8 pixel_format field".to_owned())?;
-    let mut previews = Vec::with_capacity(values.len());
-    for row in 0..values.len() {
-        if values.is_null(row) {
-            previews.push(None);
-            continue;
-        }
-        if widths.is_null(row) || heights.is_null(row) || formats.is_null(row) {
-            return Err("Spiral Image dimensions and pixel format cannot be null".to_owned());
-        }
-        let pixels = list_u8_value(data.as_ref(), row)
-            .ok_or_else(|| "Spiral Image data must be a List<UInt8>".to_owned())?;
-        previews.push(Some(
-            QueryImage::new(
-                &pixels,
-                ImageDimensions::new(widths.value(row), heights.value(row)),
-                formats.value(row),
-            )
-            .encode()?,
-        ));
-    }
-    Ok(Arc::new(StringArray::from(previews)))
-}
-
-/// Render only the canonical HWC UInt8 tensor shape used by
-/// `spql.image.to_tensor(image, 'hwc', 'none')`. Other tensors retain their
-/// ordinary JSON representation instead of being mislabeled as imagery.
-fn tensor_preview_array(array: &dyn arrow_array::Array) -> Result<Option<ArrayRef>, String> {
-    let Some(values) = array.as_any().downcast_ref::<StructArray>() else {
-        return Ok(None);
-    };
-    let Some(data) = values.column_by_name("data") else {
-        return Ok(None);
-    };
-    let Some(shapes) = values
-        .column_by_name("shape")
-        .and_then(|column| column.as_any().downcast_ref::<FixedSizeListArray>())
-    else {
-        return Ok(None);
-    };
-    if shapes.value_length() != 3 {
-        return Ok(None);
-    }
-    let mut previews = Vec::with_capacity(values.len());
-    for row in 0..values.len() {
-        if values.is_null(row) {
-            previews.push(None);
-            continue;
-        }
-        let shape_value = shapes.value(row);
-        let Some(shape) = shape_value.as_any().downcast_ref::<Int32Array>() else {
-            return Ok(None);
+            let values = array.as_any().downcast_ref::<LargeListArray>()?;
+            values.value(row)
         };
-        let [height, width, channels] = shape.values().as_ref() else {
-            return Ok(None);
-        };
-        if *height <= 0 || *width <= 0 || !matches!(*channels, 3 | 4) {
-            return Ok(None);
-        }
-        let Some(pixels) = list_u8_value(data.as_ref(), row) else {
-            return Ok(None);
-        };
-        previews.push(Some(
-            QueryImage::new(
-                &pixels,
-                ImageDimensions::new(
-                    u32::try_from(*width)
-                        .map_err(|_| "Spiral image tensor width overflowed u32")?,
-                    u32::try_from(*height)
-                        .map_err(|_| "Spiral image tensor height overflowed u32")?,
-                ),
-                if *channels == 3 { 1 } else { 2 },
-            )
-            .encode()?,
-        ));
+        let values = value.as_any().downcast_ref::<UInt8Array>()?;
+        (values.null_count() == 0).then(|| values.values().to_vec())
     }
-    Ok(Some(Arc::new(StringArray::from(previews))))
-}
-
-fn list_u8_value(array: &dyn arrow_array::Array, row: usize) -> Option<Vec<u8>> {
-    if array.is_null(row) {
-        return None;
-    }
-    let value = if let Some(values) = array.as_any().downcast_ref::<ListArray>() {
-        values.value(row)
-    } else {
-        let values = array.as_any().downcast_ref::<LargeListArray>()?;
-        values.value(row)
-    };
-    let values = value.as_any().downcast_ref::<UInt8Array>()?;
-    (values.null_count() == 0).then(|| values.values().to_vec())
 }
 
 impl QueryImage<'_> {
@@ -2315,182 +2365,160 @@ impl QueryImage<'_> {
     }
 }
 
-pub(crate) fn run_binary_query(
-    connection: &mut StorageConnection,
-    sql: &str,
-) -> Result<Vec<u8>, String> {
-    let mut statement = connection
-        .new_statement()
-        .map_err(|error| format!("opening Spiral ADBC video query: {error}"))?;
-    statement
-        .set_sql_query(sql)
-        .map_err(|error| format!("binding Spiral video query: {error}"))?;
-    let reader = statement
-        .execute()
-        .map_err(|error| format!("executing Spiral video query: {error}"))?;
-    for batch in reader {
-        let batch = batch.map_err(|error| format!("reading Spiral video: {error}"))?;
-        if batch.num_rows() == 0 {
-            continue;
-        }
-        let payload = batch
-            .column_by_name(db::PAYLOAD)
-            .ok_or_else(|| format!("Spiral video query returned no {} column", db::PAYLOAD))?;
-        if payload.is_null(0) {
-            return Err("Spiral video payload is null".to_owned());
-        }
-        if let Some(payload) = payload.as_any().downcast_ref::<BinaryArray>() {
-            return Ok(payload.value(0).to_vec());
-        }
-        if let Some(payload) = payload.as_any().downcast_ref::<LargeBinaryArray>() {
-            return Ok(payload.value(0).to_vec());
-        }
-        if let Some(payload) = payload.as_any().downcast_ref::<BinaryViewArray>() {
-            return Ok(payload.value(0).to_vec());
-        }
-        return Err(format!(
-            "Spiral video payload has unexpected type {}",
-            payload.data_type()
-        ));
-    }
-    Err("No video matched that episode and stream".to_owned())
-}
-
-fn run_u64_query(
-    connection: &mut StorageConnection,
-    sql: &str,
-    column: &str,
-) -> Result<u64, String> {
-    let mut statement = connection
-        .new_statement()
-        .map_err(|error| format!("opening Spiral scalar query: {error}"))?;
-    statement
-        .set_sql_query(sql)
-        .map_err(|error| format!("binding Spiral scalar query: {error}"))?;
-    let reader = statement
-        .execute()
-        .map_err(|error| format!("executing Spiral scalar query: {error}"))?;
-    for batch in reader {
-        let batch = batch.map_err(|error| format!("reading Spiral scalar result: {error}"))?;
-        if batch.num_rows() == 0 {
-            continue;
-        }
-        let values = batch
-            .column_by_name(column)
-            .and_then(|array| array.as_any().downcast_ref::<UInt64Array>())
-            .ok_or_else(|| format!("Spiral scalar query returned no UInt64 {column} column"))?;
-        if values.is_null(0) {
-            return Err(format!("Spiral scalar query returned null {column}"));
-        }
-        return Ok(values.value(0));
-    }
-    Err("No video matched that episode and stream".to_owned())
-}
-
-fn run_training_checkpoint_query(
-    connection: &mut StorageConnection,
-    sql: &str,
-) -> Result<CheckpointArtifact, String> {
-    let mut statement = connection
-        .new_statement()
-        .map_err(|error| format!("opening Spiral checkpoint query: {error}"))?;
-    statement
-        .set_sql_query(sql)
-        .map_err(|error| format!("binding Spiral checkpoint query: {error}"))?;
-    let reader = statement
-        .execute()
-        .map_err(|error| format!("executing Spiral checkpoint query: {error}"))?;
-    let mut artifact = None;
-    for batch in reader {
-        let batch = batch.map_err(|error| format!("reading Spiral checkpoint: {error}"))?;
-        for row in 0..batch.num_rows() {
-            if artifact.is_some() {
-                return Err("Spiral returned duplicate rows for that checkpoint".to_owned());
+impl StorageConnection {
+    pub(crate) fn run_binary_query(&mut self, sql: &str) -> Result<Vec<u8>, String> {
+        let mut statement = self
+            .new_statement()
+            .map_err(|error| format!("opening Spiral ADBC video query: {error}"))?;
+        statement
+            .set_sql_query(sql)
+            .map_err(|error| format!("binding Spiral video query: {error}"))?;
+        let reader = statement
+            .execute()
+            .map_err(|error| format!("executing Spiral video query: {error}"))?;
+        for batch in reader {
+            let batch = batch.map_err(|error| format!("reading Spiral video: {error}"))?;
+            if batch.num_rows() == 0 {
+                continue;
             }
-            let config = batch.column_by_name(db::CONFIG_JSON).ok_or_else(|| {
-                format!(
-                    "Spiral checkpoint query returned no UTF-8 {} column",
-                    db::CONFIG_JSON
-                )
-            })?;
-            let checkpoint = batch.column_by_name(db::CHECKPOINT).ok_or_else(|| {
-                format!(
-                    "Spiral checkpoint query returned no {} column",
-                    db::CHECKPOINT
-                )
-            })?;
-            let payload = if let Some(values) = checkpoint.as_any().downcast_ref::<BinaryArray>() {
-                let value = values.value(row);
-                validate_checkpoint_artifact_size(0, value.len())?;
-                value.to_vec()
-            } else if let Some(values) = checkpoint.as_any().downcast_ref::<LargeBinaryArray>() {
-                let value = values.value(row);
-                validate_checkpoint_artifact_size(0, value.len())?;
-                value.to_vec()
-            } else if let Some(values) = checkpoint.as_any().downcast_ref::<BinaryViewArray>() {
-                let value = values.value(row);
-                validate_checkpoint_artifact_size(0, value.len())?;
-                value.to_vec()
-            } else {
-                return Err(format!(
-                    "Spiral checkpoint payload has unexpected type {}",
-                    checkpoint.data_type()
-                ));
-            };
-            let config_json = if let Some(values) = config.as_any().downcast_ref::<StringArray>() {
-                let value = values.value(row).as_bytes();
-                validate_checkpoint_artifact_size(value.len(), payload.len())?;
-                value.to_vec()
-            } else if let Some(values) = config.as_any().downcast_ref::<LargeStringArray>() {
-                let value = values.value(row).as_bytes();
-                validate_checkpoint_artifact_size(value.len(), payload.len())?;
-                value.to_vec()
-            } else if let Some(values) = config.as_any().downcast_ref::<StringViewArray>() {
-                let value = values.value(row).as_bytes();
-                validate_checkpoint_artifact_size(value.len(), payload.len())?;
-                value.to_vec()
-            } else {
-                return Err(format!(
-                    "Spiral checkpoint config has unexpected type {}",
-                    config.data_type()
-                ));
-            };
-            artifact = Some(CheckpointArtifact::new(config_json, payload)?);
+            let payload = batch
+                .column_by_name(db::PAYLOAD)
+                .ok_or_else(|| format!("Spiral video query returned no {} column", db::PAYLOAD))?;
+            if payload.is_null(0) {
+                return Err("Spiral video payload is null".to_owned());
+            }
+            if let Some(payload) = payload.as_any().downcast_ref::<BinaryArray>() {
+                return Ok(payload.value(0).to_vec());
+            }
+            if let Some(payload) = payload.as_any().downcast_ref::<LargeBinaryArray>() {
+                return Ok(payload.value(0).to_vec());
+            }
+            if let Some(payload) = payload.as_any().downcast_ref::<BinaryViewArray>() {
+                return Ok(payload.value(0).to_vec());
+            }
+            return Err(format!(
+                "Spiral video payload has unexpected type {}",
+                payload.data_type()
+            ));
         }
+        Err("No video matched that episode and stream".to_owned())
     }
-    artifact.ok_or_else(|| "No checkpoint matched that training run and step".to_owned())
+
+    fn run_u64_query(&mut self, sql: &str, column: &str) -> Result<u64, String> {
+        let mut statement = self
+            .new_statement()
+            .map_err(|error| format!("opening Spiral scalar query: {error}"))?;
+        statement
+            .set_sql_query(sql)
+            .map_err(|error| format!("binding Spiral scalar query: {error}"))?;
+        let reader = statement
+            .execute()
+            .map_err(|error| format!("executing Spiral scalar query: {error}"))?;
+        for batch in reader {
+            let batch = batch.map_err(|error| format!("reading Spiral scalar result: {error}"))?;
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            let values = batch
+                .column_by_name(column)
+                .and_then(|array| array.as_any().downcast_ref::<UInt64Array>())
+                .ok_or_else(|| format!("Spiral scalar query returned no UInt64 {column} column"))?;
+            if values.is_null(0) {
+                return Err(format!("Spiral scalar query returned null {column}"));
+            }
+            return Ok(values.value(0));
+        }
+        Err("No video matched that episode and stream".to_owned())
+    }
+
+    fn run_training_checkpoint_query(&mut self, sql: &str) -> Result<CheckpointArtifact, String> {
+        let mut statement = self
+            .new_statement()
+            .map_err(|error| format!("opening Spiral checkpoint query: {error}"))?;
+        statement
+            .set_sql_query(sql)
+            .map_err(|error| format!("binding Spiral checkpoint query: {error}"))?;
+        let reader = statement
+            .execute()
+            .map_err(|error| format!("executing Spiral checkpoint query: {error}"))?;
+        let mut artifact = None;
+        for batch in reader {
+            let batch = batch.map_err(|error| format!("reading Spiral checkpoint: {error}"))?;
+            for row in 0..batch.num_rows() {
+                if artifact.is_some() {
+                    return Err("Spiral returned duplicate rows for that checkpoint".to_owned());
+                }
+                let config = batch.column_by_name(db::CONFIG_JSON).ok_or_else(|| {
+                    format!(
+                        "Spiral checkpoint query returned no UTF-8 {} column",
+                        db::CONFIG_JSON
+                    )
+                })?;
+                let checkpoint = batch.column_by_name(db::CHECKPOINT).ok_or_else(|| {
+                    format!(
+                        "Spiral checkpoint query returned no {} column",
+                        db::CHECKPOINT
+                    )
+                })?;
+                let payload = if let Some(values) =
+                    checkpoint.as_any().downcast_ref::<BinaryArray>()
+                {
+                    let value = values.value(row);
+                    CheckpointArtifact::validate_size(0, value.len())?;
+                    value.to_vec()
+                } else if let Some(values) = checkpoint.as_any().downcast_ref::<LargeBinaryArray>()
+                {
+                    let value = values.value(row);
+                    CheckpointArtifact::validate_size(0, value.len())?;
+                    value.to_vec()
+                } else if let Some(values) = checkpoint.as_any().downcast_ref::<BinaryViewArray>() {
+                    let value = values.value(row);
+                    CheckpointArtifact::validate_size(0, value.len())?;
+                    value.to_vec()
+                } else {
+                    return Err(format!(
+                        "Spiral checkpoint payload has unexpected type {}",
+                        checkpoint.data_type()
+                    ));
+                };
+                let config_json = if let Some(values) =
+                    config.as_any().downcast_ref::<StringArray>()
+                {
+                    let value = values.value(row).as_bytes();
+                    CheckpointArtifact::validate_size(value.len(), payload.len())?;
+                    value.to_vec()
+                } else if let Some(values) = config.as_any().downcast_ref::<LargeStringArray>() {
+                    let value = values.value(row).as_bytes();
+                    CheckpointArtifact::validate_size(value.len(), payload.len())?;
+                    value.to_vec()
+                } else if let Some(values) = config.as_any().downcast_ref::<StringViewArray>() {
+                    let value = values.value(row).as_bytes();
+                    CheckpointArtifact::validate_size(value.len(), payload.len())?;
+                    value.to_vec()
+                } else {
+                    return Err(format!(
+                        "Spiral checkpoint config has unexpected type {}",
+                        config.data_type()
+                    ));
+                };
+                artifact = Some(CheckpointArtifact::new(config_json, payload)?);
+            }
+        }
+        artifact.ok_or_else(|| "No checkpoint matched that training run and step".to_owned())
+    }
 }
 
-fn batch_to_json(batch: &RecordBatch) -> Result<Vec<JsonMap<String, JsonValue>>, String> {
-    let mut bytes = Vec::new();
-    let mut writer = WriterBuilder::new()
-        .with_explicit_nulls(true)
-        .build::<_, JsonArray>(&mut bytes);
-    writer
-        .write_batches(&[batch])
-        .map_err(|error| format!("encoding Spiral rows: {error}"))?;
-    writer
-        .finish()
-        .map_err(|error| format!("finishing Spiral rows: {error}"))?;
-    drop(writer);
-    let values: Vec<JsonValue> =
-        serde_json::from_slice(&bytes).map_err(|error| format!("decoding Spiral rows: {error}"))?;
-    values
-        .into_iter()
-        .map(|value| match value {
-            JsonValue::Object(row) => Ok(row),
-            _ => Err("Spiral returned a non-object row".to_owned()),
-        })
-        .collect()
-}
+struct StorageClock;
 
-fn unix_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(i64::MAX)
+impl StorageClock {
+    fn unix_millis() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(i64::MAX)
+    }
 }
 
 #[cfg(test)]
@@ -2516,33 +2544,38 @@ mod tests {
             Table::RolloutRuns,
             Table::WorkflowRuns,
         ] {
-            assert!(!is_user_project_relation(
+            assert!(!StorageManager::is_user_project_relation(
                 &table.qualified_name(namespace),
                 namespace
             ));
         }
-        assert!(!is_user_project_relation(
+        assert!(!StorageManager::is_user_project_relation(
             "workflow.feature_registry",
             namespace
         ));
-        assert!(!is_user_project_relation(
+        assert!(!StorageManager::is_user_project_relation(
             "robotics.video.assets",
             namespace
         ));
-        assert!(is_user_project_relation("robotics.episodes", namespace));
-        assert!(is_user_project_relation("customer.annotations", namespace));
+        assert!(StorageManager::is_user_project_relation(
+            "robotics.episodes",
+            namespace
+        ));
+        assert!(StorageManager::is_user_project_relation(
+            "customer.annotations",
+            namespace
+        ));
     }
 
     #[test]
     fn obsolete_workflow_json_resets_once_instead_of_poisoning_bootstrap() {
         let (document, incompatible) =
-            decode_json_document_or_default::<CurrentPrototypeDocument>(r#"{"concepts":["cube"]}"#);
+            r#"{"concepts":["cube"]}"#.decode_json_or_default::<CurrentPrototypeDocument>();
         assert!(incompatible);
         assert_eq!(document, CurrentPrototypeDocument::default());
 
-        let (document, incompatible) = decode_json_document_or_default::<CurrentPrototypeDocument>(
-            r#"{"features":["is_cube_feature"]}"#,
-        );
+        let (document, incompatible) = r#"{"features":["is_cube_feature"]}"#
+            .decode_json_or_default::<CurrentPrototypeDocument>();
         assert!(!incompatible);
         assert_eq!(document.features, ["is_cube_feature"]);
     }
@@ -2550,7 +2583,7 @@ mod tests {
     #[test]
     fn backend_owned_arrow_schemas_match_the_shared_contract() {
         assert_eq!(
-            training_checkpoint_schema()
+            TrainingCheckpointStorage::schema()
                 .fields()
                 .iter()
                 .map(|field| field.name().as_str())
@@ -2558,7 +2591,7 @@ mod tests {
             Table::TrainingCheckpoints.columns(),
         );
         assert_eq!(
-            video_assets_schema()
+            VideoAssetStorage::schema()
                 .fields()
                 .iter()
                 .map(|field| field.name().as_str())
@@ -2570,7 +2603,7 @@ mod tests {
     #[test]
     fn inline_video_blobs_store_content_sha256_in_the_named_field() {
         let payload = b"spiral";
-        let array = inline_video_blob_array(&[payload.as_slice()]).unwrap();
+        let array = VideoAssetStorage::inline_blob_array(&[payload.as_slice()]).unwrap();
         let blob = array.as_any().downcast_ref::<StructArray>().unwrap();
         let sha256 = blob
             .column_by_name("sha256")
@@ -2596,17 +2629,22 @@ mod tests {
     #[test]
     fn query_preview_rejects_mutation_and_multiple_statements() {
         assert!(
-            sql::ensure_read_only(
+            SpiralSql::ensure_read_only(
                 "SELECT * FROM robotics.episodes",
                 ReadOnlyQueryMode::Preview
             )
             .is_ok()
         );
         assert!(
-            sql::ensure_read_only("DELETE FROM robotics.episodes", ReadOnlyQueryMode::Preview)
-                .is_err()
+            SpiralSql::ensure_read_only(
+                "DELETE FROM robotics.episodes",
+                ReadOnlyQueryMode::Preview
+            )
+            .is_err()
         );
-        assert!(sql::ensure_read_only("SELECT 1; SELECT 2", ReadOnlyQueryMode::Preview).is_err());
+        assert!(
+            SpiralSql::ensure_read_only("SELECT 1; SELECT 2", ReadOnlyQueryMode::Preview).is_err()
+        );
     }
 
     #[test]
@@ -2641,8 +2679,8 @@ mod tests {
         let batch =
             RecordBatch::try_new(Arc::new(Schema::new(vec![image_field])), vec![images]).unwrap();
 
-        let preview = query_preview_batch(&batch).unwrap();
-        let rows = batch_to_json(&preview).unwrap();
+        let preview = batch.query_preview().unwrap();
+        let rows = preview.to_json_rows().unwrap();
         let value = rows[0].get("image").and_then(JsonValue::as_str).unwrap();
         assert!(value.starts_with("data:image/jpeg;base64,"));
         let encoded = value.split_once(',').unwrap().1;
@@ -2683,7 +2721,7 @@ mod tests {
         let batch =
             RecordBatch::try_new(Arc::new(Schema::new(vec![tensor_field])), vec![tensors]).unwrap();
 
-        let rows = batch_to_json(&query_preview_batch(&batch).unwrap()).unwrap();
+        let rows = batch.query_preview().unwrap().to_json_rows().unwrap();
         assert!(
             rows[0]
                 .get("image")
@@ -2705,7 +2743,7 @@ mod tests {
                 serde_json::json!([0.25, -0.5]),
             ),
         ])];
-        let (sample_hz, trajectory) = decode_trajectory(rows).unwrap();
+        let (sample_hz, trajectory) = DecodedTrajectory::decode(rows).unwrap().into_parts();
         assert_eq!(sample_hz, 60.0);
         assert_eq!(trajectory[0]["shoulder"], 0.25);
         assert_eq!(trajectory[0]["elbow"], -0.5);
@@ -2718,6 +2756,6 @@ mod tests {
             (db::JOINT_NAMES.to_owned(), serde_json::json!(["shoulder"])),
             (db::REPLAY_POSITION.to_owned(), serde_json::json!([0.0])),
         ])];
-        assert!(decode_trajectory(rows).is_err());
+        assert!(DecodedTrajectory::decode(rows).is_err());
     }
 }

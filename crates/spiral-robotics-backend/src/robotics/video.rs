@@ -73,6 +73,14 @@ impl VideoCaptureRequest {
             cameras,
         }
     }
+
+    fn has_safe_asset_key(&self) -> bool {
+        !self.episode_id.is_empty()
+            && self.episode_id.len() <= 64
+            && self.episode_id.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
+    }
 }
 
 struct VideoCaptureRun {
@@ -276,7 +284,7 @@ impl VideoCapture {
         if request.cameras.is_empty() {
             return Ok(None);
         }
-        if !safe_path_component(&request.episode_id) {
+        if !request.has_safe_asset_key() {
             return Err(format!(
                 "episode id {:?} cannot be used as a video asset key",
                 request.episode_id
@@ -441,14 +449,6 @@ impl VideoCapture {
     }
 }
 
-fn safe_path_component(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,9 +472,9 @@ mod tests {
 
     #[test]
     fn episode_ids_are_safe_logical_keys() {
-        assert!(safe_path_component("episode_000001"));
-        assert!(!safe_path_component("../episode"));
-        assert!(!safe_path_component(""));
+        assert!(VideoCaptureRequest::new("episode_000001", Vec::new()).has_safe_asset_key());
+        assert!(!VideoCaptureRequest::new("../episode", Vec::new()).has_safe_asset_key());
+        assert!(!VideoCaptureRequest::new("", Vec::new()).has_safe_asset_key());
     }
 
     #[test]

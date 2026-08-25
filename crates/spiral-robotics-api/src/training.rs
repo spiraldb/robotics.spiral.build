@@ -3,8 +3,6 @@
 use serde::{Deserialize, Serialize};
 use spiral_robotics_core::operation::OperationLifecycle;
 
-use crate::datasets::default_dataset_id;
-
 /// The policy family executed by the native training runtime.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -38,33 +36,33 @@ pub struct ActInputConfig {
     /// Camera stream IDs that must be present for every sampled anchor.
     /// An empty list discovers every camera stream shared by the selected
     /// dataset episodes, matching LeRobot's feature-driven policy inputs.
-    #[serde(default = "default_training_camera_streams")]
+    #[serde(default = "ActInputConfig::default_camera_streams")]
     camera_streams: Vec<String>,
     /// Requested image width. Zero preserves the recorded camera width.
-    #[serde(default = "default_training_image_size")]
+    #[serde(default = "ActInputConfig::default_image_size")]
     image_width: usize,
     /// Requested image height. Zero preserves the recorded camera height.
-    #[serde(default = "default_training_image_size")]
+    #[serde(default = "ActInputConfig::default_image_size")]
     image_height: usize,
     /// Spiral video decoder implementation: auto, ffmpeg, videotoolbox, or nvdec.
-    #[serde(default = "default_training_video_decoder")]
+    #[serde(default = "ActInputConfig::default_video_decoder")]
     video_decoder: String,
     /// Use the ImageNet initialization expected by vision ACT.
-    #[serde(default = "default_act_pretrained_backbone")]
+    #[serde(default = "ActInputConfig::default_pretrained_backbone")]
     pretrained_backbone: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ActArchitectureConfig {
-    #[serde(default = "default_act_hidden_dim")]
+    #[serde(default = "ActArchitectureConfig::default_hidden_dim")]
     hidden_dim: usize,
-    #[serde(default = "default_act_latent_dim")]
+    #[serde(default = "ActArchitectureConfig::default_latent_dim")]
     latent_dim: usize,
-    #[serde(default = "default_act_encoder_layers")]
+    #[serde(default = "ActArchitectureConfig::default_encoder_layers")]
     encoder_layers: usize,
-    #[serde(default = "default_act_vae_encoder_layers")]
+    #[serde(default = "ActArchitectureConfig::default_vae_encoder_layers")]
     vae_encoder_layers: usize,
-    #[serde(default = "default_act_decoder_layers")]
+    #[serde(default = "ActArchitectureConfig::default_decoder_layers")]
     decoder_layers: usize,
 }
 
@@ -87,35 +85,91 @@ impl ActLayerCounts {
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ActAttentionConfig {
-    #[serde(default = "default_act_attention_heads")]
+    #[serde(default = "ActAttentionConfig::default_heads")]
     attention_heads: usize,
-    #[serde(default = "default_act_feedforward_dim")]
+    #[serde(default = "ActAttentionConfig::default_feedforward_dim")]
     feedforward_dim: usize,
-    #[serde(default = "default_act_kl_weight")]
+    #[serde(default = "ActAttentionConfig::default_kl_weight")]
     kl_weight: f64,
+}
+
+impl ActInputConfig {
+    fn default_camera_streams() -> Vec<String> {
+        Vec::new()
+    }
+
+    const fn default_image_size() -> usize {
+        0
+    }
+
+    fn default_video_decoder() -> String {
+        "auto".to_owned()
+    }
+
+    const fn default_pretrained_backbone() -> bool {
+        true
+    }
+}
+
+impl ActArchitectureConfig {
+    const fn default_hidden_dim() -> usize {
+        512
+    }
+
+    const fn default_latent_dim() -> usize {
+        32
+    }
+
+    const fn default_encoder_layers() -> usize {
+        4
+    }
+
+    const fn default_vae_encoder_layers() -> usize {
+        4
+    }
+
+    const fn default_decoder_layers() -> usize {
+        // The original ACT requested seven decoder layers but returned only the
+        // first layer's output. LeRobot preserves that effective architecture.
+        1
+    }
+}
+
+impl ActAttentionConfig {
+    const fn default_heads() -> usize {
+        8
+    }
+
+    const fn default_feedforward_dim() -> usize {
+        3_200
+    }
+
+    const fn default_kl_weight() -> f64 {
+        10.0
+    }
 }
 
 impl Default for ActTrainingConfig {
     fn default() -> Self {
         Self {
             input: ActInputConfig {
-                camera_streams: default_training_camera_streams(),
-                image_width: default_training_image_size(),
-                image_height: default_training_image_size(),
-                video_decoder: default_training_video_decoder(),
-                pretrained_backbone: default_act_pretrained_backbone(),
+                camera_streams: ActInputConfig::default_camera_streams(),
+                image_width: ActInputConfig::default_image_size(),
+                image_height: ActInputConfig::default_image_size(),
+                video_decoder: ActInputConfig::default_video_decoder(),
+                pretrained_backbone: ActInputConfig::default_pretrained_backbone(),
             },
             architecture: ActArchitectureConfig {
-                hidden_dim: default_act_hidden_dim(),
-                latent_dim: default_act_latent_dim(),
-                encoder_layers: default_act_encoder_layers(),
-                vae_encoder_layers: default_act_vae_encoder_layers(),
-                decoder_layers: default_act_decoder_layers(),
+                hidden_dim: ActArchitectureConfig::default_hidden_dim(),
+                latent_dim: ActArchitectureConfig::default_latent_dim(),
+                encoder_layers: ActArchitectureConfig::default_encoder_layers(),
+                vae_encoder_layers: ActArchitectureConfig::default_vae_encoder_layers(),
+                decoder_layers: ActArchitectureConfig::default_decoder_layers(),
             },
             attention: ActAttentionConfig {
-                attention_heads: default_act_attention_heads(),
-                feedforward_dim: default_act_feedforward_dim(),
-                kl_weight: default_act_kl_weight(),
+                attention_heads: ActAttentionConfig::default_heads(),
+                feedforward_dim: ActAttentionConfig::default_feedforward_dim(),
+                kl_weight: ActAttentionConfig::default_kl_weight(),
             },
         }
     }
@@ -282,24 +336,24 @@ pub struct TrainingDataSelection {
     run_name: String,
     /// Relational dataset selected by the operator. The configured Spiral
     /// namespace remains a storage location; this ID is the training set.
-    #[serde(default = "default_dataset_id")]
+    #[serde(default = "TrainingDataSelection::default_dataset_id")]
     dataset_id: String,
     #[serde(default)]
     policy: TrainingPolicy,
     sql: String,
-    #[serde(default = "default_training_state_column")]
+    #[serde(default = "TrainingDataSelection::default_state_column")]
     state_column: String,
-    #[serde(default = "default_training_action_column")]
+    #[serde(default = "TrainingDataSelection::default_action_column")]
     action_column: String,
-    #[serde(default = "default_training_device")]
+    #[serde(default = "TrainingDataSelection::default_device")]
     device: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct TrainingOptimizationConfig {
-    #[serde(default = "default_training_steps")]
+    #[serde(default = "TrainingOptimizationConfig::default_steps")]
     steps: u64,
-    #[serde(default = "default_training_batch_size")]
+    #[serde(default = "TrainingOptimizationConfig::default_batch_size")]
     batch_size: usize,
     /// Fraction of covered episodes held out from optimizer updates.
     ///
@@ -307,13 +361,13 @@ pub struct TrainingOptimizationConfig {
     /// original no-validation semantics. Newly created requests default to 10%.
     #[serde(default)]
     validation_split: f64,
-    #[serde(default = "default_training_learning_rate")]
+    #[serde(default = "TrainingOptimizationConfig::default_learning_rate")]
     learning_rate: f64,
-    #[serde(default = "default_training_checkpoint_every")]
+    #[serde(default = "TrainingOptimizationConfig::default_checkpoint_every")]
     checkpoint_every: u64,
-    #[serde(default = "default_training_chunk_size")]
+    #[serde(default = "TrainingOptimizationConfig::default_chunk_size")]
     chunk_size: usize,
-    #[serde(default = "default_training_seed")]
+    #[serde(default = "TrainingOptimizationConfig::default_seed")]
     seed: u64,
 }
 
@@ -322,21 +376,21 @@ impl Default for StartTrainingRequest {
         Self {
             selection: TrainingDataSelection {
                 run_name: "act-run".to_owned(),
-                dataset_id: default_dataset_id(),
+                dataset_id: TrainingDataSelection::default_dataset_id(),
                 policy: TrainingPolicy::Act,
                 sql: String::new(),
-                state_column: default_training_state_column(),
-                action_column: default_training_action_column(),
-                device: default_training_device(),
+                state_column: TrainingDataSelection::default_state_column(),
+                action_column: TrainingDataSelection::default_action_column(),
+                device: TrainingDataSelection::default_device(),
             },
             optimization: TrainingOptimizationConfig {
-                steps: default_training_steps(),
-                batch_size: default_training_batch_size(),
-                validation_split: default_training_validation_split(),
-                learning_rate: default_training_learning_rate(),
-                checkpoint_every: default_training_checkpoint_every(),
-                chunk_size: default_training_chunk_size(),
-                seed: default_training_seed(),
+                steps: TrainingOptimizationConfig::default_steps(),
+                batch_size: TrainingOptimizationConfig::default_batch_size(),
+                validation_split: TrainingOptimizationConfig::default_validation_split(),
+                learning_rate: TrainingOptimizationConfig::default_learning_rate(),
+                checkpoint_every: TrainingOptimizationConfig::default_checkpoint_every(),
+                chunk_size: TrainingOptimizationConfig::default_chunk_size(),
+                seed: TrainingOptimizationConfig::default_seed(),
             },
             act: ActTrainingConfig::default(),
         }
@@ -454,6 +508,22 @@ impl StartTrainingRequest {
 }
 
 impl TrainingDataSelection {
+    fn default_dataset_id() -> String {
+        "default".to_owned()
+    }
+
+    fn default_state_column() -> String {
+        "state".to_owned()
+    }
+
+    fn default_action_column() -> String {
+        "action".to_owned()
+    }
+
+    fn default_device() -> String {
+        "auto".to_owned()
+    }
+
     pub fn new(
         run_name: impl Into<String>,
         dataset_id: impl Into<String>,
@@ -464,9 +534,9 @@ impl TrainingDataSelection {
             dataset_id: dataset_id.into(),
             policy: TrainingPolicy::default(),
             sql: sql.into(),
-            state_column: default_training_state_column(),
-            action_column: default_training_action_column(),
-            device: default_training_device(),
+            state_column: Self::default_state_column(),
+            action_column: Self::default_action_column(),
+            device: Self::default_device(),
         }
     }
 
@@ -492,15 +562,43 @@ impl TrainingDataSelection {
 }
 
 impl TrainingOptimizationConfig {
+    const fn default_steps() -> u64 {
+        100_000
+    }
+
+    const fn default_batch_size() -> usize {
+        8
+    }
+
+    const fn default_validation_split() -> f64 {
+        0.1
+    }
+
+    const fn default_learning_rate() -> f64 {
+        1.0e-5
+    }
+
+    const fn default_checkpoint_every() -> u64 {
+        20_000
+    }
+
+    const fn default_chunk_size() -> usize {
+        100
+    }
+
+    const fn default_seed() -> u64 {
+        1_000
+    }
+
     pub const fn new(steps: u64, batch_size: usize, learning_rate: f64) -> Self {
         Self {
             steps,
             batch_size,
-            validation_split: default_training_validation_split(),
+            validation_split: Self::default_validation_split(),
             learning_rate,
-            checkpoint_every: default_training_checkpoint_every(),
-            chunk_size: default_training_chunk_size(),
-            seed: default_training_seed(),
+            checkpoint_every: Self::default_checkpoint_every(),
+            chunk_size: Self::default_chunk_size(),
+            seed: Self::default_seed(),
         }
     }
 
@@ -523,96 +621,6 @@ impl TrainingOptimizationConfig {
         self.seed = seed;
         self
     }
-}
-
-fn default_training_state_column() -> String {
-    "state".to_owned()
-}
-
-fn default_training_action_column() -> String {
-    "action".to_owned()
-}
-
-fn default_training_device() -> String {
-    "auto".to_owned()
-}
-
-const fn default_training_steps() -> u64 {
-    100_000
-}
-
-const fn default_training_batch_size() -> usize {
-    8
-}
-
-const fn default_training_validation_split() -> f64 {
-    0.1
-}
-
-const fn default_training_learning_rate() -> f64 {
-    1.0e-5
-}
-
-const fn default_training_checkpoint_every() -> u64 {
-    20_000
-}
-
-const fn default_training_chunk_size() -> usize {
-    100
-}
-
-const fn default_training_seed() -> u64 {
-    1_000
-}
-
-fn default_training_camera_streams() -> Vec<String> {
-    Vec::new()
-}
-
-const fn default_training_image_size() -> usize {
-    0
-}
-
-fn default_training_video_decoder() -> String {
-    "auto".to_owned()
-}
-
-const fn default_act_pretrained_backbone() -> bool {
-    true
-}
-
-const fn default_act_hidden_dim() -> usize {
-    512
-}
-
-const fn default_act_latent_dim() -> usize {
-    32
-}
-
-const fn default_act_encoder_layers() -> usize {
-    4
-}
-
-const fn default_act_vae_encoder_layers() -> usize {
-    4
-}
-
-const fn default_act_decoder_layers() -> usize {
-    // The original ACT requested seven decoder layers but returned only the
-    // first layer's output. LeRobot preserves that effective architecture.
-    1
-}
-
-const fn default_act_attention_heads() -> usize {
-    8
-}
-
-const fn default_act_feedforward_dim() -> usize {
-    3_200
-}
-
-const fn default_act_kl_weight() -> f64 {
-    10.0
 }
 
 /// One sample on the shared training-step axis used by every Studio plot.
@@ -884,11 +892,15 @@ impl TrainingCheckpoint {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TrainingSource {
     /// Relational dataset row whose episodes supplied this run.
-    #[serde(default = "default_dataset_id")]
+    #[serde(default = "TrainingSource::default_dataset_id")]
     dataset_id: String,
 }
 
 impl TrainingSource {
+    fn default_dataset_id() -> String {
+        "default".to_owned()
+    }
+
     pub fn new(dataset_id: impl Into<String>) -> Self {
         Self {
             dataset_id: dataset_id.into(),
@@ -1297,7 +1309,7 @@ impl TrainingRun {
             .enumerate()
             .filter_map(|(index, point)| point.progress.event.is_some().then_some(index))
             .collect::<Vec<_>>();
-        retain_evenly(
+        Self::retain_evenly(
             &mut keep,
             &event_indices,
             TRAINING_METRIC_COMPACTION_TARGET / 8,
@@ -1338,7 +1350,7 @@ impl TrainingRun {
 
         let remaining = TRAINING_METRIC_COMPACTION_TARGET.saturating_sub(keep.len());
         let all_indices = (0..source.len()).collect::<Vec<_>>();
-        retain_evenly(&mut keep, &all_indices, remaining);
+        Self::retain_evenly(&mut keep, &all_indices, remaining);
 
         self.history.metrics = source
             .into_iter()
@@ -1346,19 +1358,22 @@ impl TrainingRun {
             .filter_map(|(index, point)| keep.contains(&index).then_some(point))
             .collect();
     }
-}
-
-fn retain_evenly(keep: &mut std::collections::BTreeSet<usize>, candidates: &[usize], limit: usize) {
-    if candidates.is_empty() || limit == 0 {
-        return;
-    }
-    if candidates.len() <= limit {
-        keep.extend(candidates.iter().copied());
-        return;
-    }
-    for slot in 0..limit {
-        let index = slot * (candidates.len() - 1) / limit.saturating_sub(1).max(1);
-        keep.insert(candidates[index]);
+    fn retain_evenly(
+        keep: &mut std::collections::BTreeSet<usize>,
+        candidates: &[usize],
+        limit: usize,
+    ) {
+        if candidates.is_empty() || limit == 0 {
+            return;
+        }
+        if candidates.len() <= limit {
+            keep.extend(candidates.iter().copied());
+            return;
+        }
+        for slot in 0..limit {
+            let index = slot * (candidates.len() - 1) / limit.saturating_sub(1).max(1);
+            keep.insert(candidates[index]);
+        }
     }
 }
 

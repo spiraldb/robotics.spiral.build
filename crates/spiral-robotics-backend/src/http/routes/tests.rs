@@ -1,6 +1,6 @@
 use super::data::DataSettingsOverrides;
-use super::devices::{CameraConfigurationObject, multipart_part};
-use super::recordings::{ByteRange, parse_byte_range};
+use super::devices::CameraConfigurationObject;
+use super::recordings::ByteRange;
 use super::*;
 
 #[test]
@@ -133,20 +133,24 @@ fn workflow_uses_named_events_on_the_single_reconnecting_stream() {
 
 #[test]
 fn workflow_agent_sse_cursor_coalesces_duplicate_wakeups_and_accepts_new_scopes() {
-    let mut cursor = ("scope-a".to_owned(), 8);
-    assert!(!super::replace_agent_cursor(
-        &mut cursor,
-        &("scope-a".to_owned(), 8)
-    ));
-    assert!(super::replace_agent_cursor(
-        &mut cursor,
-        &("scope-a".to_owned(), 9)
-    ));
-    assert!(super::replace_agent_cursor(
-        &mut cursor,
-        &("scope-b".to_owned(), 1)
-    ));
-    assert_eq!(cursor, ("scope-b".to_owned(), 1));
+    let mut cursor = AgentCursor {
+        scope_id: "scope-a".to_owned(),
+        revision: 8,
+    };
+    assert!(!cursor.advance_to(AgentCursor {
+        scope_id: "scope-a".to_owned(),
+        revision: 8,
+    }));
+    assert!(cursor.advance_to(AgentCursor {
+        scope_id: "scope-a".to_owned(),
+        revision: 9,
+    }));
+    assert!(cursor.advance_to(AgentCursor {
+        scope_id: "scope-b".to_owned(),
+        revision: 1,
+    }));
+    assert_eq!(cursor.scope_id, "scope-b");
+    assert_eq!(cursor.revision, 1);
 }
 
 #[test]
@@ -244,7 +248,7 @@ fn multipart_parts_carry_an_accurate_length() {
         std::time::Instant::now(),
     );
 
-    let part = multipart_part(&frame);
+    let part = frame.multipart_part();
     let text = String::from_utf8_lossy(&part);
 
     assert!(text.starts_with("--spiral-robotics-frame\r\nContent-Type: image/jpeg\r\n"));
@@ -256,26 +260,26 @@ fn multipart_parts_carry_an_accurate_length() {
 #[test]
 fn spiral_video_ranges_cover_browser_seek_forms() {
     assert_eq!(
-        parse_byte_range("bytes=10-19", 100),
+        ByteRange::parse("bytes=10-19", 100),
         Some(ByteRange::new(10, 19))
     );
     assert_eq!(
-        parse_byte_range("bytes=90-", 100),
+        ByteRange::parse("bytes=90-", 100),
         Some(ByteRange::new(90, 99))
     );
     assert_eq!(
-        parse_byte_range("bytes=-10", 100),
+        ByteRange::parse("bytes=-10", 100),
         Some(ByteRange::new(90, 99))
     );
     assert_eq!(
-        parse_byte_range("bytes=90-200", 100),
+        ByteRange::parse("bytes=90-200", 100),
         Some(ByteRange::new(90, 99))
     );
-    assert_eq!(parse_byte_range("bytes=100-", 100), None);
-    assert_eq!(parse_byte_range("bytes=20-10", 100), None);
-    assert_eq!(parse_byte_range("bytes=0-1,4-5", 100), None);
-    assert_eq!(parse_byte_range("items=0-1", 100), None);
-    assert_eq!(parse_byte_range("bytes=0-1", 0), None);
+    assert_eq!(ByteRange::parse("bytes=100-", 100), None);
+    assert_eq!(ByteRange::parse("bytes=20-10", 100), None);
+    assert_eq!(ByteRange::parse("bytes=0-1,4-5", 100), None);
+    assert_eq!(ByteRange::parse("items=0-1", 100), None);
+    assert_eq!(ByteRange::parse("bytes=0-1", 0), None);
 }
 
 #[test]

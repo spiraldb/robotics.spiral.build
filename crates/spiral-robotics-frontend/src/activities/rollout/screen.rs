@@ -3,7 +3,7 @@
 use dioxus_workbench::{Panel, PanelLayout};
 
 use crate::shell::activity::PanelRole;
-use crate::shell::layout::default_panel_layout_with_workbench;
+use crate::shell::layout::PanelLayoutDefinition;
 use crate::shell::workspace::ScreenWorkspaceDefinition;
 
 impl ScreenWorkspaceDefinition {
@@ -20,7 +20,7 @@ impl ScreenWorkspaceDefinition {
             .iter()
             .map(|(panel, _)| panel.clone())
             .collect::<Vec<_>>();
-        let layout: PanelLayout = default_panel_layout_with_workbench(&layout_panels, 0.27);
+        let layout: PanelLayout = layout_panels.default_panel_layout_with_workbench(0.27);
         Self::new(panels, layout, "spiral_robotics.panel-layout.v6.rollout")
     }
 }

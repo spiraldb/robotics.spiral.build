@@ -15,7 +15,6 @@ use spiral_robotics_api::robots::{
 use spiral_robotics_core::arm::{self, JointAngles};
 
 use crate::client::http as api;
-use crate::panels::scene::tool_position;
 use crate::shell::state::{Selection, studio};
 
 #[derive(Default)]
@@ -94,10 +93,10 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
     let angles = telemetry
         .as_ref()
         .filter(|_| calibrated)
-        .map(|robot| measured_angles(robot.joints()));
+        .map(|robot| robot.joints().measured_angles());
     let tip = angles
         .as_ref()
-        .and_then(|angles| tool_position(urdf, angles));
+        .and_then(|angles| urdf.so101_tool_position(angles));
     let tracking_error = telemetry.as_ref().and_then(|robot| {
         robot
             .joints()
@@ -154,13 +153,18 @@ fn ToolReadout(telemetry: Option<RobotTelemetry>, calibrated: bool) -> Element {
 }
 
 /// The limits the named motor reported for itself when it connected.
-fn motor_limits(robot: &RobotSummary, joint: &str) -> MotorLimits {
-    robot
-        .motors()
-        .iter()
-        .find(|motor| motor.name() == joint)
-        .map(|motor| motor.limits())
-        .unwrap_or_default()
+trait RobotMotorLimits {
+    fn motor_limits(&self, joint: &str) -> MotorLimits;
+}
+
+impl RobotMotorLimits for RobotSummary {
+    fn motor_limits(&self, joint: &str) -> MotorLimits {
+        self.motors()
+            .iter()
+            .find(|motor| motor.name() == joint)
+            .map(|motor| motor.limits())
+            .unwrap_or_default()
+    }
 }
 
 /// How the whole arm is doing against the limits its own motors reported.
@@ -188,7 +192,7 @@ fn ConditionReadout(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> E
                 .total_cmp(&right.temperature_celsius().unwrap_or_default())
         });
     let hot = hottest.is_some_and(|joint| {
-        joint.condition(&motor_limits(&robot, joint.name())) != MotorCondition::Nominal
+        joint.condition(&robot.motor_limits(joint.name())) != MotorCondition::Nominal
     });
 
     // Every motor shares one supply, so the interesting number is the worst of
@@ -200,7 +204,7 @@ fn ConditionReadout(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> E
     let sagging = joints.iter().any(|joint| {
         joint.voltage_volts().is_some()
             && joint.voltage_volts() == supply
-            && joint.condition(&motor_limits(&robot, joint.name())) != MotorCondition::Nominal
+            && joint.condition(&robot.motor_limits(joint.name())) != MotorCondition::Nominal
     });
 
     let hardest = joints
@@ -213,7 +217,7 @@ fn ConditionReadout(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> E
                 .total_cmp(&right.load().unwrap_or_default().abs())
         });
     let strained = hardest.is_some_and(|joint| {
-        joint.condition(&motor_limits(&robot, joint.name())) != MotorCondition::Nominal
+        joint.condition(&robot.motor_limits(joint.name())) != MotorCondition::Nominal
     });
 
     rsx! {
@@ -287,14 +291,14 @@ fn MotorDetail(robot: RobotSummary, telemetry: Option<RobotTelemetry>) -> Elemen
         return rsx! {};
     };
 
-    let label =
-        arm::so101_joint(joint.name()).map_or(joint.name().to_owned(), |j| j.label().to_owned());
+    let label = arm::JointDefinition::so101(joint.name())
+        .map_or(joint.name().to_owned(), |j| j.label().to_owned());
     let model = robot
         .motors()
         .iter()
         .find(|motor| motor.name() == joint.name())
         .and_then(|motor| motor.model().to_owned());
-    let limits = motor_limits(&robot, joint.name());
+    let limits = robot.motor_limits(joint.name());
     let condition = joint.condition(&limits);
 
     rsx! {
@@ -421,17 +425,23 @@ fn Readout(label: String, value: Option<String>, details: ReadoutDetails) -> Ele
 }
 
 /// Collect an arm's calibrated joint angles out of its telemetry.
-pub(crate) fn measured_angles(joints: &[JointTelemetry]) -> JointAngles {
-    let degrees = joints
-        .iter()
-        .filter_map(|joint| Some((joint.name().to_owned(), joint.degrees()?)))
-        .collect::<BTreeMap<_, _>>();
-    let gripper = joints
-        .iter()
-        .find(|joint| joint.name() == "gripper")
-        .and_then(|joint| joint.normalized())
-        .unwrap_or(0.0);
-    JointAngles::from(&degrees).with_gripper_normalized(gripper)
+pub(crate) trait MeasuredJointTelemetry {
+    fn measured_angles(&self) -> JointAngles;
+}
+
+impl MeasuredJointTelemetry for [JointTelemetry] {
+    fn measured_angles(&self) -> JointAngles {
+        let degrees = self
+            .iter()
+            .filter_map(|joint| Some((joint.name().to_owned(), joint.degrees()?)))
+            .collect::<BTreeMap<_, _>>();
+        let gripper = self
+            .iter()
+            .find(|joint| joint.name() == "gripper")
+            .and_then(|joint| joint.normalized())
+            .unwrap_or(0.0);
+        JointAngles::from(&degrees).with_gripper_normalized(gripper)
+    }
 }
 
 #[component]
@@ -481,7 +491,7 @@ fn JointControls(
                         continue;
                     }
                     let request = GoalRequest::new(normalized);
-                    if let Err(error) = api::send(
+                    if let Err(error) = api::Http::send(
                         Method::POST,
                         &format!("/api/robots/{command_robot}/goal"),
                         Some(&request),
@@ -546,7 +556,7 @@ fn JointControls(
                             .read()
                             .as_ref()
                             .is_some_and(|selection| selection.matches_joint(robot.id(), joint.name())),
-                        condition: joint.condition(&motor_limits(&robot, joint.name())),
+                        condition: joint.condition(&robot.motor_limits(joint.name())),
                         value: drivable
                             .then(|| commanded.read().get(joint.name()).copied())
                             .flatten(),
@@ -658,8 +668,8 @@ struct JointRowActions {
 
 #[component]
 fn JointRow(joint: JointTelemetry, state: JointRowState, actions: JointRowActions) -> Element {
-    let label =
-        arm::so101_joint(joint.name()).map_or(joint.name().to_owned(), |j| j.label().to_owned());
+    let label = arm::JointDefinition::so101(joint.name())
+        .map_or(joint.name().to_owned(), |j| j.label().to_owned());
     let measured = joint.normalized().unwrap_or(0.0);
     let shown = state.value.unwrap_or(measured);
     let interactive = state.drivable && joint.range().is_some();

@@ -1,7 +1,7 @@
 //! Backend-owned remote policy lifecycle and deadline-aware motor loop.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::FutureExt as _;
@@ -27,16 +27,16 @@ use crate::robotics::cameras::{CameraManager, Frame};
 use crate::robots::workspace::RobotWorkspace;
 use crate::rollout::policy::{
     ArtifactIdentity, CameraBindingContract, ControlOwner, ExpectedPolicyOwner, JointObservation,
-    ObservationFreshness, PolicyDataContract, PolicyImageContract, PolicyModelContract,
-    PolicyObservationContract, PolicySchemaContract, TargetRobotContract, prepare_action_goals,
-    prepare_observation_state, require_fresh_observations, validate_artifact_identity,
-    validate_rollout_contract,
+    JointObservations, ObservationFreshness, ObservationFreshnessCollection, PolicyDataContract,
+    PolicyImageContract, PolicyModelContract, PolicyObservationContract, PolicySchemaContract,
+    PreparedActionGoals, TargetRobotContract,
 };
 use crate::rollout::service::{
     CleanupResult, CompletionReason, ControlDecision, ControlObservation, ExecutionOutcome,
     InferenceTiming, PolicyCadence, RolloutAdmission, RolloutCoordinator, RolloutEventPort,
     RolloutRequest, RolloutSnapshot,
 };
+use crate::sync::MutexRecovery;
 use spiral_robotics_hardware::{HardwareHandle, HardwareState, PolicyGoals};
 use spiral_robotics_storage::StorageManager;
 use spiral_robotics_storage::StudioPreferencesStore;
@@ -246,14 +246,20 @@ impl LatestObservationSlot {
     }
 }
 
-fn observations_similar(candidate: &[f32], previous: &[f32]) -> bool {
-    candidate.len() == previous.len()
-        && candidate
-            .iter()
-            .zip(previous)
-            .map(|(candidate, previous)| (candidate - previous).powi(2))
-            .sum::<f32>()
-            < OBSERVATION_SIMILARITY_TOLERANCE.powi(2)
+trait ObservationSimilarity {
+    fn is_similar_to(&self, previous: &[f32]) -> bool;
+}
+
+impl ObservationSimilarity for [f32] {
+    fn is_similar_to(&self, previous: &[f32]) -> bool {
+        self.len() == previous.len()
+            && self
+                .iter()
+                .zip(previous)
+                .map(|(candidate, previous)| (candidate - previous).powi(2))
+                .sum::<f32>()
+                < OBSERVATION_SIMILARITY_TOLERANCE.powi(2)
+    }
 }
 
 struct DecodedImage {
@@ -293,7 +299,7 @@ struct TimedActionQueue {
 impl TimedActionQueue {
     fn from_initial_chunk(chunk: &ActionChunk) -> Result<Self, String> {
         let action_dimensions = chunk.action_dimensions();
-        let actions = chunk_actions(chunk)?;
+        let actions = chunk.actions()?;
         if actions.is_empty() {
             return Err("policy returned an empty initial action chunk".to_owned());
         }
@@ -333,7 +339,7 @@ impl TimedActionQueue {
                 self.next_timestep
             ));
         }
-        let incoming = chunk_actions(chunk)?;
+        let incoming = chunk.actions()?;
         let elapsed = self
             .next_timestep
             .saturating_sub(requested_timestep)
@@ -351,7 +357,7 @@ impl TimedActionQueue {
             .map(|(offset, incoming)| {
                 current.get(offset).map_or_else(
                     || incoming.clone(),
-                    |existing| blend_actions(existing, incoming),
+                    |existing| existing.blended_with(incoming),
                 )
             })
             .collect();
@@ -368,28 +374,44 @@ impl TimedActionQueue {
     }
 }
 
-fn chunk_actions(chunk: &ActionChunk) -> Result<Vec<Vec<f32>>, String> {
-    (0..chunk.steps())
-        .map(|step| {
-            chunk
-                .action(step)
-                .map(<[f32]>::to_vec)
-                .ok_or_else(|| "policy returned an incomplete action sequence".to_owned())
-        })
-        .collect()
+trait ActionChunkRows {
+    fn actions(&self) -> Result<Vec<Vec<f32>>, String>;
 }
 
-fn blend_actions(existing: &[f32], incoming: &[f32]) -> Vec<f32> {
-    debug_assert_eq!(existing.len(), incoming.len());
-    existing
-        .iter()
-        .zip(incoming)
-        .map(|(old, new)| ACTION_BLEND_OLD_WEIGHT * old + ACTION_BLEND_NEW_WEIGHT * new)
-        .collect()
+impl ActionChunkRows for ActionChunk {
+    fn actions(&self) -> Result<Vec<Vec<f32>>, String> {
+        (0..self.steps())
+            .map(|step| {
+                self.action(step)
+                    .map(<[f32]>::to_vec)
+                    .ok_or_else(|| "policy returned an incomplete action sequence".to_owned())
+            })
+            .collect()
+    }
 }
 
-fn action_refill_threshold(chunk_steps: usize) -> usize {
-    chunk_steps / 2
+trait ActionValues {
+    fn blended_with(&self, incoming: &[f32]) -> Vec<f32>;
+}
+
+impl ActionValues for [f32] {
+    fn blended_with(&self, incoming: &[f32]) -> Vec<f32> {
+        debug_assert_eq!(self.len(), incoming.len());
+        self.iter()
+            .zip(incoming)
+            .map(|(old, new)| ACTION_BLEND_OLD_WEIGHT * old + ACTION_BLEND_NEW_WEIGHT * new)
+            .collect()
+    }
+}
+
+trait ActionChunkSize {
+    fn refill_threshold(self) -> usize;
+}
+
+impl ActionChunkSize for usize {
+    fn refill_threshold(self) -> usize {
+        self / 2
+    }
 }
 
 pub(crate) struct RolloutHardwareResources {
@@ -421,7 +443,7 @@ struct RolloutLifecycle {
 
 impl RolloutLifecycle {
     fn take_active(&self) -> Option<ActiveRollout> {
-        lock(&self.active).take()
+        self.active.recover_lock().take()
     }
 }
 
@@ -480,9 +502,10 @@ impl RolloutManager {
     }
 
     pub(crate) fn reload_from_storage(&self) -> Result<(), String> {
-        self.lifecycle.state.send_replace(restored_rollout_snapshot(
-            self.storage.load_rollout_snapshot()?,
-        ));
+        let snapshot: ContractRolloutSnapshot = self.storage.load_rollout_snapshot()?;
+        self.lifecycle
+            .state
+            .send_replace(snapshot.restored_after_restart());
         Ok(())
     }
 
@@ -498,18 +521,21 @@ impl RolloutManager {
         self: &Arc<Self>,
         request: StartRolloutRequest,
     ) -> Result<ContractRolloutSnapshot, String> {
-        let mut active = lock(&self.lifecycle.active);
+        let mut active = self.lifecycle.active.recover_lock();
         let (session, created_ms) = self
             .lifecycle
             .session_ids
             .next(self.clock.as_ref())
             .into_parts();
         let (stop, stop_receiver) = watch::channel(false);
-        lock(&self.lifecycle.coordinator).admit(RolloutAdmission::new(
-            session.clone(),
-            created_ms,
-            RolloutRequest::from(request.clone()),
-        ))?;
+        self.lifecycle
+            .coordinator
+            .recover_lock()
+            .admit(RolloutAdmission::new(
+                session.clone(),
+                created_ms,
+                RolloutRequest::from(request.clone()),
+            ))?;
         // Spawn and publish the task handle while holding the same mutex used
         // by shutdown. Once an active session is observable its cleanup task
         // is therefore always joinable; there is no `active + task=None`
@@ -525,11 +551,11 @@ impl RolloutManager {
     }
 
     pub(crate) async fn stop(&self) -> Result<(), String> {
-        let active = lock(&self.lifecycle.active);
+        let active = self.lifecycle.active.recover_lock();
         let Some(active) = active.as_ref() else {
             return Err("no policy rollout is active".to_owned());
         };
-        let signal = lock(&self.lifecycle.coordinator).request_stop()?;
+        let signal = self.lifecycle.coordinator.recover_lock().request_stop()?;
         debug_assert_eq!(signal.session(), active.session);
         active
             .stop
@@ -542,7 +568,7 @@ impl RolloutManager {
             let Some(active) = self.lifecycle.take_active() else {
                 return;
             };
-            let _ = lock(&self.lifecycle.coordinator).request_stop();
+            let _ = self.lifecycle.coordinator.recover_lock().request_stop();
             active
         };
         task.stop_and_join().await;
@@ -558,14 +584,21 @@ impl RolloutManager {
             Ok(Err(error)) => ExecutionOutcome::Failed(error),
             Err(_) => ExecutionOutcome::Failed("policy executor panicked unexpectedly".to_owned()),
         };
-        let ticket = lock(&self.lifecycle.coordinator).begin_cleanup(&session, outcome);
+        let ticket = self
+            .lifecycle
+            .coordinator
+            .recover_lock()
+            .begin_cleanup(&session, outcome);
         // Hardware cleanup is unconditional. Even an internal lifecycle bug
         // must not strand the arm under policy ownership.
         let cleanup = self.hardware.hardware.stop_policy_session(&session).await;
-        let mut active = lock(&self.lifecycle.active);
+        let mut active = self.lifecycle.active.recover_lock();
         match ticket {
             Ok(ticket) => {
-                if let Err(error) = lock(&self.lifecycle.coordinator)
+                if let Err(error) = self
+                    .lifecycle
+                    .coordinator
+                    .recover_lock()
                     .finish_cleanup(ticket, CleanupResult::new(self.clock.now_ms(), cleanup))
                 {
                     tracing::error!(session, "rollout cleanup could not be finalized: {error}");
@@ -590,13 +623,17 @@ impl RolloutManager {
             mut stop,
         } = run;
         let session = session.as_str();
-        let artifact = load_selected_checkpoint(self.storage.as_ref(), &request).await;
+        let artifact = request.load_checkpoint(self.storage.as_ref()).await;
         if *stop.borrow() {
-            return lock(&self.lifecycle.coordinator).stopped_outcome(session);
+            return self
+                .lifecycle
+                .coordinator
+                .recover_lock()
+                .stopped_outcome(session);
         }
         let artifact = artifact?;
-        let manifest = parse_manifest(&artifact)?;
-        validate_manifest(&manifest, &request, artifact.config_json())?;
+        let manifest = artifact.manifest()?;
+        manifest.validate_for(&request, artifact.config_json())?;
         let (config_json, payload) = artifact.into_parts();
         let model_artifact =
             spiral_robotics_inference::ModelArtifact::from_bytes(config_json, payload)
@@ -619,49 +656,49 @@ impl RolloutManager {
             .cloned()
             .unwrap_or_default();
         let summary = record.summary(connection);
-        let contract = validate_rollout_contract(
-            manifest
-                .data_contract
-                .into_policy_contract(spiral_robotics_storage::SCHEMA_VERSION),
-            &PolicyModelContract::new(
-                specification.state_dimensions(),
-                specification.action_dimensions(),
-                specification
-                    .image_inputs()
-                    .iter()
-                    .map(|image| image.name().to_owned())
-                    .collect(),
+        let contract = manifest
+            .data_contract
+            .into_policy_contract(spiral_robotics_storage::SCHEMA_VERSION)
+            .validated_with(
+                &PolicyModelContract::new(
+                    specification.state_dimensions(),
+                    specification.action_dimensions(),
+                    specification
+                        .image_inputs()
+                        .iter()
+                        .map(|image| image.name().to_owned())
+                        .collect(),
+                )
+                .with_action_shape(
+                    specification.action_chunk_size(),
+                    specification.recommended_action_steps(),
+                ),
+                &TargetRobotContract::new(
+                    summary.id(),
+                    summary.robot_type().map(str::to_owned),
+                    summary
+                        .motors()
+                        .iter()
+                        .map(|motor| motor.name().to_owned())
+                        .collect(),
+                )
+                .with_cameras(
+                    summary
+                        .cameras()
+                        .iter()
+                        .map(|binding| CameraBindingContract::new(binding.name(), binding.id()))
+                        .collect(),
+                )
+                .with_availability(summary.connection().connected(), summary.calibrated())
+                .with_problem(summary.problem().map(str::to_owned)),
             )
-            .with_action_shape(
-                specification.action_chunk_size(),
-                specification.recommended_action_steps(),
-            ),
-            &TargetRobotContract::new(
-                summary.id(),
-                summary.robot_type().map(str::to_owned),
-                summary
-                    .motors()
-                    .iter()
-                    .map(|motor| motor.name().to_owned())
-                    .collect(),
-            )
-            .with_cameras(
-                summary
-                    .cameras()
-                    .iter()
-                    .map(|binding| CameraBindingContract::new(binding.name(), binding.id()))
-                    .collect(),
-            )
-            .with_availability(summary.connection().connected(), summary.calibrated())
-            .with_problem(summary.problem().map(str::to_owned)),
-        )
-        .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string())?;
         let joint_names = contract.joint_names().to_vec();
         let period = contract.sample_period();
         let sample_hz = contract.sample_hz();
         let reobservation_steps = specification
             .action_chunk_size()
-            .saturating_sub(action_refill_threshold(specification.action_chunk_size()));
+            .saturating_sub(specification.action_chunk_size().refill_threshold());
         let mut cameras = Vec::with_capacity(contract.camera_bindings().len());
         for binding in contract.camera_bindings() {
             cameras.push(CameraInput {
@@ -670,8 +707,17 @@ impl RolloutManager {
             });
         }
 
-        if !lock(&self.lifecycle.coordinator).warming_up(session)? {
-            return lock(&self.lifecycle.coordinator).stopped_outcome(session);
+        if !self
+            .lifecycle
+            .coordinator
+            .recover_lock()
+            .warming_up(session)?
+        {
+            return self
+                .lifecycle
+                .coordinator
+                .recover_lock()
+                .stopped_outcome(session);
         }
         let (policy, warmup) = tokio::task::spawn_blocking(move || {
             let mut policy = policy;
@@ -681,16 +727,29 @@ impl RolloutManager {
         .await
         .map_err(|error| format!("policy warm-up stopped unexpectedly: {error}"))?;
         let warmup = warmup.map_err(|error| format!("policy setup failed: {error}"))?;
-        lock(&self.lifecycle.coordinator).record_warmup(
+        self.lifecycle.coordinator.recover_lock().record_warmup(
             session,
-            InferenceTiming::new(duration_ms(warmup.total()), duration_ms(warmup.model())),
+            InferenceTiming::new(warmup.total().milliseconds(), warmup.model().milliseconds()),
         )?;
-        wait_for_camera_frames(&mut cameras, &mut stop).await?;
+        cameras.wait_until_fresh(&mut stop).await?;
         if *stop.borrow() {
-            return lock(&self.lifecycle.coordinator).stopped_outcome(session);
+            return self
+                .lifecycle
+                .coordinator
+                .recover_lock()
+                .stopped_outcome(session);
         }
-        if !lock(&self.lifecycle.coordinator).awaiting_control(session)? {
-            return lock(&self.lifecycle.coordinator).stopped_outcome(session);
+        if !self
+            .lifecycle
+            .coordinator
+            .recover_lock()
+            .awaiting_control(session)?
+        {
+            return self
+                .lifecycle
+                .coordinator
+                .recover_lock()
+                .stopped_outcome(session);
         }
 
         self.hardware
@@ -711,7 +770,11 @@ impl RolloutManager {
         {
             PolicyAdmission::Admitted => {}
             PolicyAdmission::Stopped => {
-                return lock(&self.lifecycle.coordinator).stopped_outcome(session);
+                return self
+                    .lifecycle
+                    .coordinator
+                    .recover_lock()
+                    .stopped_outcome(session);
             }
             PolicyAdmission::Replaced(mode) => {
                 if let Some(outcome) = self.classify_control(session, &mode)? {
@@ -720,10 +783,17 @@ impl RolloutManager {
                 return Err("policy admission ended without a control transition".to_owned());
             }
         }
-        if !lock(&self.lifecycle.coordinator)
+        if !self
+            .lifecycle
+            .coordinator
+            .recover_lock()
             .running(session, PolicyCadence::new(sample_hz, reobservation_steps))?
         {
-            return lock(&self.lifecycle.coordinator).stopped_outcome(session);
+            return self
+                .lifecycle
+                .coordinator
+                .recover_lock()
+                .stopped_outcome(session);
         }
 
         // The first chunk is prepared after policy admission but before the
@@ -734,34 +804,34 @@ impl RolloutManager {
         if let Some(outcome) = self.classify_control(session, initial_hardware.mode())? {
             return Ok(outcome);
         }
-        let initial_robot = policy_robot(&initial_hardware, request.robot())?;
-        require_healthy_policy_robot(initial_robot)?;
-        require_fresh_cameras(&cameras)?;
-        let initial_state = policy_observation_state(&joint_names, initial_robot)?;
-        let initial_similarity_state = lerobot_similarity_state(&joint_names, initial_robot)?;
+        let initial_robot = initial_hardware.policy_robot(request.robot())?;
+        initial_robot.require_healthy_for_policy()?;
+        cameras.require_fresh()?;
+        let initial_state = initial_robot.policy_observation_state(&joint_names)?;
+        let initial_similarity_state = initial_robot.lerobot_similarity_state(&joint_names)?;
         let initial_observation =
             ObservationCapture::new(&cameras, specification.image_inputs()).capture(
                 InferenceObservationRequest::new(initial_state, initial_similarity_state),
             )?;
         let mut last_processed_similarity_state = initial_observation.similarity_state.clone();
-        let mut initial_task = spawn_inference(policy, initial_observation);
+        let mut initial_task = initial_observation.spawn_inference(policy);
         let initial_output = loop {
             tokio::select! {
                 changed = stop.changed() => {
                     if changed.is_err() || *stop.borrow() {
-                        return lock(&self.lifecycle.coordinator).stopped_outcome(session);
+                        return self.lifecycle.coordinator.recover_lock().stopped_outcome(session);
                     }
                 }
                 output = &mut initial_task => break output,
             }
         };
-        let (initial_policy, initial) = resolve_inference(initial_output)?;
-        let initial_latency = completed_inference_age(&initial);
-        lock(&self.lifecycle.coordinator).record_inference(
+        let (initial_policy, initial) = InferenceTaskOutput::resolve_joined(initial_output)?;
+        let initial_latency = initial.age();
+        self.lifecycle.coordinator.recover_lock().record_inference(
             session,
             InferenceTiming::new(
-                duration_ms(initial_latency),
-                duration_ms(initial.chunk.stats().model()),
+                initial_latency.milliseconds(),
+                initial.chunk.stats().model().milliseconds(),
             ),
         )?;
 
@@ -769,7 +839,7 @@ impl RolloutManager {
         let mut actions = TimedActionQueue::from_initial_chunk(&initial.chunk)?;
         // LeRobot's async client requests observations once queue_size /
         // action_chunk_size <= 0.5. Integer queue sizes make this floor(N / 2).
-        let refill_threshold = action_refill_threshold(initial.chunk.steps());
+        let refill_threshold = initial.chunk.steps().refill_threshold();
         let mut inference = None::<InferenceTask>;
         // Equivalent to LeRobot's one-element server observation queue: while
         // a forward pass is busy, every newer eligible observation replaces
@@ -789,7 +859,7 @@ impl RolloutManager {
             tokio::select! {
                 changed = stop.changed() => {
                     if changed.is_err() || *stop.borrow() {
-                        return lock(&self.lifecycle.coordinator).stopped_outcome(session);
+                        return self.lifecycle.coordinator.recover_lock().stopped_outcome(session);
                     }
                 }
                 _ = tokio::time::sleep_until(deadline) => {
@@ -810,9 +880,9 @@ impl RolloutManager {
             if let Some(outcome) = self.classify_control(session, hardware.mode())? {
                 return Ok(outcome);
             }
-            let robot = policy_robot(&hardware, request.robot())?;
-            require_healthy_policy_robot(robot)?;
-            require_fresh_cameras(&cameras)?;
+            let robot = hardware.policy_robot(request.robot())?;
+            robot.require_healthy_for_policy()?;
+            cameras.require_fresh()?;
 
             // Polling an already-finished blocking task is immediate. While it
             // is still running, this branch does nothing and the buffered queue
@@ -822,13 +892,13 @@ impl RolloutManager {
                     .take()
                     .expect("a finished inference task is present")
                     .await;
-                let (returned_policy, completed) = resolve_inference(output)?;
-                let latency = completed_inference_age(&completed);
-                lock(&self.lifecycle.coordinator).record_inference(
+                let (returned_policy, completed) = InferenceTaskOutput::resolve_joined(output)?;
+                let latency = completed.age();
+                self.lifecycle.coordinator.recover_lock().record_inference(
                     session,
                     InferenceTiming::new(
-                        duration_ms(latency),
-                        duration_ms(completed.chunk.stats().model()),
+                        latency.milliseconds(),
+                        completed.chunk.stats().model().milliseconds(),
                     ),
                 )?;
                 actions.merge(completed.requested_timestep, &completed.chunk)?;
@@ -838,7 +908,7 @@ impl RolloutManager {
 
             let action_executed = if actions.remaining() > 0 {
                 let action = actions.pop()?;
-                let prepared = prepare_action_goals(&joint_names, &action)
+                let prepared = PreparedActionGoals::from_action(&joint_names, &action)
                     .map_err(|error| format!("stopped policy: {error}"))?;
                 if let Some(clamp) = prepared.clamps().first() {
                     let additional = prepared.clamps().len().saturating_sub(1);
@@ -854,7 +924,10 @@ impl RolloutManager {
                             if additional == 1 { "" } else { "s" }
                         )
                     };
-                    if lock(&self.lifecycle.coordinator)
+                    if self
+                        .lifecycle
+                        .coordinator
+                        .recover_lock()
                         .record_action_clamp_warning(session, warning)?
                     {
                         tracing::warn!(
@@ -876,7 +949,9 @@ impl RolloutManager {
                         prepared.goals().clone(),
                     ))
                     .await?;
-                lock(&self.lifecycle.coordinator)
+                self.lifecycle
+                    .coordinator
+                    .recover_lock()
                     .record_command(session, cycle_started.elapsed() > period)?;
                 true
             } else {
@@ -895,11 +970,11 @@ impl RolloutManager {
                 if let Some(outcome) = self.classify_control(session, refreshed.mode())? {
                     return Ok(outcome);
                 }
-                let refreshed_robot = policy_robot(&refreshed, request.robot())?;
-                require_healthy_policy_robot(refreshed_robot)?;
-                require_fresh_cameras(&cameras)?;
-                let state = policy_observation_state(&joint_names, refreshed_robot)?;
-                let similarity_state = lerobot_similarity_state(&joint_names, refreshed_robot)?;
+                let refreshed_robot = refreshed.policy_robot(request.robot())?;
+                refreshed_robot.require_healthy_for_policy()?;
+                cameras.require_fresh()?;
+                let state = refreshed_robot.policy_observation_state(&joint_names)?;
+                let similarity_state = refreshed_robot.lerobot_similarity_state(&joint_names)?;
                 let latest_action = actions.latest_action_timestep()?;
                 let observation = ObservationCapture::new(&cameras, specification.image_inputs())
                     .capture(
@@ -907,10 +982,9 @@ impl RolloutManager {
                         .requested_at(latest_action, Instant::now()),
                 )?;
                 if must_go
-                    || !observations_similar(
-                        &observation.similarity_state,
-                        &last_processed_similarity_state,
-                    )
+                    || !observation
+                        .similarity_state
+                        .is_similar_to(&last_processed_similarity_state)
                 {
                     pending_observation.replace(observation);
                 }
@@ -924,7 +998,7 @@ impl RolloutManager {
                 last_processed_similarity_state.clone_from(&observation.similarity_state);
                 let next_policy = policy.take().expect("an idle policy is available");
                 debug_assert!(inference.is_none());
-                inference = Some(spawn_inference(next_policy, observation));
+                inference = Some(observation.spawn_inference(next_policy));
             }
         }
     }
@@ -934,8 +1008,11 @@ impl RolloutManager {
         session: &str,
         mode: &ModeStatus,
     ) -> Result<Option<ExecutionOutcome>, String> {
-        let owner = control_owner(mode.selection());
-        match lock(&self.lifecycle.coordinator)
+        let owner = mode.selection().control_owner();
+        match self
+            .lifecycle
+            .coordinator
+            .recover_lock()
             .observe_control(session, ControlObservation::new(&owner, mode.error()))?
         {
             ControlDecision::Continue => Ok(None),
@@ -945,39 +1022,39 @@ impl RolloutManager {
     }
 }
 
-fn restored_rollout_snapshot(snapshot: ContractRolloutSnapshot) -> ContractRolloutSnapshot {
-    if snapshot.phase().active() {
-        let finished_ms = Some(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
-                .unwrap_or(0),
-        );
-        let identity = spiral_robotics_api::rollout::RolloutIdentity::new(
-            snapshot.session_id().map(str::to_owned),
-            snapshot.run_id().map(str::to_owned),
-            snapshot.robot().map(str::to_owned),
-        )
-        .with_checkpoint(snapshot.checkpoint_step())
-        .with_duration(snapshot.duration_seconds());
-        let lifecycle = spiral_robotics_api::rollout::RolloutLifecycle::new(
-            ContractRolloutPhase::Failed,
-            snapshot.started_ms(),
-        )
-        .with_finished_ms(finished_ms)
-        .with_messages(
-            Some("Studio stopped before this rollout completed.".to_owned()),
-            Some("No policy session was resumed after restart.".to_owned()),
-        );
-        return ContractRolloutSnapshot::new(identity, lifecycle, snapshot.metrics().clone());
-    }
-    snapshot
+trait RestoredRolloutSnapshot {
+    fn restored_after_restart(self) -> Self;
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+impl RestoredRolloutSnapshot for ContractRolloutSnapshot {
+    fn restored_after_restart(self) -> Self {
+        if self.phase().active() {
+            let finished_ms = Some(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
+                    .unwrap_or(0),
+            );
+            let identity = spiral_robotics_api::rollout::RolloutIdentity::new(
+                self.session_id().map(str::to_owned),
+                self.run_id().map(str::to_owned),
+                self.robot().map(str::to_owned),
+            )
+            .with_checkpoint(self.checkpoint_step())
+            .with_duration(self.duration_seconds());
+            let lifecycle = spiral_robotics_api::rollout::RolloutLifecycle::new(
+                ContractRolloutPhase::Failed,
+                self.started_ms(),
+            )
+            .with_finished_ms(finished_ms)
+            .with_messages(
+                Some("Studio stopped before this rollout completed.".to_owned()),
+                Some("No policy session was resumed after restart.".to_owned()),
+            );
+            return Self::new(identity, lifecycle, self.metrics().clone());
+        }
+        self
+    }
 }
 
 /// Wait until the control thread publishes the Policy mode it already accepted.
@@ -1049,179 +1126,171 @@ impl<'a> PolicyAdmissionWait<'a> {
     }
 }
 
-fn control_owner(selection: &ModeSelection) -> ControlOwner {
-    match selection {
-        ModeSelection::Policy { robot, session } => ControlOwner::Policy {
-            robot: robot.clone(),
-            session: session.clone(),
-        },
-        selection => ControlOwner::Other(describe_control_state(selection)),
+trait ModeSelectionPolicy {
+    fn control_owner(&self) -> ControlOwner;
+    fn control_description(&self) -> String;
+}
+
+impl ModeSelectionPolicy for ModeSelection {
+    fn control_owner(&self) -> ControlOwner {
+        match self {
+            Self::Policy { robot, session } => ControlOwner::Policy {
+                robot: robot.clone(),
+                session: session.clone(),
+            },
+            selection => ControlOwner::Other(selection.control_description()),
+        }
+    }
+
+    fn control_description(&self) -> String {
+        match self {
+            Self::Idle => "Idle".to_owned(),
+            Self::Manual { robot } => format!("Manual on {robot}"),
+            Self::Teleoperate { leader, follower } => {
+                format!("Teleoperation from {leader} to {follower}")
+            }
+            Self::Replay { robot, episode } => {
+                format!("Replay of {episode} on {robot}")
+            }
+            Self::Policy { robot, session } => {
+                format!("Policy session {session} on {robot}")
+            }
+        }
     }
 }
 
-fn describe_control_state(selection: &ModeSelection) -> String {
-    match selection {
-        ModeSelection::Idle => "Idle".to_owned(),
-        ModeSelection::Manual { robot } => format!("Manual on {robot}"),
-        ModeSelection::Teleoperate { leader, follower } => {
-            format!("Teleoperation from {leader} to {follower}")
-        }
-        ModeSelection::Replay { robot, episode } => {
-            format!("Replay of {episode} on {robot}")
-        }
-        ModeSelection::Policy { robot, session } => {
-            format!("Policy session {session} on {robot}")
-        }
+trait RolloutCheckpointRequest {
+    async fn load_checkpoint(
+        &self,
+        checkpoint_store: &dyn CheckpointStore,
+    ) -> Result<CheckpointArtifact, String>;
+}
+
+impl RolloutCheckpointRequest for StartRolloutRequest {
+    async fn load_checkpoint(
+        &self,
+        checkpoint_store: &dyn CheckpointStore,
+    ) -> Result<CheckpointArtifact, String> {
+        checkpoint_store
+            .load_checkpoint(CheckpointKey::new(
+                self.run_id().to_owned(),
+                self.checkpoint_step(),
+            ))
+            .await
     }
 }
 
-async fn load_selected_checkpoint(
-    checkpoint_store: &dyn CheckpointStore,
-    request: &StartRolloutRequest,
-) -> Result<CheckpointArtifact, String> {
-    checkpoint_store
-        .load_checkpoint(CheckpointKey::new(
-            request.run_id().to_owned(),
-            request.checkpoint_step(),
-        ))
-        .await
+trait CheckpointManifest {
+    fn manifest(&self) -> Result<ArtifactManifest, String>;
 }
 
-fn parse_manifest(artifact: &CheckpointArtifact) -> Result<ArtifactManifest, String> {
-    let (_, metadata) = SafeTensors::read_metadata(artifact.payload())
-        .map_err(|error| format!("checkpoint metadata is invalid: {error}"))?;
-    let manifest = metadata
-        .metadata()
-        .as_ref()
-        .and_then(|metadata| metadata.get("spiral_robotics"))
-        .ok_or_else(|| "checkpoint has no Spiral Robotics manifest".to_owned())?;
-    serde_json::from_str(manifest)
-        .map_err(|error| format!("checkpoint manifest is invalid: {error}"))
-}
-
-fn validate_manifest(
-    manifest: &ArtifactManifest,
-    request: &StartRolloutRequest,
-    config: &[u8],
-) -> Result<(), String> {
-    validate_artifact_identity(
-        &ArtifactIdentity::new(&manifest.format, &manifest.artifact, &manifest.run_id)
-            .with_artifact(manifest.step, &manifest.tensor_namespace),
-        request.run_id(),
-        request.checkpoint_step(),
-    )
-    .map_err(|error| error.to_string())?;
-    let stored_config: serde_json::Value = serde_json::from_slice(config)
-        .map_err(|error| format!("stored native model config is invalid: {error}"))?;
-    if stored_config != manifest.model_config {
-        return Err("stored native model config does not match the checkpoint manifest".to_owned());
+impl CheckpointManifest for CheckpointArtifact {
+    fn manifest(&self) -> Result<ArtifactManifest, String> {
+        let (_, metadata) = SafeTensors::read_metadata(self.payload())
+            .map_err(|error| format!("checkpoint metadata is invalid: {error}"))?;
+        let manifest = metadata
+            .metadata()
+            .as_ref()
+            .and_then(|metadata| metadata.get("spiral_robotics"))
+            .ok_or_else(|| "checkpoint has no Spiral Robotics manifest".to_owned())?;
+        serde_json::from_str(manifest)
+            .map_err(|error| format!("checkpoint manifest is invalid: {error}"))
     }
-    Ok(())
 }
 
-async fn wait_for_camera_frames(
-    cameras: &mut [CameraInput],
-    stop: &mut watch::Receiver<bool>,
-) -> Result<(), String> {
-    let started = Instant::now();
-    loop {
-        if *stop.borrow() {
-            return Ok(());
-        }
-        if require_fresh_cameras(cameras).is_ok() {
-            return Ok(());
-        }
-        if started.elapsed() >= INITIAL_CAMERA_TIMEOUT {
+impl ArtifactManifest {
+    fn validate_for(&self, request: &StartRolloutRequest, config: &[u8]) -> Result<(), String> {
+        ArtifactIdentity::new(&self.format, &self.artifact, &self.run_id)
+            .with_artifact(self.step, &self.tensor_namespace)
+            .validate_for(request.run_id(), request.checkpoint_step())
+            .map_err(|error| error.to_string())?;
+        let stored_config: serde_json::Value = serde_json::from_slice(config)
+            .map_err(|error| format!("stored native model config is invalid: {error}"))?;
+        if stored_config != self.model_config {
             return Err(
-                "camera streams did not produce fresh frames within five seconds".to_owned(),
+                "stored native model config does not match the checkpoint manifest".to_owned(),
             );
         }
-        tokio::select! {
-            changed = stop.changed() => {
-                if changed.is_err() || *stop.borrow() {
-                    return Ok(());
-                }
-            }
-            _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+        Ok(())
+    }
+}
+
+trait HardwarePolicyTelemetry {
+    fn policy_robot(&self, robot: &str) -> Result<&RobotTelemetry, String>;
+}
+
+impl HardwarePolicyTelemetry for HardwareState {
+    fn policy_robot(&self, robot: &str) -> Result<&RobotTelemetry, String> {
+        self.telemetry()
+            .robots()
+            .iter()
+            .find(|candidate| candidate.id() == robot)
+            .ok_or_else(|| "stopped policy: follower telemetry disappeared".to_owned())
+    }
+}
+
+trait PolicyRobotTelemetry {
+    fn require_healthy_for_policy(&self) -> Result<(), String>;
+    fn policy_observation_state(&self, joint_names: &[String]) -> Result<Vec<f32>, String>;
+    fn lerobot_similarity_state(&self, joint_names: &[String]) -> Result<Vec<f32>, String>;
+}
+
+impl PolicyRobotTelemetry for RobotTelemetry {
+    fn require_healthy_for_policy(&self) -> Result<(), String> {
+        if let Some(error) = &self.error() {
+            return Err(format!("stopped policy: follower reported {error}"));
         }
-    }
-}
-
-fn policy_robot<'a>(
-    hardware: &'a HardwareState,
-    robot: &str,
-) -> Result<&'a RobotTelemetry, String> {
-    hardware
-        .telemetry()
-        .robots()
-        .iter()
-        .find(|candidate| candidate.id() == robot)
-        .ok_or_else(|| "stopped policy: follower telemetry disappeared".to_owned())
-}
-
-fn require_healthy_policy_robot(robot: &RobotTelemetry) -> Result<(), String> {
-    if let Some(error) = &robot.error() {
-        return Err(format!("stopped policy: follower reported {error}"));
-    }
-    if let Some(joint) = robot
-        .joints()
-        .iter()
-        .find(|joint| !joint.faults().is_empty())
-    {
-        return Err(format!(
-            "stopped policy: joint {:?} reported a motor fault",
-            joint.name()
-        ));
-    }
-    Ok(())
-}
-
-fn policy_observation_state(
-    joint_names: &[String],
-    robot: &RobotTelemetry,
-) -> Result<Vec<f32>, String> {
-    prepare_observation_state(
-        joint_names,
-        &robot
+        if let Some(joint) = self
             .joints()
             .iter()
-            .map(|joint| JointObservation::new(joint.name(), joint.normalized()))
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|error| format!("stopped policy: {error}"))
-}
+            .find(|joint| !joint.faults().is_empty())
+        {
+            return Err(format!(
+                "stopped policy: joint {:?} reported a motor fault",
+                joint.name()
+            ));
+        }
+        Ok(())
+    }
 
-/// Reconstruct the raw joint units used by LeRobot's SO-101 client solely for
-/// its near-duplicate observation filter. Center offsets do not affect the
-/// distance: body joints use degrees, while the gripper's RANGE_0_100 value is
-/// the affine equivalent of this runtime's centered-normalized position.
-fn lerobot_similarity_state(
-    joint_names: &[String],
-    robot: &RobotTelemetry,
-) -> Result<Vec<f32>, String> {
-    joint_names
-        .iter()
-        .map(|name| {
-            let joint = robot
-                .joints()
-                .iter()
-                .find(|joint| joint.name() == *name)
-                .ok_or_else(|| {
-                    format!("stopped policy: joint {name:?} disappeared from live telemetry")
-                })?;
-            let value = if name == "gripper" {
-                joint.normalized().map(|value| (value + 1.0) * 50.0)
-            } else {
-                joint.degrees()
-            };
-            value
-                .filter(|value| value.is_finite())
-                .map(|value| value as f32)
-                .ok_or_else(|| {
-                    format!("stopped policy: joint {name:?} has no finite LeRobot-space telemetry")
-                })
-        })
-        .collect()
+    fn policy_observation_state(&self, joint_names: &[String]) -> Result<Vec<f32>, String> {
+        self.joints()
+            .iter()
+            .map(|joint| JointObservation::new(joint.name(), joint.normalized()))
+            .collect::<Vec<_>>()
+            .ordered_state(joint_names)
+            .map_err(|error| format!("stopped policy: {error}"))
+    }
+
+    /// Reconstruct the raw joint units used by LeRobot's SO-101 client solely
+    /// for its near-duplicate observation filter.
+    fn lerobot_similarity_state(&self, joint_names: &[String]) -> Result<Vec<f32>, String> {
+        joint_names
+            .iter()
+            .map(|name| {
+                let joint = self
+                    .joints()
+                    .iter()
+                    .find(|joint| joint.name() == *name)
+                    .ok_or_else(|| {
+                        format!("stopped policy: joint {name:?} disappeared from live telemetry")
+                    })?;
+                let value = if name == "gripper" {
+                    joint.normalized().map(|value| (value + 1.0) * 50.0)
+                } else {
+                    joint.degrees()
+                };
+                value
+                    .filter(|value| value.is_finite())
+                    .map(|value| value as f32)
+                    .ok_or_else(|| {
+                        format!(
+                            "stopped policy: joint {name:?} has no finite LeRobot-space telemetry"
+                        )
+                    })
+            })
+            .collect()
+    }
 }
 
 impl ObservationCapture<'_> {
@@ -1280,85 +1349,92 @@ impl ObservationCapture<'_> {
     }
 }
 
-fn spawn_inference(policy: Box<dyn Policy>, observation: InferenceObservation) -> InferenceTask {
-    tokio::task::spawn_blocking(move || {
-        let mut policy = policy;
-        let result = infer_observation(policy.as_mut(), observation);
-        InferenceTaskOutput { policy, result }
-    })
-}
-
-fn infer_observation(
-    policy: &mut dyn Policy,
-    observation: InferenceObservation,
-) -> Result<CompletedInference, String> {
-    let InferenceObservation {
-        state,
-        similarity_state: _,
-        images,
-        requested_timestep,
-        oldest_input_at,
-    } = observation;
-    let decoded = decode_images(images)?;
-    let views = decoded
-        .iter()
-        .map(|image| {
-            ImageFrame::packed_rgb8(
-                &image.name,
-                ImageDimensions::new(image.width, image.height),
-                &image.pixels,
-            )
+impl InferenceObservation {
+    fn spawn_inference(self, policy: Box<dyn Policy>) -> InferenceTask {
+        tokio::task::spawn_blocking(move || {
+            let mut policy = policy;
+            let result = self.infer_with(policy.as_mut());
+            InferenceTaskOutput { policy, result }
         })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("preparing camera input: {error}"))?;
-    let chunk = policy
-        .infer(InferenceInput::new(&state, &views))
-        .map_err(|error| format!("policy inference failed: {error}"))?;
-    Ok(CompletedInference {
-        chunk,
-        requested_timestep,
-        oldest_input_at,
-    })
-}
+    }
 
-fn decode_images(images: Vec<CapturedImage>) -> Result<Vec<DecodedImage>, String> {
-    images
-        .into_iter()
-        .map(|captured| {
-            let image = image::load_from_memory(captured.frame.bytes())
-                .map_err(|error| format!("decoding camera {:?}: {error}", captured.name))?
-                .to_rgb8();
-            let image = image::imageops::resize(
-                &image,
-                captured.width as u32,
-                captured.height as u32,
-                FilterType::Triangle,
-            );
-            Ok(DecodedImage {
-                name: captured.name,
-                width: captured.width,
-                height: captured.height,
-                pixels: image.into_raw(),
-            })
-        })
-        .collect()
-}
-
-fn resolve_inference(
-    output: Result<InferenceTaskOutput, tokio::task::JoinError>,
-) -> Result<(Box<dyn Policy>, CompletedInference), String> {
-    let output = output.map_err(|error| format!("policy inference worker stopped: {error}"))?;
-    output.result.map(|inference| (output.policy, inference))
-}
-
-fn completed_inference_age(inference: &CompletedInference) -> Duration {
-    Instant::now().saturating_duration_since(inference.oldest_input_at)
-}
-
-fn require_fresh_cameras(cameras: &[CameraInput]) -> Result<(), String> {
-    require_fresh_observations(
-        &cameras
+    fn infer_with(self, policy: &mut dyn Policy) -> Result<CompletedInference, String> {
+        let Self {
+            state,
+            similarity_state: _,
+            images,
+            requested_timestep,
+            oldest_input_at,
+        } = self;
+        let decoded = images
+            .into_iter()
+            .map(CapturedImage::decode)
+            .collect::<Result<Vec<_>, _>>()?;
+        let views = decoded
             .iter()
+            .map(|image| {
+                ImageFrame::packed_rgb8(
+                    &image.name,
+                    ImageDimensions::new(image.width, image.height),
+                    &image.pixels,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("preparing camera input: {error}"))?;
+        let chunk = policy
+            .infer(InferenceInput::new(&state, &views))
+            .map_err(|error| format!("policy inference failed: {error}"))?;
+        Ok(CompletedInference {
+            chunk,
+            requested_timestep,
+            oldest_input_at,
+        })
+    }
+}
+
+impl CapturedImage {
+    fn decode(self) -> Result<DecodedImage, String> {
+        let image = image::load_from_memory(self.frame.bytes())
+            .map_err(|error| format!("decoding camera {:?}: {error}", self.name))?
+            .to_rgb8();
+        let image = image::imageops::resize(
+            &image,
+            self.width as u32,
+            self.height as u32,
+            FilterType::Triangle,
+        );
+        Ok(DecodedImage {
+            name: self.name,
+            width: self.width,
+            height: self.height,
+            pixels: image.into_raw(),
+        })
+    }
+}
+
+impl InferenceTaskOutput {
+    fn resolve_joined(
+        output: Result<Self, tokio::task::JoinError>,
+    ) -> Result<(Box<dyn Policy>, CompletedInference), String> {
+        let output = output.map_err(|error| format!("policy inference worker stopped: {error}"))?;
+        output.result.map(|inference| (output.policy, inference))
+    }
+}
+
+impl CompletedInference {
+    fn age(&self) -> Duration {
+        Instant::now().saturating_duration_since(self.oldest_input_at)
+    }
+}
+
+trait CameraInputs {
+    fn require_fresh(&self) -> Result<(), String>;
+    async fn wait_until_fresh(&mut self, stop: &mut watch::Receiver<bool>) -> Result<(), String>;
+}
+
+impl CameraInputs for [CameraInput] {
+    fn require_fresh(&self) -> Result<(), String> {
+        self.iter()
             .map(|camera| {
                 ObservationFreshness::new(
                     camera.name.clone(),
@@ -1369,29 +1445,59 @@ fn require_fresh_cameras(cameras: &[CameraInput]) -> Result<(), String> {
                         .map(|frame| frame.captured_at().elapsed()),
                 )
             })
-            .collect::<Vec<_>>(),
-        INPUT_STALE_AFTER,
-    )
-    .map_err(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .require_fresh(INPUT_STALE_AFTER)
+            .map_err(|error| error.to_string())
+    }
+
+    async fn wait_until_fresh(&mut self, stop: &mut watch::Receiver<bool>) -> Result<(), String> {
+        let started = Instant::now();
+        loop {
+            if *stop.borrow() {
+                return Ok(());
+            }
+            if self.require_fresh().is_ok() {
+                return Ok(());
+            }
+            if started.elapsed() >= INITIAL_CAMERA_TIMEOUT {
+                return Err(
+                    "camera streams did not produce fresh frames within five seconds".to_owned(),
+                );
+            }
+            tokio::select! {
+                changed = stop.changed() => {
+                    if changed.is_err() || *stop.borrow() {
+                        return Ok(());
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+            }
+        }
+    }
 }
 
-fn duration_ms(duration: Duration) -> f64 {
-    duration.as_secs_f64() * 1_000.0
+trait Milliseconds {
+    fn milliseconds(self) -> f64;
+}
+
+impl Milliseconds for Duration {
+    fn milliseconds(self) -> f64 {
+        self.as_secs_f64() * 1_000.0
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ActiveRollout, ArtifactDataContract, ArtifactImageContract, ArtifactManifest,
-        ArtifactObservationContract, CameraInput, CompletedInference, INPUT_STALE_AFTER,
-        InferenceObservation, LatestObservationSlot, TimedActionQueue, action_refill_threshold,
-        completed_inference_age, load_selected_checkpoint, observations_similar,
-        require_fresh_cameras, resolve_inference, spawn_inference, validate_manifest,
+        ActionChunkSize, ActiveRollout, ArtifactDataContract, ArtifactImageContract,
+        ArtifactManifest, ArtifactObservationContract, CameraInput, CameraInputs,
+        CompletedInference, INPUT_STALE_AFTER, InferenceObservation, InferenceTaskOutput,
+        LatestObservationSlot, ObservationSimilarity, RolloutCheckpointRequest, TimedActionQueue,
     };
     use crate::rollout::policy::{
         ACT_ARTIFACT_FORMAT, ACT_TENSOR_NAMESPACE, CameraBindingContract, PolicyDataContract,
         PolicyImageContract, PolicyModelContract, PolicyObservationContract, PolicySchemaContract,
-        TargetRobotContract, validate_rollout_contract,
+        TargetRobotContract,
     };
     use bytes::Bytes;
     use spiral_robotics_api::rollout::StartRolloutRequest;
@@ -1508,9 +1614,9 @@ mod tests {
 
     #[test]
     fn action_queue_refills_at_lerobot_default_half_chunk_threshold() {
-        assert_eq!(action_refill_threshold(100), 50);
-        assert_eq!(action_refill_threshold(99), 49);
-        assert_eq!(action_refill_threshold(10), 5);
+        assert_eq!(100_usize.refill_threshold(), 50);
+        assert_eq!(99_usize.refill_threshold(), 49);
+        assert_eq!(10_usize.refill_threshold(), 5);
     }
 
     #[test]
@@ -1534,9 +1640,9 @@ mod tests {
 
     #[test]
     fn lerobot_observation_similarity_uses_strict_unit_l2_tolerance() {
-        assert!(observations_similar(&[0.5, 0.5], &[0.0, 0.0]));
-        assert!(!observations_similar(&[1.0, 0.0], &[0.0, 0.0]));
-        assert!(!observations_similar(&[0.0], &[0.0, 0.0]));
+        assert!([0.5, 0.5].is_similar_to(&[0.0, 0.0]));
+        assert!(![1.0, 0.0].is_similar_to(&[0.0, 0.0]));
+        assert!(![0.0].is_similar_to(&[0.0, 0.0]));
     }
 
     #[test]
@@ -1553,7 +1659,7 @@ mod tests {
             oldest_input_at: now - INPUT_STALE_AFTER - Duration::from_nanos(1),
         };
 
-        assert!(completed_inference_age(&inference) > INPUT_STALE_AFTER);
+        assert!(inference.age() > INPUT_STALE_AFTER);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1567,7 +1673,7 @@ mod tests {
             requested_timestep: 0,
             oldest_input_at: now,
         };
-        let mut inference = spawn_inference(Box::new(SlowPolicy::new(latency)), observation);
+        let mut inference = observation.spawn_inference(Box::new(SlowPolicy::new(latency)));
         let mut ticker = tokio::time::interval(Duration::from_millis(10));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let initial = ActionChunk::try_new(
@@ -1588,7 +1694,8 @@ mod tests {
                 }
             }
         };
-        resolve_inference(output).expect("slow inference completes on its worker");
+        InferenceTaskOutput::resolve_joined(output)
+            .expect("slow inference completes on its worker");
 
         assert!(
             commands.len() >= 8,
@@ -1679,7 +1786,8 @@ mod tests {
         let request =
             StartRolloutRequest::new("run-from-project-a", 20_000, "follower").with_duration(30);
 
-        let loaded = load_selected_checkpoint(&checkpoint_store, &request)
+        let loaded = request
+            .load_checkpoint(&checkpoint_store)
             .await
             .expect("the fake checkpoint_store has no Settings dependency");
 
@@ -1692,20 +1800,20 @@ mod tests {
 
     #[test]
     fn camera_roles_resolve_persisted_training_stream_ids() {
-        let contract = validate_rollout_contract(
-            PolicyDataContract::new(
-                PolicyObservationContract::new(
-                    "centered_normalized",
-                    "so101_follower",
-                    vec!["shoulder".to_owned()],
-                )
-                .with_capture(vec!["follower.camera.wrist".to_owned()], 60.0),
-                PolicyImageContract::new("chw", "imagenet", "fixed_fps"),
-                PolicySchemaContract::new(
-                    spiral_robotics_storage::SCHEMA_VERSION,
-                    spiral_robotics_storage::SCHEMA_VERSION,
-                ),
+        let contract = PolicyDataContract::new(
+            PolicyObservationContract::new(
+                "centered_normalized",
+                "so101_follower",
+                vec!["shoulder".to_owned()],
+            )
+            .with_capture(vec!["follower.camera.wrist".to_owned()], 60.0),
+            PolicyImageContract::new("chw", "imagenet", "fixed_fps"),
+            PolicySchemaContract::new(
+                spiral_robotics_storage::SCHEMA_VERSION,
+                spiral_robotics_storage::SCHEMA_VERSION,
             ),
+        )
+        .validated_with(
             &PolicyModelContract::new(1, 1, vec!["follower.camera.wrist".to_owned()])
                 .with_action_shape(10, 1),
             &TargetRobotContract::new(
@@ -1748,7 +1856,7 @@ mod tests {
             tensor_namespace: ACT_TENSOR_NAMESPACE.to_owned(),
         };
         let config = serde_json::to_vec(&model_config).unwrap();
-        assert!(validate_manifest(&manifest, &request, &config).is_ok());
+        assert!(manifest.validate_for(&request, &config).is_ok());
     }
 
     #[test]
@@ -1763,10 +1871,6 @@ mod tests {
             name: "follower.camera.wrist".to_owned(),
             receiver,
         }];
-        assert!(
-            require_fresh_cameras(&cameras)
-                .unwrap_err()
-                .contains("stale")
-        );
+        assert!(cameras.require_fresh().unwrap_err().contains("stale"));
     }
 }

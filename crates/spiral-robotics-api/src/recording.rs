@@ -3,8 +3,6 @@
 use serde::{Deserialize, Serialize};
 use spiral_robotics_core::operation::EpisodeOutcome;
 
-use crate::datasets::default_dataset_id;
-
 /// Replay a trajectory fetched directly from SpiralDB.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StartSpiralReplayRequest {
@@ -47,7 +45,7 @@ pub struct EpisodeIdentity {
     id: String,
     /// Dataset row this episode belongs to. Streams and samples reference the
     /// episode; only the episode row carries dataset membership.
-    #[serde(default = "default_dataset_id")]
+    #[serde(default = "EpisodeIdentity::default_dataset_id")]
     dataset_id: String,
     /// Arms sampled in this take, in the order their joints appear in a frame.
     arms: Vec<EpisodeArm>,
@@ -192,6 +190,10 @@ impl EpisodeSummary {
 }
 
 impl EpisodeIdentity {
+    fn default_dataset_id() -> String {
+        "default".to_owned()
+    }
+
     pub fn new(
         id: impl Into<String>,
         dataset_id: impl Into<String>,
@@ -616,12 +618,16 @@ pub struct RecordingIdentity {
     /// Identifier the finished take will have.
     episode: String,
     /// Logical dataset row this take will reference when it completes.
-    #[serde(default = "default_dataset_id")]
+    #[serde(default = "RecordingIdentity::default_dataset_id")]
     dataset_id: String,
     arms: Vec<String>,
 }
 
 impl RecordingIdentity {
+    fn default_dataset_id() -> String {
+        "default".to_owned()
+    }
+
     pub fn new(
         episode: impl Into<String>,
         dataset_id: impl Into<String>,
@@ -888,7 +894,7 @@ impl ReplayProgress {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StartRecordingRequest {
     /// Dataset row that will own the completed episode.
-    #[serde(default = "default_dataset_id")]
+    #[serde(default = "StartRecordingRequest::default_dataset_id")]
     dataset_id: String,
     /// Arms to sample. Empty means every connected arm, which is the useful
     /// default: a take is a record of the whole scene, not of one arm.
@@ -902,7 +908,7 @@ pub struct StartRecordingRequest {
 impl Default for StartRecordingRequest {
     fn default() -> Self {
         Self {
-            dataset_id: default_dataset_id(),
+            dataset_id: StartRecordingRequest::default_dataset_id(),
             arms: Vec::new(),
             note: None,
         }
@@ -910,6 +916,10 @@ impl Default for StartRecordingRequest {
 }
 
 impl StartRecordingRequest {
+    fn default_dataset_id() -> String {
+        "default".to_owned()
+    }
+
     pub fn new(dataset_id: impl Into<String>) -> Self {
         Self {
             dataset_id: dataset_id.into(),

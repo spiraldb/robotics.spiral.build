@@ -15,11 +15,15 @@ pub struct StartRolloutRequest {
     checkpoint_step: u64,
     robot: String,
     /// Time spent actively applying policy actions, excluding load and warm-up.
-    #[serde(default = "default_rollout_duration_seconds")]
+    #[serde(default = "StartRolloutRequest::default_duration_seconds")]
     duration_seconds: u32,
 }
 
 impl StartRolloutRequest {
+    const fn default_duration_seconds() -> u32 {
+        DEFAULT_ROLLOUT_DURATION_SECONDS
+    }
+
     pub fn new(run_id: impl Into<String>, checkpoint_step: u64, robot: impl Into<String>) -> Self {
         Self {
             run_id: run_id.into(),
@@ -44,10 +48,6 @@ impl StartRolloutRequest {
     pub const fn duration_seconds(&self) -> u32 {
         self.duration_seconds
     }
-}
-
-const fn default_rollout_duration_seconds() -> u32 {
-    DEFAULT_ROLLOUT_DURATION_SECONDS
 }
 
 /// Authoritative lifecycle of the native inference and motor-control task.

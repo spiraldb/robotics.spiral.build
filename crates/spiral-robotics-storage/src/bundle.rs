@@ -22,22 +22,13 @@ use spiral_robotics_api::workflow::{
     SIGLIP_BASE_REPOSITORY, SIGLIP_BASE_REVISION, WORKFLOW_FEATURE_REGISTRY_RELATION,
     WorkflowAgentArtifactKind, WorkflowAgentMessagePhase, WorkflowAgentPhase, WorkflowAgentRole,
     WorkflowAgentToolPhase, WorkflowFeatureApplicability, WorkflowFeatureDefinition,
-    derived_feature_cache_relation,
 };
 use spiral_robotics_core::query::UnquotedSqlIdentifier;
 use spiral_robotics_core::workflow::QualifiedRelation;
 
 use crate::adbc::StorageConnection;
-#[cfg(test)]
-use crate::manager::run_binary_query;
-use crate::manager::{
-    commit_catalog_transaction, drop_video_dataset, ensure_dataset_namespace,
-    ensure_video_assets_blob_relation, execute_update_sql, ingest_batches,
-    normalize_video_asset_batch, rebuild_video_dataset, replace_batches,
-    retarget_stored_video_media_relations, run_query, stored_video_episode_ids, table_exists,
-    video_dataset_exists,
-};
-use crate::sql;
+use crate::manager::VideoAssetRecordBatch as _;
+use crate::sql::SpiralSql;
 
 const PROJECT_MAGIC: &[u8; 8] = b"SPRPROJ1";
 const EPISODES_MAGIC: &[u8; 8] = b"SPREPS01";
@@ -65,8 +56,12 @@ const CACHE_KEY_FIELDS: [(&str, DataType); 5] = [
     ("episode_time_ns", DataType::UInt64),
 ];
 
-fn workflow_cache_key_declaration_may_be_nullable(name: &str) -> bool {
-    matches!(name, "frame_index" | "episode_time_ns")
+struct WorkflowArrow;
+
+impl WorkflowArrow {
+    fn cache_key_may_be_nullable(name: &str) -> bool {
+        matches!(name, "frame_index" | "episode_time_ns")
+    }
 }
 
 #[allow(dead_code)]
@@ -398,31 +393,33 @@ impl WorkflowBundleRegistry {
     }
 }
 
-fn current_workflow_registry(
-    connection: &mut StorageConnection,
-) -> Result<Option<WorkflowBundleRegistry>, String> {
-    if !table_exists(connection, WORKFLOW_FEATURE_REGISTRY_RELATION)? {
-        return Ok(None);
+impl WorkflowBundleRegistry {
+    fn load(connection: &mut StorageConnection) -> Result<Option<WorkflowBundleRegistry>, String> {
+        if !connection.table_exists(WORKFLOW_FEATURE_REGISTRY_RELATION)? {
+            return Ok(None);
+        }
+        let mut statement = connection
+            .new_statement()
+            .map_err(|error| format!("opening Workflow feature registry: {error}"))?;
+        statement
+            .set_sql_query(format!(
+                "SELECT * FROM {WORKFLOW_FEATURE_REGISTRY_RELATION}"
+            ))
+            .map_err(|error| format!("binding Workflow feature registry: {error}"))?;
+        let reader = statement
+            .execute()
+            .map_err(|error| format!("reading Workflow feature registry: {error}"))?;
+        let schema = reader.schema();
+        let mut batches = reader
+            .map(|batch| {
+                batch.map_err(|error| format!("reading Workflow feature registry: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if batches.is_empty() {
+            batches.push(RecordBatch::new_empty(schema));
+        }
+        Self::validate(&batches).map(Some)
     }
-    let mut statement = connection
-        .new_statement()
-        .map_err(|error| format!("opening Workflow feature registry: {error}"))?;
-    statement
-        .set_sql_query(format!(
-            "SELECT * FROM {WORKFLOW_FEATURE_REGISTRY_RELATION}"
-        ))
-        .map_err(|error| format!("binding Workflow feature registry: {error}"))?;
-    let reader = statement
-        .execute()
-        .map_err(|error| format!("reading Workflow feature registry: {error}"))?;
-    let schema = reader.schema();
-    let mut batches = reader
-        .map(|batch| batch.map_err(|error| format!("reading Workflow feature registry: {error}")))
-        .collect::<Result<Vec<_>, _>>()?;
-    if batches.is_empty() {
-        batches.push(RecordBatch::new_empty(schema));
-    }
-    validate_workflow_registry(&batches).map(Some)
 }
 
 impl ProjectBundle {
@@ -434,23 +431,23 @@ impl ProjectBundle {
         let mut queries = Vec::new();
         for table in Table::ALL {
             let relation = table.qualified_name(namespace);
-            if !table_exists(connection, &relation)? {
+            if !connection.table_exists(&relation)? {
                 continue;
             }
             let query = if table == Table::VideoAssets {
-                portable_video_assets_query(&relation, None)
+                BundleSpec::portable_video_assets_query(&relation, None)
             } else {
                 format!("SELECT * FROM {relation}")
             };
             queries.push((table.name().to_owned(), query));
         }
-        if let Some(registry) = current_workflow_registry(connection)? {
+        if let Some(registry) = WorkflowBundleRegistry::load(connection)? {
             queries.push((
                 WORKFLOW_FEATURE_REGISTRY_RELATION.to_owned(),
                 format!("SELECT * FROM {WORKFLOW_FEATURE_REGISTRY_RELATION}"),
             ));
             for relation in registry.cache_relations() {
-                if !table_exists(connection, &relation)? {
+                if !connection.table_exists(&relation)? {
                     return Err(format!(
                         "Workflow feature registry declares missing cache relation {relation:?}"
                     ));
@@ -474,13 +471,13 @@ impl EpisodeBundle {
             namespace,
             dataset_id,
         } = selection;
-        validate_dataset_id(dataset_id)?;
+        EpisodeBundle::validate_dataset_id(dataset_id)?;
         let datasets = Table::Datasets.qualified_name(namespace);
         let episodes = Table::Episodes.qualified_name(namespace);
-        if !table_exists(connection, &datasets)? || !table_exists(connection, &episodes)? {
+        if !connection.table_exists(&datasets)? || !connection.table_exists(&episodes)? {
             return Err(format!("dataset {dataset_id:?} has no episodes to export"));
         }
-        let dataset = sql::string_literal(dataset_id);
+        let dataset = SpiralSql::string_literal(dataset_id);
         let episode_ids = format!(
             "SELECT {episode_id} FROM {episodes} WHERE {dataset_id_column} = {dataset}",
             episode_id = column::EPISODE_ID,
@@ -489,7 +486,7 @@ impl EpisodeBundle {
         let mut queries = Vec::new();
         for table in EPISODE_TABLES {
             let relation = table.qualified_name(namespace);
-            if !table_exists(connection, &relation)? {
+            if !connection.table_exists(&relation)? {
                 continue;
             }
             let query = match table {
@@ -501,7 +498,7 @@ impl EpisodeBundle {
                     "SELECT * FROM {relation} WHERE {} IN ({episode_ids})",
                     column::EPISODE_ID
                 ),
-                Table::VideoAssets => portable_video_assets_query(
+                Table::VideoAssets => BundleSpec::portable_video_assets_query(
                     &relation,
                     Some(&format!("{} IN ({episode_ids})", column::EPISODE_ID)),
                 ),
@@ -570,7 +567,7 @@ impl BundleSpec {
             let reader = statement
                 .execute()
                 .map_err(|error| format!("reading {} relation {relation}: {error}", self.label))?;
-            let occupied = encoded_entries_size(&entries)
+            let occupied = Self::encoded_entries_size(&entries)
                 .saturating_add(self.magic.len() + 4 + MAX_MANIFEST_BYTES + 2);
             let payload_limit = self
                 .max_bytes
@@ -595,7 +592,7 @@ impl BundleSpec {
                     .map_err(|error| format!("finishing Arrow stream for {relation}: {error}"))?;
             }
             let payload = payload.into_inner();
-            let projected_size = encoded_entries_size(&entries)
+            let projected_size = Self::encoded_entries_size(&entries)
                 .saturating_add(2 + relation.len() + 8 + payload.len())
                 .saturating_add(self.magic.len() + 4 + MAX_MANIFEST_BYTES);
             if projected_size > self.max_bytes {
@@ -613,34 +610,36 @@ impl BundleSpec {
     }
 }
 
-fn portable_video_assets_query(relation: &str, predicate: Option<&str>) -> String {
-    let filter = predicate
-        .map(|predicate| format!(" WHERE {predicate}"))
-        .unwrap_or_default();
-    format!(
-        "SELECT {episode_id}, {stream_id}, {segment_index}, {timeline_offset}, {camera_id}, \
+impl BundleSpec {
+    fn portable_video_assets_query(relation: &str, predicate: Option<&str>) -> String {
+        let filter = predicate
+            .map(|predicate| format!(" WHERE {predicate}"))
+            .unwrap_or_default();
+        format!(
+            "SELECT {episode_id}, {stream_id}, {segment_index}, {timeline_offset}, {camera_id}, \
          spql.io.read_bytes({payload}) AS {payload}, {byte_size}, {width}, {height}, {fps}, \
          {frames}, {media_relation} FROM {relation}{filter}",
-        episode_id = column::EPISODE_ID,
-        stream_id = column::STREAM_ID,
-        segment_index = column::SEGMENT_INDEX,
-        timeline_offset = column::TIMELINE_OFFSET_NS,
-        camera_id = column::CAMERA_ID,
-        payload = column::PAYLOAD,
-        byte_size = column::BYTE_SIZE,
-        width = column::WIDTH,
-        height = column::HEIGHT,
-        fps = column::FPS,
-        frames = column::FRAMES,
-        media_relation = column::MEDIA_RELATION,
-    )
-}
+            episode_id = column::EPISODE_ID,
+            stream_id = column::STREAM_ID,
+            segment_index = column::SEGMENT_INDEX,
+            timeline_offset = column::TIMELINE_OFFSET_NS,
+            camera_id = column::CAMERA_ID,
+            payload = column::PAYLOAD,
+            byte_size = column::BYTE_SIZE,
+            width = column::WIDTH,
+            height = column::HEIGHT,
+            fps = column::FPS,
+            frames = column::FRAMES,
+            media_relation = column::MEDIA_RELATION,
+        )
+    }
 
-fn encoded_entries_size(entries: &[(String, Vec<u8>)]) -> usize {
-    entries
-        .iter()
-        .map(|(name, payload)| 2 + name.len() + 8 + payload.len())
-        .sum()
+    fn encoded_entries_size(entries: &[(String, Vec<u8>)]) -> usize {
+        entries
+            .iter()
+            .map(|(name, payload)| 2 + name.len() + 8 + payload.len())
+            .sum()
+    }
 }
 
 impl BundleSpec {
@@ -655,19 +654,19 @@ impl BundleSpec {
             format: self.format.to_owned(),
             format_version: FORMAT_VERSION,
             schema_version: spiral::SCHEMA_VERSION,
-            exported_ms: unix_millis(),
+            exported_ms: BundleClock::unix_millis(),
             relations: entries.iter().map(|(name, _)| name.clone()).collect(),
         };
         let manifest = serde_json::to_vec(&manifest)
             .map_err(|error| format!("encoding {} manifest: {error}", self.label))?;
         let mut bundle = Vec::new();
         bundle.extend_from_slice(self.magic);
-        write_u32(&mut bundle, manifest.len())?;
+        BundleCodec::write_u32(&mut bundle, manifest.len())?;
         bundle.extend_from_slice(&manifest);
         for (name, payload) in entries {
-            write_u16(&mut bundle, name.len())?;
+            BundleCodec::write_u16(&mut bundle, name.len())?;
             bundle.extend_from_slice(name.as_bytes());
-            write_u64(&mut bundle, payload.len())?;
+            BundleCodec::write_u64(&mut bundle, payload.len())?;
             bundle.extend_from_slice(&payload);
         }
         bundle.extend_from_slice(&0_u16.to_le_bytes());
@@ -689,7 +688,7 @@ impl ProjectBundle {
         source: BundleSource<'_>,
     ) -> Result<ProjectImportSummary, String> {
         let BundleSource { namespace, bytes } = source;
-        let decoded = decode_project_entries(PROJECT_SPEC.parse_raw(bytes)?)?;
+        let decoded = ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(bytes)?)?;
         let fixed_relations = decoded
             .iter()
             .filter_map(|entry| match &entry.relation {
@@ -697,8 +696,8 @@ impl ProjectBundle {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let imported_video_episodes = video_episode_ids(&fixed_relations)?;
-        let current_caches = current_workflow_registry(connection)?
+        let imported_video_episodes = EpisodeBundle::video_episode_ids(&fixed_relations)?;
+        let current_caches = WorkflowBundleRegistry::load(connection)?
             .map(|registry| registry.cache_relations())
             .unwrap_or_default();
         let incoming_caches = decoded
@@ -711,13 +710,13 @@ impl ProjectBundle {
         let incoming_registry = decoded
             .iter()
             .any(|entry| entry.relation == ProjectRelation::WorkflowFeatureRegistry);
-        let workflow_plan = workflow_restore_plan(
+        let workflow_plan = WorkflowRestorePlan::from_caches(
             &current_caches,
             incoming_registry.then_some(&incoming_caches),
         );
 
         let (mut summary, transaction_warning) =
-            run_project_import_transaction(connection, "project import", |connection| {
+            connection.run_project_import_transaction("project import", |connection| {
                 // Retire only relations absent from the incoming project. Relations in
                 // the bundle are atomically replaced below through hosted Arbor. All
                 // namespace swaps remain staged in this one project transaction, so a
@@ -730,27 +729,31 @@ impl ProjectBundle {
                         continue;
                     }
                     let relation = table.qualified_name(namespace);
-                    if table_exists(connection, &relation)? {
-                        execute_update_sql(connection, &format!("DROP TABLE {relation}")).map_err(
-                            |error| format!("clearing project relation {relation}: {error}"),
-                        )?;
+                    if connection.table_exists(&relation)? {
+                        connection
+                            .execute_update_sql(&format!("DROP TABLE {relation}"))
+                            .map_err(|error| {
+                                format!("clearing project relation {relation}: {error}")
+                            })?;
                     }
                 }
                 for relation in &workflow_plan.retire_caches {
-                    if table_exists(connection, relation)? {
-                        execute_update_sql(connection, &format!("DROP TABLE {relation}")).map_err(
-                            |error| format!("clearing Workflow cache {relation}: {error}"),
-                        )?;
+                    if connection.table_exists(relation)? {
+                        connection
+                            .execute_update_sql(&format!("DROP TABLE {relation}"))
+                            .map_err(|error| {
+                                format!("clearing Workflow cache {relation}: {error}")
+                            })?;
                     }
                 }
                 if workflow_plan.clear_registry
-                    && table_exists(connection, WORKFLOW_FEATURE_REGISTRY_RELATION)?
+                    && connection.table_exists(WORKFLOW_FEATURE_REGISTRY_RELATION)?
                 {
-                    execute_update_sql(
-                        connection,
-                        &format!("DROP TABLE {WORKFLOW_FEATURE_REGISTRY_RELATION}"),
-                    )
-                    .map_err(|error| format!("clearing Workflow feature registry: {error}"))?;
+                    connection
+                        .execute_update_sql(&format!(
+                            "DROP TABLE {WORKFLOW_FEATURE_REGISTRY_RELATION}"
+                        ))
+                        .map_err(|error| format!("clearing Workflow feature registry: {error}"))?;
                 }
 
                 let mut summary = ProjectImportSummary::default();
@@ -761,7 +764,7 @@ impl ProjectBundle {
                         .into_iter()
                         .map(|batch| {
                             if entry.relation == ProjectRelation::Managed(Table::VideoAssets) {
-                                prepare_video_asset_import(batch, namespace)
+                                EpisodeBundle::prepare_video_asset_import(batch, namespace)
                             } else {
                                 Ok(batch)
                             }
@@ -770,7 +773,7 @@ impl ProjectBundle {
                     summary.record_relation(
                         batches.iter().map(RecordBatch::num_rows).sum::<usize>() as u64,
                     );
-                    replace_batches(connection, &relation, batches)?;
+                    connection.replace_batches(&relation, batches)?;
                 }
                 Ok(summary)
             })?;
@@ -783,9 +786,11 @@ impl ProjectBundle {
         // published. Keep the project_store's exclusive checkout while reconciling
         // the derived MP4 resources immediately after the durable rows commit.
         if can_reconcile {
-            if let Err(error) =
-                reconcile_project_video_dataset(connection, namespace, &imported_video_episodes)
-            {
+            if let Err(error) = EpisodeBundle::reconcile_project_video_dataset(
+                connection,
+                namespace,
+                &imported_video_episodes,
+            ) {
                 summary.push_warning(format!(
                     "project rows committed, but the derived video dataset needs repair: {error}"
                 ));
@@ -811,19 +816,19 @@ impl EpisodeBundle {
             namespace,
             dataset_id,
         } = selection;
-        validate_dataset_id(dataset_id)?;
+        EpisodeBundle::validate_dataset_id(dataset_id)?;
         let mut decoded = EPISODES_SPEC.decode_entries(EPISODES_SPEC.parse(bytes)?)?;
-        sort_relations(&mut decoded, &EPISODE_TABLES);
-        let episode_ids = validate_episode_relations(&decoded)?;
-        let video_episode_ids = video_episode_ids(&decoded)?;
-        let existing_video_episodes = stored_video_episode_ids(connection, namespace)?;
-        reject_existing_episodes(connection, namespace, &episode_ids)?;
-        ensure_dataset_namespace(connection, namespace)?;
+        EpisodeBundle::sort_relations(&mut decoded, &EPISODE_TABLES);
+        let episode_ids = EpisodeBundle::validate_relations(&decoded)?;
+        let video_episode_ids = EpisodeBundle::video_episode_ids(&decoded)?;
+        let existing_video_episodes = connection.stored_video_episode_ids(namespace)?;
+        EpisodeBundle::reject_existing_episodes(connection, namespace, &episode_ids)?;
+        connection.ensure_dataset_namespace(namespace)?;
         if !video_episode_ids.is_empty() {
-            ensure_video_assets_blob_relation(connection, namespace)?;
+            connection.ensure_video_assets_blob_relation(namespace)?;
         }
-        if !existing_video_episodes.is_empty() && !video_dataset_exists(connection, namespace)? {
-            retarget_stored_video_media_relations(connection, namespace)?;
+        if !existing_video_episodes.is_empty() && !connection.video_dataset_exists(namespace)? {
+            connection.retarget_stored_video_media_relations(namespace)?;
         }
 
         connection
@@ -831,8 +836,9 @@ impl EpisodeBundle {
             .map_err(|error| format!("starting episode import transaction: {error}"))?;
         let outcome = (|| {
             let datasets = Table::Datasets.qualified_name(namespace);
-            let dataset_exists = table_exists(connection, &datasets)?
-                && !run_query(connection, &sql::dataset_exists(&datasets, dataset_id), 1)?
+            let dataset_exists = connection.table_exists(&datasets)?
+                && !connection
+                    .run_query(&SpiralSql::dataset_exists(&datasets, dataset_id), 1)?
                     .rows()
                     .is_empty();
             let mut imported_rows = 0_u64;
@@ -844,10 +850,14 @@ impl EpisodeBundle {
                 let batches = batches
                     .into_iter()
                     .map(|batch| match table {
-                        Table::Datasets | Table::Episodes => {
-                            replace_utf8_column(batch, column::DATASET_ID, dataset_id)
+                        Table::Datasets | Table::Episodes => EpisodeBundle::replace_utf8_column(
+                            batch,
+                            column::DATASET_ID,
+                            dataset_id,
+                        ),
+                        Table::VideoAssets => {
+                            EpisodeBundle::prepare_video_asset_import(batch, namespace)
                         }
-                        Table::VideoAssets => prepare_video_asset_import(batch, namespace),
                         _ => Ok(batch),
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -855,7 +865,7 @@ impl EpisodeBundle {
                     imported_rows.saturating_add(
                         batches.iter().map(RecordBatch::num_rows).sum::<usize>() as u64,
                     );
-                ingest_batches(connection, &relation, batches)?;
+                connection.ingest_batches(&relation, batches)?;
             }
             Ok(
                 EpisodeImportSummary::new(dataset_id, episode_ids.len() as u64, imported_rows)
@@ -863,14 +873,15 @@ impl EpisodeBundle {
             )
         })();
         let (mut summary, transaction_warning) =
-            finish_transaction(connection, outcome, "episode import")?;
+            connection.finish_transaction(outcome, "episode import")?;
         let can_reconcile = transaction_warning.is_none();
         if let Some(warning) = transaction_warning {
             summary.push_warning(warning);
         }
         if can_reconcile {
             if !video_episode_ids.is_empty()
-                && let Err(error) = reconcile_appended_video_dataset(connection, namespace)
+                && let Err(error) =
+                    EpisodeBundle::reconcile_appended_video_dataset(connection, namespace)
             {
                 summary.push_warning(format!(
                     "episode rows committed, but the derived video dataset needs repair: {error}"
@@ -1025,9 +1036,9 @@ impl ArrowDecodeBudget {
         let mut position = 0_usize;
         let mut counters = ArrowPreflightCounters::default();
         while position < payload.len() {
-            let first = read_arrow_u32(payload, &mut position, relation)?;
+            let first = BundleCodec::read_arrow_u32(payload, &mut position, relation)?;
             let metadata_len = if first == u32::MAX {
-                read_arrow_u32(payload, &mut position, relation)?
+                BundleCodec::read_arrow_u32(payload, &mut position, relation)?
             } else {
                 first
             };
@@ -1141,18 +1152,22 @@ impl ArrowDecodeBudget {
     }
 }
 
-fn read_arrow_u32(payload: &[u8], position: &mut usize, relation: &str) -> Result<u32, String> {
-    let end = position
-        .checked_add(4)
-        .filter(|end| *end <= payload.len())
-        .ok_or_else(|| format!("Arrow stream for {relation} has a truncated message prefix"))?;
-    let value = u32::from_le_bytes(
-        payload[*position..end]
-            .try_into()
-            .expect("Arrow prefix has exactly four bytes"),
-    );
-    *position = end;
-    Ok(value)
+struct BundleCodec;
+
+impl BundleCodec {
+    fn read_arrow_u32(payload: &[u8], position: &mut usize, relation: &str) -> Result<u32, String> {
+        let end = position
+            .checked_add(4)
+            .filter(|end| *end <= payload.len())
+            .ok_or_else(|| format!("Arrow stream for {relation} has a truncated message prefix"))?;
+        let value = u32::from_le_bytes(
+            payload[*position..end]
+                .try_into()
+                .expect("Arrow prefix has exactly four bytes"),
+        );
+        *position = end;
+        Ok(value)
+    }
 }
 
 impl ArrowPreflight<'_> {
@@ -1492,517 +1507,554 @@ impl ManagedDataTypeCompatibility for DataType {
     }
 }
 
-fn decode_project_entries(
-    entries: Vec<(String, Vec<u8>)>,
-) -> Result<Vec<DecodedProjectRelation>, String> {
-    let mut budget = ArrowDecodeBudget::default();
-    let mut payloads = entries.into_iter().collect::<BTreeMap<_, _>>();
-    let registry_batches = payloads
-        .remove(WORKFLOW_FEATURE_REGISTRY_RELATION)
-        .map(|payload| {
-            budget.decode_with_row_limit(
-                ArrowPayload::new(
-                    WORKFLOW_FEATURE_REGISTRY_RELATION,
-                    payload,
-                    PROJECT_SPEC.label,
-                ),
-                MAX_FEATURE_REGISTRY_ROWS,
-            )
-        })
-        .transpose()?;
-    let registry = registry_batches
-        .as_deref()
-        .map(validate_workflow_registry)
-        .transpose()?
-        .unwrap_or_default();
-    let declared_caches = registry.cache_relations();
-    let dynamic_names = payloads
-        .keys()
-        .filter(|name| PROJECT_SPEC.table_named(name).is_none())
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    if let Some(name) = dynamic_names.difference(&declared_caches).next() {
-        return Err(format!(
-            "project contains undeclared Workflow relation {name:?}"
-        ));
-    }
-    if let Some(name) = declared_caches.difference(&dynamic_names).next() {
-        return Err(format!(
-            "project is missing declared Workflow cache relation {name:?}"
-        ));
-    }
+impl ProjectBundle {
+    fn decode_entries(
+        entries: Vec<(String, Vec<u8>)>,
+    ) -> Result<Vec<DecodedProjectRelation>, String> {
+        let mut budget = ArrowDecodeBudget::default();
+        let mut payloads = entries.into_iter().collect::<BTreeMap<_, _>>();
+        let registry_batches = payloads
+            .remove(WORKFLOW_FEATURE_REGISTRY_RELATION)
+            .map(|payload| {
+                budget.decode_with_row_limit(
+                    ArrowPayload::new(
+                        WORKFLOW_FEATURE_REGISTRY_RELATION,
+                        payload,
+                        PROJECT_SPEC.label,
+                    ),
+                    MAX_FEATURE_REGISTRY_ROWS,
+                )
+            })
+            .transpose()?;
+        let registry = registry_batches
+            .as_deref()
+            .map(WorkflowBundleRegistry::validate)
+            .transpose()?
+            .unwrap_or_default();
+        let declared_caches = registry.cache_relations();
+        let dynamic_names = payloads
+            .keys()
+            .filter(|name| PROJECT_SPEC.table_named(name).is_none())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if let Some(name) = dynamic_names.difference(&declared_caches).next() {
+            return Err(format!(
+                "project contains undeclared Workflow relation {name:?}"
+            ));
+        }
+        if let Some(name) = declared_caches.difference(&dynamic_names).next() {
+            return Err(format!(
+                "project is missing declared Workflow cache relation {name:?}"
+            ));
+        }
 
-    let mut decoded = Vec::new();
-    for table in Table::ALL {
-        if let Some(payload) = payloads.remove(table.name()) {
-            let mut relation =
-                PROJECT_SPEC.decode_entries_with_budget(vec![(table, payload)], &mut budget)?;
-            if table == Table::WorkflowRuns {
-                validate_workflow_agent_bundle_rows(&relation[0].1)?;
+        let mut decoded = Vec::new();
+        for table in Table::ALL {
+            if let Some(payload) = payloads.remove(table.name()) {
+                let mut relation =
+                    PROJECT_SPEC.decode_entries_with_budget(vec![(table, payload)], &mut budget)?;
+                if table == Table::WorkflowRuns {
+                    BundleAgentDocumentV2::validate_batches(&relation[0].1)?;
+                }
+                decoded.push(DecodedProjectRelation {
+                    relation: ProjectRelation::Managed(table),
+                    batches: relation.pop().expect("one project relation was decoded").1,
+                });
             }
+        }
+        for relation in declared_caches {
+            let payload = payloads
+                .remove(&relation)
+                .expect("declared project cache presence was checked");
+            let batches = budget.decode_with_row_limit(
+                ArrowPayload::new(&relation, payload, PROJECT_SPEC.label),
+                MAX_FEATURE_CACHE_ROWS,
+            )?;
+            WorkflowCacheValidator::validate_bundle(&relation, &batches, &registry)?;
             decoded.push(DecodedProjectRelation {
-                relation: ProjectRelation::Managed(table),
-                batches: relation.pop().expect("one project relation was decoded").1,
+                relation: ProjectRelation::WorkflowFeatureCache(relation.clone()),
+                batches,
             });
         }
+        if let Some(batches) = registry_batches {
+            decoded.push(DecodedProjectRelation {
+                relation: ProjectRelation::WorkflowFeatureRegistry,
+                batches,
+            });
+        }
+        debug_assert!(payloads.is_empty());
+        Ok(decoded)
     }
-    for relation in declared_caches {
-        let payload = payloads
-            .remove(&relation)
-            .expect("declared project cache presence was checked");
-        let batches = budget.decode_with_row_limit(
-            ArrowPayload::new(&relation, payload, PROJECT_SPEC.label),
-            MAX_FEATURE_CACHE_ROWS,
-        )?;
-        validate_workflow_cache(&relation, &batches, &registry)?;
-        decoded.push(DecodedProjectRelation {
-            relation: ProjectRelation::WorkflowFeatureCache(relation.clone()),
-            batches,
-        });
-    }
-    if let Some(batches) = registry_batches {
-        decoded.push(DecodedProjectRelation {
-            relation: ProjectRelation::WorkflowFeatureRegistry,
-            batches,
-        });
-    }
-    debug_assert!(payloads.is_empty());
-    Ok(decoded)
 }
 
-fn validate_workflow_agent_bundle_rows(batches: &[RecordBatch]) -> Result<(), String> {
-    let mut keys = BTreeSet::new();
-    for batch in batches {
-        for row in 0..batch.num_rows() {
-            let run_id = batch
-                .column_by_name("run_id")
-                .and_then(|column| workflow_string_value(column.as_ref(), row))
-                .ok_or_else(|| "project Workflow history has an invalid run_id".to_owned())?;
-            if !matches!(run_id, "default" | "agent:default") {
-                return Err(format!(
-                    "project Workflow history contains unknown document key {run_id:?}"
-                ));
+impl BundleAgentDocumentV2 {
+    fn validate_batches(batches: &[RecordBatch]) -> Result<(), String> {
+        let mut keys = BTreeSet::new();
+        for batch in batches {
+            for row in 0..batch.num_rows() {
+                let run_id = batch
+                    .column_by_name("run_id")
+                    .and_then(|column| WorkflowArrow::string_value(column.as_ref(), row))
+                    .ok_or_else(|| "project Workflow history has an invalid run_id".to_owned())?;
+                if !matches!(run_id, "default" | "agent:default") {
+                    return Err(format!(
+                        "project Workflow history contains unknown document key {run_id:?}"
+                    ));
+                }
+                if !keys.insert(run_id.to_owned()) {
+                    return Err(format!(
+                        "project Workflow history contains duplicate document key {run_id:?}"
+                    ));
+                }
+                if run_id != "agent:default" {
+                    continue;
+                }
+                let snapshot = batch
+                    .column_by_name("snapshot_json")
+                    .and_then(|column| WorkflowArrow::string_value(column.as_ref(), row))
+                    .ok_or_else(|| {
+                        "project Assistant history has an invalid snapshot_json".to_owned()
+                    })?;
+                BundleAgentDocumentV2::validate_json(snapshot)?;
             }
-            if !keys.insert(run_id.to_owned()) {
-                return Err(format!(
-                    "project Workflow history contains duplicate document key {run_id:?}"
-                ));
+        }
+        Ok(())
+    }
+
+    fn validate_json(encoded: &str) -> Result<(), String> {
+        if encoded.len() > MAX_WORKFLOW_AGENT_DOCUMENT_BYTES {
+            return Err("project Assistant history exceeds the 16 MiB bound".to_owned());
+        }
+        let value: serde_json::Value = serde_json::from_str(encoded)
+            .map_err(|error| format!("project Assistant history is invalid JSON: {error}"))?;
+        let Some(object) = value.as_object() else {
+            return Err("project Assistant history must be a JSON object".to_owned());
+        };
+
+        let conversations = object.get("conversations").ok_or_else(|| {
+            "project Assistant history does not match the current document shape".to_owned()
+        })?;
+        let canonical =
+            serde_json::from_value::<BundleAgentDocumentV2>(value.clone()).map_err(|error| {
+                format!(
+                    "project Assistant history does not match the current document shape: {error}"
+                )
+            })?;
+        if canonical.conversations.iter().any(|conversation| {
+            !BundleAgentDocumentV2::provider_history_is_structurally_valid(
+                &conversation.provider_messages,
+                conversation.session.lifecycle.phase.active(),
+            )
+        }) {
+            return Err(
+                "project Assistant provider history has an invalid role or tool exchange"
+                    .to_owned(),
+            );
+        }
+        if canonical.schema_version != WORKFLOW_AGENT_DOCUMENT_SCHEMA_VERSION {
+            return Err("project Assistant history uses an unsupported schema version".to_owned());
+        }
+        let conversations = conversations
+            .as_array()
+            .ok_or_else(|| "project Assistant conversations must be a JSON array".to_owned())?;
+        if conversations.is_empty() || conversations.len() > MAX_WORKFLOW_AGENT_CONVERSATIONS {
+            return Err(format!(
+                "project Assistant history must contain 1–{MAX_WORKFLOW_AGENT_CONVERSATIONS} conversations"
+            ));
+        }
+        let mut ids = BTreeSet::new();
+        for conversation in conversations {
+            let conversation = conversation
+                .as_object()
+                .ok_or_else(|| "project Assistant conversation must be a JSON object".to_owned())?;
+            let id = BundleAgentDocumentV2::bounded_json_string(
+                conversation.get("conversation_id"),
+                128,
+                "conversation id",
+            )?;
+            if !ids.insert(id) {
+                return Err(
+                    "project Assistant history has duplicate conversation identities".to_owned(),
+                );
             }
-            if run_id != "agent:default" {
+            let title = BundleAgentDocumentV2::bounded_json_string(
+                conversation.get("title"),
+                MAX_WORKFLOW_AGENT_CONVERSATION_TITLE_CHARS,
+                "conversation title",
+            )?;
+            if title.trim().is_empty() {
+                return Err("project Assistant conversation title cannot be empty".to_owned());
+            }
+            let session = conversation
+                .get("session")
+                .and_then(serde_json::Value::as_object)
+                .ok_or_else(|| {
+                    "project Assistant conversation is missing its session".to_owned()
+                })?;
+            if session
+                .get("workflow_id")
+                .and_then(serde_json::Value::as_str)
+                != Some(DEFAULT_WORKFLOW_ID)
+            {
+                return Err(
+                    "project Assistant session belongs to an unsupported Workflow".to_owned(),
+                );
+            }
+            if session
+                .get("conversation_id")
+                .and_then(serde_json::Value::as_str)
+                != Some(id)
+            {
+                return Err(
+                    "project Assistant session identity does not match its conversation".to_owned(),
+                );
+            }
+            BundleAgentDocumentV2::validate_agent_messages(session.get("messages"))?;
+            BundleAgentDocumentV2::validate_provider_messages(
+                conversation.get("provider_messages"),
+            )?;
+        }
+        let active = object
+            .get("active_conversation_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "project Assistant history has no active conversation".to_owned())?;
+        if !ids.contains(active) {
+            return Err("project Assistant active conversation does not exist".to_owned());
+        }
+        Ok(())
+    }
+
+    fn validate_agent_messages(messages: Option<&serde_json::Value>) -> Result<(), String> {
+        let messages = messages
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "project Assistant messages must be a JSON array".to_owned())?;
+        if messages.len() > MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION {
+            return Err(format!(
+                "project Assistant conversation exceeds its {MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION}-message bound"
+            ));
+        }
+        let mut ids = BTreeSet::new();
+        for message in messages {
+            let id = message
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "project Assistant message has no identity".to_owned())?;
+            if id.is_empty() || id.len() > 128 || !ids.insert(id) {
+                return Err(
+                    "project Assistant history has invalid or duplicate message identities"
+                        .to_owned(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_provider_messages(messages: Option<&serde_json::Value>) -> Result<(), String> {
+        let Some(messages) = messages else {
+            return Ok(());
+        };
+        let messages = messages
+            .as_array()
+            .ok_or_else(|| "project Assistant provider history must be a JSON array".to_owned())?;
+        if messages.len() > MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION {
+            return Err(format!(
+                "project Assistant provider history exceeds its {MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION}-message bound"
+            ));
+        }
+        Ok(())
+    }
+
+    fn provider_history_is_structurally_valid(
+        messages: &[BundleProviderMessage],
+        allow_incomplete_tail: bool,
+    ) -> bool {
+        let mut pending: Option<BTreeSet<&str>> = None;
+        for message in messages {
+            if !matches!(message.role.as_str(), "user" | "assistant" | "tool") {
+                return false;
+            }
+            if let Some(expected) = pending.as_mut() {
+                if message.role != "tool"
+                    || message
+                        .tool_call_id
+                        .as_deref()
+                        .is_none_or(|id| !expected.remove(id))
+                {
+                    return false;
+                }
+                if expected.is_empty() {
+                    pending = None;
+                }
                 continue;
             }
-            let snapshot = batch
-                .column_by_name("snapshot_json")
-                .and_then(|column| workflow_string_value(column.as_ref(), row))
-                .ok_or_else(|| {
-                    "project Assistant history has an invalid snapshot_json".to_owned()
-                })?;
-            validate_workflow_agent_json(snapshot)?;
+            if message.role == "tool" {
+                return false;
+            }
+            if !message.tool_calls.is_empty() {
+                if message.role != "assistant" {
+                    return false;
+                }
+                let expected = message
+                    .tool_calls
+                    .iter()
+                    .map(|call| call.id.as_str())
+                    .collect::<BTreeSet<_>>();
+                if expected.len() != message.tool_calls.len()
+                    || expected.iter().any(|id| id.is_empty())
+                {
+                    return false;
+                }
+                pending = Some(expected);
+            }
         }
+        pending.is_none() || allow_incomplete_tail
     }
-    Ok(())
+
+    fn bounded_json_string<'a>(
+        value: Option<&'a serde_json::Value>,
+        max_chars: usize,
+        label: &str,
+    ) -> Result<&'a str, String> {
+        let value = value
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("project Assistant {label} is invalid"))?;
+        if value.is_empty() || value.chars().count() > max_chars {
+            return Err(format!("project Assistant {label} exceeds its bound"));
+        }
+        Ok(value)
+    }
 }
 
-fn validate_workflow_agent_json(encoded: &str) -> Result<(), String> {
-    if encoded.len() > MAX_WORKFLOW_AGENT_DOCUMENT_BYTES {
-        return Err("project Assistant history exceeds the 16 MiB bound".to_owned());
-    }
-    let value: serde_json::Value = serde_json::from_str(encoded)
-        .map_err(|error| format!("project Assistant history is invalid JSON: {error}"))?;
-    let Some(object) = value.as_object() else {
-        return Err("project Assistant history must be a JSON object".to_owned());
-    };
-
-    let conversations = object.get("conversations").ok_or_else(|| {
-        "project Assistant history does not match the current document shape".to_owned()
-    })?;
-    let canonical =
-        serde_json::from_value::<BundleAgentDocumentV2>(value.clone()).map_err(|error| {
-            format!("project Assistant history does not match the current document shape: {error}")
-        })?;
-    if canonical.conversations.iter().any(|conversation| {
-        !bundle_provider_history_is_structurally_valid(
-            &conversation.provider_messages,
-            conversation.session.lifecycle.phase.active(),
+impl WorkflowBundleRegistry {
+    fn validate(batches: &[RecordBatch]) -> Result<WorkflowBundleRegistry, String> {
+        Self::validate_with_limits(
+            batches,
+            MAX_FEATURE_REGISTRY_ROWS,
+            MAX_FEATURE_CACHE_COLUMNS,
         )
-    }) {
-        return Err(
-            "project Assistant provider history has an invalid role or tool exchange".to_owned(),
-        );
     }
-    if canonical.schema_version != WORKFLOW_AGENT_DOCUMENT_SCHEMA_VERSION {
-        return Err("project Assistant history uses an unsupported schema version".to_owned());
-    }
-    let conversations = conversations
-        .as_array()
-        .ok_or_else(|| "project Assistant conversations must be a JSON array".to_owned())?;
-    if conversations.is_empty() || conversations.len() > MAX_WORKFLOW_AGENT_CONVERSATIONS {
-        return Err(format!(
-            "project Assistant history must contain 1–{MAX_WORKFLOW_AGENT_CONVERSATIONS} conversations"
-        ));
-    }
-    let mut ids = BTreeSet::new();
-    for conversation in conversations {
-        let conversation = conversation
-            .as_object()
-            .ok_or_else(|| "project Assistant conversation must be a JSON object".to_owned())?;
-        let id = bounded_json_string(conversation.get("conversation_id"), 128, "conversation id")?;
-        if !ids.insert(id) {
-            return Err(
-                "project Assistant history has duplicate conversation identities".to_owned(),
-            );
-        }
-        let title = bounded_json_string(
-            conversation.get("title"),
-            MAX_WORKFLOW_AGENT_CONVERSATION_TITLE_CHARS,
-            "conversation title",
-        )?;
-        if title.trim().is_empty() {
-            return Err("project Assistant conversation title cannot be empty".to_owned());
-        }
-        let session = conversation
-            .get("session")
-            .and_then(serde_json::Value::as_object)
-            .ok_or_else(|| "project Assistant conversation is missing its session".to_owned())?;
-        if session
-            .get("workflow_id")
-            .and_then(serde_json::Value::as_str)
-            != Some(DEFAULT_WORKFLOW_ID)
-        {
-            return Err("project Assistant session belongs to an unsupported Workflow".to_owned());
-        }
-        if session
-            .get("conversation_id")
-            .and_then(serde_json::Value::as_str)
-            != Some(id)
-        {
-            return Err(
-                "project Assistant session identity does not match its conversation".to_owned(),
-            );
-        }
-        validate_agent_messages(session.get("messages"))?;
-        validate_provider_messages(conversation.get("provider_messages"))?;
-    }
-    let active = object
-        .get("active_conversation_id")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "project Assistant history has no active conversation".to_owned())?;
-    if !ids.contains(active) {
-        return Err("project Assistant active conversation does not exist".to_owned());
-    }
-    Ok(())
-}
 
-fn validate_agent_messages(messages: Option<&serde_json::Value>) -> Result<(), String> {
-    let messages = messages
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| "project Assistant messages must be a JSON array".to_owned())?;
-    if messages.len() > MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION {
-        return Err(format!(
-            "project Assistant conversation exceeds its {MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION}-message bound"
-        ));
-    }
-    let mut ids = BTreeSet::new();
-    for message in messages {
-        let id = message
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "project Assistant message has no identity".to_owned())?;
-        if id.is_empty() || id.len() > 128 || !ids.insert(id) {
-            return Err(
-                "project Assistant history has invalid or duplicate message identities".to_owned(),
-            );
-        }
-    }
-    Ok(())
-}
-
-fn validate_provider_messages(messages: Option<&serde_json::Value>) -> Result<(), String> {
-    let Some(messages) = messages else {
-        return Ok(());
-    };
-    let messages = messages
-        .as_array()
-        .ok_or_else(|| "project Assistant provider history must be a JSON array".to_owned())?;
-    if messages.len() > MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION {
-        return Err(format!(
-            "project Assistant provider history exceeds its {MAX_WORKFLOW_AGENT_MESSAGES_PER_CONVERSATION}-message bound"
-        ));
-    }
-    Ok(())
-}
-
-fn bundle_provider_history_is_structurally_valid(
-    messages: &[BundleProviderMessage],
-    allow_incomplete_tail: bool,
-) -> bool {
-    let mut pending: Option<BTreeSet<&str>> = None;
-    for message in messages {
-        if !matches!(message.role.as_str(), "user" | "assistant" | "tool") {
-            return false;
-        }
-        if let Some(expected) = pending.as_mut() {
-            if message.role != "tool"
-                || message
-                    .tool_call_id
-                    .as_deref()
-                    .is_none_or(|id| !expected.remove(id))
-            {
-                return false;
-            }
-            if expected.is_empty() {
-                pending = None;
-            }
-            continue;
-        }
-        if message.role == "tool" {
-            return false;
-        }
-        if !message.tool_calls.is_empty() {
-            if message.role != "assistant" {
-                return false;
-            }
-            let expected = message
-                .tool_calls
-                .iter()
-                .map(|call| call.id.as_str())
-                .collect::<BTreeSet<_>>();
-            if expected.len() != message.tool_calls.len() || expected.iter().any(|id| id.is_empty())
-            {
-                return false;
-            }
-            pending = Some(expected);
-        }
-    }
-    pending.is_none() || allow_incomplete_tail
-}
-
-fn bounded_json_string<'a>(
-    value: Option<&'a serde_json::Value>,
-    max_chars: usize,
-    label: &str,
-) -> Result<&'a str, String> {
-    let value = value
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| format!("project Assistant {label} is invalid"))?;
-    if value.is_empty() || value.chars().count() > max_chars {
-        return Err(format!("project Assistant {label} exceeds its bound"));
-    }
-    Ok(value)
-}
-
-fn validate_workflow_registry(batches: &[RecordBatch]) -> Result<WorkflowBundleRegistry, String> {
-    validate_workflow_registry_with_limits(
-        batches,
-        MAX_FEATURE_REGISTRY_ROWS,
-        MAX_FEATURE_CACHE_COLUMNS,
-    )
-}
-
-fn validate_workflow_registry_with_limits(
-    batches: &[RecordBatch],
-    max_rows: usize,
-    max_features_per_cache: usize,
-) -> Result<WorkflowBundleRegistry, String> {
-    let mut registry = WorkflowBundleRegistry::default();
-    let mut features_per_cache = BTreeMap::<String, usize>::new();
-    let mut cache_sources = BTreeMap::<String, String>::new();
-    for batch in batches {
-        validate_workflow_registry_schema(batch.schema().as_ref())?;
-        for row in 0..batch.num_rows() {
-            if registry.entries.len() >= max_rows {
-                return Err(format!(
-                    "Workflow feature registry exceeds the bounded limit of {max_rows} definitions"
-                ));
-            }
-            let source_relation = required_workflow_text(batch, "source_relation", row)?;
-            let cache_relation = required_workflow_text(batch, "cache_relation", row)?;
-            let feature_name = required_workflow_text(batch, "feature_name", row)?;
-            let applicability = WorkflowFeatureApplicability::new(
-                source_relation.clone(),
-                required_workflow_text(batch, "media_field", row)?,
-            )
-            .with_stream_ids(workflow_registry_stream_ids(batch, row)?);
-            let definition = WorkflowFeatureDefinition::new(
-                feature_name.clone(),
-                required_workflow_text(batch, "description", row)?,
-                required_workflow_text(batch, "concept", row)?,
-            )
-            .with_applicability(applicability);
-            QualifiedRelation::try_from(source_relation.as_str()).map_err(|error| {
-                format!("Workflow feature registry has unsafe source relation: {error}")
-            })?;
-            QualifiedRelation::try_from(cache_relation.as_str()).map_err(|error| {
-                format!("Workflow feature registry has unsafe cache relation: {error}")
-            })?;
-            let expected = derived_feature_cache_relation(&source_relation);
-            if cache_relation != expected {
-                return Err(format!(
-                    "Workflow feature registry cache relation {cache_relation:?} does not match server-derived identity {expected:?}"
-                ));
-            }
-            if let Some(existing) = cache_sources.get(&cache_relation) {
-                if existing != &source_relation {
+    fn validate_with_limits(
+        batches: &[RecordBatch],
+        max_rows: usize,
+        max_features_per_cache: usize,
+    ) -> Result<WorkflowBundleRegistry, String> {
+        let mut registry = WorkflowBundleRegistry::default();
+        let mut features_per_cache = BTreeMap::<String, usize>::new();
+        let mut cache_sources = BTreeMap::<String, String>::new();
+        for batch in batches {
+            Self::validate_schema(batch.schema().as_ref())?;
+            for row in 0..batch.num_rows() {
+                if registry.entries.len() >= max_rows {
+                    return Err(format!(
+                        "Workflow feature registry exceeds the bounded limit of {max_rows} definitions"
+                    ));
+                }
+                let source_relation =
+                    WorkflowBundleRegistry::required_text(batch, "source_relation", row)?;
+                let cache_relation =
+                    WorkflowBundleRegistry::required_text(batch, "cache_relation", row)?;
+                let feature_name =
+                    WorkflowBundleRegistry::required_text(batch, "feature_name", row)?;
+                let applicability = WorkflowFeatureApplicability::new(
+                    source_relation.clone(),
+                    WorkflowBundleRegistry::required_text(batch, "media_field", row)?,
+                )
+                .with_stream_ids(WorkflowBundleRegistry::stream_ids(batch, row)?);
+                let definition = WorkflowFeatureDefinition::new(
+                    feature_name.clone(),
+                    WorkflowBundleRegistry::required_text(batch, "description", row)?,
+                    WorkflowBundleRegistry::required_text(batch, "concept", row)?,
+                )
+                .with_applicability(applicability);
+                QualifiedRelation::try_from(source_relation.as_str()).map_err(|error| {
+                    format!("Workflow feature registry has unsafe source relation: {error}")
+                })?;
+                QualifiedRelation::try_from(cache_relation.as_str()).map_err(|error| {
+                    format!("Workflow feature registry has unsafe cache relation: {error}")
+                })?;
+                let expected =
+                spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(
+                    &source_relation,
+                );
+                if cache_relation != expected {
+                    return Err(format!(
+                        "Workflow feature registry cache relation {cache_relation:?} does not match server-derived identity {expected:?}"
+                    ));
+                }
+                if let Some(existing) = cache_sources.get(&cache_relation) {
+                    if existing != &source_relation {
+                        return Err(
+                            "Workflow feature registry maps one cache identity to multiple sources"
+                                .to_owned(),
+                        );
+                    }
+                } else {
+                    cache_sources.insert(cache_relation.clone(), source_relation.clone());
+                }
+                WorkflowBundleRegistry::validate_definition(&definition)?;
+                let producer_model =
+                    WorkflowBundleRegistry::required_text(batch, "producer_model_id", row)?;
+                let producer_repository =
+                    WorkflowBundleRegistry::required_text(batch, "producer_repository", row)?;
+                let artifact_revision =
+                    WorkflowBundleRegistry::required_text(batch, "artifact_revision", row)?;
+                let value_semantics =
+                    WorkflowBundleRegistry::required_text(batch, "value_semantics", row)?;
+                let definition_version =
+                    WorkflowBundleRegistry::required_u32(batch, "definition_version", row)?;
+                let created_at_ms =
+                    WorkflowBundleRegistry::required_u64(batch, "created_at_ms", row)?;
+                let updated_at_ms =
+                    WorkflowBundleRegistry::required_u64(batch, "updated_at_ms", row)?;
+                if producer_model != SIGLIP_BASE_MODEL_ID
+                    || producer_repository != SIGLIP_BASE_REPOSITORY
+                    || artifact_revision != SIGLIP_BASE_REVISION
+                    || value_semantics != FEATURE_VALUE_SEMANTICS
+                    || definition_version != 1
+                    || updated_at_ms < created_at_ms
+                {
                     return Err(
-                        "Workflow feature registry maps one cache identity to multiple sources"
+                        "Workflow feature registry contains incompatible producer provenance"
                             .to_owned(),
                     );
                 }
-            } else {
-                cache_sources.insert(cache_relation.clone(), source_relation.clone());
-            }
-            validate_workflow_definition(&definition)?;
-            let producer_model = required_workflow_text(batch, "producer_model_id", row)?;
-            let producer_repository = required_workflow_text(batch, "producer_repository", row)?;
-            let artifact_revision = required_workflow_text(batch, "artifact_revision", row)?;
-            let value_semantics = required_workflow_text(batch, "value_semantics", row)?;
-            let definition_version = required_workflow_u32(batch, "definition_version", row)?;
-            let created_at_ms = required_workflow_u64(batch, "created_at_ms", row)?;
-            let updated_at_ms = required_workflow_u64(batch, "updated_at_ms", row)?;
-            if producer_model != SIGLIP_BASE_MODEL_ID
-                || producer_repository != SIGLIP_BASE_REPOSITORY
-                || artifact_revision != SIGLIP_BASE_REVISION
-                || value_semantics != FEATURE_VALUE_SEMANTICS
-                || definition_version != 1
-                || updated_at_ms < created_at_ms
-            {
-                return Err(
-                    "Workflow feature registry contains incompatible producer provenance"
-                        .to_owned(),
-                );
-            }
-            let key = (source_relation, feature_name);
-            if registry
-                .entries
-                .insert(
-                    key,
-                    WorkflowBundleRegistryEntry {
-                        definition,
-                        cache_relation: cache_relation.clone(),
-                    },
-                )
-                .is_some()
-            {
-                return Err(
-                    "Workflow feature registry contains a duplicate source/name definition"
-                        .to_owned(),
-                );
-            }
-            let count = features_per_cache.entry(cache_relation).or_default();
-            *count += 1;
-            if *count > max_features_per_cache {
-                return Err(format!(
-                    "Workflow feature cache exceeds {max_features_per_cache} registered feature columns"
-                ));
+                let key = (source_relation, feature_name);
+                if registry
+                    .entries
+                    .insert(
+                        key,
+                        WorkflowBundleRegistryEntry {
+                            definition,
+                            cache_relation: cache_relation.clone(),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(
+                        "Workflow feature registry contains a duplicate source/name definition"
+                            .to_owned(),
+                    );
+                }
+                let count = features_per_cache.entry(cache_relation).or_default();
+                *count += 1;
+                if *count > max_features_per_cache {
+                    return Err(format!(
+                        "Workflow feature cache exceeds {max_features_per_cache} registered feature columns"
+                    ));
+                }
             }
         }
+        Ok(registry)
     }
-    Ok(registry)
-}
 
-fn validate_workflow_registry_schema(schema: &Schema) -> Result<(), String> {
-    let expected = [
-        ("source_relation", DataType::Utf8, false),
-        ("cache_relation", DataType::Utf8, false),
-        ("feature_name", DataType::Utf8, false),
-        ("description", DataType::Utf8, false),
-        ("concept", DataType::Utf8, false),
-        ("media_field", DataType::Utf8, false),
-        (
-            "stream_ids",
-            DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
-            false,
-        ),
-        ("producer_model_id", DataType::Utf8, false),
-        ("producer_repository", DataType::Utf8, false),
-        ("artifact_revision", DataType::Utf8, false),
-        ("value_semantics", DataType::Utf8, false),
-        ("definition_version", DataType::UInt32, false),
-        ("created_at_ms", DataType::UInt64, false),
-        ("updated_at_ms", DataType::UInt64, false),
-    ];
-    if schema.fields().len() != expected.len()
-        || schema
-            .fields()
-            .iter()
-            .zip(expected)
-            .any(|(actual, (name, data_type, nullable))| {
-                actual.name() != name
-                    || actual.is_nullable() != nullable
-                    || !workflow_storage_type_matches(actual.data_type(), &data_type)
-            })
-    {
-        return Err(
-            "Workflow feature registry has an incompatible canonical 14-field schema".to_owned(),
-        );
-    }
-    Ok(())
-}
-
-fn validate_workflow_definition(definition: &WorkflowFeatureDefinition) -> Result<(), String> {
-    let applicability = definition.applicability();
-    let streams = applicability.stream_ids().iter().collect::<BTreeSet<_>>();
-    if !definition.has_valid_name()
-        || definition.description().trim().is_empty()
-        || definition.description().chars().count() > MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH
-        || definition.concept().trim().is_empty()
-        || definition.concept().chars().count() > MAX_SIGLIP_CONCEPT_LENGTH
-        || UnquotedSqlIdentifier::try_from(applicability.media_field()).is_err()
-        || applicability.stream_ids().len() > MAX_WORKFLOW_FEATURE_STREAMS
-        || streams.len() != applicability.stream_ids().len()
-        || streams
-            .iter()
-            .any(|stream| stream.trim().is_empty() || stream.len() > 128)
-    {
-        return Err("Workflow feature registry contains an invalid feature definition".to_owned());
-    }
-    Ok(())
-}
-
-fn workflow_registry_stream_ids(batch: &RecordBatch, row: usize) -> Result<Vec<String>, String> {
-    let lists = batch
-        .column_by_name("stream_ids")
-        .and_then(|column| column.as_any().downcast_ref::<ListArray>())
-        .ok_or_else(|| "Workflow feature registry stream_ids is not List<Utf8>".to_owned())?;
-    if lists.is_null(row) {
-        return Err("Workflow feature registry stream_ids is null".to_owned());
-    }
-    let values = lists.value(row);
-    (0..values.len())
-        .map(|index| {
-            workflow_string_value(values.as_ref(), index)
-                .map(str::to_owned)
-                .ok_or_else(|| {
-                    "Workflow feature registry contains a null or invalid stream ID".to_owned()
+    fn validate_schema(schema: &Schema) -> Result<(), String> {
+        let expected = [
+            ("source_relation", DataType::Utf8, false),
+            ("cache_relation", DataType::Utf8, false),
+            ("feature_name", DataType::Utf8, false),
+            ("description", DataType::Utf8, false),
+            ("concept", DataType::Utf8, false),
+            ("media_field", DataType::Utf8, false),
+            (
+                "stream_ids",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
+                false,
+            ),
+            ("producer_model_id", DataType::Utf8, false),
+            ("producer_repository", DataType::Utf8, false),
+            ("artifact_revision", DataType::Utf8, false),
+            ("value_semantics", DataType::Utf8, false),
+            ("definition_version", DataType::UInt32, false),
+            ("created_at_ms", DataType::UInt64, false),
+            ("updated_at_ms", DataType::UInt64, false),
+        ];
+        if schema.fields().len() != expected.len()
+            || schema
+                .fields()
+                .iter()
+                .zip(expected)
+                .any(|(actual, (name, data_type, nullable))| {
+                    actual.name() != name
+                        || actual.is_nullable() != nullable
+                        || !WorkflowArrow::storage_type_matches(actual.data_type(), &data_type)
                 })
-        })
-        .collect()
-}
+        {
+            return Err(
+                "Workflow feature registry has an incompatible canonical 14-field schema"
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
 
-fn required_workflow_text(batch: &RecordBatch, name: &str, row: usize) -> Result<String, String> {
-    batch
-        .column_by_name(name)
-        .and_then(|column| workflow_string_value(column.as_ref(), row))
-        .map(str::to_owned)
-        .ok_or_else(|| format!("Workflow feature registry field {name:?} is null or invalid"))
-}
+    fn validate_definition(definition: &WorkflowFeatureDefinition) -> Result<(), String> {
+        let applicability = definition.applicability();
+        let streams = applicability.stream_ids().iter().collect::<BTreeSet<_>>();
+        if !definition.has_valid_name()
+            || definition.description().trim().is_empty()
+            || definition.description().chars().count() > MAX_WORKFLOW_FEATURE_DESCRIPTION_LENGTH
+            || definition.concept().trim().is_empty()
+            || definition.concept().chars().count() > MAX_SIGLIP_CONCEPT_LENGTH
+            || UnquotedSqlIdentifier::try_from(applicability.media_field()).is_err()
+            || applicability.stream_ids().len() > MAX_WORKFLOW_FEATURE_STREAMS
+            || streams.len() != applicability.stream_ids().len()
+            || streams
+                .iter()
+                .any(|stream| stream.trim().is_empty() || stream.len() > 128)
+        {
+            return Err(
+                "Workflow feature registry contains an invalid feature definition".to_owned(),
+            );
+        }
+        Ok(())
+    }
 
-fn required_workflow_u32(batch: &RecordBatch, name: &str, row: usize) -> Result<u32, String> {
-    batch
-        .column_by_name(name)
-        .and_then(|column| column.as_any().downcast_ref::<UInt32Array>())
-        .filter(|values| !values.is_null(row))
-        .map(|values| values.value(row))
-        .ok_or_else(|| format!("Workflow feature registry field {name:?} is null or invalid"))
-}
+    fn stream_ids(batch: &RecordBatch, row: usize) -> Result<Vec<String>, String> {
+        let lists = batch
+            .column_by_name("stream_ids")
+            .and_then(|column| column.as_any().downcast_ref::<ListArray>())
+            .ok_or_else(|| "Workflow feature registry stream_ids is not List<Utf8>".to_owned())?;
+        if lists.is_null(row) {
+            return Err("Workflow feature registry stream_ids is null".to_owned());
+        }
+        let values = lists.value(row);
+        (0..values.len())
+            .map(|index| {
+                WorkflowArrow::string_value(values.as_ref(), index)
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        "Workflow feature registry contains a null or invalid stream ID".to_owned()
+                    })
+            })
+            .collect()
+    }
 
-fn required_workflow_u64(batch: &RecordBatch, name: &str, row: usize) -> Result<u64, String> {
-    batch
-        .column_by_name(name)
-        .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
-        .filter(|values| !values.is_null(row))
-        .map(|values| values.value(row))
-        .ok_or_else(|| format!("Workflow feature registry field {name:?} is null or invalid"))
+    fn required_text(batch: &RecordBatch, name: &str, row: usize) -> Result<String, String> {
+        batch
+            .column_by_name(name)
+            .and_then(|column| WorkflowArrow::string_value(column.as_ref(), row))
+            .map(str::to_owned)
+            .ok_or_else(|| format!("Workflow feature registry field {name:?} is null or invalid"))
+    }
+
+    fn required_u32(batch: &RecordBatch, name: &str, row: usize) -> Result<u32, String> {
+        batch
+            .column_by_name(name)
+            .and_then(|column| column.as_any().downcast_ref::<UInt32Array>())
+            .filter(|values| !values.is_null(row))
+            .map(|values| values.value(row))
+            .ok_or_else(|| format!("Workflow feature registry field {name:?} is null or invalid"))
+    }
+
+    fn required_u64(batch: &RecordBatch, name: &str, row: usize) -> Result<u64, String> {
+        batch
+            .column_by_name(name)
+            .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+            .filter(|values| !values.is_null(row))
+            .map(|values| values.value(row))
+            .ok_or_else(|| format!("Workflow feature registry field {name:?} is null or invalid"))
+    }
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -2046,17 +2098,19 @@ impl<'a> WorkflowCacheValidator<'a> {
     }
 }
 
-fn validate_workflow_cache(
-    relation: &str,
-    batches: &[RecordBatch],
-    registry: &WorkflowBundleRegistry,
-) -> Result<(), String> {
-    WorkflowCacheValidator::new(
-        relation,
-        registry,
-        WorkflowCacheLimits::new(MAX_FEATURE_CACHE_ROWS, MAX_FEATURE_CACHE_COLUMNS),
-    )
-    .validate(batches)
+impl WorkflowCacheValidator<'_> {
+    fn validate_bundle(
+        relation: &str,
+        batches: &[RecordBatch],
+        registry: &WorkflowBundleRegistry,
+    ) -> Result<(), String> {
+        WorkflowCacheValidator::new(
+            relation,
+            registry,
+            WorkflowCacheLimits::new(MAX_FEATURE_CACHE_ROWS, MAX_FEATURE_CACHE_COLUMNS),
+        )
+        .validate(batches)
+    }
 }
 
 impl WorkflowCacheValidator<'_> {
@@ -2082,7 +2136,7 @@ impl WorkflowCacheValidator<'_> {
                         self.limits.rows,
                     ));
                 }
-                let key = workflow_cache_key(batch, row)?;
+                let key = WorkflowCacheKey::from_batch(batch, row)?;
                 if !keys.insert(key) {
                     return Err(
                         "Workflow feature cache contains duplicate stable frame identities"
@@ -2121,8 +2175,8 @@ impl WorkflowCacheValidator<'_> {
         for (index, (name, expected)) in CACHE_KEY_FIELDS.iter().enumerate() {
             let field = schema.field(index);
             if field.name() != name
-                || (field.is_nullable() && !workflow_cache_key_declaration_may_be_nullable(name))
-                || !workflow_storage_type_matches(field.data_type(), expected)
+                || (field.is_nullable() && !WorkflowArrow::cache_key_may_be_nullable(name))
+                || !WorkflowArrow::storage_type_matches(field.data_type(), expected)
             {
                 return Err(format!(
                     "Workflow feature cache key field {index} must use compatible {name} {expected:?} storage"
@@ -2165,84 +2219,90 @@ impl WorkflowCacheValidator<'_> {
     }
 }
 
-fn workflow_cache_key(batch: &RecordBatch, row: usize) -> Result<WorkflowCacheKey, String> {
-    let text = |name: &str| {
-        batch
-            .column_by_name(name)
-            .and_then(|column| workflow_string_value(column.as_ref(), row))
-            .map(str::to_owned)
-            .ok_or_else(|| format!("Workflow feature cache key {name:?} is null or invalid"))
-    };
-    let u32_value = |name: &str| {
-        batch
-            .column_by_name(name)
-            .and_then(|column| column.as_any().downcast_ref::<UInt32Array>())
-            .filter(|values| !values.is_null(row))
-            .map(|values| values.value(row))
-            .ok_or_else(|| format!("Workflow feature cache key {name:?} is null or invalid"))
-    };
-    let u64_value = |name: &str| {
-        batch
-            .column_by_name(name)
-            .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
-            .filter(|values| !values.is_null(row))
-            .map(|values| values.value(row))
-            .ok_or_else(|| format!("Workflow feature cache key {name:?} is null or invalid"))
-    };
-    Ok(WorkflowCacheKey {
-        episode_id: text("episode_id")?,
-        stream_id: text("stream_id")?,
-        segment_index: u32_value("segment_index")?,
-        frame_index: u64_value("frame_index")?,
-        episode_time_ns: u64_value("episode_time_ns")?,
-    })
-}
-
-fn workflow_string_value(array: &dyn arrow_array::Array, row: usize) -> Option<&str> {
-    if array.is_null(row) {
-        return None;
-    }
-    if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
-        Some(values.value(row))
-    } else if let Some(values) = array.as_any().downcast_ref::<LargeStringArray>() {
-        Some(values.value(row))
-    } else {
-        array
-            .as_any()
-            .downcast_ref::<StringViewArray>()
-            .map(|values| values.value(row))
+impl WorkflowCacheKey {
+    fn from_batch(batch: &RecordBatch, row: usize) -> Result<WorkflowCacheKey, String> {
+        let text = |name: &str| {
+            batch
+                .column_by_name(name)
+                .and_then(|column| WorkflowArrow::string_value(column.as_ref(), row))
+                .map(str::to_owned)
+                .ok_or_else(|| format!("Workflow feature cache key {name:?} is null or invalid"))
+        };
+        let u32_value = |name: &str| {
+            batch
+                .column_by_name(name)
+                .and_then(|column| column.as_any().downcast_ref::<UInt32Array>())
+                .filter(|values| !values.is_null(row))
+                .map(|values| values.value(row))
+                .ok_or_else(|| format!("Workflow feature cache key {name:?} is null or invalid"))
+        };
+        let u64_value = |name: &str| {
+            batch
+                .column_by_name(name)
+                .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+                .filter(|values| !values.is_null(row))
+                .map(|values| values.value(row))
+                .ok_or_else(|| format!("Workflow feature cache key {name:?} is null or invalid"))
+        };
+        Ok(WorkflowCacheKey {
+            episode_id: text("episode_id")?,
+            stream_id: text("stream_id")?,
+            segment_index: u32_value("segment_index")?,
+            frame_index: u64_value("frame_index")?,
+            episode_time_ns: u64_value("episode_time_ns")?,
+        })
     }
 }
 
-fn workflow_storage_type_matches(actual: &DataType, expected: &DataType) -> bool {
-    actual == expected
-        || matches!(
-            (actual, expected),
-            (
-                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View,
-                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-            )
-        )
-        || match (actual, expected) {
-            (DataType::List(actual), DataType::List(expected)) => {
-                actual.name() == expected.name()
-                    && actual.is_nullable() == expected.is_nullable()
-                    && actual.metadata() == expected.metadata()
-                    && workflow_storage_type_matches(actual.data_type(), expected.data_type())
-            }
-            _ => false,
+impl WorkflowArrow {
+    fn string_value(array: &dyn arrow_array::Array, row: usize) -> Option<&str> {
+        if array.is_null(row) {
+            return None;
         }
+        if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
+            Some(values.value(row))
+        } else if let Some(values) = array.as_any().downcast_ref::<LargeStringArray>() {
+            Some(values.value(row))
+        } else {
+            array
+                .as_any()
+                .downcast_ref::<StringViewArray>()
+                .map(|values| values.value(row))
+        }
+    }
+
+    fn storage_type_matches(actual: &DataType, expected: &DataType) -> bool {
+        actual == expected
+            || matches!(
+                (actual, expected),
+                (
+                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View,
+                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+                )
+            )
+            || match (actual, expected) {
+                (DataType::List(actual), DataType::List(expected)) => {
+                    actual.name() == expected.name()
+                        && actual.is_nullable() == expected.is_nullable()
+                        && actual.metadata() == expected.metadata()
+                        && Self::storage_type_matches(actual.data_type(), expected.data_type())
+                }
+                _ => false,
+            }
+    }
 }
 
-fn workflow_restore_plan(
-    current_caches: &BTreeSet<String>,
-    incoming_caches: Option<&BTreeSet<String>>,
-) -> WorkflowRestorePlan {
-    let empty = BTreeSet::new();
-    let incoming = incoming_caches.unwrap_or(&empty);
-    WorkflowRestorePlan {
-        retire_caches: current_caches.difference(incoming).cloned().collect(),
-        clear_registry: incoming_caches.is_none(),
+impl WorkflowRestorePlan {
+    fn from_caches(
+        current_caches: &BTreeSet<String>,
+        incoming_caches: Option<&BTreeSet<String>>,
+    ) -> WorkflowRestorePlan {
+        let empty = BTreeSet::new();
+        let incoming = incoming_caches.unwrap_or(&empty);
+        WorkflowRestorePlan {
+            retire_caches: current_caches.difference(incoming).cloned().collect(),
+            clear_registry: incoming_caches.is_none(),
+        }
     }
 }
 
@@ -2260,7 +2320,7 @@ impl ProjectImportTransaction for StorageConnection {
     }
 
     fn commit_project_import(&mut self) -> Result<(), String> {
-        commit_catalog_transaction(self)
+        self.commit_catalog_transaction()
     }
 
     fn rollback_project_import(&mut self) -> Result<(), String> {
@@ -2276,376 +2336,395 @@ impl ProjectImportTransaction for StorageConnection {
     }
 }
 
-fn run_project_import_transaction<C, T>(
-    connection: &mut C,
-    operation: &str,
-    mutation: impl FnOnce(&mut C) -> Result<T, String>,
-) -> Result<(T, Option<String>), String>
-where
-    C: ProjectImportTransaction,
-{
-    if let Err(error) = connection.begin_project_import() {
-        connection.discard_project_connection();
-        return Err(format!(
-            "starting {operation} transaction failed and its connection was discarded: {error}"
-        ));
-    }
+trait ProjectImportTransactionRunner: ProjectImportTransaction {
+    fn run_project_import_transaction<T>(
+        &mut self,
+        operation: &str,
+        mutation: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<(T, Option<String>), String> {
+        let connection = self;
+        if let Err(error) = connection.begin_project_import() {
+            connection.discard_project_connection();
+            return Err(format!(
+                "starting {operation} transaction failed and its connection was discarded: {error}"
+            ));
+        }
 
-    let value = match mutation(connection) {
-        Ok(value) => value,
-        Err(primary) => match connection.rollback_project_import() {
-            Ok(()) => match connection.restore_project_autocommit() {
-                Ok(()) => return Err(primary),
-                Err(restore) => {
+        let value = match mutation(connection) {
+            Ok(value) => value,
+            Err(primary) => match connection.rollback_project_import() {
+                Ok(()) => match connection.restore_project_autocommit() {
+                    Ok(()) => return Err(primary),
+                    Err(restore) => {
+                        connection.discard_project_connection();
+                        return Err(format!(
+                            "{primary}; restoring ADBC autocommit after {operation} also failed: {restore}; connection discarded"
+                        ));
+                    }
+                },
+                Err(rollback) => {
                     connection.discard_project_connection();
                     return Err(format!(
-                        "{primary}; restoring ADBC autocommit after {operation} also failed: {restore}; connection discarded"
+                        "{primary}; rolling back {operation} also failed: {rollback}; connection discarded"
                     ));
                 }
             },
-            Err(rollback) => {
-                connection.discard_project_connection();
-                return Err(format!(
-                    "{primary}; rolling back {operation} also failed: {rollback}; connection discarded"
-                ));
-            }
-        },
-    };
+        };
 
-    if let Err(commit) = connection.commit_project_import() {
-        let rollback = connection.rollback_project_import();
-        connection.discard_project_connection();
-        return Err(match rollback {
-            Ok(()) => format!(
-                "committing {operation} failed with an uncertain outcome; connection discarded: {commit}"
-            ),
-            Err(rollback) => format!(
-                "committing {operation} failed with an uncertain outcome: {commit}; rolling back also failed: {rollback}; connection discarded"
-            ),
+        if let Err(commit) = connection.commit_project_import() {
+            let rollback = connection.rollback_project_import();
+            connection.discard_project_connection();
+            return Err(match rollback {
+                Ok(()) => format!(
+                    "committing {operation} failed with an uncertain outcome; connection discarded: {commit}"
+                ),
+                Err(rollback) => format!(
+                    "committing {operation} failed with an uncertain outcome: {commit}; rolling back also failed: {rollback}; connection discarded"
+                ),
+            });
+        }
+
+        match connection.restore_project_autocommit() {
+            Ok(()) => Ok((value, None)),
+            Err(restore) => {
+                connection.discard_project_connection();
+                Ok((
+                    value,
+                    Some(format!(
+                        "{operation} committed, but its Spiral connection was discarded because restoring ADBC autocommit failed: {restore}"
+                    )),
+                ))
+            }
+        }
+    }
+}
+
+impl<C: ProjectImportTransaction> ProjectImportTransactionRunner for C {}
+
+impl StorageConnection {
+    fn finish_transaction<T>(
+        &mut self,
+        outcome: Result<T, String>,
+        operation: &str,
+    ) -> Result<(T, Option<String>), String> {
+        let connection = self;
+        let final_result = match outcome {
+            Ok(value) => connection
+                .commit_catalog_transaction()
+                .map(|()| value)
+                .map_err(|error| format!("committing {operation}: {error}")),
+            Err(error) => {
+                let rollback = connection.rollback();
+                Err(match rollback {
+                    Ok(()) => error,
+                    Err(rollback) => format!("{error}; rolling back also failed: {rollback}"),
+                })
+            }
+        };
+        let autocommit = connection
+            .set_autocommit(true)
+            .map_err(|error| format!("restoring Spiral autocommit after {operation}: {error}"));
+        match (final_result, autocommit) {
+            (Ok(value), Ok(())) => Ok((value, None)),
+            (Err(error), _) => Err(error),
+            (Ok(value), Err(error)) => {
+                // The data is already durable. Report that truth to the operator,
+                // but never return the connection to the pool with unknown
+                // transaction state.
+                connection.discard();
+                Ok((
+                    value,
+                    Some(format!(
+                        "{operation} committed, but its Spiral connection was discarded: {error}"
+                    )),
+                ))
+            }
+        }
+    }
+}
+
+impl EpisodeBundle {
+    fn sort_relations(decoded: &mut [(Table, Vec<RecordBatch>)], order: &[Table]) {
+        decoded.sort_by_key(|(table, _)| {
+            order
+                .iter()
+                .position(|candidate| candidate == table)
+                .unwrap_or(usize::MAX)
         });
     }
 
-    match connection.restore_project_autocommit() {
-        Ok(()) => Ok((value, None)),
-        Err(restore) => {
-            connection.discard_project_connection();
-            Ok((
-                value,
-                Some(format!(
-                    "{operation} committed, but its Spiral connection was discarded because restoring ADBC autocommit failed: {restore}"
-                )),
-            ))
+    fn validate_relations(decoded: &[(Table, Vec<RecordBatch>)]) -> Result<Vec<String>, String> {
+        if !decoded.iter().any(|(table, _)| *table == Table::Datasets)
+            || !decoded.iter().any(|(table, _)| *table == Table::Episodes)
+        {
+            return Err("episode bundle must contain datasets and episodes relations".to_owned());
         }
-    }
-}
-
-fn finish_transaction<T>(
-    connection: &mut StorageConnection,
-    outcome: Result<T, String>,
-    operation: &str,
-) -> Result<(T, Option<String>), String> {
-    let final_result = match outcome {
-        Ok(value) => commit_catalog_transaction(connection)
-            .map(|()| value)
-            .map_err(|error| format!("committing {operation}: {error}")),
-        Err(error) => {
-            let rollback = connection.rollback();
-            Err(match rollback {
-                Ok(()) => error,
-                Err(rollback) => format!("{error}; rolling back also failed: {rollback}"),
-            })
-        }
-    };
-    let autocommit = connection
-        .set_autocommit(true)
-        .map_err(|error| format!("restoring Spiral autocommit after {operation}: {error}"));
-    match (final_result, autocommit) {
-        (Ok(value), Ok(())) => Ok((value, None)),
-        (Err(error), _) => Err(error),
-        (Ok(value), Err(error)) => {
-            // The data is already durable. Report that truth to the operator,
-            // but never return the connection to the pool with unknown
-            // transaction state.
-            connection.discard();
-            Ok((
-                value,
-                Some(format!(
-                    "{operation} committed, but its Spiral connection was discarded: {error}"
-                )),
-            ))
-        }
-    }
-}
-
-fn sort_relations(decoded: &mut [(Table, Vec<RecordBatch>)], order: &[Table]) {
-    decoded.sort_by_key(|(table, _)| {
-        order
+        let dataset_rows = decoded
             .iter()
-            .position(|candidate| candidate == table)
-            .unwrap_or(usize::MAX)
-    });
-}
-
-fn validate_episode_relations(
-    decoded: &[(Table, Vec<RecordBatch>)],
-) -> Result<Vec<String>, String> {
-    if !decoded.iter().any(|(table, _)| *table == Table::Datasets)
-        || !decoded.iter().any(|(table, _)| *table == Table::Episodes)
-    {
-        return Err("episode bundle must contain datasets and episodes relations".to_owned());
-    }
-    let dataset_rows = decoded
-        .iter()
-        .filter(|(table, _)| *table == Table::Datasets)
-        .flat_map(|(_, batches)| batches)
-        .map(RecordBatch::num_rows)
-        .sum::<usize>();
-    if dataset_rows != 1 {
-        return Err("episode bundle must describe exactly one source dataset".to_owned());
-    }
-    let mut source_datasets = Vec::new();
-    for (_, batches) in decoded
-        .iter()
-        .filter(|(table, _)| *table == Table::Datasets)
-    {
-        for batch in batches {
-            source_datasets.extend(utf8_values(batch, column::DATASET_ID)?);
+            .filter(|(table, _)| *table == Table::Datasets)
+            .flat_map(|(_, batches)| batches)
+            .map(RecordBatch::num_rows)
+            .sum::<usize>();
+        if dataset_rows != 1 {
+            return Err("episode bundle must describe exactly one source dataset".to_owned());
         }
-    }
-    let source_dataset = source_datasets
-        .pop()
-        .ok_or_else(|| "episode bundle source dataset has no dataset ID".to_owned())?;
-    validate_dataset_id(&source_dataset)?;
-    let mut episode_ids = BTreeSet::new();
-    for (table, batches) in decoded {
-        if *table == Table::Episodes {
+        let mut source_datasets = Vec::new();
+        for (_, batches) in decoded
+            .iter()
+            .filter(|(table, _)| *table == Table::Datasets)
+        {
             for batch in batches {
-                let ids = utf8_values(batch, column::EPISODE_ID)?;
-                let datasets = utf8_values(batch, column::DATASET_ID)?;
-                if datasets.iter().any(|dataset| dataset != &source_dataset) {
-                    return Err(format!(
-                        "episode bundle contains an episode outside source dataset {source_dataset:?}"
-                    ));
-                }
-                for episode_id in ids {
-                    validate_episode_id(&episode_id)?;
-                    if !episode_ids.insert(episode_id.clone()) {
-                        return Err(format!("episode bundle repeats episode ID {episode_id:?}"));
-                    }
-                }
+                source_datasets.extend(EpisodeBundle::utf8_values(batch, column::DATASET_ID)?);
             }
         }
-    }
-    if episode_ids.is_empty() {
-        return Err("episode bundle contains no episodes".to_owned());
-    }
-    for (table, batches) in decoded {
-        if matches!(
-            table,
-            Table::EpisodeStreams | Table::JointSamples | Table::VideoAssets
-        ) {
-            for batch in batches {
-                for episode_id in utf8_values(batch, column::EPISODE_ID)? {
-                    if !episode_ids.contains(&episode_id) {
+        let source_dataset = source_datasets
+            .pop()
+            .ok_or_else(|| "episode bundle source dataset has no dataset ID".to_owned())?;
+        EpisodeBundle::validate_dataset_id(&source_dataset)?;
+        let mut episode_ids = BTreeSet::new();
+        for (table, batches) in decoded {
+            if *table == Table::Episodes {
+                for batch in batches {
+                    let ids = EpisodeBundle::utf8_values(batch, column::EPISODE_ID)?;
+                    let datasets = EpisodeBundle::utf8_values(batch, column::DATASET_ID)?;
+                    if datasets.iter().any(|dataset| dataset != &source_dataset) {
                         return Err(format!(
-                            "episode bundle relation {table} references unknown episode {episode_id:?}"
+                            "episode bundle contains an episode outside source dataset {source_dataset:?}"
                         ));
                     }
+                    for episode_id in ids {
+                        EpisodeBundle::validate_episode_id(&episode_id)?;
+                        if !episode_ids.insert(episode_id.clone()) {
+                            return Err(format!(
+                                "episode bundle repeats episode ID {episode_id:?}"
+                            ));
+                        }
+                    }
                 }
             }
         }
-    }
-    Ok(episode_ids.into_iter().collect())
-}
-
-fn video_episode_ids(decoded: &[(Table, Vec<RecordBatch>)]) -> Result<BTreeSet<String>, String> {
-    let mut episode_ids = BTreeSet::new();
-    for (_, batches) in decoded
-        .iter()
-        .filter(|(table, _)| *table == Table::VideoAssets)
-    {
-        for batch in batches {
-            for episode_id in utf8_values(batch, column::EPISODE_ID)? {
-                validate_episode_id(&episode_id)?;
-                episode_ids.insert(episode_id);
+        if episode_ids.is_empty() {
+            return Err("episode bundle contains no episodes".to_owned());
+        }
+        for (table, batches) in decoded {
+            if matches!(
+                table,
+                Table::EpisodeStreams | Table::JointSamples | Table::VideoAssets
+            ) {
+                for batch in batches {
+                    for episode_id in EpisodeBundle::utf8_values(batch, column::EPISODE_ID)? {
+                        if !episode_ids.contains(&episode_id) {
+                            return Err(format!(
+                                "episode bundle relation {table} references unknown episode {episode_id:?}"
+                            ));
+                        }
+                    }
+                }
             }
         }
+        Ok(episode_ids.into_iter().collect())
     }
-    Ok(episode_ids)
-}
 
-fn reconcile_project_video_dataset(
-    connection: &mut StorageConnection,
-    namespace: &str,
-    imported: &BTreeSet<String>,
-) -> Result<(), String> {
-    let dataset_exists = video_dataset_exists(connection, namespace)?;
-    if imported.is_empty() {
-        drop_video_dataset(connection, namespace)?;
-    } else {
-        rebuild_video_dataset(connection, namespace, dataset_exists)?;
-    }
-    Ok(())
-}
-
-fn reconcile_appended_video_dataset(
-    connection: &mut StorageConnection,
-    namespace: &str,
-) -> Result<(), String> {
-    let dataset_exists = video_dataset_exists(connection, namespace)?;
-    rebuild_video_dataset(connection, namespace, dataset_exists)?;
-    Ok(())
-}
-
-fn utf8_values(batch: &RecordBatch, name: &str) -> Result<Vec<String>, String> {
-    let index = batch
-        .schema()
-        .index_of(name)
-        .map_err(|error| format!("episode bundle is missing column {name}: {error}"))?;
-    let values = batch.column(index);
-    if let Some(values) = values.as_any().downcast_ref::<StringArray>() {
-        return collect_utf8(values.iter(), name);
-    }
-    if let Some(values) = values.as_any().downcast_ref::<LargeStringArray>() {
-        return collect_utf8(values.iter(), name);
-    }
-    if let Some(values) = values.as_any().downcast_ref::<StringViewArray>() {
-        return collect_utf8(values.iter(), name);
-    }
-    Err(format!("episode bundle column {name} is not UTF-8 text"))
-}
-
-fn collect_utf8<'a>(
-    values: impl Iterator<Item = Option<&'a str>>,
-    name: &str,
-) -> Result<Vec<String>, String> {
-    values
-        .map(|value| {
-            value
-                .map(str::to_owned)
-                .ok_or_else(|| format!("episode bundle column {name} contains a null value"))
-        })
-        .collect()
-}
-
-fn replace_utf8_column(batch: RecordBatch, name: &str, value: &str) -> Result<RecordBatch, String> {
-    let index = batch
-        .schema()
-        .index_of(name)
-        .map_err(|error| format!("episode bundle is missing column {name}: {error}"))?;
-    let mut columns = batch.columns().to_vec();
-    let source = &columns[index];
-    columns[index] = if source.as_any().is::<StringArray>() {
-        Arc::new(StringArray::from(vec![value; batch.num_rows()])) as ArrayRef
-    } else if source.as_any().is::<LargeStringArray>() {
-        Arc::new(LargeStringArray::from(vec![value; batch.num_rows()])) as ArrayRef
-    } else if source.as_any().is::<StringViewArray>() {
-        Arc::new(StringViewArray::from(vec![value; batch.num_rows()])) as ArrayRef
-    } else {
-        return Err(format!("episode bundle column {name} is not UTF-8 text"));
-    };
-    RecordBatch::try_new(batch.schema(), columns)
-        .map_err(|error| format!("retargeting episode bundle dataset: {error}"))
-}
-
-fn retarget_video_media_relations(
-    batch: RecordBatch,
-    namespace: &str,
-) -> Result<RecordBatch, String> {
-    let media_relation = sql::video_dataset_output(namespace);
-    let index = batch
-        .schema()
-        .index_of(column::MEDIA_RELATION)
-        .map_err(|error| {
-            format!(
-                "episode bundle is missing column {}: {error}",
-                column::MEDIA_RELATION
-            )
-        })?;
-    let mut columns = batch.columns().to_vec();
-    let source = &columns[index];
-    columns[index] = if source.as_any().is::<StringArray>() {
-        Arc::new(StringArray::from(vec![
-            media_relation.as_str();
-            batch.num_rows()
-        ])) as ArrayRef
-    } else if source.as_any().is::<LargeStringArray>() {
-        Arc::new(LargeStringArray::from(vec![
-            media_relation.as_str();
-            batch.num_rows()
-        ])) as ArrayRef
-    } else if source.as_any().is::<StringViewArray>() {
-        Arc::new(StringViewArray::from(vec![
-            media_relation.as_str();
-            batch.num_rows()
-        ])) as ArrayRef
-    } else {
-        return Err(format!(
-            "episode bundle column {} is not UTF-8 text",
-            column::MEDIA_RELATION
-        ));
-    };
-    RecordBatch::try_new(batch.schema(), columns)
-        .map_err(|error| format!("retargeting episode bundle media relations: {error}"))
-}
-
-fn prepare_video_asset_import(batch: RecordBatch, namespace: &str) -> Result<RecordBatch, String> {
-    retarget_video_media_relations(normalize_video_asset_batch(batch)?, namespace)
-}
-
-fn reject_existing_episodes(
-    connection: &mut StorageConnection,
-    namespace: &str,
-    episode_ids: &[String],
-) -> Result<(), String> {
-    let episodes = Table::Episodes.qualified_name(namespace);
-    if !table_exists(connection, &episodes)? {
-        return Ok(());
-    }
-    for chunk in episode_ids.chunks(100) {
-        let candidates = chunk
+    fn video_episode_ids(
+        decoded: &[(Table, Vec<RecordBatch>)],
+    ) -> Result<BTreeSet<String>, String> {
+        let mut episode_ids = BTreeSet::new();
+        for (_, batches) in decoded
             .iter()
-            .map(|episode_id| sql::string_literal(episode_id))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let query = format!(
-            "SELECT {episode_id} FROM {episodes} WHERE {episode_id} IN ({candidates})",
-            episode_id = column::EPISODE_ID,
-        );
-        let existing = run_query(connection, &query, chunk.len())?;
-        if let Some(value) = existing
-            .rows()
-            .first()
-            .and_then(|row| row.get(column::EPISODE_ID))
-            .and_then(serde_json::Value::as_str)
+            .filter(|(table, _)| *table == Table::VideoAssets)
+        {
+            for batch in batches {
+                for episode_id in EpisodeBundle::utf8_values(batch, column::EPISODE_ID)? {
+                    EpisodeBundle::validate_episode_id(&episode_id)?;
+                    episode_ids.insert(episode_id);
+                }
+            }
+        }
+        Ok(episode_ids)
+    }
+
+    fn reconcile_project_video_dataset(
+        connection: &mut StorageConnection,
+        namespace: &str,
+        imported: &BTreeSet<String>,
+    ) -> Result<(), String> {
+        let dataset_exists = connection.video_dataset_exists(namespace)?;
+        if imported.is_empty() {
+            connection.drop_video_dataset(namespace)?;
+        } else {
+            connection.rebuild_video_dataset(namespace, dataset_exists)?;
+        }
+        Ok(())
+    }
+
+    fn reconcile_appended_video_dataset(
+        connection: &mut StorageConnection,
+        namespace: &str,
+    ) -> Result<(), String> {
+        let dataset_exists = connection.video_dataset_exists(namespace)?;
+        connection.rebuild_video_dataset(namespace, dataset_exists)?;
+        Ok(())
+    }
+
+    fn utf8_values(batch: &RecordBatch, name: &str) -> Result<Vec<String>, String> {
+        let index = batch
+            .schema()
+            .index_of(name)
+            .map_err(|error| format!("episode bundle is missing column {name}: {error}"))?;
+        let values = batch.column(index);
+        if let Some(values) = values.as_any().downcast_ref::<StringArray>() {
+            return EpisodeBundle::collect_utf8(values.iter(), name);
+        }
+        if let Some(values) = values.as_any().downcast_ref::<LargeStringArray>() {
+            return EpisodeBundle::collect_utf8(values.iter(), name);
+        }
+        if let Some(values) = values.as_any().downcast_ref::<StringViewArray>() {
+            return EpisodeBundle::collect_utf8(values.iter(), name);
+        }
+        Err(format!("episode bundle column {name} is not UTF-8 text"))
+    }
+
+    fn collect_utf8<'a>(
+        values: impl Iterator<Item = Option<&'a str>>,
+        name: &str,
+    ) -> Result<Vec<String>, String> {
+        values
+            .map(|value| {
+                value
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("episode bundle column {name} contains a null value"))
+            })
+            .collect()
+    }
+
+    fn replace_utf8_column(
+        batch: RecordBatch,
+        name: &str,
+        value: &str,
+    ) -> Result<RecordBatch, String> {
+        let index = batch
+            .schema()
+            .index_of(name)
+            .map_err(|error| format!("episode bundle is missing column {name}: {error}"))?;
+        let mut columns = batch.columns().to_vec();
+        let source = &columns[index];
+        columns[index] = if source.as_any().is::<StringArray>() {
+            Arc::new(StringArray::from(vec![value; batch.num_rows()])) as ArrayRef
+        } else if source.as_any().is::<LargeStringArray>() {
+            Arc::new(LargeStringArray::from(vec![value; batch.num_rows()])) as ArrayRef
+        } else if source.as_any().is::<StringViewArray>() {
+            Arc::new(StringViewArray::from(vec![value; batch.num_rows()])) as ArrayRef
+        } else {
+            return Err(format!("episode bundle column {name} is not UTF-8 text"));
+        };
+        RecordBatch::try_new(batch.schema(), columns)
+            .map_err(|error| format!("retargeting episode bundle dataset: {error}"))
+    }
+
+    fn retarget_video_media_relations(
+        batch: RecordBatch,
+        namespace: &str,
+    ) -> Result<RecordBatch, String> {
+        let media_relation = SpiralSql::video_dataset_output(namespace);
+        let index = batch
+            .schema()
+            .index_of(column::MEDIA_RELATION)
+            .map_err(|error| {
+                format!(
+                    "episode bundle is missing column {}: {error}",
+                    column::MEDIA_RELATION
+                )
+            })?;
+        let mut columns = batch.columns().to_vec();
+        let source = &columns[index];
+        columns[index] = if source.as_any().is::<StringArray>() {
+            Arc::new(StringArray::from(vec![
+                media_relation.as_str();
+                batch.num_rows()
+            ])) as ArrayRef
+        } else if source.as_any().is::<LargeStringArray>() {
+            Arc::new(LargeStringArray::from(vec![
+                media_relation.as_str();
+                batch.num_rows()
+            ])) as ArrayRef
+        } else if source.as_any().is::<StringViewArray>() {
+            Arc::new(StringViewArray::from(vec![
+                media_relation.as_str();
+                batch.num_rows()
+            ])) as ArrayRef
+        } else {
+            return Err(format!(
+                "episode bundle column {} is not UTF-8 text",
+                column::MEDIA_RELATION
+            ));
+        };
+        RecordBatch::try_new(batch.schema(), columns)
+            .map_err(|error| format!("retargeting episode bundle media relations: {error}"))
+    }
+
+    fn prepare_video_asset_import(
+        batch: RecordBatch,
+        namespace: &str,
+    ) -> Result<RecordBatch, String> {
+        EpisodeBundle::retarget_video_media_relations(batch.normalize_video_asset()?, namespace)
+    }
+
+    fn reject_existing_episodes(
+        connection: &mut StorageConnection,
+        namespace: &str,
+        episode_ids: &[String],
+    ) -> Result<(), String> {
+        let episodes = Table::Episodes.qualified_name(namespace);
+        if !connection.table_exists(&episodes)? {
+            return Ok(());
+        }
+        for chunk in episode_ids.chunks(100) {
+            let candidates = chunk
+                .iter()
+                .map(|episode_id| SpiralSql::string_literal(episode_id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let query = format!(
+                "SELECT {episode_id} FROM {episodes} WHERE {episode_id} IN ({candidates})",
+                episode_id = column::EPISODE_ID,
+            );
+            let existing = connection.run_query(&query, chunk.len())?;
+            if let Some(value) = existing
+                .rows()
+                .first()
+                .and_then(|row| row.get(column::EPISODE_ID))
+                .and_then(serde_json::Value::as_str)
+            {
+                return Err(format!(
+                    "episode {value:?} already exists; episode import never overwrites existing episodes"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_dataset_id(dataset_id: &str) -> Result<(), String> {
+        if !spiral::StorageSchema::is_dataset_id(dataset_id) {
+            return Err(
+                "dataset ID must contain 1–96 letters, numbers, '.', '_' or '-'".to_owned(),
+            );
+        }
+        Ok(())
+    }
+
+    fn validate_episode_id(episode_id: &str) -> Result<(), String> {
+        if episode_id.is_empty()
+            || episode_id.len() > 128
+            || !episode_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
         {
             return Err(format!(
-                "episode {value:?} already exists; episode import never overwrites existing episodes"
+                "episode bundle contains invalid episode ID {episode_id:?}"
             ));
         }
+        Ok(())
     }
-    Ok(())
-}
-
-fn validate_dataset_id(dataset_id: &str) -> Result<(), String> {
-    if !spiral::is_dataset_id(dataset_id) {
-        return Err("dataset ID must contain 1–96 letters, numbers, '.', '_' or '-'".to_owned());
-    }
-    Ok(())
-}
-
-fn validate_episode_id(episode_id: &str) -> Result<(), String> {
-    if episode_id.is_empty()
-        || episode_id.len() > 128
-        || !episode_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-    {
-        return Err(format!(
-            "episode bundle contains invalid episode ID {episode_id:?}"
-        ));
-    }
-    Ok(())
 }
 
 impl BundleSpec {
@@ -2676,7 +2755,7 @@ impl BundleSpec {
         if &magic != self.magic {
             return Err(format!("file is not a Spiral Robotics {}", self.label));
         }
-        let manifest_len = read_u32(&mut source)? as usize;
+        let manifest_len = BundleCodec::read_u32(&mut source)? as usize;
         if manifest_len == 0 || manifest_len > MAX_MANIFEST_BYTES {
             return Err(format!("{} manifest has an invalid size", self.label));
         }
@@ -2722,7 +2801,7 @@ impl BundleSpec {
         let mut seen = BTreeSet::new();
         let mut entries = BTreeMap::new();
         loop {
-            let name_len = read_u16(&mut source)? as usize;
+            let name_len = BundleCodec::read_u16(&mut source)? as usize;
             if name_len == 0 {
                 break;
             }
@@ -2741,7 +2820,7 @@ impl BundleSpec {
                     self.label
                 ));
             }
-            let payload_len = read_u64(&mut source)?;
+            let payload_len = BundleCodec::read_u64(&mut source)?;
             let payload_len = usize::try_from(payload_len).map_err(|_| {
                 format!(
                     "{} relation {name:?} is too large for this machine",
@@ -2815,46 +2894,54 @@ impl io::Write for LimitedPayload {
         Ok(())
     }
 }
-fn write_u16(target: &mut Vec<u8>, value: usize) -> Result<(), String> {
-    let value = u16::try_from(value).map_err(|_| "project entry name is too long".to_owned())?;
-    target.extend_from_slice(&value.to_le_bytes());
-    Ok(())
+impl BundleCodec {
+    fn write_u16(target: &mut Vec<u8>, value: usize) -> Result<(), String> {
+        let value =
+            u16::try_from(value).map_err(|_| "project entry name is too long".to_owned())?;
+        target.extend_from_slice(&value.to_le_bytes());
+        Ok(())
+    }
+    fn write_u32(target: &mut Vec<u8>, value: usize) -> Result<(), String> {
+        let value = u32::try_from(value).map_err(|_| "project manifest is too large".to_owned())?;
+        target.extend_from_slice(&value.to_le_bytes());
+        Ok(())
+    }
+    fn write_u64(target: &mut Vec<u8>, value: usize) -> Result<(), String> {
+        target.extend_from_slice(&(value as u64).to_le_bytes());
+        Ok(())
+    }
+    fn read_u16(source: &mut Cursor<&[u8]>) -> Result<u16, String> {
+        let mut bytes = [0; 2];
+        source
+            .read_exact(&mut bytes)
+            .map_err(|_| "project file is truncated".to_owned())?;
+        Ok(u16::from_le_bytes(bytes))
+    }
+    fn read_u32(source: &mut Cursor<&[u8]>) -> Result<u32, String> {
+        let mut bytes = [0; 4];
+        source
+            .read_exact(&mut bytes)
+            .map_err(|_| "project file is truncated".to_owned())?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+    fn read_u64(source: &mut Cursor<&[u8]>) -> Result<u64, String> {
+        let mut bytes = [0; 8];
+        source
+            .read_exact(&mut bytes)
+            .map_err(|_| "project file is truncated".to_owned())?;
+        Ok(u64::from_le_bytes(bytes))
+    }
 }
-fn write_u32(target: &mut Vec<u8>, value: usize) -> Result<(), String> {
-    let value = u32::try_from(value).map_err(|_| "project manifest is too large".to_owned())?;
-    target.extend_from_slice(&value.to_le_bytes());
-    Ok(())
-}
-fn write_u64(target: &mut Vec<u8>, value: usize) -> Result<(), String> {
-    target.extend_from_slice(&(value as u64).to_le_bytes());
-    Ok(())
-}
-fn read_u16(source: &mut Cursor<&[u8]>) -> Result<u16, String> {
-    let mut bytes = [0; 2];
-    source
-        .read_exact(&mut bytes)
-        .map_err(|_| "project file is truncated".to_owned())?;
-    Ok(u16::from_le_bytes(bytes))
-}
-fn read_u32(source: &mut Cursor<&[u8]>) -> Result<u32, String> {
-    let mut bytes = [0; 4];
-    source
-        .read_exact(&mut bytes)
-        .map_err(|_| "project file is truncated".to_owned())?;
-    Ok(u32::from_le_bytes(bytes))
-}
-fn read_u64(source: &mut Cursor<&[u8]>) -> Result<u64, String> {
-    let mut bytes = [0; 8];
-    source
-        .read_exact(&mut bytes)
-        .map_err(|_| "project file is truncated".to_owned())?;
-    Ok(u64::from_le_bytes(bytes))
-}
-fn unix_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(0)
+
+struct BundleClock;
+
+impl BundleClock {
+    fn unix_millis() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
+            .unwrap_or(0)
+    }
 }
 
 #[cfg(test)]
@@ -2876,14 +2963,8 @@ mod tests {
     use super::*;
     use crate::adbc::ProjectStore;
     use crate::episodes::{EpisodeCompletion, EpisodeStart, EpisodeStore};
-    use crate::manager::{
-        StorageManager, ensure_dataset_namespace, execute_update_sql, ingest_batch, run_query,
-        table_exists,
-    };
-    use crate::settings::{
-        BackendStateStore, SpiralConnectionSettings, environment_spiral_endpoint,
-        environment_spiral_spfs_endpoint,
-    };
+    use crate::manager::StorageManager;
+    use crate::settings::{BackendStateStore, ServiceEndpoint, SpiralConnectionSettings};
 
     fn envelope(manifest: Manifest, entries: &[(&str, &[u8])]) -> Vec<u8> {
         envelope_for(PROJECT_MAGIC, manifest, entries)
@@ -2893,12 +2974,12 @@ mod tests {
         let manifest = serde_json::to_vec(&manifest).unwrap();
         let mut bundle = Vec::new();
         bundle.extend_from_slice(magic);
-        write_u32(&mut bundle, manifest.len()).unwrap();
+        BundleCodec::write_u32(&mut bundle, manifest.len()).unwrap();
         bundle.extend_from_slice(&manifest);
         for (name, payload) in entries {
-            write_u16(&mut bundle, name.len()).unwrap();
+            BundleCodec::write_u16(&mut bundle, name.len()).unwrap();
             bundle.extend_from_slice(name.as_bytes());
-            write_u64(&mut bundle, payload.len()).unwrap();
+            BundleCodec::write_u64(&mut bundle, payload.len()).unwrap();
             bundle.extend_from_slice(payload);
         }
         bundle.extend_from_slice(&0_u16.to_le_bytes());
@@ -3230,7 +3311,7 @@ mod tests {
                 agent_conversation("conversation-b")
             ]
         });
-        validate_workflow_agent_json(&valid.to_string()).unwrap();
+        BundleAgentDocumentV2::validate_json(&valid.to_string()).unwrap();
 
         let mut schema_less = valid.clone();
         schema_less
@@ -3238,7 +3319,7 @@ mod tests {
             .unwrap()
             .remove("schema_version");
         assert!(
-            validate_workflow_agent_json(&schema_less.to_string())
+            BundleAgentDocumentV2::validate_json(&schema_less.to_string())
                 .unwrap_err()
                 .contains("current document shape")
         );
@@ -3246,7 +3327,7 @@ mod tests {
         let mut unknown_selection = valid.clone();
         unknown_selection["active_conversation_id"] = serde_json::json!("missing");
         assert!(
-            validate_workflow_agent_json(&unknown_selection.to_string())
+            BundleAgentDocumentV2::validate_json(&unknown_selection.to_string())
                 .unwrap_err()
                 .contains("active conversation")
         );
@@ -3256,7 +3337,7 @@ mod tests {
             serde_json::json!([agent_conversation("same"), agent_conversation("same")]);
         duplicate["active_conversation_id"] = serde_json::json!("same");
         assert!(
-            validate_workflow_agent_json(&duplicate.to_string())
+            BundleAgentDocumentV2::validate_json(&duplicate.to_string())
                 .unwrap_err()
                 .contains("duplicate")
         );
@@ -3272,7 +3353,7 @@ mod tests {
             "conversations": too_many
         });
         assert!(
-            validate_workflow_agent_json(&over_limit.to_string())
+            BundleAgentDocumentV2::validate_json(&over_limit.to_string())
                 .unwrap_err()
                 .contains("1–20")
         );
@@ -3283,7 +3364,7 @@ mod tests {
             .unwrap()
             .remove("created_ms");
         assert!(
-            validate_workflow_agent_json(&missing_timestamp.to_string())
+            BundleAgentDocumentV2::validate_json(&missing_timestamp.to_string())
                 .unwrap_err()
                 .contains("current document shape")
         );
@@ -3292,7 +3373,7 @@ mod tests {
         unknown_nested["conversations"][0]["session"]["messages"][0]["future_field"] =
             serde_json::json!(true);
         assert!(
-            validate_workflow_agent_json(&unknown_nested.to_string())
+            BundleAgentDocumentV2::validate_json(&unknown_nested.to_string())
                 .unwrap_err()
                 .contains("current document shape")
         );
@@ -3300,7 +3381,7 @@ mod tests {
         let mut unknown_top_level = valid;
         unknown_top_level["future_field"] = serde_json::json!(true);
         assert!(
-            validate_workflow_agent_json(&unknown_top_level.to_string())
+            BundleAgentDocumentV2::validate_json(&unknown_top_level.to_string())
                 .unwrap_err()
                 .contains("current document shape")
         );
@@ -3313,7 +3394,7 @@ mod tests {
         });
         foreign_workflow["conversations"][0]["session"]["workflow_id"] = serde_json::json!("other");
         assert!(
-            validate_workflow_agent_json(&foreign_workflow.to_string())
+            BundleAgentDocumentV2::validate_json(&foreign_workflow.to_string())
                 .unwrap_err()
                 .contains("unsupported Workflow")
         );
@@ -3326,7 +3407,7 @@ mod tests {
                 "conversations": [agent_conversation("conversation-a")]
             });
             injected["conversations"][0]["provider_messages"][0]["role"] = serde_json::json!(role);
-            let error = validate_workflow_agent_json(&injected.to_string()).unwrap_err();
+            let error = BundleAgentDocumentV2::validate_json(&injected.to_string()).unwrap_err();
             assert!(error.contains("invalid role"), "unexpected error: {error}");
         }
     }
@@ -3345,12 +3426,12 @@ mod tests {
             "provider_messages": [{"role": "user", "content": "Inspect relations"}]
         });
         assert!(
-            validate_workflow_agent_json(&legacy.to_string())
+            BundleAgentDocumentV2::validate_json(&legacy.to_string())
                 .unwrap_err()
                 .contains("current document shape")
         );
         assert!(
-            validate_workflow_agent_json(&serde_json::json!({"future": []}).to_string())
+            BundleAgentDocumentV2::validate_json(&serde_json::json!({"future": []}).to_string())
                 .unwrap_err()
                 .contains("current document shape")
         );
@@ -3377,7 +3458,7 @@ mod tests {
                 Arc::new(Int64Array::from(vec![1])) as ArrayRef,
             ],
         );
-        let error = match decode_project_entries(vec![(
+        let error = match ProjectBundle::decode_entries(vec![(
             Table::WorkflowRuns.name().to_owned(),
             arrow_payload(&workflow_runs),
         )]) {
@@ -3438,7 +3519,7 @@ mod tests {
             vec![
                 text(|definition| definition.applicability().source_relation().to_owned()),
                 text(|definition| {
-                    derived_feature_cache_relation(definition.applicability().source_relation())
+                    spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(definition.applicability().source_relation())
                 }),
                 text(|definition| definition.name().to_owned()),
                 text(|definition| definition.description().to_owned()),
@@ -3527,7 +3608,7 @@ mod tests {
         let bundle = envelope(manifest(Vec::new()), &[]);
         assert_eq!(PROJECT_SPEC.parse(&bundle).unwrap(), Vec::new());
         assert!(
-            decode_project_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
+            ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
                 .unwrap()
                 .is_empty()
         );
@@ -3616,7 +3697,7 @@ mod tests {
             (Table::Episodes, vec![duplicate_episodes]),
         ];
         assert!(
-            validate_episode_relations(&duplicate)
+            EpisodeBundle::validate_relations(&duplicate)
                 .unwrap_err()
                 .contains("repeats episode ID")
         );
@@ -3632,7 +3713,7 @@ mod tests {
             (Table::JointSamples, vec![unknown_child]),
         ];
         assert!(
-            validate_episode_relations(&dangling)
+            EpisodeBundle::validate_relations(&dangling)
                 .unwrap_err()
                 .contains("references unknown episode")
         );
@@ -3654,7 +3735,7 @@ mod tests {
             ),
         ];
         assert!(
-            validate_episode_relations(&decoded)
+            EpisodeBundle::validate_relations(&decoded)
                 .unwrap_err()
                 .contains("outside source dataset")
         );
@@ -3670,14 +3751,15 @@ mod tests {
             ),
         ]);
 
-        let retargeted = retarget_video_media_relations(batch, "destination").unwrap();
+        let retargeted =
+            EpisodeBundle::retarget_video_media_relations(batch, "destination").unwrap();
 
         assert_eq!(
-            utf8_values(&retargeted, column::MEDIA_RELATION).unwrap(),
-            vec![sql::video_dataset_output("destination"); 2]
+            EpisodeBundle::utf8_values(&retargeted, column::MEDIA_RELATION).unwrap(),
+            vec![SpiralSql::video_dataset_output("destination"); 2]
         );
         assert_eq!(
-            video_episode_ids(&[(Table::VideoAssets, vec![retargeted])]).unwrap(),
+            EpisodeBundle::video_episode_ids(&[(Table::VideoAssets, vec![retargeted])]).unwrap(),
             BTreeSet::from(["episode-b".to_owned(), "episode_a".to_owned()])
         );
     }
@@ -3708,12 +3790,15 @@ mod tests {
     #[test]
     fn project_workflow_relations_are_exactly_registry_allowlisted() {
         let source = "media.frames";
-        let cache = derived_feature_cache_relation(source);
+        let cache =
+            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(
+                source,
+            );
         let definition = workflow_definition(source, "holding_feature");
         let registry = canonical_registry_batch(std::slice::from_ref(&definition));
         let cache_batch = canonical_cache_batch(std::slice::from_ref(&definition), &[1]);
         let valid = workflow_project_bundle(&registry, &[(cache.as_str(), cache_batch.clone())]);
-        let decoded = decode_project_entries(PROJECT_SPEC.parse_raw(&valid).unwrap())
+        let decoded = ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(&valid).unwrap())
             .expect("a registry and its exact declared cache must decode");
         assert_eq!(
             decoded
@@ -3729,7 +3814,7 @@ mod tests {
             &[(WORKFLOW_FEATURE_REGISTRY_RELATION, &registry_payload)],
         );
         assert!(
-            decode_project_entries(PROJECT_SPEC.parse_raw(&missing).unwrap())
+            ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(&missing).unwrap())
                 .unwrap_err()
                 .contains("missing declared Workflow cache")
         );
@@ -3749,7 +3834,7 @@ mod tests {
             ],
         );
         assert!(
-            decode_project_entries(PROJECT_SPEC.parse_raw(&undeclared).unwrap())
+            ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(&undeclared).unwrap())
                 .unwrap_err()
                 .contains("undeclared Workflow relation")
         );
@@ -3769,7 +3854,7 @@ mod tests {
             &[(WORKFLOW_FEATURE_REGISTRY_RELATION, &payload)],
         );
         assert!(
-            decode_project_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
+            ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
                 .unwrap_err()
                 .contains("does not match server-derived identity")
         );
@@ -3783,7 +3868,7 @@ mod tests {
         ]);
         let bundle = workflow_project_bundle(&permissive_old_shape, &[]);
         assert!(
-            decode_project_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
+            ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
                 .unwrap_err()
                 .contains("canonical 14-field schema")
         );
@@ -3796,21 +3881,21 @@ mod tests {
         );
         let bundle = workflow_project_bundle(&forged, &[]);
         assert!(
-            decode_project_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
+            ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
                 .unwrap_err()
                 .contains("incompatible producer provenance")
         );
 
         let duplicate = canonical_registry_batch(&[definition.clone(), definition.clone()]);
         assert!(
-            validate_workflow_registry(&[duplicate])
+            WorkflowBundleRegistry::validate(&[duplicate])
                 .unwrap_err()
                 .contains("duplicate source/name")
         );
         let second = workflow_definition("media.frames", "still_feature");
         let bounded = canonical_registry_batch(&[definition, second]);
         assert!(
-            validate_workflow_registry_with_limits(&[bounded], 1, MAX_FEATURE_CACHE_COLUMNS)
+            WorkflowBundleRegistry::validate_with_limits(&[bounded], 1, MAX_FEATURE_CACHE_COLUMNS)
                 .unwrap_err()
                 .contains("bounded limit of 1")
         );
@@ -3820,8 +3905,12 @@ mod tests {
     fn project_cache_uses_atomic_registry_provenance_after_spiral_drops_field_metadata() {
         let definition = workflow_definition("media.frames", "holding_feature");
         let registry_batch = canonical_registry_batch(std::slice::from_ref(&definition));
-        let registry = validate_workflow_registry(std::slice::from_ref(&registry_batch)).unwrap();
-        let relation = derived_feature_cache_relation("media.frames");
+        let registry =
+            WorkflowBundleRegistry::validate(std::slice::from_ref(&registry_batch)).unwrap();
+        let relation =
+            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(
+                "media.frames",
+            );
 
         let missing_feature = canonical_cache_batch(&[], &[1]);
         let bundle = workflow_project_bundle(
@@ -3829,20 +3918,24 @@ mod tests {
             &[(relation.as_str(), missing_feature.clone())],
         );
         assert!(
-            decode_project_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
+            ProjectBundle::decode_entries(PROJECT_SPEC.parse_raw(&bundle).unwrap())
                 .unwrap_err()
                 .contains("do not exactly match")
         );
 
         let canonical = canonical_cache_batch(std::slice::from_ref(&definition), &[1]);
         assert!(canonical.schema().field(5).metadata().is_empty());
-        validate_workflow_cache(&relation, std::slice::from_ref(&canonical), &registry)
-            .expect("metadata-free cache fields use the validated atomic registry provenance");
+        WorkflowCacheValidator::validate_bundle(
+            &relation,
+            std::slice::from_ref(&canonical),
+            &registry,
+        )
+        .expect("metadata-free cache fields use the validated atomic registry provenance");
 
         let invalid_score =
             replace_batch_column(&canonical, 5, Arc::new(Float32Array::from(vec![Some(1.5)])));
         assert!(
-            validate_workflow_cache(&relation, &[invalid_score], &registry)
+            WorkflowCacheValidator::validate_bundle(&relation, &[invalid_score], &registry)
                 .unwrap_err()
                 .contains("sigmoid probability semantics")
         );
@@ -3852,12 +3945,12 @@ mod tests {
     fn project_registry_accepts_pinned_spiral_nested_utf8view_normalization_only() {
         let expected = DataType::List(Arc::new(Field::new("item", DataType::Utf8, false)));
         let normalized = DataType::List(Arc::new(Field::new("item", DataType::Utf8View, false)));
-        assert!(workflow_storage_type_matches(&normalized, &expected));
-        assert!(!workflow_storage_type_matches(
+        assert!(WorkflowArrow::storage_type_matches(&normalized, &expected));
+        assert!(!WorkflowArrow::storage_type_matches(
             &DataType::List(Arc::new(Field::new("item", DataType::BinaryView, false,))),
             &expected
         ));
-        assert!(!workflow_storage_type_matches(
+        assert!(!WorkflowArrow::storage_type_matches(
             &DataType::List(Arc::new(Field::new("item", DataType::Utf8View, true,))),
             &expected
         ));
@@ -3868,11 +3961,14 @@ mod tests {
         let first = workflow_definition("media.frames", "holding_feature");
         let second = workflow_definition("media.frames", "still_feature");
         let registry_batch = canonical_registry_batch(&[first.clone(), second.clone()]);
-        let registry = validate_workflow_registry(&[registry_batch]).unwrap();
-        let relation = derived_feature_cache_relation("media.frames");
+        let registry = WorkflowBundleRegistry::validate(&[registry_batch]).unwrap();
+        let relation =
+            spiral_robotics_api::workflow::WorkflowFeatureApplicability::derived_cache_relation(
+                "media.frames",
+            );
         let duplicate = canonical_cache_batch(&[first.clone(), second.clone()], &[1, 1]);
         assert!(
-            validate_workflow_cache(&relation, &[duplicate], &registry)
+            WorkflowCacheValidator::validate_bundle(&relation, &[duplicate], &registry)
                 .unwrap_err()
                 .contains("duplicate stable frame identities")
         );
@@ -3911,14 +4007,14 @@ mod tests {
             "workflow.features_c".to_owned(),
         ]);
         assert_eq!(
-            workflow_restore_plan(&current, Some(&incoming)),
+            WorkflowRestorePlan::from_caches(&current, Some(&incoming)),
             WorkflowRestorePlan {
                 retire_caches: vec!["workflow.features_a".to_owned()],
                 clear_registry: false,
             }
         );
         assert_eq!(
-            workflow_restore_plan(&current, None),
+            WorkflowRestorePlan::from_caches(&current, None),
             WorkflowRestorePlan {
                 retire_caches: vec![
                     "workflow.features_a".to_owned(),
@@ -3973,18 +4069,19 @@ mod tests {
     #[test]
     fn project_transaction_success_and_mutation_failure_have_deterministic_cleanup() {
         let mut success = MockProjectTransaction::default();
-        let result = run_project_import_transaction(&mut success, "project import", |connection| {
-            connection.events.push("mutation");
-            Ok(7)
-        })
-        .unwrap();
+        let result = success
+            .run_project_import_transaction("project import", |connection| {
+                connection.events.push("mutation");
+                Ok(7)
+            })
+            .unwrap();
         assert_eq!(result, (7, None));
         assert_eq!(success.events, ["begin", "mutation", "commit", "restore"]);
         assert!(!success.discarded);
 
         let mut failure = MockProjectTransaction::default();
-        let error =
-            run_project_import_transaction::<_, ()>(&mut failure, "project import", |connection| {
+        let error = failure
+            .run_project_import_transaction::<()>("project import", |connection| {
                 connection.events.push("mutation");
                 Err("mutation failed".to_owned())
             })
@@ -4000,8 +4097,9 @@ mod tests {
             begin_error: Some("begin failed"),
             ..Default::default()
         };
-        let error =
-            run_project_import_transaction(&mut begin, "project import", |_| Ok(())).unwrap_err();
+        let error = begin
+            .run_project_import_transaction("project import", |_| Ok(()))
+            .unwrap_err();
         assert!(error.contains("begin failed") && error.contains("discarded"));
         assert_eq!(begin.events, ["begin", "discard"]);
 
@@ -4009,8 +4107,8 @@ mod tests {
             rollback_error: Some("rollback failed"),
             ..Default::default()
         };
-        let error =
-            run_project_import_transaction::<_, ()>(&mut rollback, "project import", |_| {
+        let error = rollback
+            .run_project_import_transaction::<()>("project import", |_| {
                 Err("mutation failed".to_owned())
             })
             .unwrap_err();
@@ -4021,9 +4119,9 @@ mod tests {
             commit_error: Some("commit failed"),
             ..Default::default()
         };
-        let error =
-            run_project_import_transaction(&mut uncertain_commit, "project import", |_| Ok(()))
-                .unwrap_err();
+        let error = uncertain_commit
+            .run_project_import_transaction("project import", |_| Ok(()))
+            .unwrap_err();
         assert!(error.contains("commit failed") && error.contains("uncertain outcome"));
         assert_eq!(
             uncertain_commit.events,
@@ -4035,8 +4133,9 @@ mod tests {
             rollback_error: Some("rollback after commit failed"),
             ..Default::default()
         };
-        let error =
-            run_project_import_transaction(&mut commit, "project import", |_| Ok(())).unwrap_err();
+        let error = commit
+            .run_project_import_transaction("project import", |_| Ok(()))
+            .unwrap_err();
         assert!(
             error.contains("commit failed")
                 && error.contains("rollback after commit failed")
@@ -4048,12 +4147,11 @@ mod tests {
             restore_error: Some("restore failed"),
             ..Default::default()
         };
-        let error = run_project_import_transaction::<_, ()>(
-            &mut rollback_restore,
-            "project import",
-            |_| Err("mutation failed".to_owned()),
-        )
-        .unwrap_err();
+        let error = rollback_restore
+            .run_project_import_transaction::<()>("project import", |_| {
+                Err("mutation failed".to_owned())
+            })
+            .unwrap_err();
         assert!(error.contains("mutation failed") && error.contains("restore failed"));
         assert_eq!(
             rollback_restore.events,
@@ -4067,8 +4165,9 @@ mod tests {
             restore_error: Some("restore failed"),
             ..Default::default()
         };
-        let (value, warning) =
-            run_project_import_transaction(&mut transaction, "project import", |_| Ok(9)).unwrap();
+        let (value, warning) = transaction
+            .run_project_import_transaction("project import", |_| Ok(9))
+            .unwrap();
         assert_eq!(value, 9);
         assert!(warning.unwrap().contains("restore failed"));
         assert_eq!(
@@ -4104,14 +4203,12 @@ mod tests {
 
         project_store
             .run_exclusive_blocking(|connection| {
-                ensure_dataset_namespace(connection, project_store.namespace())?;
-                ingest_batch(
-                    connection,
+                connection.ensure_dataset_namespace(project_store.namespace())?;
+                connection.ingest_batch(
                     &Table::StudioSettings.qualified_name(project_store.namespace()),
                     settings_batch("exported-setting", r#"{"source":"export"}"#, 10),
                 )?;
-                ingest_batch(
-                    connection,
+                connection.ingest_batch(
                     &Table::TrainingCheckpoints.qualified_name(project_store.namespace()),
                     checkpoint_batch(),
                 )
@@ -4133,13 +4230,11 @@ mod tests {
         project_store
             .run_exclusive_blocking(|connection| {
                 drop_studio_relations(connection, project_store.namespace())?;
-                ingest_batch(
-                    connection,
+                connection.ingest_batch(
                     &Table::StudioSettings.qualified_name(project_store.namespace()),
                     settings_batch("replacement-setting", r#"{"source":"replacement"}"#, 20),
                 )?;
-                ingest_batch(
-                    connection,
+                connection.ingest_batch(
                     &Table::RolloutRuns.qualified_name(project_store.namespace()),
                     snapshot_batch("replacement-run"),
                 )
@@ -4163,10 +4258,11 @@ mod tests {
         assert_eq!(relation_payloads(&restored), exported_payloads);
         project_store
             .run_blocking(|connection| {
-                assert!(!table_exists(
-                    connection,
-                    &Table::RolloutRuns.qualified_name(project_store.namespace())
-                )?);
+                assert!(
+                    !connection.table_exists(
+                        &Table::RolloutRuns.qualified_name(project_store.namespace())
+                    )?
+                );
                 Ok(())
             })
             .expect("checking overwrite semantics must succeed");
@@ -4191,7 +4287,7 @@ mod tests {
 
         project_store
             .run_exclusive_blocking(|connection| {
-                ensure_dataset_namespace(connection, project_store.namespace())?;
+                connection.ensure_dataset_namespace(project_store.namespace())?;
                 EpisodeSeed::new(project_store.namespace(), "source", "episode_exported")
                     .with_started_ms(10)
                     .save(connection)
@@ -4228,8 +4324,7 @@ mod tests {
         project_store
             .run_blocking(|connection| {
                 let episodes = Table::Episodes.qualified_name(project_store.namespace());
-                let result = run_query(
-                    connection,
+                let result = connection.run_query(
                     &format!(
                         "SELECT {episode_id}, {dataset_id} FROM {episodes} ORDER BY {episode_id}",
                         episode_id = column::EPISODE_ID,
@@ -4294,25 +4389,22 @@ mod tests {
 
         project_store
             .run_exclusive_blocking(|connection| {
-                ensure_dataset_namespace(connection, project_store.namespace())?;
-                ingest_batch(
-                    connection,
+                connection.ensure_dataset_namespace(project_store.namespace())?;
+                connection.ingest_batch(
                     &Table::Datasets.qualified_name(project_store.namespace()),
                     start.dataset_batch().map_err(|error| error.to_string())?,
                 )?;
-                ingest_batch(
-                    connection,
+                connection.ingest_batch(
                     &Table::Episodes.qualified_name(project_store.namespace()),
                     completion
                         .episode_batch(&start, 0)
                         .map_err(|error| error.to_string())?,
                 )?;
-                ingest_batch(
-                    connection,
+                connection.ingest_batch(
                     &Table::VideoAssets.qualified_name(project_store.namespace()),
                     video_asset_batch(episode_id, &mp4),
                 )?;
-                ensure_video_assets_blob_relation(connection, project_store.namespace())
+                connection.ensure_video_assets_blob_relation(project_store.namespace())
             })
             .expect("legacy Binary video rows must migrate to Blob without derived resources");
         let exported = storage
@@ -4359,8 +4451,7 @@ mod tests {
                         .map(String::as_str),
                     Some("spql.io.Blob"),
                 );
-                let descriptor = run_query(
-                    connection,
+                let descriptor = connection.run_query(
                     &format!(
                         "SELECT spql.blob.uri({payload}) AS uri FROM {assets}",
                         payload = column::PAYLOAD,
@@ -4374,30 +4465,26 @@ mod tests {
                         .is_some_and(|uri| !uri.is_empty()),
                     "large MP4 must be outlined into a provider-backed Blob",
                 );
-                let range = run_binary_query(
-                    connection,
-                    &sql::video_asset_range(
-                        project_store.namespace(),
-                        &crate::video::VideoAssetKey::new(
-                            episode_id.to_owned(),
-                            "camera.main".to_owned(),
-                            Some(0),
-                        ),
-                        crate::video::VideoByteRange::new(512, 1024),
+                let range = connection.run_binary_query(&SpiralSql::video_asset_range(
+                    project_store.namespace(),
+                    &crate::video::VideoAssetKey::new(
+                        episode_id.to_owned(),
+                        "camera.main".to_owned(),
+                        Some(0),
                     ),
-                )?;
+                    crate::video::VideoByteRange::new(512, 1024),
+                ))?;
                 assert_eq!(range, mp4[512..1536]);
 
-                let output = sql::video_dataset_output(project_store.namespace());
-                let rows = run_query(connection, &sql::count_rows(&output), 1)?;
+                let output = SpiralSql::video_dataset_output(project_store.namespace());
+                let rows = connection.run_query(&SpiralSql::count_rows(&output), 1)?;
                 assert_eq!(
                     rows.rows()[0]
                         .get("rows")
                         .and_then(serde_json::Value::as_u64),
                     Some(1)
                 );
-                let frames = run_query(
-                    connection,
+                let frames = connection.run_query(
                     &format!(
                         "SELECT COUNT(*) AS count FROM {output} AS asset, \
                          LATERAL spql.video.frames(asset.media, \
@@ -4456,7 +4543,7 @@ mod tests {
         let namespace_start = Instant::now();
         project_store
             .run_exclusive_blocking(|connection| {
-                ensure_dataset_namespace(connection, project_store.namespace())
+                connection.ensure_dataset_namespace(project_store.namespace())
             })
             .expect("the profiling namespace must be created");
         profile_event("spiral.setup_namespace", namespace_start, (0, 0));
@@ -4536,7 +4623,7 @@ mod tests {
                     .expect("the profiling archive must parse"),
             )
             .expect("the profiling archive must decode");
-        sort_relations(&mut decoded, &Table::ALL);
+        EpisodeBundle::sort_relations(&mut decoded, &Table::ALL);
 
         let project = required_project();
         let namespace = format!(
@@ -4552,7 +4639,7 @@ mod tests {
 
         project_store
             .run_exclusive_blocking(|connection| {
-                ensure_dataset_namespace(connection, project_store.namespace())?;
+                connection.ensure_dataset_namespace(project_store.namespace())?;
                 for (label, table, row_limit) in [
                     ("dataset_1", Table::Datasets, 1),
                     ("joint_0", Table::JointSamples, 0),
@@ -4663,7 +4750,7 @@ mod tests {
 
         fn write_autocommit(self, connection: &mut StorageConnection) -> Result<(), String> {
             let write_start = Instant::now();
-            ingest_batches(connection, self.target, self.batches.to_vec())?;
+            connection.ingest_batches(self.target, self.batches.to_vec())?;
             let write_seconds = write_start.elapsed().as_secs_f64();
             let (rows, bytes) = self.metrics;
             let label = self.label;
@@ -4681,14 +4768,14 @@ mod tests {
 
             let write_start = Instant::now();
             if self.replace {
-                replace_batches(connection, self.target, self.batches.to_vec())?;
+                connection.replace_batches(self.target, self.batches.to_vec())?;
             } else {
-                ingest_batches(connection, self.target, self.batches.to_vec())?;
+                connection.ingest_batches(self.target, self.batches.to_vec())?;
             }
             let write_seconds = write_start.elapsed().as_secs_f64();
 
             let commit_start = Instant::now();
-            commit_catalog_transaction(connection)?;
+            connection.commit_catalog_transaction()?;
             let commit_seconds = commit_start.elapsed().as_secs_f64();
             connection.set_autocommit(true)?;
             let (rows, bytes) = self.metrics;
@@ -4764,13 +4851,13 @@ mod tests {
             );
             decoded.append(&mut relation);
         }
-        sort_relations(&mut decoded, &Table::ALL);
+        EpisodeBundle::sort_relations(&mut decoded, &Table::ALL);
         if let Some(limit) = profile_usize("SPIRAL_PROFILE_VIDEO_LIMIT") {
             limit_relation_rows(&mut decoded, Table::VideoAssets, limit);
         }
 
         let video_ids_start = Instant::now();
-        let imported_video_episodes = video_episode_ids(&decoded)?;
+        let imported_video_episodes = EpisodeBundle::video_episode_ids(&decoded)?;
         profile_event(
             "studio.collect_video_episode_ids",
             video_ids_start,
@@ -4789,7 +4876,7 @@ mod tests {
                 }
                 let relation = table.qualified_name(namespace);
                 let exists_start = Instant::now();
-                let exists = table_exists(connection, &relation)?;
+                let exists = connection.table_exists(&relation)?;
                 profile_event(
                     &format!("spiral.table_exists.{}", table.name()),
                     exists_start,
@@ -4797,7 +4884,7 @@ mod tests {
                 );
                 if exists {
                     let drop_start = Instant::now();
-                    execute_update_sql(connection, &format!("DROP TABLE {relation}"))?;
+                    connection.execute_update_sql(&format!("DROP TABLE {relation}"))?;
                     profile_event(
                         &format!("spiral.drop_relation.{}", table.name()),
                         drop_start,
@@ -4817,7 +4904,7 @@ mod tests {
                 for batch in batches {
                     let transform_start = Instant::now();
                     let batch = if table == Table::VideoAssets {
-                        prepare_video_asset_import(batch, namespace)?
+                        EpisodeBundle::prepare_video_asset_import(batch, namespace)?
                     } else {
                         batch
                     };
@@ -4846,7 +4933,7 @@ mod tests {
                 }
                 summary.record_relation(relation_rows as u64);
                 let stream_ingest_start = Instant::now();
-                replace_batches(connection, &relation, stream_batches)?;
+                connection.replace_batches(&relation, stream_batches)?;
                 profile_event(
                     &format!("spiral.replace.{}.stream", table.name()),
                     stream_ingest_start,
@@ -4864,7 +4951,8 @@ mod tests {
         let mut summary = match outcome {
             Ok(summary) => {
                 let commit_start = Instant::now();
-                commit_catalog_transaction(connection)
+                connection
+                    .commit_catalog_transaction()
                     .map_err(|error| format!("committing profiled project import: {error}"))?;
                 profile_event(
                     "spiral.transaction_commit",
@@ -4899,7 +4987,7 @@ mod tests {
         if !profile_bool("SPIRAL_PROFILE_SKIP_VIDEO_RECONCILE") {
             let reconcile_total_start = Instant::now();
             if imported_video_episodes.is_empty() {
-                drop_video_dataset(connection, namespace)?;
+                connection.drop_video_dataset(namespace)?;
             } else {
                 let _ = profile_rebuild_video_dataset(connection, namespace)?;
             }
@@ -4917,24 +5005,27 @@ mod tests {
         namespace: &str,
     ) -> Result<bool, String> {
         let exists_start = Instant::now();
-        let dataset_exists = video_dataset_exists(connection, namespace)?;
+        let dataset_exists = connection.video_dataset_exists(namespace)?;
         profile_event("spiral.reconcile_video_exists", exists_start, (1, 0));
 
-        let sources = sql::video_sources_relation(namespace);
+        let sources = SpiralSql::video_sources_relation(namespace);
         let assets = Table::VideoAssets.qualified_name(namespace);
-        let dataset = sql::video_dataset_relation(namespace);
+        let dataset = SpiralSql::video_dataset_relation(namespace);
         let view_start = Instant::now();
-        execute_update_sql(connection, &sql::create_video_sources(&sources, &assets))
+        connection
+            .execute_update_sql(&SpiralSql::create_video_sources(&sources, &assets))
             .map_err(|error| format!("creating Spiral video source view: {error}"))?;
         profile_event("spiral.reconcile_video_view", view_start, (1, 0));
         if !dataset_exists {
             let create_start = Instant::now();
-            execute_update_sql(connection, &sql::create_video_dataset(&dataset, &sources))
+            connection
+                .execute_update_sql(&SpiralSql::create_video_dataset(&dataset, &sources))
                 .map_err(|error| format!("creating Spiral MP4 dataset: {error}"))?;
             profile_event("spiral.reconcile_video_create", create_start, (1, 0));
         }
         let refresh_start = Instant::now();
-        execute_update_sql(connection, &sql::refresh_dataset(&dataset))
+        connection
+            .execute_update_sql(&SpiralSql::refresh_dataset(&dataset))
             .map_err(|error| format!("refreshing Spiral MP4 dataset: {error}"))?;
         profile_event("spiral.reconcile_video_refresh", refresh_start, (1, 0));
         Ok(dataset_exists)
@@ -4996,14 +5087,14 @@ mod tests {
         BackendStateStore::open_default()
             .ok()
             .and_then(|store| store.spiral_endpoint())
-            .unwrap_or_else(environment_spiral_endpoint)
+            .unwrap_or_else(|| ServiceEndpoint::environment_spiral().into_string())
     }
 
     fn configured_spiral_spfs_endpoint() -> String {
         BackendStateStore::open_default()
             .ok()
             .and_then(|store| store.spiral_spfs_endpoint())
-            .unwrap_or_else(environment_spiral_spfs_endpoint)
+            .unwrap_or_else(|| ServiceEndpoint::environment_spiral_spfs().into_string())
     }
 
     fn configured_project_store(project: String, namespace: String) -> Arc<ProjectStore> {
@@ -5113,13 +5204,11 @@ mod tests {
                 .with_timing(self.started_ms, 60.0)
                 .with_source("transfer-e2e".to_owned(), None);
             let completion = EpisodeCompletion::new(0.0, Vec::new(), Vec::new());
-            ingest_batch(
-                connection,
+            connection.ingest_batch(
                 &Table::Datasets.qualified_name(self.namespace),
                 start.dataset_batch().map_err(|error| error.to_string())?,
             )?;
-            ingest_batch(
-                connection,
+            connection.ingest_batch(
                 &Table::Episodes.qualified_name(self.namespace),
                 completion
                     .episode_batch(&start, 0)
@@ -5203,11 +5292,11 @@ mod tests {
         connection: &mut StorageConnection,
         namespace: &str,
     ) -> Result<(), String> {
-        drop_video_dataset(connection, namespace)?;
+        connection.drop_video_dataset(namespace)?;
         for table in Table::ALL.into_iter().rev() {
             let relation = table.qualified_name(namespace);
-            if table_exists(connection, &relation)? {
-                execute_update_sql(connection, &format!("DROP TABLE {relation}"))?;
+            if connection.table_exists(&relation)? {
+                connection.execute_update_sql(&format!("DROP TABLE {relation}"))?;
             }
         }
         Ok(())
@@ -5228,8 +5317,8 @@ mod tests {
             let namespace = self.project_store.namespace().to_owned();
             let _ = self.project_store.run_exclusive_blocking(|connection| {
                 drop_studio_relations(connection, &namespace)?;
-                if table_exists(connection, &namespace)? {
-                    execute_update_sql(connection, &format!("DROP TABLE {namespace}"))?;
+                if connection.table_exists(&namespace)? {
+                    connection.execute_update_sql(&format!("DROP TABLE {namespace}"))?;
                 }
                 Ok(())
             });

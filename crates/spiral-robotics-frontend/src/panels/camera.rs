@@ -3,8 +3,9 @@
 use dioxus::prelude::*;
 
 use crate::client::historical::HistoricalPreview;
+use crate::client::http::{CameraApiPath, EpisodeApiPath};
+use crate::format::ClockPresentation;
 use crate::shell::activity::{LoadState, RecordedSource, TimelineSubject};
-use crate::shell::frame::format_elapsed_status;
 
 #[cfg(feature = "web")]
 use wasm_bindgen::{JsCast as _, JsValue};
@@ -40,7 +41,7 @@ pub(crate) fn CameraEditor(
             if let CameraEditorSource::Recorded(source) = source
                 && let Some(recorded) = source.renderable()
             {
-                sync_recorded_camera(&element_id, recorded.video_seconds, playing);
+                recorded.sync_element(&element_id, playing);
             }
         },
     ));
@@ -56,6 +57,7 @@ pub(crate) fn CameraEditor(
             if let Some(recorded) = source.renderable().cloned() {
                 let updating = source.state().is_loading();
                 let warning = source.state().reason().map(str::to_owned);
+                let sync_camera = recorded.clone();
                 rsx! {
                     div { class: "camera-editor-meta",
                         span {
@@ -78,8 +80,8 @@ pub(crate) fn CameraEditor(
                             autoplay: playing,
                             muted: true,
                             playsinline: true,
-                            onloadedmetadata: move |_| sync_recorded_camera(&element_id, recorded.video_seconds, playing),
-                            "aria-label": "Recorded {recorded.label} camera at {format_elapsed_status(recorded.episode_seconds)}",
+                            onloadedmetadata: move |_| sync_camera.sync_element(&element_id, playing),
+                            "aria-label": "Recorded {recorded.label} camera at {recorded.episode_seconds.clock_label()}",
                             "Your browser cannot preview this recorded camera stream."
                         }
                         if let Some(ref warning) = warning {
@@ -169,7 +171,7 @@ fn LiveCameraFrame(robot: String, role: String, device: String) -> Element {
         div { class: "camera-editor-frame camera-live-frame",
             img {
                 class: "camera-stream-image",
-                src: crate::client::http::camera_stream_url(&device),
+                src: device.camera_stream_url(),
                 alt: "Live view from the {role} camera on {robot}",
                 loading: "eager",
                 decoding: "sync",
@@ -214,88 +216,69 @@ impl HistoricalCamera {
     pub(crate) const fn approximate(&self) -> bool {
         self.approximate
     }
+
+    fn sync_element(&self, element_id: &str, should_play: bool) {
+        #[cfg(feature = "web")]
+        {
+            let Some(element) = web_sys::window()
+                .and_then(|window| window.document())
+                .and_then(|document| document.get_element_by_id(element_id))
+            else {
+                return;
+            };
+            let target = self.video_seconds.max(0.0);
+            let current = js_sys::Reflect::get(element.as_ref(), &JsValue::from_str("currentTime"))
+                .ok()
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0);
+            let seek_threshold = if should_play { 0.25 } else { 0.005 };
+            if (current - target).abs() > seek_threshold {
+                let _ = js_sys::Reflect::set(
+                    element.as_ref(),
+                    &JsValue::from_str("currentTime"),
+                    &JsValue::from_f64(target),
+                );
+            }
+
+            let paused = js_sys::Reflect::get(element.as_ref(), &JsValue::from_str("paused"))
+                .ok()
+                .and_then(|value| value.as_bool())
+                .unwrap_or(!should_play);
+            let method = match (should_play, paused) {
+                (true, true) => Some("play"),
+                (false, false) => Some("pause"),
+                _ => None,
+            };
+            if let Some(method) = method
+                && let Ok(function) =
+                    js_sys::Reflect::get(element.as_ref(), &JsValue::from_str(method))
+                        .and_then(|value| value.dyn_into::<js_sys::Function>())
+            {
+                let _ = function.call0(element.as_ref());
+            }
+        }
+        #[cfg(not(feature = "web"))]
+        let _ = (element_id, should_play);
+    }
 }
 
-#[cfg(test)]
-pub(crate) fn historical_camera(
-    preview: &HistoricalPreview,
-    selected: Option<&(String, String, String)>,
-) -> Option<HistoricalCamera> {
-    historical_camera_at(preview, selected, preview.sample().seconds())
-}
-
-pub(crate) fn historical_camera_at(
-    preview: &HistoricalPreview,
-    selected: Option<&(String, String, String)>,
-    at: f64,
-) -> Option<HistoricalCamera> {
-    let expected = selected.map(|(robot, role, _)| format!("{robot}.camera.{role}"));
-    let stream_id = if let Some(expected) = expected.as_deref() {
-        preview
-            .timeline()
-            .videos()
-            .iter()
-            .find(|asset| asset.stream_id() == expected)
-            .map(|asset| asset.stream_id())?
-    } else {
-        preview
-            .timeline()
-            .videos()
-            .first()
-            .map(|asset| asset.stream_id())?
-    };
-    let label = selected
-        .filter(|(robot, role, _)| stream_id == format!("{robot}.camera.{role}"))
-        .map(|(_, role, _)| role.clone())
-        .or_else(|| stream_id.rsplit('.').next().map(str::to_owned))
-        .unwrap_or_else(|| "recorded".to_owned());
-    HistoricalCameraStream::new(preview, stream_id, &label).at(at)
-}
-
-pub(crate) fn recorded_scene_source(
-    subject: &TimelineSubject,
-    source: Option<&RecordedSource<HistoricalPreview>>,
-) -> crate::panels::scene::SceneSource {
-    let Some(episode) = subject.recorded_episode() else {
-        return crate::panels::scene::SceneSource::Live;
-    };
-    let source = source
-        .filter(|source| source.episode() == episode)
-        .cloned()
-        .map(|source| source.map(HistoricalPreview::into_sample))
-        .unwrap_or_else(|| {
-            RecordedSource::new(episode, 0.0, LoadState::Loading { previous: None })
-        });
-    crate::panels::scene::SceneSource::Recorded(source)
-}
-
-fn map_recorded_camera(
-    episode: &str,
-    source: Option<&RecordedSource<HistoricalPreview>>,
-    select: impl Fn(&HistoricalPreview) -> Option<HistoricalCamera>,
-) -> RecordedSource<HistoricalCamera> {
-    let Some(source) = source.filter(|source| source.episode() == episode) else {
-        return RecordedSource::new(episode, 0.0, LoadState::Loading { previous: None });
-    };
-    let state = match source.state() {
-        LoadState::Loading { previous } => LoadState::Loading {
-            previous: previous.as_ref().and_then(&select),
-        },
-        LoadState::Ready(preview) => select(preview).map_or_else(
-            || LoadState::Unavailable {
-                reason: "This episode has no local video for this camera.".to_owned(),
-            },
-            LoadState::Ready,
-        ),
-        LoadState::Unavailable { reason } => LoadState::Unavailable {
-            reason: reason.clone(),
-        },
-        LoadState::Failed { reason, previous } => LoadState::Failed {
-            reason: reason.clone(),
-            previous: previous.as_ref().and_then(select),
-        },
-    };
-    RecordedSource::new(source.episode(), source.seconds(), state)
+impl TimelineSubject {
+    pub(crate) fn recorded_scene_source(
+        &self,
+        source: Option<&RecordedSource<HistoricalPreview>>,
+    ) -> crate::panels::scene::SceneSource {
+        let Some(episode) = self.recorded_episode() else {
+            return crate::panels::scene::SceneSource::Live;
+        };
+        let source = source
+            .filter(|source| source.episode() == episode)
+            .cloned()
+            .map(|source| source.map(HistoricalPreview::into_sample))
+            .unwrap_or_else(|| {
+                RecordedSource::new(episode, 0.0, LoadState::Loading { previous: None })
+            });
+        crate::panels::scene::SceneSource::Recorded(source)
+    }
 }
 
 pub(crate) struct RecordedCameraSourceRequest<'a> {
@@ -321,43 +304,112 @@ impl<'a> RecordedCameraSourceRequest<'a> {
         self,
         camera: &(String, String, String),
     ) -> CameraEditorSource {
-        CameraEditorSource::Recorded(map_recorded_camera(self.episode, self.source, |preview| {
-            historical_camera_at(preview, Some(camera), self.at)
-        }))
+        let at = self.at;
+        CameraEditorSource::Recorded(
+            self.map_camera(|preview| preview.historical_camera_at(Some(camera), at)),
+        )
     }
 
     pub(crate) fn for_stream(self, stream_id: &str, label: &str) -> CameraEditorSource {
-        CameraEditorSource::Recorded(map_recorded_camera(self.episode, self.source, |preview| {
-            HistoricalCameraStream::new(preview, stream_id, label).at(self.at)
-        }))
+        let at = self.at;
+        CameraEditorSource::Recorded(
+            self.map_camera(|preview| {
+                HistoricalCameraStream::new(preview, stream_id, label).at(at)
+            }),
+        )
     }
-}
 
-pub(crate) fn recorded_camera_registry_placeholder(
-    episode: &str,
-    source: Option<&RecordedSource<HistoricalPreview>>,
-) -> CameraEditorSource {
-    let (title, detail) = match source
-        .filter(|source| source.episode() == episode)
-        .map(RecordedSource::state)
-    {
-        None | Some(LoadState::Loading { .. }) => (
-            "Loading recorded cameras",
-            "The camera tabs will appear when the episode source is ready.".to_owned(),
-        ),
-        Some(LoadState::Ready(_)) | Some(LoadState::Unavailable { .. }) => (
-            "No recorded camera",
-            "This episode contains no local camera video.".to_owned(),
-        ),
-        Some(LoadState::Failed { reason, .. }) => ("Recorded cameras unavailable", reason.clone()),
-    };
-    CameraEditorSource::Empty {
-        title: title.to_owned(),
-        detail,
+    pub(crate) fn registry_placeholder(self) -> CameraEditorSource {
+        let (title, detail) = match self
+            .source
+            .filter(|source| source.episode() == self.episode)
+            .map(RecordedSource::state)
+        {
+            None | Some(LoadState::Loading { .. }) => (
+                "Loading recorded cameras",
+                "The camera tabs will appear when the episode source is ready.".to_owned(),
+            ),
+            Some(LoadState::Ready(_)) | Some(LoadState::Unavailable { .. }) => (
+                "No recorded camera",
+                "This episode contains no local camera video.".to_owned(),
+            ),
+            Some(LoadState::Failed { reason, .. }) => {
+                ("Recorded cameras unavailable", reason.clone())
+            }
+        };
+        CameraEditorSource::Empty {
+            title: title.to_owned(),
+            detail,
+        }
+    }
+
+    fn map_camera(
+        self,
+        select: impl Fn(&HistoricalPreview) -> Option<HistoricalCamera>,
+    ) -> RecordedSource<HistoricalCamera> {
+        let Some(source) = self
+            .source
+            .filter(|source| source.episode() == self.episode)
+        else {
+            return RecordedSource::new(self.episode, 0.0, LoadState::Loading { previous: None });
+        };
+        let state = match source.state() {
+            LoadState::Loading { previous } => LoadState::Loading {
+                previous: previous.as_ref().and_then(&select),
+            },
+            LoadState::Ready(preview) => select(preview).map_or_else(
+                || LoadState::Unavailable {
+                    reason: "This episode has no local video for this camera.".to_owned(),
+                },
+                LoadState::Ready,
+            ),
+            LoadState::Unavailable { reason } => LoadState::Unavailable {
+                reason: reason.clone(),
+            },
+            LoadState::Failed { reason, previous } => LoadState::Failed {
+                reason: reason.clone(),
+                previous: previous.as_ref().and_then(select),
+            },
+        };
+        RecordedSource::new(source.episode(), source.seconds(), state)
     }
 }
 
 impl HistoricalPreview {
+    #[cfg(test)]
+    pub(crate) fn historical_camera(
+        &self,
+        selected: Option<&(String, String, String)>,
+    ) -> Option<HistoricalCamera> {
+        self.historical_camera_at(selected, self.sample().seconds())
+    }
+
+    pub(crate) fn historical_camera_at(
+        &self,
+        selected: Option<&(String, String, String)>,
+        at: f64,
+    ) -> Option<HistoricalCamera> {
+        let expected = selected.map(|(robot, role, _)| format!("{robot}.camera.{role}"));
+        let stream_id = if let Some(expected) = expected.as_deref() {
+            self.timeline()
+                .videos()
+                .iter()
+                .find(|asset| asset.stream_id() == expected)
+                .map(|asset| asset.stream_id())?
+        } else {
+            self.timeline()
+                .videos()
+                .first()
+                .map(|asset| asset.stream_id())?
+        };
+        let label = selected
+            .filter(|(robot, role, _)| stream_id == format!("{robot}.camera.{role}"))
+            .map(|(_, role, _)| role.clone())
+            .or_else(|| stream_id.rsplit('.').next().map(str::to_owned))
+            .unwrap_or_else(|| "recorded".to_owned());
+        HistoricalCameraStream::new(self, stream_id, &label).at(at)
+    }
+
     pub(crate) fn recorded_camera_streams(&self) -> Vec<(String, String)> {
         let mut streams = Vec::new();
         for asset in self.timeline().videos() {
@@ -435,8 +487,7 @@ impl<'a> HistoricalCameraStream<'a> {
                 })
                 .or_else(|| {
                     exact_assets.iter().copied().min_by(|left, right| {
-                        video_segment_distance(left, at)
-                            .total_cmp(&video_segment_distance(right, at))
+                        left.distance_from(at).total_cmp(&right.distance_from(at))
                     })
                 })?
         };
@@ -460,11 +511,10 @@ impl<'a> HistoricalCameraStream<'a> {
             };
             (ratio * asset.duration_seconds().max(0.0), true)
         };
-        let url = crate::client::http::episode_video_url(
-            self.preview.episode(),
-            asset.stream_id(),
-            asset.segment_index(),
-        );
+        let url = self
+            .preview
+            .episode()
+            .video_url(asset.stream_id(), asset.segment_index());
         Some(HistoricalCamera {
             label,
             url,
@@ -475,57 +525,20 @@ impl<'a> HistoricalCameraStream<'a> {
     }
 }
 
-fn video_segment_distance(asset: &crate::client::http::VideoAssetMetadata, at: f64) -> f64 {
-    let start = asset.timeline_offset_seconds().unwrap_or_default();
-    let end = start + asset.duration_seconds().max(0.0);
-    if at < start {
-        start - at
-    } else if at > end {
-        at - end
-    } else {
-        0.0
-    }
+trait VideoSegmentTimeline {
+    fn distance_from(&self, at: f64) -> f64;
 }
 
-fn sync_recorded_camera(element_id: &str, video_seconds: f64, should_play: bool) {
-    #[cfg(feature = "web")]
-    {
-        let Some(element) = web_sys::window()
-            .and_then(|window| window.document())
-            .and_then(|document| document.get_element_by_id(element_id))
-        else {
-            return;
-        };
-        let target = video_seconds.max(0.0);
-        let current = js_sys::Reflect::get(element.as_ref(), &JsValue::from_str("currentTime"))
-            .ok()
-            .and_then(|value| value.as_f64())
-            .unwrap_or(0.0);
-        let seek_threshold = if should_play { 0.25 } else { 0.005 };
-        if (current - target).abs() > seek_threshold {
-            let _ = js_sys::Reflect::set(
-                element.as_ref(),
-                &JsValue::from_str("currentTime"),
-                &JsValue::from_f64(target),
-            );
-        }
-
-        let paused = js_sys::Reflect::get(element.as_ref(), &JsValue::from_str("paused"))
-            .ok()
-            .and_then(|value| value.as_bool())
-            .unwrap_or(!should_play);
-        let method = match (should_play, paused) {
-            (true, true) => Some("play"),
-            (false, false) => Some("pause"),
-            _ => None,
-        };
-        if let Some(method) = method
-            && let Ok(function) = js_sys::Reflect::get(element.as_ref(), &JsValue::from_str(method))
-                .and_then(|value| value.dyn_into::<js_sys::Function>())
-        {
-            let _ = function.call0(element.as_ref());
+impl VideoSegmentTimeline for crate::client::http::VideoAssetMetadata {
+    fn distance_from(&self, at: f64) -> f64 {
+        let start = self.timeline_offset_seconds().unwrap_or_default();
+        let end = start + self.duration_seconds().max(0.0);
+        if at < start {
+            start - at
+        } else if at > end {
+            at - end
+        } else {
+            0.0
         }
     }
-    #[cfg(not(feature = "web"))]
-    let _ = (element_id, video_seconds, should_play);
 }

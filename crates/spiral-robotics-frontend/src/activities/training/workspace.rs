@@ -16,19 +16,20 @@ use charming::element::{
 use charming::series::Line;
 use dioxus::prelude::*;
 use dioxus_workbench::{LayoutNode, Panel, PanelId, PanelLayout, PanelWorkspace, SplitAxis};
+#[cfg(test)]
 use spiral_robotics_api::catalog as spiral;
 use spiral_robotics_api::training::{
     TrainingMetricPoint, TrainingReadiness, TrainingRun, TrainingRunPhase,
 };
+use spiral_robotics_core::identity::DatasetId;
 
 use crate::activities::training::state::training_controller;
 use crate::components::charts::{
     COLOR_CPU, COLOR_GPU, COLOR_INK_FAINT, COLOR_LINE, COLOR_MEMORY, COLOR_SELECTED, COLOR_SURFACE,
-    COLOR_THROUGHPUT, COLOR_TRAIN, COLOR_TRANSFER, COLOR_VALIDATION, CharmingChart, MONO_FONT,
-    TooltipRateUnit, downsample_extrema, studio_bytes_tooltip, studio_numeric_tooltip,
-    studio_percent_tooltip, studio_rate_tooltip,
+    COLOR_THROUGHPUT, COLOR_TRAIN, COLOR_TRANSFER, COLOR_VALIDATION, CharmingChart, ChartPoints,
+    MONO_FONT, StudioTooltip, TooltipRateUnit,
 };
-use crate::format::format_loss;
+use crate::format::LossPresentation;
 use crate::shell::state::studio;
 
 const EMPTY_RUN_PANEL_ID: &str = "training-run-empty";
@@ -84,7 +85,7 @@ pub(crate) fn TrainingWorkspace() -> Element {
         .collect::<Vec<_>>();
     let registered_runs = opened_runs
         .iter()
-        .map(|run| (run_panel_id(run.id()), run.id().to_owned()))
+        .map(|run| (run.id().training_panel_id(), run.id().to_owned()))
         .collect::<Vec<_>>();
     let mut panels = vec![control, history];
     let right_panel_ids = if opened_runs.is_empty() {
@@ -105,10 +106,10 @@ pub(crate) fn TrainingWorkspace() -> Element {
     } else {
         let ids = opened_runs
             .iter()
-            .map(|run| run_panel_id(run.id()))
+            .map(|run| run.id().training_panel_id())
             .collect::<Vec<_>>();
         for run in opened_runs {
-            let panel_id = run_panel_id(run.id());
+            let panel_id = run.id().training_panel_id();
             panels.push(
                 Panel::new(
                     panel_id,
@@ -130,7 +131,7 @@ pub(crate) fn TrainingWorkspace() -> Element {
     let selected_panel = controller
         .selected_run()
         .filter(|id| snapshot.runs().iter().any(|run| run.id() == id))
-        .map(|id| PanelId::from(run_panel_id(&id)));
+        .map(|id| PanelId::from(id.training_panel_id()));
     let closeable_runs = registered_runs.clone();
     let left = LayoutNode::split(
         "training-left-rail",
@@ -193,7 +194,7 @@ fn TrainingRunControl(
         .collect::<BTreeSet<_>>();
     let starting = controller.starting();
     let stopping = controller.stopping();
-    let dataset_valid = spiral::is_dataset_id(dataset_id.trim());
+    let dataset_valid = DatasetId::is_canonical(dataset_id.trim());
     let can_start = readiness.ready() && active_run.is_none() && !starting && dataset_valid;
     let active_id = active_run.as_ref().map(|run| run.id().to_owned());
     let progress = active_run.as_ref().map(|run| {
@@ -203,7 +204,7 @@ fn TrainingRunControl(
             run.current_step() as f64 / run.config().steps() as f64 * 100.0
         }
     });
-    let (readiness_summary, readiness_recovery) = training_readiness_guidance(&readiness);
+    let (readiness_summary, readiness_recovery) = readiness.guidance();
     let runtime_summary = readiness
         .runtime()
         .as_ref()
@@ -212,7 +213,7 @@ fn TrainingRunControl(
     let mut runtime_devices = vec![("auto".to_owned(), "Auto".to_owned())];
     if let Some(runtime) = &readiness.runtime() {
         for label in runtime.devices() {
-            let (value, label) = runtime_device_option(label);
+            let (value, label) = label.runtime_device_option();
             if !runtime_devices
                 .iter()
                 .any(|(existing, _)| existing == &value)
@@ -260,7 +261,7 @@ fn TrainingRunControl(
                     div { class: "training-active-heading",
                         div {
                             strong { "{run.config().run_name()}" }
-                            span { class: phase_class(run.phase()), "{run.phase().label()}" }
+                            span { class: run.phase().presentation_class(), "{run.phase().label()}" }
                             small { "Dataset · {run.config().dataset_id()}" }
                         }
                         span { class: "training-step-readout", "{run.current_step()} / {run.config().steps()}" }
@@ -599,7 +600,7 @@ fn TrainingHistoryRow(run: TrainingRun, selected: bool) -> Element {
                 },
                 span { class: "training-history-name", "{run.config().run_name()}" }
                 span { class: "training-history-dataset", "{run.config().dataset_id()}" }
-                span { class: phase_class(run.phase()), "{run.phase().label()}" }
+                span { class: run.phase().presentation_class(), "{run.phase().label()}" }
                 span { class: "training-history-step", "{run.current_step()} / {run.config().steps()}" }
             }
             Action {
@@ -672,7 +673,7 @@ fn TrainingRunDetail(run: TrainingRun) -> Element {
                 div { class: "training-run-identity",
                     div {
                         h2 { "{run.config().run_name()}" }
-                        span { class: phase_class(run.phase()), "{run.phase().label()}" }
+                        span { class: run.phase().presentation_class(), "{run.phase().label()}" }
                     }
                     p { "Dataset · {run.config().dataset_id()} · {run.config().policy().label()} · {run.config().device()}" }
                 }
@@ -725,51 +726,80 @@ fn TrainingRunDetail(run: TrainingRun) -> Element {
     }
 }
 
-fn run_panel_id(run_id: &str) -> String {
-    format!("training-run-{run_id}")
+trait TrainingIdentityPresentation {
+    fn training_panel_id(&self) -> String;
+    fn chart_dom_id(&self, prefix: &str) -> String;
+    fn training_chart_group(&self) -> String;
 }
 
-fn training_readiness_guidance(readiness: &TrainingReadiness) -> (String, String) {
-    if !readiness.spiral_ready() {
-        return (
-            "SpiralDB is unavailable.".to_owned(),
-            "Open Settings and test the SpiralDB connection.".to_owned(),
-        );
+impl TrainingIdentityPresentation for str {
+    fn training_panel_id(&self) -> String {
+        format!("training-run-{self}")
     }
-    if readiness.runtime().is_none() {
-        return (
-            readiness.summary().to_owned(),
-            "Open Settings and connect the policy compute runtime.".to_owned(),
-        );
+
+    fn chart_dom_id(&self, prefix: &str) -> String {
+        let safe = self
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                    character
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>();
+        format!("{prefix}-{safe}")
     }
-    if !readiness.ready() {
-        return (
-            readiness.summary().to_owned(),
-            "Resolve the reported blocker, then retry training.".to_owned(),
-        );
+
+    fn training_chart_group(&self) -> String {
+        self.chart_dom_id("training-step-window")
     }
-    (
-        readiness.summary().to_owned(),
-        "Training is ready.".to_owned(),
-    )
+}
+
+trait TrainingReadinessPresentation {
+    fn guidance(&self) -> (String, String);
+}
+
+impl TrainingReadinessPresentation for TrainingReadiness {
+    fn guidance(&self) -> (String, String) {
+        if !self.spiral_ready() {
+            return (
+                "SpiralDB is unavailable.".to_owned(),
+                "Open Settings and test the SpiralDB connection.".to_owned(),
+            );
+        }
+        if self.runtime().is_none() {
+            return (
+                self.summary().to_owned(),
+                "Open Settings and connect the policy compute runtime.".to_owned(),
+            );
+        }
+        if !self.ready() {
+            return (
+                self.summary().to_owned(),
+                "Resolve the reported blocker, then retry training.".to_owned(),
+            );
+        }
+        (self.summary().to_owned(), "Training is ready.".to_owned())
+    }
 }
 
 #[component]
 fn TrainingLearning(run: TrainingRun) -> Element {
     let last = run.metrics().last();
-    let latest_train = last.map(|point| format_loss(point.train_loss()));
+    let latest_train = last.map(|point| point.train_loss().loss_label());
     let latest_validation = run
         .metrics()
         .iter()
         .rev()
         .find_map(|point| point.validation_loss())
-        .map(format_loss);
+        .map(LossPresentation::loss_label);
     let lr = last.map(|point| format!("{:.2e}", point.learning_rate()));
     let latest_train = latest_train.unwrap_or_else(|| "—".to_owned());
     let latest_validation = latest_validation.unwrap_or_else(|| "—".to_owned());
     let lr = lr.unwrap_or_else(|| "—".to_owned());
-    let chart_id = chart_dom_id("training-loss", run.id());
-    let chart_group = training_chart_group(run.id());
+    let chart_id = run.id().chart_dom_id("training-loss");
+    let chart_group = run.id().training_chart_group();
     let loss_chart = run.loss_chart();
 
     rsx! {
@@ -818,7 +848,7 @@ fn TrainingLearning(run: TrainingRun) -> Element {
                     for checkpoint in &run.checkpoints() {
                         span {
                             class: "training-event-tick training-event-checkpoint",
-                            style: "left: {step_percent(checkpoint.step(), run.config().steps()):.3}%",
+                            style: "left: {checkpoint.step().percent_of(run.config().steps()):.3}%",
                             title: "Checkpoint saved at step {checkpoint.step()}",
                             "aria-label": "Checkpoint at step {checkpoint.step()}",
                         }
@@ -826,9 +856,9 @@ fn TrainingLearning(run: TrainingRun) -> Element {
                     for point in run.metrics().iter().filter(|point| point.event().is_some()) {
                         span {
                             class: if point.event().is_some_and(|event| event.contains("loader stall")) { "training-event-tick training-event-stall" } else { "training-event-tick training-event-validation" },
-                            style: "left: {step_percent(point.step(), run.config().steps()):.3}%",
-                            title: metric_event_label(point),
-                            "aria-label": metric_event_label(point),
+                            style: "left: {point.step().percent_of(run.config().steps()):.3}%",
+                            title: point.event_label(),
+                            "aria-label": point.event_label(),
                         }
                     }
                 }
@@ -889,12 +919,12 @@ fn TrainingPerformance(run: TrainingRun) -> Element {
             point.step().max(run.current_step())
         })
         .max(1);
-    let chart_group = training_chart_group(run.id());
+    let chart_group = run.id().training_chart_group();
     let throughput = last
         .map(|point| format!("{:.1} samples/s", point.examples_per_second()))
         .unwrap_or_else(|| "—".to_owned());
     let transfer = last
-        .map(|point| format_rate(point.transfer_bytes_per_second()))
+        .map(|point| point.transfer_bytes_per_second().formatted_rate())
         .unwrap_or_else(|| "—".to_owned());
     let cpu = last
         .and_then(|point| point.cpu_percent())
@@ -906,19 +936,28 @@ fn TrainingPerformance(run: TrainingRun) -> Element {
         .unwrap_or_else(|| "—".to_owned());
     let memory = last
         .and_then(|point| point.memory_bytes())
-        .map(format_bytes)
+        .map(TrainingByteCountPresentation::formatted_bytes)
         .unwrap_or_else(|| "—".to_owned());
-    let loader_ms = format_milliseconds(last.and_then(|point| point.loader_ms()));
-    let arrow_encode_ms = format_milliseconds(last.and_then(|point| point.arrow_encode_ms()));
-    let upload_ms = format_milliseconds(last.and_then(|point| point.upload_ms()));
-    let device_copy_ms = format_milliseconds(last.and_then(|point| point.device_copy_ms()));
-    let model_ms = format_milliseconds(last.and_then(|point| point.model_ms()));
-    let throughput_chart =
-        training_resource_chart(metrics, observed_steps, ResourceSeries::Throughput);
-    let transfer_chart = training_resource_chart(metrics, observed_steps, ResourceSeries::Transfer);
-    let cpu_chart = training_resource_chart(metrics, observed_steps, ResourceSeries::Cpu);
-    let gpu_chart = training_resource_chart(metrics, observed_steps, ResourceSeries::Gpu);
-    let memory_chart = training_resource_chart(metrics, observed_steps, ResourceSeries::Memory);
+    let loader_ms = last
+        .and_then(|point| point.loader_ms())
+        .formatted_milliseconds();
+    let arrow_encode_ms = last
+        .and_then(|point| point.arrow_encode_ms())
+        .formatted_milliseconds();
+    let upload_ms = last
+        .and_then(|point| point.upload_ms())
+        .formatted_milliseconds();
+    let device_copy_ms = last
+        .and_then(|point| point.device_copy_ms())
+        .formatted_milliseconds();
+    let model_ms = last
+        .and_then(|point| point.model_ms())
+        .formatted_milliseconds();
+    let throughput_chart = ResourceSeries::Throughput.chart(metrics, observed_steps);
+    let transfer_chart = ResourceSeries::Transfer.chart(metrics, observed_steps);
+    let cpu_chart = ResourceSeries::Cpu.chart(metrics, observed_steps);
+    let gpu_chart = ResourceSeries::Gpu.chart(metrics, observed_steps);
+    let memory_chart = ResourceSeries::Memory.chart(metrics, observed_steps);
 
     rsx! {
         section { class: "training-resources",
@@ -945,11 +984,11 @@ fn TrainingPerformance(run: TrainingRun) -> Element {
                 }
             }
             div { class: "training-resource-grid",
-                ResourceLane { lane: ResourceLaneModel::new(chart_dom_id("training-rate", run.id()), "Training rate", throughput).with_chart(throughput_chart, chart_group.clone()).with_presentation("resource-throughput", "Samples completed per second.") }
-                ResourceLane { lane: ResourceLaneModel::new(chart_dom_id("input-rate", run.id()), "Input rate", transfer).with_chart(transfer_chart, chart_group.clone()).with_presentation("resource-transfer", "Prepared camera data per second.") }
-                ResourceLane { lane: ResourceLaneModel::new(chart_dom_id("cpu-utilization", run.id()), "CPU", cpu).with_chart(cpu_chart, chart_group.clone()).with_presentation("resource-cpu", "Runtime process CPU utilization. 100% is one fully occupied core.") }
-                ResourceLane { lane: ResourceLaneModel::new(chart_dom_id("gpu-utilization", run.id()), "GPU", gpu).with_chart(gpu_chart, chart_group.clone()).with_presentation("resource-gpu", "Whole-device utilization reported by the selected runtime; other processes may contribute.") }
-                ResourceLane { lane: ResourceLaneModel::new(chart_dom_id("memory-usage", run.id()), "Memory", memory).with_chart(memory_chart, chart_group).with_presentation("resource-memory", "Current resident memory used by the runtime process, including training allocations.") }
+                ResourceLane { lane: ResourceLaneModel::new(run.id().chart_dom_id("training-rate"), "Training rate", throughput).with_chart(throughput_chart, chart_group.clone()).with_presentation("resource-throughput", "Samples completed per second.") }
+                ResourceLane { lane: ResourceLaneModel::new(run.id().chart_dom_id("input-rate"), "Input rate", transfer).with_chart(transfer_chart, chart_group.clone()).with_presentation("resource-transfer", "Prepared camera data per second.") }
+                ResourceLane { lane: ResourceLaneModel::new(run.id().chart_dom_id("cpu-utilization"), "CPU", cpu).with_chart(cpu_chart, chart_group.clone()).with_presentation("resource-cpu", "Runtime process CPU utilization. 100% is one fully occupied core.") }
+                ResourceLane { lane: ResourceLaneModel::new(run.id().chart_dom_id("gpu-utilization"), "GPU", gpu).with_chart(gpu_chart, chart_group.clone()).with_presentation("resource-gpu", "Whole-device utilization reported by the selected runtime; other processes may contribute.") }
+                ResourceLane { lane: ResourceLaneModel::new(run.id().chart_dom_id("memory-usage"), "Memory", memory).with_chart(memory_chart, chart_group).with_presentation("resource-memory", "Current resident memory used by the runtime process, including training allocations.") }
             }
         }
     }
@@ -1028,18 +1067,20 @@ enum ResourceSeries {
     Memory,
 }
 
-pub(crate) fn default_training_sql(namespace: &str, dataset_id: &str) -> String {
-    spiral::ManagedTable::Datasets.training_sql_for_dataset(namespace, dataset_id)
+trait TrainingPhasePresentation {
+    fn presentation_class(self) -> &'static str;
 }
 
-fn phase_class(phase: TrainingRunPhase) -> &'static str {
-    match phase {
-        TrainingRunPhase::Starting | TrainingRunPhase::Running | TrainingRunPhase::Stopping => {
-            "training-phase training-phase-active"
+impl TrainingPhasePresentation for TrainingRunPhase {
+    fn presentation_class(self) -> &'static str {
+        match self {
+            TrainingRunPhase::Starting | TrainingRunPhase::Running | TrainingRunPhase::Stopping => {
+                "training-phase training-phase-active"
+            }
+            TrainingRunPhase::Completed => "training-phase training-phase-complete",
+            TrainingRunPhase::Stopped => "training-phase",
+            TrainingRunPhase::Failed => "training-phase training-phase-failed",
         }
-        TrainingRunPhase::Completed => "training-phase training-phase-complete",
-        TrainingRunPhase::Stopped => "training-phase",
-        TrainingRunPhase::Failed => "training-phase training-phase-failed",
     }
 }
 
@@ -1049,8 +1090,12 @@ trait TrainingRunPresentation {
 
 impl TrainingRunPresentation for TrainingRun {
     fn loss_chart(&self) -> Chart {
-        let train = metric_series_data(self.metrics(), |point| Some(point.train_loss()), true);
-        let validation = metric_series_data(self.metrics(), |point| point.validation_loss(), true);
+        let train = self
+            .metrics()
+            .series_data(|point| Some(point.train_loss()), true);
+        let validation = self
+            .metrics()
+            .series_data(|point| point.validation_loss(), true);
         let observed_steps = self
             .metrics()
             .last()
@@ -1062,7 +1107,7 @@ impl TrainingRunPresentation for TrainingRun {
         Chart::new()
             .animation(false)
             .color(vec![COLOR_TRAIN, COLOR_VALIDATION])
-            .tooltip(studio_numeric_tooltip(4))
+            .tooltip(StudioTooltip::numeric(4))
             .grid(
                 Grid::new()
                     .left(48)
@@ -1072,13 +1117,13 @@ impl TrainingRunPresentation for TrainingRun {
                     .contain_label(false),
             )
             .x_axis(
-                chart_axis(AxisType::Value, true)
+                TrainingChartStyle::axis(AxisType::Value, true)
                     .min(0)
                     .max(observed_steps as f64)
                     .split_number(4),
             )
-            .y_axis(chart_axis(AxisType::Value, true).split_number(5))
-            .data_zoom(training_slider_zoom(48.0, 12.0))
+            .y_axis(TrainingChartStyle::axis(AxisType::Value, true).split_number(5))
+            .data_zoom(TrainingChartStyle::slider_zoom(48.0, 12.0))
             .series(
                 MetricLineSpec::new("train-loss", "Train", COLOR_TRAIN)
                     .with_width(2.0)
@@ -1092,95 +1137,90 @@ impl TrainingRunPresentation for TrainingRun {
     }
 }
 
-fn training_slider_zoom(left: f64, right: f64) -> DataZoom {
-    DataZoom::new()
-        .type_(DataZoomType::Slider)
-        .show(true)
-        .x_axis_index(0)
-        .filter_mode(FilterMode::Filter)
-        .realtime(true)
-        .throttle(50)
-        .brush_select(false)
-        .left(left)
-        .right(right)
-        .bottom(4)
-        .background_color(COLOR_SURFACE)
-        .border_color(COLOR_LINE)
-        .filler_color(COLOR_SELECTED)
+impl ResourceSeries {
+    fn chart(self, metrics: &[TrainingMetricPoint], observed_steps: u64) -> Chart {
+        let (id, name, color) = match self {
+            Self::Throughput => ("training-rate", "Training rate", COLOR_THROUGHPUT),
+            Self::Transfer => ("input-rate", "Input rate", COLOR_TRANSFER),
+            Self::Cpu => ("cpu-utilization", "CPU", COLOR_CPU),
+            Self::Gpu => ("gpu-utilization", "GPU", COLOR_GPU),
+            Self::Memory => ("memory-usage", "Memory", COLOR_MEMORY),
+        };
+        let data = metrics.series_data(
+            |point| match self {
+                Self::Throughput => Some(point.examples_per_second()),
+                Self::Transfer => Some(point.transfer_bytes_per_second()),
+                Self::Cpu => point.cpu_percent(),
+                Self::Gpu => point.gpu_percent(),
+                Self::Memory => point.memory_bytes().map(|value| value as f64),
+            },
+            false,
+        );
+        let tooltip = match self {
+            Self::Throughput => StudioTooltip::rate(TooltipRateUnit::SamplesPerSecond),
+            Self::Transfer => StudioTooltip::rate(TooltipRateUnit::BytesPerSecond),
+            Self::Cpu | Self::Gpu => StudioTooltip::percent(),
+            Self::Memory => StudioTooltip::bytes(),
+        };
+
+        Chart::new()
+            .animation(false)
+            .color(vec![color])
+            .tooltip(tooltip)
+            .grid(Grid::new().left(0).right(0).top(6).bottom(40))
+            .x_axis(
+                TrainingChartStyle::axis(AxisType::Value, false)
+                    .min(0)
+                    .max(observed_steps.max(1) as f64),
+            )
+            .y_axis(match self {
+                Self::Gpu => TrainingChartStyle::axis(AxisType::Value, false)
+                    .min(0)
+                    .max(100),
+                _ => TrainingChartStyle::axis(AxisType::Value, false)
+                    .min(0)
+                    .scale(true),
+            })
+            .data_zoom(TrainingChartStyle::slider_zoom(8.0, 8.0))
+            .series(
+                MetricLineSpec::new(id, name, color)
+                    .with_width(1.5)
+                    .render(data)
+                    .area_style(AreaStyle::new().color(color).opacity(0.09)),
+            )
+    }
 }
 
-fn training_resource_chart(
-    metrics: &[TrainingMetricPoint],
-    observed_steps: u64,
-    series: ResourceSeries,
-) -> Chart {
-    let (id, name, color) = match series {
-        ResourceSeries::Throughput => ("training-rate", "Training rate", COLOR_THROUGHPUT),
-        ResourceSeries::Transfer => ("input-rate", "Input rate", COLOR_TRANSFER),
-        ResourceSeries::Cpu => ("cpu-utilization", "CPU", COLOR_CPU),
-        ResourceSeries::Gpu => ("gpu-utilization", "GPU", COLOR_GPU),
-        ResourceSeries::Memory => ("memory-usage", "Memory", COLOR_MEMORY),
-    };
-    let data = metric_series_data(
-        metrics,
-        |point| match series {
-            ResourceSeries::Throughput => Some(point.examples_per_second()),
-            ResourceSeries::Transfer => Some(point.transfer_bytes_per_second()),
-            ResourceSeries::Cpu => point.cpu_percent(),
-            ResourceSeries::Gpu => point.gpu_percent(),
-            ResourceSeries::Memory => point.memory_bytes().map(|value| value as f64),
-        },
-        false,
-    );
-    let tooltip = match series {
-        ResourceSeries::Throughput => studio_rate_tooltip(TooltipRateUnit::SamplesPerSecond),
-        ResourceSeries::Transfer => studio_rate_tooltip(TooltipRateUnit::BytesPerSecond),
-        ResourceSeries::Cpu | ResourceSeries::Gpu => studio_percent_tooltip(),
-        ResourceSeries::Memory => studio_bytes_tooltip(),
-    };
-
-    Chart::new()
-        .animation(false)
-        .color(vec![color])
-        .tooltip(tooltip)
-        .grid(Grid::new().left(0).right(0).top(6).bottom(40))
-        .x_axis(
-            chart_axis(AxisType::Value, false)
-                .min(0)
-                .max(observed_steps.max(1) as f64),
-        )
-        .y_axis(match series {
-            ResourceSeries::Gpu => chart_axis(AxisType::Value, false).min(0).max(100),
-            _ => chart_axis(AxisType::Value, false).min(0).scale(true),
-        })
-        .data_zoom(training_slider_zoom(8.0, 8.0))
-        .series(
-            MetricLineSpec::new(id, name, color)
-                .with_width(1.5)
-                .render(data)
-                .area_style(AreaStyle::new().color(color).opacity(0.09)),
-        )
+trait TrainingMetricSeries {
+    fn series_data(
+        &self,
+        value: impl Fn(&TrainingMetricPoint) -> Option<f64>,
+        positive_only: bool,
+    ) -> DataFrame;
 }
 
-fn metric_series_data(
-    metrics: &[TrainingMetricPoint],
-    value: impl Fn(&TrainingMetricPoint) -> Option<f64>,
-    positive_only: bool,
-) -> DataFrame {
-    let points = metrics
-        .iter()
-        .filter_map(|point| {
-            let value = value(point)?;
-            (value.is_finite()
-                && (!positive_only || value > 0.0)
-                && (positive_only || value >= 0.0))
-                .then_some((point.step() as f64, value))
-        })
-        .collect::<Vec<_>>();
-    downsample_extrema(&points, TRAINING_CHART_POINT_BUDGET)
-        .into_iter()
-        .map(|(step, value)| xy_point(step, Some(value)))
-        .collect()
+impl TrainingMetricSeries for [TrainingMetricPoint] {
+    fn series_data(
+        &self,
+        value: impl Fn(&TrainingMetricPoint) -> Option<f64>,
+        positive_only: bool,
+    ) -> DataFrame {
+        let points = self
+            .iter()
+            .filter_map(|point| {
+                let value = value(point)?;
+                (value.is_finite()
+                    && (!positive_only || value > 0.0)
+                    && (positive_only || value >= 0.0))
+                    .then_some((point.step() as f64, value))
+            })
+            .collect::<Vec<_>>();
+        points
+            .downsample_extrema(TRAINING_CHART_POINT_BUDGET)
+            .into_iter()
+            .map(|(step, value)| TrainingChartStyle::point(step, Some(value)))
+            .collect()
+    }
 }
 
 struct MetricLineSpec<'a> {
@@ -1219,107 +1259,145 @@ impl<'a> MetricLineSpec<'a> {
     }
 }
 
-fn chart_axis(kind: AxisType, visible: bool) -> Axis {
-    Axis::new()
-        .type_(kind)
-        .show(true)
-        .axis_line(AxisLine::new().show(false))
-        .axis_tick(AxisTick::new().show(false))
-        .axis_label(
-            AxisLabel::new()
-                .show(visible)
-                .font_family(MONO_FONT)
-                .font_size(10)
-                .color(COLOR_INK_FAINT),
-        )
-        .split_line(
-            SplitLine::new()
-                .show(visible)
-                .line_style(LineStyle::new().color(COLOR_LINE).width(1)),
-        )
-}
+struct TrainingChartStyle;
 
-fn xy_point(x: f64, y: Option<f64>) -> DataPoint {
-    DataPoint::from(vec![CompositeValue::from(x), CompositeValue::from(y)])
-}
+impl TrainingChartStyle {
+    fn slider_zoom(left: f64, right: f64) -> DataZoom {
+        DataZoom::new()
+            .type_(DataZoomType::Slider)
+            .show(true)
+            .x_axis_index(0)
+            .filter_mode(FilterMode::Filter)
+            .realtime(true)
+            .throttle(50)
+            .brush_select(false)
+            .left(left)
+            .right(right)
+            .bottom(4)
+            .background_color(COLOR_SURFACE)
+            .border_color(COLOR_LINE)
+            .filler_color(COLOR_SELECTED)
+    }
 
-fn chart_dom_id(prefix: &str, key: &str) -> String {
-    let safe = key
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    format!("{prefix}-{safe}")
-}
+    fn axis(kind: AxisType, visible: bool) -> Axis {
+        Axis::new()
+            .type_(kind)
+            .show(true)
+            .axis_line(AxisLine::new().show(false))
+            .axis_tick(AxisTick::new().show(false))
+            .axis_label(
+                AxisLabel::new()
+                    .show(visible)
+                    .font_family(MONO_FONT)
+                    .font_size(10)
+                    .color(COLOR_INK_FAINT),
+            )
+            .split_line(
+                SplitLine::new()
+                    .show(visible)
+                    .line_style(LineStyle::new().color(COLOR_LINE).width(1)),
+            )
+    }
 
-fn training_chart_group(run_id: &str) -> String {
-    chart_dom_id("training-step-window", run_id)
-}
-
-fn step_percent(step: u64, total_steps: u64) -> f64 {
-    (step as f64 / total_steps.max(1) as f64 * 100.0).clamp(0.0, 100.0)
-}
-
-fn metric_event_label(point: &TrainingMetricPoint) -> String {
-    format!(
-        "{} at step {}",
-        point.event().unwrap_or("Event"),
-        point.step()
-    )
-}
-
-fn format_rate(bytes_per_second: f64) -> String {
-    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-    const MIB: f64 = 1024.0 * 1024.0;
-    if bytes_per_second >= GIB {
-        format!("{:.2} GiB/s", bytes_per_second / GIB)
-    } else {
-        format!("{:.1} MiB/s", bytes_per_second / MIB)
+    fn point(x: f64, y: Option<f64>) -> DataPoint {
+        DataPoint::from(vec![CompositeValue::from(x), CompositeValue::from(y)])
     }
 }
 
-fn format_bytes(bytes: u64) -> String {
-    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-    const MIB: f64 = 1024.0 * 1024.0;
-    let bytes = bytes as f64;
-    if bytes >= GIB {
-        format!("{:.2} GiB", bytes / GIB)
-    } else {
-        format!("{:.1} MiB", bytes / MIB)
+trait TrainingStepPresentation {
+    fn percent_of(self, total_steps: u64) -> f64;
+}
+
+impl TrainingStepPresentation for u64 {
+    fn percent_of(self, total_steps: u64) -> f64 {
+        (self as f64 / total_steps.max(1) as f64 * 100.0).clamp(0.0, 100.0)
     }
 }
 
-fn format_milliseconds(value: Option<f64>) -> String {
-    value
-        .filter(|value| value.is_finite() && *value >= 0.0)
-        .map(|value| {
-            if value >= 1_000.0 {
-                format!("{:.2} s", value / 1_000.0)
-            } else if value >= 10.0 {
-                format!("{value:.0} ms")
-            } else {
-                format!("{value:.1} ms")
-            }
-        })
-        .unwrap_or_else(|| "—".to_owned())
+trait TrainingMetricEventPresentation {
+    fn event_label(&self) -> String;
+}
+
+impl TrainingMetricEventPresentation for TrainingMetricPoint {
+    fn event_label(&self) -> String {
+        format!(
+            "{} at step {}",
+            self.event().unwrap_or("Event"),
+            self.step()
+        )
+    }
+}
+
+trait TrainingByteRatePresentation {
+    fn formatted_rate(self) -> String;
+}
+
+impl TrainingByteRatePresentation for f64 {
+    fn formatted_rate(self) -> String {
+        const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+        const MIB: f64 = 1024.0 * 1024.0;
+        if self >= GIB {
+            format!("{:.2} GiB/s", self / GIB)
+        } else {
+            format!("{:.1} MiB/s", self / MIB)
+        }
+    }
+}
+
+trait TrainingByteCountPresentation {
+    fn formatted_bytes(self) -> String;
+}
+
+impl TrainingByteCountPresentation for u64 {
+    fn formatted_bytes(self) -> String {
+        const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+        const MIB: f64 = 1024.0 * 1024.0;
+        let bytes = self as f64;
+        if bytes >= GIB {
+            format!("{:.2} GiB", bytes / GIB)
+        } else {
+            format!("{:.1} MiB", bytes / MIB)
+        }
+    }
+}
+
+trait TrainingDurationPresentation {
+    fn formatted_milliseconds(self) -> String;
+}
+
+impl TrainingDurationPresentation for Option<f64> {
+    fn formatted_milliseconds(self) -> String {
+        self.filter(|value| value.is_finite() && *value >= 0.0)
+            .map(|value| {
+                if value >= 1_000.0 {
+                    format!("{:.2} s", value / 1_000.0)
+                } else if value >= 10.0 {
+                    format!("{value:.0} ms")
+                } else {
+                    format!("{value:.1} ms")
+                }
+            })
+            .unwrap_or_else(|| "—".to_owned())
+    }
 }
 
 /// Runtime health responses keep device discovery intentionally lightweight:
 /// the first whitespace-delimited token is the identifier accepted by session
 /// creation and the complete string is its operator-facing label.
-fn runtime_device_option(advertised: &str) -> (String, String) {
-    let label = advertised.trim();
-    let value = label
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    (value, label.to_owned())
+trait RuntimeDevicePresentation {
+    fn runtime_device_option(&self) -> (String, String);
+}
+
+impl RuntimeDevicePresentation for str {
+    fn runtime_device_option(&self) -> (String, String) {
+        let label = self.trim();
+        let value = label
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        (value, label.to_owned())
+    }
 }
 
 #[cfg(test)]
@@ -1330,30 +1408,30 @@ mod tests {
 
     #[test]
     fn phase_timings_keep_submillisecond_detail_and_scan_long_uploads_as_seconds() {
-        assert_eq!(format_milliseconds(Some(0.26)), "0.3 ms");
-        assert_eq!(format_milliseconds(Some(149.4)), "149 ms");
-        assert_eq!(format_milliseconds(Some(2_963.0)), "2.96 s");
-        assert_eq!(format_milliseconds(None), "—");
+        assert_eq!(Some(0.26).formatted_milliseconds(), "0.3 ms");
+        assert_eq!(Some(149.4).formatted_milliseconds(), "149 ms");
+        assert_eq!(Some(2_963.0).formatted_milliseconds(), "2.96 s");
+        assert_eq!(None.formatted_milliseconds(), "—");
     }
 
     #[test]
     fn runtime_device_options_submit_identifiers_instead_of_hardware_labels() {
         assert_eq!(
-            runtime_device_option("CUDA:0 NVIDIA A100-SXM4-40GB"),
+            "CUDA:0 NVIDIA A100-SXM4-40GB".runtime_device_option(),
             (
                 "cuda:0".to_owned(),
                 "CUDA:0 NVIDIA A100-SXM4-40GB".to_owned()
             )
         );
         assert_eq!(
-            runtime_device_option("CPU"),
+            "CPU".runtime_device_option(),
             ("cpu".to_owned(), "CPU".to_owned())
         );
     }
 
     #[test]
     fn default_query_selects_complete_kept_follower_samples() {
-        let sql = default_training_sql("robotics", "pick-place");
+        let sql = spiral::ManagedTable::Datasets.training_sql_for_dataset("robotics", "pick-place");
         assert!(sql.contains(&format!(
             "FROM {}",
             Table::JointSamples.qualified_name("robotics")
@@ -1369,7 +1447,7 @@ mod tests {
     fn unavailable_training_never_claims_to_be_ready() {
         let readiness =
             TrainingReadiness::new(false, true, "Policy compute runtime is unavailable.");
-        let (summary, recovery) = training_readiness_guidance(&readiness);
+        let (summary, recovery) = readiness.guidance();
         assert_eq!(summary, "Policy compute runtime is unavailable.");
         assert_eq!(
             recovery,
@@ -1378,10 +1456,7 @@ mod tests {
 
         let checking = TrainingReadiness::new(false, true, "Checking training storage.")
             .with_runtime(Some(Default::default()));
-        assert_ne!(
-            training_readiness_guidance(&checking).1,
-            "Training is ready."
-        );
+        assert_ne!(checking.guidance().1, "Training is ready.");
     }
 
     #[test]
@@ -1391,7 +1466,7 @@ mod tests {
             spiral_robotics_api::training::TrainingResourceMetrics::new(0.0, 25.0),
             spiral_robotics_api::training::TrainingStageTimings::default(),
         )];
-        let chart = training_resource_chart(&metrics, 100, ResourceSeries::Throughput);
+        let chart = ResourceSeries::Throughput.chart(&metrics, 100);
         let option = serde_json::to_value(chart).expect("chart should serialize");
         assert_eq!(option["xAxis"]["max"], 100.0);
         assert_eq!(option["series"][0]["data"][0][0], 50.0);
@@ -1399,7 +1474,7 @@ mod tests {
         assert_eq!(option["dataZoom"][0]["type"], "slider");
         assert_eq!(option["dataZoom"][0]["show"], true);
         assert_eq!(option["dataZoom"][0]["xAxisIndex"], 0);
-        assert_eq!(step_percent(50, 100), 50.0);
+        assert_eq!(50_u64.percent_of(100), 50.0);
     }
 
     #[test]

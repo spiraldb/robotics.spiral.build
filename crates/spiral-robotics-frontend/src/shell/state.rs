@@ -40,17 +40,6 @@ pub(crate) fn description() -> Description {
     use_context::<Description>()
 }
 
-fn now_ms() -> f64 {
-    #[cfg(all(feature = "web", target_arch = "wasm32"))]
-    {
-        js_sys::Date::now()
-    }
-    #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
-    {
-        0.0
-    }
-}
-
 /// The one selection shared by the hierarchy, viewport, cameras, and inspector.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Selection {
@@ -87,37 +76,36 @@ impl Selection {
 /// a valid object on an available arm. Camera selection remains intentional;
 /// selecting an arm itself, arriving with no selection, or losing a stale
 /// motor selection opens that arm's first motor in the inspector.
-fn default_joint_selection(
-    robots: &[RobotSummary],
-    selected: Option<&Selection>,
-) -> Option<Selection> {
-    let robot = selected
-        .and_then(|selection| {
-            robots
-                .iter()
-                .find(|robot| robot.id() == selection.robot_id())
-        })
-        .or_else(|| robots.first())?;
+trait RobotSelection {
+    fn default_joint_selection(&self, selected: Option<&Selection>) -> Option<Selection>;
+}
 
-    match selected {
-        Some(Selection::Camera {
-            robot: selected, ..
-        }) if selected == robot.id() => return None,
-        Some(Selection::Joint {
-            robot: selected,
-            joint,
-        }) if selected == robot.id()
-            && robot.motors().iter().any(|motor| motor.name() == joint) =>
-        {
-            return None;
+impl RobotSelection for [RobotSummary] {
+    fn default_joint_selection(&self, selected: Option<&Selection>) -> Option<Selection> {
+        let robot = selected
+            .and_then(|selection| self.iter().find(|robot| robot.id() == selection.robot_id()))
+            .or_else(|| self.first())?;
+
+        match selected {
+            Some(Selection::Camera {
+                robot: selected, ..
+            }) if selected == robot.id() => return None,
+            Some(Selection::Joint {
+                robot: selected,
+                joint,
+            }) if selected == robot.id()
+                && robot.motors().iter().any(|motor| motor.name() == joint) =>
+            {
+                return None;
+            }
+            _ => {}
         }
-        _ => {}
-    }
 
-    robot.motors().first().map(|motor| Selection::Joint {
-        robot: robot.id().to_owned(),
-        joint: motor.name().to_owned(),
-    })
+        robot.motors().first().map(|motor| Selection::Joint {
+            robot: robot.id().to_owned(),
+            joint: motor.name().to_owned(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -182,6 +170,17 @@ pub(crate) struct StudioDataSignals {
 }
 
 impl Studio {
+    fn now_ms() -> f64 {
+        #[cfg(all(feature = "web", target_arch = "wasm32"))]
+        {
+            js_sys::Date::now()
+        }
+        #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+        {
+            0.0
+        }
+    }
+
     pub(crate) const fn snapshot(self) -> Signal<StudioSnapshot> {
         self.snapshot
     }
@@ -208,6 +207,11 @@ impl Studio {
 
     pub(crate) const fn live(self) -> Signal<bool> {
         self.backend.live
+    }
+
+    #[cfg(all(feature = "web", target_arch = "wasm32"))]
+    const fn last_event_ms(self) -> Signal<f64> {
+        self.backend.last_event_ms
     }
 
     pub(crate) const fn clock_ms(self) -> Signal<f64> {
@@ -289,14 +293,14 @@ impl Studio {
                 let snapshot_signal = studio.snapshot();
                 let snapshot = snapshot_signal.read();
                 let selected = default_selection.read();
-                default_joint_selection(snapshot.robots(), selected.as_ref())
+                snapshot.robots().default_joint_selection(selected.as_ref())
             };
             if let Some(next) = next {
                 default_selection.set(Some(next));
             }
         });
         #[cfg(all(feature = "web", target_arch = "wasm32"))]
-        let mut studio = studio;
+        let studio = studio;
 
         // The listener deliberately precedes catalog bootstrap. Wait for its
         // explicit readiness edge before making the browser session's one
@@ -305,7 +309,8 @@ impl Studio {
         let mut catalog_bootstrap_started = use_signal(|| false);
         #[cfg(all(feature = "web", target_arch = "wasm32"))]
         use_effect(move || {
-            if studio.snapshot().read().readiness.catalog_available && !catalog_bootstrap_started()
+            if studio.snapshot().read().readiness().catalog_available()
+                && !catalog_bootstrap_started()
             {
                 catalog_bootstrap_started.set(true);
                 spawn(async move {
@@ -318,20 +323,17 @@ impl Studio {
         // restarts, so the page recovers without a manual refresh.
         #[cfg(all(feature = "web", target_arch = "wasm32"))]
         use_future(move || async move {
-            let Self {
-                mut snapshot,
-                mut telemetry,
-                mut training,
-                mut rollout,
-                mut workflow_state,
-                mut workflow_agent_state,
-                mut live,
-                mut last_event_ms,
-                mut recording_signals,
-                ..
-            } = studio;
+            let mut snapshot = studio.snapshot();
+            let mut telemetry = studio.telemetry();
+            let mut training = studio.training();
+            let mut rollout = studio.rollout();
+            let mut workflow_state = studio.workflow_state();
+            let mut workflow_agent_state = studio.workflow_agent_state();
+            let mut live = studio.live();
+            let mut last_event_ms = studio.last_event_ms();
+            let mut recording_signals = studio.recording_signals();
             loop {
-                let _ = api::stream_events(|event| {
+                let _ = api::Http::stream_events(|event| {
                     // Opening an EventSource is not a connection signal. Only
                     // mark the UI live after the server has delivered a valid
                     // event, so controls never look usable during a failed
@@ -345,7 +347,7 @@ impl Studio {
                         StudioEvent::Rollout(value) => rollout.set(*value),
                         StudioEvent::WorkflowSnapshot(value) => workflow_state.set(Some(*value)),
                         StudioEvent::WorkflowUpdate(update) => {
-                            workflow_state.set(Some(update.state));
+                            workflow_state.set(Some(update.state().clone()));
                         }
                         StudioEvent::WorkflowAgent(value) => {
                             // The backend treats its broadcast values as
@@ -360,7 +362,7 @@ impl Studio {
                             // Only a frame that can change the store touches it.
                             // Idle writes would mark the signal dirty and
                             // needlessly rebuild the Timeline view model.
-                            if frame.recording.is_some() || recording_signals.peek().live() {
+                            if frame.recording().is_some() || recording_signals.peek().live() {
                                 recording_signals.write().observe(&frame);
                             }
                             telemetry.set(*frame);
@@ -503,7 +505,7 @@ impl Studio {
             catalog.loading = true;
             catalog.error = None;
         }
-        match api::get::<EpisodeCatalogResponse>("/api/episodes").await {
+        match api::Http::get::<EpisodeCatalogResponse>("/api/episodes").await {
             Ok(response) => {
                 let mut catalog = self.data.episode_catalog.write();
                 let (datasets, episodes, issues) = response.into_parts();
@@ -697,7 +699,7 @@ impl Studio {
 
     fn notify(&self, notice: MessageNotice) {
         let mut notifications = self.notifications;
-        notifications.write().push(notice, now_ms());
+        notifications.write().push(notice, Self::now_ms());
     }
 }
 
@@ -713,7 +715,7 @@ mod tests {
     };
     use spiral_robotics_core::calibration::MotorDirection;
 
-    use super::{Selection, default_joint_selection};
+    use super::{RobotSelection, Selection};
 
     fn robot(id: &str, motors: &[&str]) -> RobotSummary {
         RobotSummary::new(
@@ -751,20 +753,20 @@ mod tests {
 
     #[test]
     fn the_first_motor_is_the_default_object_on_the_focused_arm() {
-        let robots = vec![
+        let robots = [
             robot("follower", &["shoulder_pan", "elbow_flex"]),
             robot("leader", &["shoulder_lift"]),
         ];
 
         assert_eq!(
-            default_joint_selection(&robots, None),
+            robots.default_joint_selection(None),
             Some(Selection::Joint {
                 robot: "follower".into(),
                 joint: "shoulder_pan".into(),
             })
         );
         assert_eq!(
-            default_joint_selection(&robots, Some(&Selection::Robot("leader".into()))),
+            robots.default_joint_selection(Some(&Selection::Robot("leader".into()))),
             Some(Selection::Joint {
                 robot: "leader".into(),
                 joint: "shoulder_lift".into(),
@@ -774,7 +776,7 @@ mod tests {
 
     #[test]
     fn an_intentional_camera_or_valid_motor_selection_is_preserved() {
-        let robots = vec![robot("follower", &["shoulder_pan"])];
+        let robots = [robot("follower", &["shoulder_pan"])];
         let camera = Selection::Camera {
             robot: "follower".into(),
             role: "top".into(),
@@ -784,7 +786,7 @@ mod tests {
             joint: "shoulder_pan".into(),
         };
 
-        assert_eq!(default_joint_selection(&robots, Some(&camera)), None);
-        assert_eq!(default_joint_selection(&robots, Some(&joint)), None);
+        assert_eq!(robots.default_joint_selection(Some(&camera)), None);
+        assert_eq!(robots.default_joint_selection(Some(&joint)), None);
     }
 }

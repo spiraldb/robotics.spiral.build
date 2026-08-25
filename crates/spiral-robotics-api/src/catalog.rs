@@ -235,11 +235,6 @@ impl QueryPreset {
     }
 }
 
-pub fn is_dataset_id(dataset_id: &str) -> bool {
-    spiral_robotics_core::identity::DatasetId::try_from(dataset_id)
-        .is_ok_and(|identity| identity.as_str() == dataset_id)
-}
-
 pub mod column {
     pub const STATE_VALID: &str = "state_valid";
     pub const ACTION_VALID: &str = "action_valid";

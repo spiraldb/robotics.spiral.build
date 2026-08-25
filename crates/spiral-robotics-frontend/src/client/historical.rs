@@ -15,10 +15,11 @@ use spiral_robotics_api::recording::{
 use spiral_robotics_core::arm::SO101_JOINTS;
 
 use crate::client::http as api;
+use crate::client::http::EpisodeApiPath;
 use crate::panels::timeline::panel::{
     TimelineSignalLane, TimelineSignalPoint, TimelineSignalSeries,
 };
-use crate::panels::timeline::signals::signal_color;
+use crate::panels::timeline::signals::SignalNamePresentation;
 use crate::shell::activity::{LoadState, RecordedSource};
 use crate::shell::state::Studio;
 
@@ -27,11 +28,17 @@ const RECORDED_REQUEST_TIMEOUT_MS: u32 = 15_000;
 const TRACE_BUCKETS: usize = 240;
 const MAX_CACHED_EPISODES: usize = 4;
 
-pub(crate) fn historical_replay_slot(seconds: f64) -> u64 {
-    if !seconds.is_finite() || seconds <= 0.0 {
-        return 0;
+pub(crate) trait HistoricalReplayTime {
+    fn replay_slot(self) -> u64;
+}
+
+impl HistoricalReplayTime for f64 {
+    fn replay_slot(self) -> u64 {
+        if !self.is_finite() || self <= 0.0 {
+            return 0;
+        }
+        (self * HISTORICAL_RENDER_HZ).floor() as u64
     }
-    (seconds * HISTORICAL_RENDER_HZ).floor() as u64
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -201,94 +208,135 @@ impl HistoricalPreviewSignals {
     }
 }
 
-pub(crate) fn request_historical_preview(
-    studio: Studio,
-    request: HistoricalPreviewRequest,
-    signals: HistoricalPreviewSignals,
-) {
-    let HistoricalPreviewRequest {
-        episode,
-        expected_frames,
-        seconds,
-    } = request;
-    let HistoricalPreviewSignals {
-        mut state,
-        mut revision,
-        mut cache,
-    } = signals;
-    // A controller clock may advance while the one snapshot request is in
-    // flight. Record the newest requested time without starting another read;
-    // the completion below samples that newest time from the loaded snapshot.
-    let same_episode_loading = state.peek().as_ref().is_some_and(|source| {
-        source.episode() == episode && matches!(source.state(), LoadState::Loading { .. })
-    });
-    if same_episode_loading && cache.peek().get(&episode, expected_frames).is_none() {
-        if let Some(source) = state.write().as_mut() {
-            source.set_seconds(seconds);
-        }
-        return;
-    }
-
-    let ticket = revision.peek().wrapping_add(1);
-    revision.set(ticket);
-    if let Some(inspection) = cache.peek().get(&episode, expected_frames) {
-        match inspection.preview_at(seconds) {
-            Ok(preview) => state.set(Some(RecordedSource::new(
-                episode,
-                seconds,
-                LoadState::Ready(preview),
-            ))),
-            Err(error) => {
-                state.set(Some(RecordedSource::new(
-                    episode,
-                    seconds,
-                    LoadState::Failed {
-                        reason: error.clone(),
-                        previous: None,
-                    },
-                )));
-                studio.report(error);
+impl Studio {
+    pub(crate) fn request_historical_preview(
+        self,
+        request: HistoricalPreviewRequest,
+        signals: HistoricalPreviewSignals,
+    ) {
+        let studio = self;
+        let HistoricalPreviewRequest {
+            episode,
+            expected_frames,
+            seconds,
+        } = request;
+        let HistoricalPreviewSignals {
+            mut state,
+            mut revision,
+            mut cache,
+        } = signals;
+        // A controller clock may advance while the one snapshot request is in
+        // flight. Record the newest requested time without starting another read;
+        // the completion below samples that newest time from the loaded snapshot.
+        let same_episode_loading = state.peek().as_ref().is_some_and(|source| {
+            source.episode() == episode && matches!(source.state(), LoadState::Loading { .. })
+        });
+        if same_episode_loading && cache.peek().get(&episode, expected_frames).is_none() {
+            if let Some(source) = state.write().as_mut() {
+                source.set_seconds(seconds);
             }
-        }
-        return;
-    }
-
-    let previous = state
-        .peek()
-        .as_ref()
-        .filter(|source| source.episode() == episode)
-        .and_then(RecordedSource::renderable)
-        .cloned();
-    state.set(Some(RecordedSource::new(
-        episode.clone(),
-        seconds,
-        LoadState::Loading {
-            previous: previous.clone(),
-        },
-    )));
-    spawn(async move {
-        let path = api::episode_inspection_url(&episode);
-        let loaded = with_deadline(
-            "The episode inspection snapshot",
-            RECORDED_REQUEST_TIMEOUT_MS,
-            api::get::<api::EpisodeInspectionSnapshot>(&path),
-        )
-        .await
-        .and_then(CachedInspection::try_new)
-        .map(Arc::new);
-        if !revision.peek().eq(&ticket) {
             return;
         }
-        match loaded {
-            Ok(inspection) => {
-                if expected_frames
-                    .is_some_and(|frames| inspection.snapshot.episode().frames() != frames)
-                {
-                    let error = format!(
-                        "The episode changed while it was loading (expected {expected} frames, received {actual}). Reload it to inspect the latest revision.",
-                        expected = expected_frames.unwrap_or_default(),
-                        actual = inspection.snapshot.episode().frames(),
-                    );
+
+        let ticket = revision.peek().wrapping_add(1);
+        revision.set(ticket);
+        if let Some(inspection) = cache.peek().get(&episode, expected_frames) {
+            match inspection.preview_at(seconds) {
+                Ok(preview) => state.set(Some(RecordedSource::new(
+                    episode,
+                    seconds,
+                    LoadState::Ready(preview),
+                ))),
+                Err(error) => {
+                    state.set(Some(RecordedSource::new(
+                        episode,
+                        seconds,
+                        LoadState::Failed {
+                            reason: error.clone(),
+                            previous: None,
+                        },
+                    )));
+                    studio.report(error);
+                }
+            }
+            return;
+        }
+
+        let previous = state
+            .peek()
+            .as_ref()
+            .filter(|source| source.episode() == episode)
+            .and_then(RecordedSource::renderable)
+            .cloned();
+        state.set(Some(RecordedSource::new(
+            episode.clone(),
+            seconds,
+            LoadState::Loading {
+                previous: previous.clone(),
+            },
+        )));
+        spawn(async move {
+            let path = episode.inspection_url();
+            let loaded = HistoricalDeadline::run(
+                "The episode inspection snapshot",
+                RECORDED_REQUEST_TIMEOUT_MS,
+                api::Http::get::<api::EpisodeInspectionSnapshot>(&path),
+            )
+            .await
+            .and_then(CachedInspection::try_new)
+            .map(Arc::new);
+            if !revision.peek().eq(&ticket) {
+                return;
+            }
+            match loaded {
+                Ok(inspection) => {
+                    if expected_frames
+                        .is_some_and(|frames| inspection.snapshot.episode().frames() != frames)
+                    {
+                        let error = format!(
+                            "The episode changed while it was loading (expected {expected} frames, received {actual}). Reload it to inspect the latest revision.",
+                            expected = expected_frames.unwrap_or_default(),
+                            actual = inspection.snapshot.episode().frames(),
+                        );
+                        state.set(Some(RecordedSource::new(
+                            episode,
+                            seconds,
+                            LoadState::Failed {
+                                reason: error.clone(),
+                                previous,
+                            },
+                        )));
+                        studio.report(error);
+                        return;
+                    }
+                    let requested_seconds = state
+                        .peek()
+                        .as_ref()
+                        .filter(|source| source.episode() == episode)
+                        .map_or(seconds, |source| source.seconds());
+                    match inspection.preview_at(requested_seconds) {
+                        Ok(preview) => {
+                            cache.write().insert(Arc::clone(&inspection));
+                            state.set(Some(RecordedSource::new(
+                                episode,
+                                requested_seconds,
+                                LoadState::Ready(preview),
+                            )));
+                        }
+                        Err(error) => {
+                            state.set(Some(RecordedSource::new(
+                                episode,
+                                requested_seconds,
+                                LoadState::Failed {
+                                    reason: error.clone(),
+                                    previous,
+                                },
+                            )));
+                            studio.report(error);
+                        }
+                    }
+                }
+                Err(error) => {
                     state.set(Some(RecordedSource::new(
                         episode,
                         seconds,
@@ -298,48 +346,10 @@ pub(crate) fn request_historical_preview(
                         },
                     )));
                     studio.report(error);
-                    return;
-                }
-                let requested_seconds = state
-                    .peek()
-                    .as_ref()
-                    .filter(|source| source.episode() == episode)
-                    .map_or(seconds, |source| source.seconds());
-                match inspection.preview_at(requested_seconds) {
-                    Ok(preview) => {
-                        cache.write().insert(Arc::clone(&inspection));
-                        state.set(Some(RecordedSource::new(
-                            episode,
-                            requested_seconds,
-                            LoadState::Ready(preview),
-                        )));
-                    }
-                    Err(error) => {
-                        state.set(Some(RecordedSource::new(
-                            episode,
-                            requested_seconds,
-                            LoadState::Failed {
-                                reason: error.clone(),
-                                previous,
-                            },
-                        )));
-                        studio.report(error);
-                    }
                 }
             }
-            Err(error) => {
-                state.set(Some(RecordedSource::new(
-                    episode,
-                    seconds,
-                    LoadState::Failed {
-                        reason: error.clone(),
-                        previous,
-                    },
-                )));
-                studio.report(error);
-            }
-        }
-    });
+        });
+    }
 }
 
 trait HistoricalSnapshot {
@@ -471,7 +481,7 @@ impl HistoricalSnapshot for EpisodeInspectionSnapshot {
                     ))
                 })
                 .collect();
-            TimelineSignalLane::new(joint.name(), joint.label(), signal_color(joint.name()))
+            TimelineSignalLane::new(joint.name(), joint.label(), joint.name().signal_color())
                 .with_series(series)
         })
     }
@@ -638,30 +648,34 @@ impl TraceBucket {
     }
 }
 
-#[cfg(all(feature = "web", target_arch = "wasm32"))]
-async fn recorded_deadline(millis: u32) {
-    gloo_timers::future::TimeoutFuture::new(millis).await;
-}
+struct HistoricalDeadline;
 
-#[cfg(not(all(feature = "web", target_arch = "wasm32")))]
-async fn recorded_deadline(_millis: u32) {
-    std::future::pending::<()>().await
-}
+impl HistoricalDeadline {
+    #[cfg(all(feature = "web", target_arch = "wasm32"))]
+    async fn timer(millis: u32) {
+        gloo_timers::future::TimeoutFuture::new(millis).await;
+    }
 
-async fn with_deadline<T>(
-    label: &str,
-    millis: u32,
-    work: impl std::future::Future<Output = Result<T, String>>,
-) -> Result<T, String> {
-    use futures_util::future::{Either, select};
-    let work = std::pin::pin!(work);
-    let timer = std::pin::pin!(recorded_deadline(millis));
-    match select(work, timer).await {
-        Either::Left((result, _)) => result,
-        Either::Right(((), _)) => Err(format!(
-            "{label} did not answer within {}s.",
-            millis / 1_000
-        )),
+    #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+    async fn timer(_millis: u32) {
+        std::future::pending::<()>().await
+    }
+
+    async fn run<T>(
+        label: &str,
+        millis: u32,
+        work: impl std::future::Future<Output = Result<T, String>>,
+    ) -> Result<T, String> {
+        use futures_util::future::{Either, select};
+        let work = std::pin::pin!(work);
+        let timer = std::pin::pin!(Self::timer(millis));
+        match select(work, timer).await {
+            Either::Left((result, _)) => result,
+            Either::Right(((), _)) => Err(format!(
+                "{label} did not answer within {}s.",
+                millis / 1_000
+            )),
+        }
     }
 }
 

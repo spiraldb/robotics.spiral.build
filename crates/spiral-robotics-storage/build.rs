@@ -4,9 +4,10 @@ use std::path::Path;
 mod schema_build;
 
 fn main() {
-    schema_build::generate_schema_version(
+    schema_build::SchemaVersionGenerator::new(
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("schema")
             .as_path(),
-    );
+    )
+    .generate();
 }

@@ -2,7 +2,7 @@
 
 #[cfg(feature = "server")]
 fn main() -> std::process::ExitCode {
-    spiral_robotics_backend::run(spiral_robotics_frontend::App)
+    spiral_robotics_backend::StudioServer::run(spiral_robotics_frontend::App)
 }
 
 #[cfg(all(not(feature = "server"), feature = "web"))]

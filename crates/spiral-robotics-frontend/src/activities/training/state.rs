@@ -8,9 +8,10 @@ use std::collections::BTreeSet;
 
 use dioxus::prelude::*;
 use gloo_net::http::Method;
+use spiral_robotics_api::catalog as spiral;
 use spiral_robotics_api::training::{StartTrainingRequest, TrainingRun};
 
-use crate::activities::data::sql_draft::rebase_generated_sql;
+use crate::activities::data::sql_draft::GeneratedSqlDraft;
 use crate::client::http as api;
 use crate::shell::notifications::MessageSource;
 use crate::shell::state::Studio;
@@ -43,12 +44,9 @@ struct TrainingCommandSignals {
     confirming_delete: Signal<Option<String>>,
 }
 
-pub(crate) fn use_training_controller(
-    namespace: &str,
-    dataset_id: &str,
-    default_sql: fn(&str, &str) -> String,
-) -> TrainingController {
-    let initial_sql = default_sql(namespace, dataset_id);
+pub(crate) fn use_training_controller(namespace: &str, dataset_id: &str) -> TrainingController {
+    let initial_sql =
+        spiral::ManagedTable::Datasets.training_sql_for_dataset(namespace, dataset_id);
     let request_sql = initial_sql.clone();
     let request_dataset = dataset_id.to_owned();
     let controller = TrainingController {
@@ -78,7 +76,6 @@ pub(crate) fn use_training_controller(
             controller.sync_dataset(DatasetSync {
                 namespace: &namespace,
                 dataset_id: &dataset_id,
-                default_sql,
             })
         },
     ));
@@ -92,7 +89,6 @@ pub(crate) fn training_controller() -> TrainingController {
 struct DatasetSync<'a> {
     namespace: &'a str,
     dataset_id: &'a str,
-    default_sql: fn(&str, &str) -> String,
 }
 
 pub(crate) struct TrainingRunIdentity {
@@ -109,7 +105,8 @@ impl TrainingRunIdentity {
 impl TrainingController {
     fn sync_dataset(mut self, dataset: DatasetSync<'_>) {
         let previous = self.draft.generated_sql.peek().to_owned();
-        let next = (dataset.default_sql)(dataset.namespace, dataset.dataset_id);
+        let next = spiral::ManagedTable::Datasets
+            .training_sql_for_dataset(dataset.namespace, dataset.dataset_id);
         self.draft
             .request
             .write()
@@ -120,7 +117,7 @@ impl TrainingController {
         {
             let mut request = self.draft.request.write();
             let mut sql = request.sql().to_owned();
-            if rebase_generated_sql(&mut sql, &previous, &next) {
+            if sql.rebase_generated(&previous, &next) {
                 request.set_sql(sql);
             }
         }
@@ -145,7 +142,7 @@ impl TrainingController {
             self.draft
                 .request
                 .write()
-                .set_run_name(next_default_run_name(existing_names));
+                .set_run_name(existing_names.next_default_run_name());
         }
     }
 
@@ -220,7 +217,7 @@ impl TrainingController {
         let mut request_signal = self.draft.request;
         let mut automatic_run_name = self.draft.automatic_run_name;
         spawn(async move {
-            let result = api::send_json::<_, TrainingRun>(
+            let result = api::Http::send_json::<_, TrainingRun>(
                 Method::POST,
                 "/api/training/runs",
                 Some(&request),
@@ -244,7 +241,7 @@ impl TrainingController {
                     }
                     request_signal
                         .write()
-                        .set_run_name(next_default_run_name(&existing_names));
+                        .set_run_name(existing_names.next_default_run_name());
                     automatic_run_name.set(true);
                     if !opened_runs.peek().iter().any(|id| id == run.id()) {
                         opened_runs.write().push(run.id().to_owned());
@@ -263,7 +260,7 @@ impl TrainingController {
         self.commands.stopping.set(Some(id.clone()));
         let mut stopping = self.commands.stopping;
         studio.run_utility("Stop requested.", async move {
-            let result = api::post(&format!("/api/training/runs/{id}/stop")).await;
+            let result = api::Http::post(&format!("/api/training/runs/{id}/stop")).await;
             stopping.set(None);
             result
         });
@@ -281,7 +278,7 @@ impl TrainingController {
         let mut selected_run = self.history.selected_run;
         let mut opened_runs = self.history.opened_runs;
         studio.run_utility(format!("Deleted run {}.", run.name), async move {
-            let result = api::send::<()>(Method::DELETE, &path, None).await;
+            let result = api::Http::send::<()>(Method::DELETE, &path, None).await;
             deleting.set(None);
             if result.is_ok() {
                 confirming_delete.set(None);
@@ -298,25 +295,28 @@ impl TrainingController {
     }
 }
 
-fn next_default_run_name(existing_names: &[String]) -> String {
-    const PREFIX: &str = "act-run-";
+trait TrainingRunNames {
+    fn next_default_run_name(&self) -> String;
+}
 
-    let used = existing_names
-        .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    let mut number = existing_names
-        .iter()
-        .filter_map(|name| name.strip_prefix(PREFIX)?.parse::<u64>().ok())
-        .max()
-        .unwrap_or_default()
-        .saturating_add(1);
-    loop {
-        let candidate = format!("{PREFIX}{number:03}");
-        if !used.contains(candidate.as_str()) {
-            return candidate;
+impl TrainingRunNames for [String] {
+    fn next_default_run_name(&self) -> String {
+        const PREFIX: &str = "act-run-";
+
+        let used = self.iter().map(String::as_str).collect::<BTreeSet<_>>();
+        let mut number = self
+            .iter()
+            .filter_map(|name| name.strip_prefix(PREFIX)?.parse::<u64>().ok())
+            .max()
+            .unwrap_or_default()
+            .saturating_add(1);
+        loop {
+            let candidate = format!("{PREFIX}{number:03}");
+            if !used.contains(candidate.as_str()) {
+                return candidate;
+            }
+            number = number.saturating_add(1);
         }
-        number = number.saturating_add(1);
     }
 }
 
@@ -341,18 +341,18 @@ impl OpenedTrainingRuns for Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpenedTrainingRuns, next_default_run_name};
+    use super::{OpenedTrainingRuns, TrainingRunNames};
 
     #[test]
     fn default_run_names_advance_from_history_without_colliding() {
-        let names = vec![
+        let names = [
             "act-run-001".to_owned(),
             "experiment".to_owned(),
             "act-run-007".to_owned(),
             "act-run-008".to_owned(),
         ];
-        assert_eq!(next_default_run_name(&names), "act-run-009");
-        assert_eq!(next_default_run_name(&[]), "act-run-001");
+        assert_eq!(names.next_default_run_name(), "act-run-009");
+        assert_eq!(Vec::<String>::new().next_default_run_name(), "act-run-001");
     }
 
     #[test]

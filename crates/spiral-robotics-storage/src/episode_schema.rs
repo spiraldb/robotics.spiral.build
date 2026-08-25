@@ -18,14 +18,76 @@ use spiral_robotics_api::recording::EpisodeArm;
 use crate::episodes::{EpisodeCompletion, EpisodeError, EpisodeStart, Sample};
 use crate::video::VideoSize;
 
-/// Schema for [`crate::schema::Table::Datasets`].
-pub(crate) fn datasets_schema() -> SchemaRef {
-    Arc::new(Schema::new(vec![
-        Field::new(db::DATASET_ID, DataType::Utf8, false),
-        Field::new(db::NAME, DataType::Utf8, false),
-        Field::new(db::CREATED_MS, DataType::Int64, false),
-        Field::new(db::DESCRIPTION, DataType::Utf8, true),
-    ]))
+pub(crate) struct EpisodeSchema;
+
+impl EpisodeSchema {
+    /// Schema for [`crate::schema::Table::Datasets`].
+    pub(crate) fn datasets() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new(db::DATASET_ID, DataType::Utf8, false),
+            Field::new(db::NAME, DataType::Utf8, false),
+            Field::new(db::CREATED_MS, DataType::Int64, false),
+            Field::new(db::DESCRIPTION, DataType::Utf8, true),
+        ]))
+    }
+
+    fn episodes() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new(db::EPISODE_ID, DataType::Utf8, false),
+            Field::new(db::DATASET_ID, DataType::Utf8, false),
+            Field::new(db::SCHEMA_VERSION, DataType::UInt32, false),
+            Field::new(db::STARTED_MS, DataType::Int64, false),
+            Field::new(db::SAMPLE_HZ, DataType::Float64, false),
+            Field::new(db::SOURCE, DataType::Utf8, false),
+            Field::new(db::NOTE, DataType::Utf8, true),
+            Field::new(db::FRAMES, DataType::UInt64, false),
+            Field::new(db::DURATION_NS, DataType::UInt64, false),
+            Field::new(db::MAX_FOLLOW_ERROR_DEGREES, DataType::Float64, true),
+            Field::new(db::DISCARDED, DataType::Boolean, false),
+            Field::new(db::METADATA_JSON, DataType::Utf8, false),
+        ]))
+    }
+
+    fn episode_streams() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new(db::EPISODE_ID, DataType::Utf8, false),
+            Field::new(db::STREAM_ID, DataType::Utf8, false),
+            Field::new(db::MODALITY, DataType::Utf8, false),
+            Field::new(db::ROBOT_TYPE, DataType::Utf8, true),
+            Field::new(
+                db::JOINT_NAMES,
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
+                true,
+            ),
+            Field::new(db::CAMERA_ID, DataType::Utf8, true),
+            Field::new(db::WIDTH, DataType::UInt32, true),
+            Field::new(db::HEIGHT, DataType::UInt32, true),
+            Field::new(db::FPS, DataType::UInt32, true),
+        ]))
+    }
+
+    fn joint_samples() -> SchemaRef {
+        let nullable_f64_list =
+            || DataType::List(Arc::new(Field::new("item", DataType::Float64, true)));
+        Arc::new(Schema::new(vec![
+            Field::new(db::EPISODE_ID, DataType::Utf8, false),
+            Field::new(db::STREAM_ID, DataType::Utf8, false),
+            Field::new(db::SAMPLE_INDEX, DataType::UInt64, false),
+            Field::new(db::EPISODE_TIME_NS, DataType::UInt64, false),
+            Field::new(db::STATE_VALID, DataType::Boolean, false),
+            Field::new(db::ACTION_VALID, DataType::Boolean, false),
+            Field::new(db::STATE_POSITION, nullable_f64_list(), false),
+            Field::new(db::ACTION_POSITION, nullable_f64_list(), true),
+            Field::new(
+                db::RAW_POSITION,
+                DataType::List(Arc::new(Field::new("item", DataType::Int64, false))),
+                false,
+            ),
+            Field::new(db::VELOCITY, nullable_f64_list(), true),
+            Field::new(db::EFFORT, nullable_f64_list(), true),
+            Field::new(db::FOLLOW_ERROR_DEGREES, DataType::Float64, true),
+        ]))
+    }
 }
 
 /// Build the owning dataset row. Dataset IDs double as their initial display
@@ -39,8 +101,9 @@ impl EpisodeStart {
             Arc::new(Int64Array::from(vec![start.started_ms()])),
             Arc::new(StringArray::from(vec![None::<&str>])),
         ];
-        RecordBatch::try_new(datasets_schema(), columns)
-            .map_err(|error| invalid(format!("building Spiral dataset batch: {error}")))
+        RecordBatch::try_new(EpisodeSchema::datasets(), columns).map_err(|error| {
+            EpisodeError::invalid(format!("building Spiral dataset batch: {error}"))
+        })
     }
 }
 
@@ -128,7 +191,9 @@ pub(crate) struct SpiralEpisodeEncoder {
 impl SpiralEpisodeEncoder {
     pub(crate) fn new(start: EpisodeStart) -> Result<Self, EpisodeError> {
         if start.arms().is_empty() {
-            return Err(invalid("a Spiral episode needs at least one arm stream"));
+            return Err(EpisodeError::invalid(
+                "a Spiral episode needs at least one arm stream",
+            ));
         }
         Ok(Self {
             start,
@@ -143,7 +208,7 @@ impl SpiralEpisodeEncoder {
     /// Convert one control frame without performing I/O.
     pub(crate) fn encode(&mut self, sample: &Sample) -> Result<Vec<JointSampleRow>, EpisodeError> {
         sample.validate_for(&self.start)?;
-        let episode_time_ns = seconds_to_ns(sample.seconds(), "sample time")?;
+        let episode_time_ns = EpisodeTimestamp::nanoseconds(sample.seconds(), "sample time")?;
         let sample_index = self.next_sample_index;
 
         let rows = self
@@ -184,28 +249,9 @@ impl SpiralEpisodeEncoder {
         self.next_sample_index = self
             .next_sample_index
             .checked_add(1)
-            .ok_or_else(|| invalid("episode sample index overflowed u64"))?;
+            .ok_or_else(|| EpisodeError::invalid("episode sample index overflowed u64"))?;
         Ok(rows)
     }
-}
-
-/// Schema for the completion row inserted last into
-/// [`crate::schema::Table::Episodes`].
-pub(crate) fn episodes_schema() -> SchemaRef {
-    Arc::new(Schema::new(vec![
-        Field::new(db::EPISODE_ID, DataType::Utf8, false),
-        Field::new(db::DATASET_ID, DataType::Utf8, false),
-        Field::new(db::SCHEMA_VERSION, DataType::UInt32, false),
-        Field::new(db::STARTED_MS, DataType::Int64, false),
-        Field::new(db::SAMPLE_HZ, DataType::Float64, false),
-        Field::new(db::SOURCE, DataType::Utf8, false),
-        Field::new(db::NOTE, DataType::Utf8, true),
-        Field::new(db::FRAMES, DataType::UInt64, false),
-        Field::new(db::DURATION_NS, DataType::UInt64, false),
-        Field::new(db::MAX_FOLLOW_ERROR_DEGREES, DataType::Float64, true),
-        Field::new(db::DISCARDED, DataType::Boolean, false),
-        Field::new(db::METADATA_JSON, DataType::Utf8, false),
-    ]))
 }
 
 /// Build the single row that makes an episode visible to readers.
@@ -215,9 +261,11 @@ impl EpisodeCompletion {
         start: &EpisodeStart,
         frames: u64,
     ) -> Result<RecordBatch, EpisodeError> {
-        let duration_ns = seconds_to_ns(self.duration_seconds(), "episode duration")?;
-        let metadata = serde_json::to_string(&(start, self))
-            .map_err(|error| invalid(format!("encoding episode metadata: {error}")))?;
+        let duration_ns =
+            EpisodeTimestamp::nanoseconds(self.duration_seconds(), "episode duration")?;
+        let metadata = serde_json::to_string(&(start, self)).map_err(|error| {
+            EpisodeError::invalid(format!("encoding episode metadata: {error}"))
+        })?;
         let columns: Vec<ArrayRef> = vec![
             Arc::new(StringArray::from(vec![start.id()])),
             Arc::new(StringArray::from(vec![start.dataset_id()])),
@@ -232,28 +280,10 @@ impl EpisodeCompletion {
             Arc::new(BooleanArray::from(vec![self.discarded()])),
             Arc::new(StringArray::from(vec![metadata])),
         ];
-        RecordBatch::try_new(episodes_schema(), columns)
-            .map_err(|error| invalid(format!("building Spiral episode batch: {error}")))
+        RecordBatch::try_new(EpisodeSchema::episodes(), columns).map_err(|error| {
+            EpisodeError::invalid(format!("building Spiral episode batch: {error}"))
+        })
     }
-}
-
-/// Schema for [`crate::schema::Table::EpisodeStreams`].
-pub(crate) fn episode_streams_schema() -> SchemaRef {
-    Arc::new(Schema::new(vec![
-        Field::new(db::EPISODE_ID, DataType::Utf8, false),
-        Field::new(db::STREAM_ID, DataType::Utf8, false),
-        Field::new(db::MODALITY, DataType::Utf8, false),
-        Field::new(db::ROBOT_TYPE, DataType::Utf8, true),
-        Field::new(
-            db::JOINT_NAMES,
-            DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
-            true,
-        ),
-        Field::new(db::CAMERA_ID, DataType::Utf8, true),
-        Field::new(db::WIDTH, DataType::UInt32, true),
-        Field::new(db::HEIGHT, DataType::UInt32, true),
-        Field::new(db::FPS, DataType::UInt32, true),
-    ]))
 }
 
 /// Describe every joint stream before its samples are appended.
@@ -287,8 +317,9 @@ impl EpisodeStart {
             Arc::new(UInt32Array::from(vec![None; start.arms().len()])),
             Arc::new(UInt32Array::from(vec![None; start.arms().len()])),
         ];
-        RecordBatch::try_new(episode_streams_schema(), columns)
-            .map_err(|error| invalid(format!("building Spiral stream batch: {error}")))
+        RecordBatch::try_new(EpisodeSchema::episode_streams(), columns).map_err(|error| {
+            EpisodeError::invalid(format!("building Spiral stream batch: {error}"))
+        })
     }
 }
 
@@ -328,33 +359,10 @@ impl VideoStreamRows for [VideoStreamRow] {
                 rows.iter().map(|row| row.properties.fps),
             )),
         ];
-        RecordBatch::try_new(episode_streams_schema(), columns)
-            .map_err(|error| invalid(format!("building Spiral video stream batch: {error}")))
+        RecordBatch::try_new(EpisodeSchema::episode_streams(), columns).map_err(|error| {
+            EpisodeError::invalid(format!("building Spiral video stream batch: {error}"))
+        })
     }
-}
-
-/// Schema for [`crate::schema::Table::JointSamples`].
-pub(crate) fn joint_samples_schema() -> SchemaRef {
-    let nullable_f64_list =
-        || DataType::List(Arc::new(Field::new("item", DataType::Float64, true)));
-    Arc::new(Schema::new(vec![
-        Field::new(db::EPISODE_ID, DataType::Utf8, false),
-        Field::new(db::STREAM_ID, DataType::Utf8, false),
-        Field::new(db::SAMPLE_INDEX, DataType::UInt64, false),
-        Field::new(db::EPISODE_TIME_NS, DataType::UInt64, false),
-        Field::new(db::STATE_VALID, DataType::Boolean, false),
-        Field::new(db::ACTION_VALID, DataType::Boolean, false),
-        Field::new(db::STATE_POSITION, nullable_f64_list(), false),
-        Field::new(db::ACTION_POSITION, nullable_f64_list(), true),
-        Field::new(
-            db::RAW_POSITION,
-            DataType::List(Arc::new(Field::new("item", DataType::Int64, false))),
-            false,
-        ),
-        Field::new(db::VELOCITY, nullable_f64_list(), true),
-        Field::new(db::EFFORT, nullable_f64_list(), true),
-        Field::new(db::FOLLOW_ERROR_DEGREES, DataType::Float64, true),
-    ]))
 }
 
 /// Convert rows into a batch suitable for ADBC `bind_stream` ingestion.
@@ -373,14 +381,14 @@ impl JointSampleRows for [JointSampleRow] {
         let mut effort = ListBuilder::new(Float64Builder::new());
 
         for row in rows {
-            append_nullable_values(&mut state_position, Some(&row.state.position));
-            append_nullable_values(&mut action_position, row.action_position.as_deref());
+            state_position.append_nullable_values(Some(&row.state.position));
+            action_position.append_nullable_values(row.action_position.as_deref());
             for value in &row.state.raw_position {
                 raw_position.values().append_value(*value);
             }
             raw_position.append(true);
-            append_nullable_values(&mut velocity, row.state.velocity.as_deref());
-            append_nullable_values(&mut effort, row.state.effort.as_deref());
+            velocity.append_nullable_values(row.state.velocity.as_deref());
+            effort.append_nullable_values(row.state.effort.as_deref());
         }
 
         let columns: Vec<ArrayRef> = vec![
@@ -415,26 +423,30 @@ impl JointSampleRows for [JointSampleRow] {
                 rows.iter().map(|row| row.follow_error_degrees),
             )),
         ];
-        RecordBatch::try_new(joint_samples_schema(), columns)
-            .map_err(|error| invalid(format!("building Spiral joint sample batch: {error}")))
+        RecordBatch::try_new(EpisodeSchema::joint_samples(), columns).map_err(|error| {
+            EpisodeError::invalid(format!("building Spiral joint sample batch: {error}"))
+        })
     }
 }
 
-fn append_nullable_values(
-    builder: &mut ListBuilder<Float64Builder>,
-    values: Option<&[Option<f64>]>,
-) {
-    let Some(values) = values else {
-        builder.append(false);
-        return;
-    };
-    for value in values {
-        match value {
-            Some(value) => builder.values().append_value(*value),
-            None => builder.values().append_null(),
+trait NullableFloatListBuilder {
+    fn append_nullable_values(&mut self, values: Option<&[Option<f64>]>);
+}
+
+impl NullableFloatListBuilder for ListBuilder<Float64Builder> {
+    fn append_nullable_values(&mut self, values: Option<&[Option<f64>]>) {
+        let Some(values) = values else {
+            self.append(false);
+            return;
+        };
+        for value in values {
+            match value {
+                Some(value) => self.values().append_value(*value),
+                None => self.values().append_null(),
+            }
         }
+        self.append(true);
     }
-    builder.append(true);
 }
 
 trait EpisodeSample {
@@ -445,93 +457,54 @@ impl EpisodeSample for Sample {
     fn validate_for(&self, start: &EpisodeStart) -> Result<(), EpisodeError> {
         let sample = self;
         if !self.seconds().is_finite() || self.seconds() < 0.0 {
-            return Err(invalid("sample time must be finite and non-negative"));
+            return Err(EpisodeError::invalid(
+                "sample time must be finite and non-negative",
+            ));
         }
         if sample
             .follow_error_degrees()
             .is_some_and(|value| !value.is_finite())
         {
-            return Err(invalid("follow error must be finite when present"));
+            return Err(EpisodeError::invalid(
+                "follow error must be finite when present",
+            ));
         }
-        validate_outer_shape(
-            "normalized position",
-            start.arms().len(),
-            sample.normalized().len(),
-        )?;
-        validate_outer_shape("raw position", start.arms().len(), sample.raw().len())?;
+        Shape::new(start.arms().len(), sample.normalized().len())
+            .validate_streams("normalized position")?;
+        Shape::new(start.arms().len(), sample.raw().len()).validate_streams("raw position")?;
         if let Some(velocity) = &sample.velocity() {
-            validate_outer_shape("velocity", start.arms().len(), velocity.len())?;
+            Shape::new(start.arms().len(), velocity.len()).validate_streams("velocity")?;
         }
         if let Some(effort) = &sample.effort() {
-            validate_outer_shape("effort", start.arms().len(), effort.len())?;
+            Shape::new(start.arms().len(), effort.len()).validate_streams("effort")?;
         }
         if !sample.action().is_empty() {
-            validate_outer_shape("action", start.arms().len(), sample.action().len())?;
+            Shape::new(start.arms().len(), sample.action().len()).validate_streams("action")?;
         }
 
         for (arm_index, arm) in start.arms().iter().enumerate() {
-            validate_joint_shape(
-                "normalized position",
-                arm.id(),
-                Shape {
-                    expected: arm.joints().len(),
-                    actual: sample.normalized()[arm_index].len(),
-                },
-            )?;
-            validate_joint_shape(
-                "raw position",
-                arm.id(),
-                Shape {
-                    expected: arm.joints().len(),
-                    actual: sample.raw()[arm_index].len(),
-                },
-            )?;
-            validate_finite_values("normalized position", &sample.normalized()[arm_index])?;
+            Shape::new(arm.joints().len(), sample.normalized()[arm_index].len())
+                .validate_joints("normalized position", arm.id())?;
+            Shape::new(arm.joints().len(), sample.raw()[arm_index].len())
+                .validate_joints("raw position", arm.id())?;
+            sample.normalized()[arm_index].validate_finite("normalized position")?;
             if let Some(action) = sample.action().get(arm_index).and_then(Option::as_ref) {
-                validate_joint_shape(
-                    "action",
-                    arm.id(),
-                    Shape {
-                        expected: arm.joints().len(),
-                        actual: action.len(),
-                    },
-                )?;
-                validate_finite_values("action", action)?;
+                Shape::new(arm.joints().len(), action.len()).validate_joints("action", arm.id())?;
+                action.validate_finite("action")?;
             }
             if let Some(velocity) = &sample.velocity() {
-                validate_joint_shape(
-                    "velocity",
-                    arm.id(),
-                    Shape {
-                        expected: arm.joints().len(),
-                        actual: velocity[arm_index].len(),
-                    },
-                )?;
-                validate_finite_values("velocity", &velocity[arm_index])?;
+                Shape::new(arm.joints().len(), velocity[arm_index].len())
+                    .validate_joints("velocity", arm.id())?;
+                velocity[arm_index].validate_finite("velocity")?;
             }
             if let Some(effort) = &sample.effort() {
-                validate_joint_shape(
-                    "effort",
-                    arm.id(),
-                    Shape {
-                        expected: arm.joints().len(),
-                        actual: effort[arm_index].len(),
-                    },
-                )?;
-                validate_finite_values("effort", &effort[arm_index])?;
+                Shape::new(arm.joints().len(), effort[arm_index].len())
+                    .validate_joints("effort", arm.id())?;
+                effort[arm_index].validate_finite("effort")?;
             }
         }
         Ok(())
     }
-}
-
-fn validate_outer_shape(label: &str, expected: usize, actual: usize) -> Result<(), EpisodeError> {
-    if expected == actual {
-        return Ok(());
-    }
-    Err(invalid(format!(
-        "{label} has {actual} arm streams, expected {expected}"
-    )))
 }
 
 #[derive(Clone, Copy)]
@@ -540,36 +513,62 @@ struct Shape {
     actual: usize,
 }
 
-fn validate_joint_shape(label: &str, arm: &str, shape: Shape) -> Result<(), EpisodeError> {
-    if shape.expected == shape.actual {
-        return Ok(());
+impl Shape {
+    const fn new(expected: usize, actual: usize) -> Self {
+        Self { expected, actual }
     }
-    Err(invalid(format!(
-        "{label} for arm {arm:?} has {} joints, expected {}",
-        shape.actual, shape.expected
-    )))
+
+    fn validate_streams(self, label: &str) -> Result<(), EpisodeError> {
+        if self.expected == self.actual {
+            return Ok(());
+        }
+        Err(EpisodeError::invalid(format!(
+            "{label} has {} arm streams, expected {}",
+            self.actual, self.expected
+        )))
+    }
+
+    fn validate_joints(self, label: &str, arm: &str) -> Result<(), EpisodeError> {
+        if self.expected == self.actual {
+            return Ok(());
+        }
+        Err(EpisodeError::invalid(format!(
+            "{label} for arm {arm:?} has {} joints, expected {}",
+            self.actual, self.expected
+        )))
+    }
 }
 
-fn validate_finite_values(label: &str, values: &[Option<f64>]) -> Result<(), EpisodeError> {
-    if values.iter().flatten().all(|value| value.is_finite()) {
-        return Ok(());
-    }
-    Err(invalid(format!("{label} contains a non-finite value")))
+trait FiniteOptionalValues {
+    fn validate_finite(&self, label: &str) -> Result<(), EpisodeError>;
 }
 
-fn seconds_to_ns(seconds: f64, label: &str) -> Result<u64, EpisodeError> {
-    if !seconds.is_finite() || seconds < 0.0 {
-        return Err(invalid(format!("{label} must be finite and non-negative")));
+impl FiniteOptionalValues for [Option<f64>] {
+    fn validate_finite(&self, label: &str) -> Result<(), EpisodeError> {
+        if self.iter().flatten().all(|value| value.is_finite()) {
+            return Ok(());
+        }
+        Err(EpisodeError::invalid(format!(
+            "{label} contains a non-finite value"
+        )))
     }
-    let nanos = seconds * 1_000_000_000.0;
-    if nanos > u64::MAX as f64 {
-        return Err(invalid(format!("{label} is too large")));
-    }
-    Ok(nanos.round() as u64)
 }
 
-fn invalid(message: impl Into<String>) -> EpisodeError {
-    EpisodeError::Invalid(message.into())
+struct EpisodeTimestamp;
+
+impl EpisodeTimestamp {
+    fn nanoseconds(seconds: f64, label: &str) -> Result<u64, EpisodeError> {
+        if !seconds.is_finite() || seconds < 0.0 {
+            return Err(EpisodeError::invalid(format!(
+                "{label} must be finite and non-negative"
+            )));
+        }
+        let nanos = seconds * 1_000_000_000.0;
+        if nanos > u64::MAX as f64 {
+            return Err(EpisodeError::invalid(format!("{label} is too large")));
+        }
+        Ok(nanos.round() as u64)
+    }
 }
 
 #[cfg(test)]
@@ -584,10 +583,10 @@ mod tests {
     #[test]
     fn persisted_arrow_schemas_match_the_shared_contract() {
         for (table, schema) in [
-            (Table::Datasets, datasets_schema()),
-            (Table::Episodes, episodes_schema()),
-            (Table::EpisodeStreams, episode_streams_schema()),
-            (Table::JointSamples, joint_samples_schema()),
+            (Table::Datasets, EpisodeSchema::datasets()),
+            (Table::Episodes, EpisodeSchema::episodes()),
+            (Table::EpisodeStreams, EpisodeSchema::episode_streams()),
+            (Table::JointSamples, EpisodeSchema::joint_samples()),
         ] {
             let actual = schema
                 .fields()

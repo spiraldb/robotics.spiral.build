@@ -220,26 +220,30 @@ pub const ROBOT_CONFIGURATION_COLUMN: &str = column::CONFIG_JSON;
 /// Column carrying the robot configuration's last-update timestamp.
 pub const ROBOT_UPDATED_MILLIS_COLUMN: &str = column::UPDATED_MS;
 
-/// Fully qualify the robot-configuration relation in the active namespace.
-pub fn robot_configuration_relation(namespace: &str) -> String {
-    Table::Robots.qualified_name(namespace)
-}
+/// Public entry point for physical storage-schema naming and validation.
+pub struct StorageSchema;
 
-/// Whether a value is safe to interpolate as an unquoted SQL identifier.
-pub fn is_identifier(value: &str) -> bool {
-    spiral_robotics_core::query::UnquotedSqlIdentifier::try_from(value).is_ok()
-}
+impl StorageSchema {
+    /// Fully qualify the robot-configuration relation in the active namespace.
+    pub fn robot_configuration_relation(namespace: &str) -> String {
+        Table::Robots.qualified_name(namespace)
+    }
 
-/// Whether a value is safe as a logical dataset row identifier.
-pub fn is_dataset_id(value: &str) -> bool {
-    spiral_robotics_core::identity::DatasetId::try_from(value)
-        .is_ok_and(|identity| identity.as_str() == value)
-}
+    /// Whether a value is safe to interpolate as an unquoted SQL identifier.
+    pub fn is_identifier(value: &str) -> bool {
+        spiral_robotics_core::query::UnquotedSqlIdentifier::try_from(value).is_ok()
+    }
 
-/// Convert an external immutable ID into one component of a generated name.
-#[cfg(test)]
-fn identifier_component(value: &str) -> String {
-    spiral_robotics_core::identity::SqlNameComponent::from(value).into_string()
+    /// Whether a value is safe as a logical dataset row identifier.
+    pub fn is_dataset_id(value: &str) -> bool {
+        spiral_robotics_core::identity::DatasetId::is_canonical(value)
+    }
+
+    /// Convert an external immutable ID into one component of a generated name.
+    #[cfg(test)]
+    fn identifier_component(value: &str) -> String {
+        spiral_robotics_core::identity::SqlNameComponent::from(value).into_string()
+    }
 }
 
 #[cfg(test)]
@@ -272,16 +276,19 @@ mod tests {
 
     #[test]
     fn identifiers_follow_the_sql_contract() {
-        assert!(is_identifier("spiral_robotics_v3"));
-        assert!(!is_identifier("spiral-robotics-v3"));
-        assert!(!is_identifier("3spiral_robotics"));
-        assert!(is_dataset_id("2026.pick-place_v1"));
-        assert!(!is_dataset_id("pick place"));
-        assert!(!is_dataset_id(""));
-        assert_eq!(identifier_component("episode_37"), "episode_37");
+        assert!(StorageSchema::is_identifier("spiral_robotics_v3"));
+        assert!(!StorageSchema::is_identifier("spiral-robotics-v3"));
+        assert!(!StorageSchema::is_identifier("3spiral_robotics"));
+        assert!(StorageSchema::is_dataset_id("2026.pick-place_v1"));
+        assert!(!StorageSchema::is_dataset_id("pick place"));
+        assert!(!StorageSchema::is_dataset_id(""));
+        assert_eq!(
+            StorageSchema::identifier_component("episode_37"),
+            "episode_37"
+        );
         assert_ne!(
-            identifier_component("episode-37"),
-            identifier_component("episode_37")
+            StorageSchema::identifier_component("episode-37"),
+            StorageSchema::identifier_component("episode_37")
         );
     }
 }

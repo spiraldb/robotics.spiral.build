@@ -36,6 +36,15 @@ impl MessageSeverity {
             Self::Error => "message-error",
         }
     }
+
+    fn linger_ms(self, text: &str) -> u32 {
+        let reading = 3_500 + (text.chars().count() as u32) * 55;
+        let floor = match self {
+            Self::Error | Self::Warning => 8_000,
+            Self::Info | Self::Success => 4_000,
+        };
+        reading.clamp(floor, 14_000)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,8 +124,15 @@ impl StudioMessage {
         self.source
     }
 
-    pub(crate) const fn raised_ms(&self) -> f64 {
-        self.timing.raised_ms
+    pub(crate) fn age_label(&self, now_ms: f64) -> String {
+        let seconds = ((now_ms - self.timing.raised_ms) / 1_000.0).max(0.0);
+        if seconds < 60.0 {
+            "now".to_owned()
+        } else if seconds < 3_600.0 {
+            format!("{}m", (seconds / 60.0).floor() as u64)
+        } else {
+            format!("{}h", (seconds / 3_600.0).floor() as u64)
+        }
     }
 
     pub(crate) const fn is_read(&self) -> bool {
@@ -172,7 +188,7 @@ impl NotificationCenterState {
         } = notice;
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        let prominent_until_ms = now_ms + f64::from(linger_ms(&text, severity));
+        let prominent_until_ms = now_ms + f64::from(severity.linger_ms(&text));
         self.messages.push_back(StudioMessage {
             id,
             text,
@@ -230,15 +246,6 @@ impl NotificationCenterState {
     pub(crate) fn clear(&mut self) {
         self.messages.clear();
     }
-}
-
-fn linger_ms(text: &str, severity: MessageSeverity) -> u32 {
-    let reading = 3_500 + (text.chars().count() as u32) * 55;
-    let floor = match severity {
-        MessageSeverity::Error | MessageSeverity::Warning => 8_000,
-        MessageSeverity::Info | MessageSeverity::Success => 4_000,
-    };
-    reading.clamp(floor, 14_000)
 }
 
 #[cfg(test)]

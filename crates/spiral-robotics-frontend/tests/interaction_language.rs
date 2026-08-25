@@ -178,7 +178,7 @@ fn failed_project_import_releases_the_blocking_confirmation() {
         "Project import failed. {error}",
         "pending_project_file.set(None);",
         "project_transfer_error.set(Some(error.clone()));",
-        "focus_after_render(\"project-import-input\".to_owned());",
+        "BrowserFocus::after_render(\"project-import-input\".to_owned());",
     ] {
         assert!(
             settings.contains(behavior),
@@ -337,7 +337,7 @@ fn workflow_assistant_receipts_results_and_run_states_are_explicit() {
         "Uncommitted feature work was discarded",
         "any cache publication that completed before cancellation remains authoritative",
         "Run again",
-        "render_assistant_text",
+        "AssistantDocument::parse",
         "role: \"status\"",
         "\"aria-live\": \"polite\"",
     ] {

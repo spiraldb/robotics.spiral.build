@@ -153,10 +153,17 @@ impl CalibrationReapplyResponse {
 pub struct MotorSummary {
     name: String,
     id: u32,
-    #[serde(with = "direction_serde")]
+    #[serde(
+        serialize_with = "direction_serde::DirectionSerde::serialize",
+        deserialize_with = "direction_serde::DirectionSerde::deserialize"
+    )]
     direction: MotorDirection,
     model: Option<String>,
-    #[serde(default, with = "motor_calibration_option_serde")]
+    #[serde(
+        default,
+        serialize_with = "motor_calibration_option_serde::MotorCalibrationOptionSerde::serialize",
+        deserialize_with = "motor_calibration_option_serde::MotorCalibrationOptionSerde::deserialize"
+    )]
     calibration: Option<MotorCalibration>,
     /// What this motor will fault at, read from its EEPROM when it connected.
     ///
@@ -222,27 +229,34 @@ mod direction_serde {
     use serde::{Deserialize, Deserializer, Serializer, de};
     use spiral_robotics_core::calibration::MotorDirection;
 
-    pub(super) fn serialize<S>(direction: &MotorDirection, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(match direction {
-            MotorDirection::Normal => "normal",
-            MotorDirection::Reversed => "reversed",
-        })
-    }
+    pub(super) struct DirectionSerde;
 
-    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<MotorDirection, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        match String::deserialize(deserializer)?.as_str() {
-            "normal" => Ok(MotorDirection::Normal),
-            "reversed" => Ok(MotorDirection::Reversed),
-            direction_name => Err(de::Error::unknown_variant(
-                direction_name,
-                &["normal", "reversed"],
-            )),
+    impl DirectionSerde {
+        pub(super) fn serialize<S>(
+            direction: &MotorDirection,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            serializer.serialize_str(match direction {
+                MotorDirection::Normal => "normal",
+                MotorDirection::Reversed => "reversed",
+            })
+        }
+
+        pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<MotorDirection, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            match String::deserialize(deserializer)?.as_str() {
+                "normal" => Ok(MotorDirection::Normal),
+                "reversed" => Ok(MotorDirection::Reversed),
+                direction_name => Err(de::Error::unknown_variant(
+                    direction_name,
+                    &["normal", "reversed"],
+                )),
+            }
         }
     }
 }
@@ -255,48 +269,57 @@ mod motor_calibration_option_serde {
     #[serde(deny_unknown_fields)]
     struct Wire {
         id: u32,
-        #[serde(with = "super::direction_serde")]
+        #[serde(
+            serialize_with = "super::direction_serde::DirectionSerde::serialize",
+            deserialize_with = "super::direction_serde::DirectionSerde::deserialize"
+        )]
         direction: MotorDirection,
         range_min: i64,
         center: i64,
         range_max: i64,
     }
 
-    pub(super) fn serialize<S>(
-        calibration: &Option<MotorCalibration>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        calibration
-            .map(|motor| {
-                let reading = motor.reading();
-                Wire {
-                    id: motor.id(),
-                    direction: motor.direction(),
-                    range_min: reading.range_min(),
-                    center: reading.center(),
-                    range_max: reading.range_max(),
-                }
-            })
-            .serialize(serializer)
-    }
+    pub(super) struct MotorCalibrationOptionSerde;
 
-    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Option<MotorCalibration>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Option::<Wire>::deserialize(deserializer)?
-            .map(|wire| {
-                MotorCalibration::new(
-                    wire.id,
-                    wire.direction,
-                    MotorReading::new(wire.center, wire.range_min, wire.range_max),
-                )
-                .map_err(de::Error::custom)
-            })
-            .transpose()
+    impl MotorCalibrationOptionSerde {
+        pub(super) fn serialize<S>(
+            calibration: &Option<MotorCalibration>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            calibration
+                .map(|motor| {
+                    let reading = motor.reading();
+                    Wire {
+                        id: motor.id(),
+                        direction: motor.direction(),
+                        range_min: reading.range_min(),
+                        center: reading.center(),
+                        range_max: reading.range_max(),
+                    }
+                })
+                .serialize(serializer)
+        }
+
+        pub(super) fn deserialize<'de, D>(
+            deserializer: D,
+        ) -> Result<Option<MotorCalibration>, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            Option::<Wire>::deserialize(deserializer)?
+                .map(|wire| {
+                    MotorCalibration::new(
+                        wire.id,
+                        wire.direction,
+                        MotorReading::new(wire.center, wire.range_min, wire.range_max),
+                    )
+                    .map_err(de::Error::custom)
+                })
+                .transpose()
+        }
     }
 }
 
@@ -437,17 +460,22 @@ pub struct CameraMount {
     #[serde(default)]
     rpy: [f64; 3],
     /// Horizontal field of view, in degrees.
-    #[serde(default = "default_field_of_view")]
+    #[serde(default = "CameraMount::default_field_of_view")]
     fov_degrees: f64,
 }
 
 impl CameraMount {
+    /// Field of view assumed for a mount that does not state one.
+    const fn default_field_of_view() -> f64 {
+        62.0
+    }
+
     pub fn new(frame: Option<String>, xyz: [f64; 3], rpy: [f64; 3]) -> Self {
         Self {
             frame,
             xyz,
             rpy,
-            fov_degrees: default_field_of_view(),
+            fov_degrees: Self::default_field_of_view(),
         }
     }
 
@@ -463,15 +491,6 @@ impl CameraMount {
     pub const fn rpy(&self) -> [f64; 3] {
         self.rpy
     }
-}
-
-/// Field of view assumed for a mount that does not state one.
-///
-/// A middling webcam lens. It is a drawing default, not a measurement, and the
-/// frustum it produces answers "is this pointed at the workspace" rather than
-/// "what exactly is in shot".
-fn default_field_of_view() -> f64 {
-    62.0
 }
 
 /// Whether a robot's motor bus is currently open.

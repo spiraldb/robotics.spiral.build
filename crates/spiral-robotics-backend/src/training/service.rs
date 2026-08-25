@@ -23,6 +23,26 @@ const ACT_IMAGE_RUNTIME_MULTIPLIER: usize = 4;
 /// workspace reserve. All ACT trainable tensors use f32 today.
 const ACT_TRAINING_BYTES_PER_TRANSFORMER_PARAMETER: usize = 5 * std::mem::size_of::<f32>();
 
+struct ActTrainingResourceEstimate(Option<usize>);
+
+impl ActTrainingResourceEstimate {
+    fn for_command(command: &StartTrainingCommand, runtime_image_bytes: usize) -> Self {
+        Self(command.estimated_act_resource_bytes(runtime_image_bytes))
+    }
+
+    fn enforce(self) -> Result<(), OperationError> {
+        if self
+            .0
+            .is_none_or(|bytes| bytes > MAX_ACT_TRAINING_RESOURCE_BYTES)
+        {
+            return Err(OperationError::invalid_input(format!(
+                "ACT model and optimizer may not exceed the {MAX_ACT_TRAINING_RESOURCE_BYTES}-byte remote compute-session budget. Reduce hidden size, feed-forward size, layer count, batch size, cameras, or image dimensions."
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TrainingPolicy {
     Act,
@@ -423,6 +443,21 @@ impl DeleteTrainingRunCommand {
         Self {
             run_id: run_id.into(),
         }
+    }
+
+    fn validated_run_id(self) -> Result<String, OperationError> {
+        let run_id = self.run_id.trim().to_owned();
+        if run_id.is_empty()
+            || run_id.len() > 128
+            || !run_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        {
+            return Err(OperationError::InvalidInput(
+                "Training run ID is invalid.".to_owned(),
+            ));
+        }
+        Ok(run_id)
     }
 }
 
@@ -930,79 +965,78 @@ pub(crate) trait TrainingPort: Send + Sync {
     async fn delete_training(&self, run_id: String) -> Result<(), OperationError>;
 }
 
-pub(crate) fn list_training<P: TrainingPort + ?Sized>(port: &P) -> TrainingSnapshot {
-    port.training_snapshot()
+pub(crate) struct TrainingActions<'a, P: ?Sized> {
+    port: &'a P,
 }
 
-pub(crate) async fn start_training<P: TrainingPort + ?Sized>(
-    port: &P,
-    command: StartTrainingCommand,
-) -> Result<TrainingRun, OperationError> {
-    let command = command.validated()?;
-    port.start_training(command).await
-}
+impl<'a, P: TrainingPort + ?Sized> TrainingActions<'a, P> {
+    pub(crate) fn new(port: &'a P) -> Self {
+        Self { port }
+    }
 
-pub(crate) fn stop_training<P: TrainingPort + ?Sized>(
-    port: &P,
-    run_id: &str,
-) -> Result<(), OperationError> {
-    port.stop_training(run_id)
-}
+    pub(crate) fn list(&self) -> TrainingSnapshot {
+        self.port.training_snapshot()
+    }
 
-/// Delete one inactive run and every artifact owned by it.
-///
-/// Admission checks happen before crossing the deletion boundary so the
-/// adapter never removes a checkpoint that is training or driving an arm.
-pub(crate) async fn delete_training<P: TrainingPort + ?Sized>(
-    port: &P,
-    activity: TrainingRunActivity,
-    command: DeleteTrainingRunCommand,
-) -> Result<(), OperationError> {
-    let run_id = validate_run_id(command.run_id)?;
-    let Some(run) = port.training_run_status(&run_id) else {
-        return Err(OperationError::NotFound(format!(
-            "training run {run_id:?} is no longer available"
-        )));
-    };
-    if run.active {
-        return Err(OperationError::Conflict(format!(
-            "training run {run_id:?} is still active; stop it before deleting it"
-        )));
+    pub(crate) async fn start(
+        &self,
+        command: StartTrainingCommand,
+    ) -> Result<TrainingRun, OperationError> {
+        self.port.start_training(command.validated()?).await
     }
-    if activity.rollout.as_deref() == Some(run_id.as_str()) {
-        return Err(OperationError::Conflict(format!(
-            "training run {run_id:?} is in use by Rollout; stop Rollout before deleting it"
-        )));
-    }
-    port.delete_training(run_id).await
-}
 
-pub(crate) fn admit_rollout<T>(
-    training: &T,
-    command: RolloutRequest,
-) -> Result<RolloutRequest, OperationError>
-where
-    T: TrainingPort + ?Sized,
-{
-    let command = command.validated()?;
-    let Some(run) = training.training_run_status(command.run_id()) else {
-        return Err(OperationError::InvalidInput(
-            "the selected training run is no longer available".to_owned(),
-        ));
-    };
-    if run.active {
-        return Err(OperationError::InvalidInput(
-            "stop or finish training before starting a rollout".to_owned(),
-        ));
+    pub(crate) fn stop(&self, run_id: &str) -> Result<(), OperationError> {
+        self.port.stop_training(run_id)
     }
-    if !run.checkpoints.iter().any(|checkpoint| {
-        checkpoint.step == command.checkpoint_step() && checkpoint.inference_ready
-    }) {
-        return Err(OperationError::InvalidInput(
-            "the selected checkpoint is no longer available".to_owned(),
-        ));
+
+    pub(crate) async fn delete(
+        &self,
+        activity: TrainingRunActivity,
+        command: DeleteTrainingRunCommand,
+    ) -> Result<(), OperationError> {
+        let run_id = command.validated_run_id()?;
+        let Some(run) = self.port.training_run_status(&run_id) else {
+            return Err(OperationError::NotFound(format!(
+                "training run {run_id:?} is no longer available"
+            )));
+        };
+        if run.active {
+            return Err(OperationError::Conflict(format!(
+                "training run {run_id:?} is still active; stop it before deleting it"
+            )));
+        }
+        if activity.rollout.as_deref() == Some(run_id.as_str()) {
+            return Err(OperationError::Conflict(format!(
+                "training run {run_id:?} is in use by Rollout; stop Rollout before deleting it"
+            )));
+        }
+        self.port.delete_training(run_id).await
     }
-    Ok(command)
+
+    pub(crate) fn admit_rollout(
+        &self,
+        command: RolloutRequest,
+    ) -> Result<RolloutRequest, OperationError> {
+        let command = command.validated()?;
+        let Some(run) = self.port.training_run_status(command.run_id()) else {
+            return Err(OperationError::invalid_input(
+                "the selected training run is no longer available",
+            ));
+        };
+        if run.active {
+            return Err(OperationError::invalid_input(
+                "stop or finish training before starting a rollout",
+            ));
+        }
+        if !run.checkpoints.iter().any(|checkpoint| {
+            checkpoint.step == command.checkpoint_step() && checkpoint.inference_ready
+        }) {
+            return Err(OperationError::invalid_input(
+                "the selected checkpoint is no longer available",
+            ));
+        }
+        Ok(command)
+    }
 }
 
 impl StartTrainingCommand {
@@ -1017,7 +1051,9 @@ impl StartTrainingCommand {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
         {
-            return invalid("Run name must use 1–80 letters, numbers, '.', '_' or '-' characters.");
+            return Err(OperationError::invalid_input(
+                "Run name must use 1–80 letters, numbers, '.', '_' or '-' characters.",
+            ));
         }
         DatasetId::try_from(command.dataset_id()).map_err(|_| {
             OperationError::InvalidInput(
@@ -1032,11 +1068,15 @@ impl StartTrainingCommand {
             ("Action column", command.action_column()),
         ] {
             if UnquotedSqlIdentifier::try_from(column).is_err() {
-                return invalid(format!("{label} must be a SQL identifier."));
+                return Err(OperationError::invalid_input(format!(
+                    "{label} must be a SQL identifier."
+                )));
             }
         }
         if command.state_column() == command.action_column() {
-            return invalid("State and action columns must be different.");
+            return Err(OperationError::invalid_input(
+                "State and action columns must be different.",
+            ));
         }
         if command.device().is_empty()
             || command.device().len() > 64
@@ -1045,39 +1085,55 @@ impl StartTrainingCommand {
                     || matches!(byte, b'_' | b'-' | b'.' | b':' | b'/' | b'+')
             })
         {
-            return invalid(
+            return Err(OperationError::invalid_input(
                 "Training device must be a 1–64 character identifier advertised by the runtime.",
-            );
+            ));
         }
         if !(1..=10_000_000).contains(&command.steps()) {
-            return invalid("Training steps must be between 1 and 10,000,000.");
+            return Err(OperationError::invalid_input(
+                "Training steps must be between 1 and 10,000,000.",
+            ));
         }
         if !(1..=512).contains(&command.batch_size()) {
-            return invalid("Batch size must be between 1 and 512.");
+            return Err(OperationError::invalid_input(
+                "Batch size must be between 1 and 512.",
+            ));
         }
         if !command.validation_split().is_finite()
             || !(0.0..=0.5).contains(&command.validation_split())
         {
-            return invalid("Validation split must be between 0% and 50%.");
+            return Err(OperationError::invalid_input(
+                "Validation split must be between 0% and 50%.",
+            ));
         }
         if !(1..=256).contains(&command.chunk_size()) {
-            return invalid("Action chunk size must be between 1 and 256.");
+            return Err(OperationError::invalid_input(
+                "Action chunk size must be between 1 and 256.",
+            ));
         }
         if command
             .batch_size()
             .checked_mul(command.chunk_size())
             .is_none_or(|rows| rows > 8_192)
         {
-            return invalid("Batch size × action chunk size may not exceed 8,192 manifest rows.");
+            return Err(OperationError::invalid_input(
+                "Batch size × action chunk size may not exceed 8,192 manifest rows.",
+            ));
         }
         if command.checkpoint_every() == 0 || command.checkpoint_every() > command.steps() {
-            return invalid("Checkpoint cadence must be between 1 and the run step count.");
+            return Err(OperationError::invalid_input(
+                "Checkpoint cadence must be between 1 and the run step count.",
+            ));
         }
         if !command.learning_rate().is_finite() || command.learning_rate() <= 0.0 {
-            return invalid("Learning rate must be a finite positive number.");
+            return Err(OperationError::invalid_input(
+                "Learning rate must be a finite positive number.",
+            ));
         }
         if command.act().camera_streams().len() > 8 {
-            return invalid("ACT supports at most eight camera streams.");
+            return Err(OperationError::invalid_input(
+                "ACT supports at most eight camera streams.",
+            ));
         }
         let mut camera_streams = BTreeSet::new();
         for stream in command.act().camera_streams() {
@@ -1086,10 +1142,14 @@ impl StartTrainingCommand {
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
             {
-                return invalid(format!("Invalid ACT camera stream {stream:?}."));
+                return Err(OperationError::invalid_input(format!(
+                    "Invalid ACT camera stream {stream:?}."
+                )));
             }
             if !camera_streams.insert(stream) {
-                return invalid(format!("ACT camera stream {stream:?} is repeated."));
+                return Err(OperationError::invalid_input(format!(
+                    "ACT camera stream {stream:?} is repeated."
+                )));
             }
         }
         let native_images = command.act().image_width() == 0 && command.act().image_height() == 0;
@@ -1097,9 +1157,9 @@ impl StartTrainingCommand {
             && (!(32..=1_024).contains(&command.act().image_width())
                 || !(32..=1_024).contains(&command.act().image_height()))
         {
-            return invalid(
+            return Err(OperationError::invalid_input(
                 "ACT image width and height must both be zero (native) or between 32 and 1,024.",
-            );
+            ));
         }
         let runtime_image_bytes = if native_images {
             // The adapter repeats the exact check after resolving native dataset
@@ -1125,9 +1185,9 @@ impl StartTrainingCommand {
                 .and_then(|values| values.checked_mul(command.act().image_height()))
                 .and_then(|values| values.checked_mul(std::mem::size_of::<f32>()));
             if image_bytes.is_none_or(|bytes| bytes > MAX_TRAINING_IMAGE_BATCH_BYTES) {
-                return invalid(format!(
+                return Err(OperationError::invalid_input(format!(
                     "ACT expanded f32 image batch may not exceed {MAX_TRAINING_IMAGE_BATCH_BYTES} bytes. Reduce batch size, camera count, or image dimensions."
-                ));
+                )));
             }
             image_bytes.expect("checked runtime image byte count")
         };
@@ -1135,10 +1195,14 @@ impl StartTrainingCommand {
             command.act().video_decoder(),
             "auto" | "ffmpeg" | "videotoolbox" | "nvdec"
         ) {
-            return invalid("ACT video decoder must be auto, ffmpeg, videotoolbox, or nvdec.");
+            return Err(OperationError::invalid_input(
+                "ACT video decoder must be auto, ffmpeg, videotoolbox, or nvdec.",
+            ));
         }
         if !(1..=16).contains(&command.act().attention_heads()) {
-            return invalid("ACT attention heads must be between 1 and 16.");
+            return Err(OperationError::invalid_input(
+                "ACT attention heads must be between 1 and 16.",
+            ));
         }
         if !(64..=1_024).contains(&command.act().hidden_dim())
             || !command.act().hidden_dim().is_multiple_of(4)
@@ -1147,9 +1211,9 @@ impl StartTrainingCommand {
                 .hidden_dim()
                 .is_multiple_of(command.act().attention_heads())
         {
-            return invalid(
+            return Err(OperationError::invalid_input(
                 "ACT hidden size must be 64–1,024 and divisible by four and the attention-head count.",
-            );
+            ));
         }
         if !(1..=12).contains(&command.act().encoder_layers())
             || !(1..=12).contains(&command.act().vae_encoder_layers())
@@ -1158,82 +1222,55 @@ impl StartTrainingCommand {
             || command.act().feedforward_dim() < command.act().hidden_dim()
             || command.act().feedforward_dim() > 16_384
         {
-            return invalid("ACT transformer configuration is outside the supported range.");
+            return Err(OperationError::invalid_input(
+                "ACT transformer configuration is outside the supported range.",
+            ));
         }
-        enforce_act_training_resource_budget(estimate_act_training_resource_bytes(
-            &command,
-            runtime_image_bytes,
-        ))?;
+        ActTrainingResourceEstimate::for_command(command, runtime_image_bytes).enforce()?;
         if !command.act().kl_weight().is_finite() || command.act().kl_weight() < 0.0 {
-            return invalid("ACT KL weight must be finite and non-negative.");
+            return Err(OperationError::invalid_input(
+                "ACT KL weight must be finite and non-negative.",
+            ));
         }
         Ok(self)
     }
-}
 
-fn validate_run_id(run_id: String) -> Result<String, OperationError> {
-    let run_id = run_id.trim().to_owned();
-    if run_id.is_empty()
-        || run_id.len() > 128
-        || !run_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-    {
-        return invalid("Training run ID is invalid.");
+    /// Conservatively estimate memory owned while one ACT optimizer step is
+    /// live, including transformer parameters and expanded image tensors.
+    fn estimated_act_resource_bytes(&self, runtime_image_bytes: usize) -> Option<usize> {
+        let hidden = self.act().hidden_dim();
+        let feedforward = self.act().feedforward_dim();
+        let hidden_squared = hidden.checked_mul(hidden)?;
+        let hidden_feedforward = hidden.checked_mul(feedforward)?;
+
+        // Encoder/CVAE encoder: one self-attention, one feed-forward pair, two
+        // norms. Decoder: self + cross attention, one feed-forward pair, 3 norms.
+        let encoder_parameters = hidden_squared
+            .checked_mul(4)?
+            .checked_add(hidden_feedforward.checked_mul(2)?)?
+            .checked_add(hidden.checked_mul(9)?)?
+            .checked_add(feedforward)?;
+        let decoder_parameters = hidden_squared
+            .checked_mul(8)?
+            .checked_add(hidden_feedforward.checked_mul(2)?)?
+            .checked_add(hidden.checked_mul(15)?)?
+            .checked_add(feedforward)?;
+        let encoder_count = self
+            .act()
+            .encoder_layers()
+            .checked_add(self.act().vae_encoder_layers())?;
+        let transformer_parameters = encoder_parameters
+            .checked_mul(encoder_count)?
+            .checked_add(decoder_parameters.checked_mul(self.act().decoder_layers())?)?
+            .checked_add(hidden.checked_mul(self.act().latent_dim())?)?
+            .checked_add(hidden.checked_mul(self.chunk_size())?)?;
+        let transformer_training_bytes =
+            transformer_parameters.checked_mul(ACT_TRAINING_BYTES_PER_TRANSFORMER_PARAMETER)?;
+        let image_runtime_bytes = runtime_image_bytes.checked_mul(ACT_IMAGE_RUNTIME_MULTIPLIER)?;
+        transformer_training_bytes
+            .checked_add(image_runtime_bytes)?
+            .checked_add(ACT_NON_TRANSFORMER_RESOURCE_RESERVE_BYTES)
     }
-    Ok(run_id)
-}
-
-/// Conservative, checked estimate for memory owned while one ACT optimizer
-/// step is live. The exact state/action projections are dataset-dependent, so
-/// a fixed non-transformer reserve covers those, ResNet-18, CVAE projections,
-/// and backend bookkeeping. Known transformer parameters are counted from the
-/// command, including attention, feed-forward, bias, and norm terms.
-fn estimate_act_training_resource_bytes(
-    command: &StartTrainingCommand,
-    runtime_image_bytes: usize,
-) -> Option<usize> {
-    let hidden = command.act().hidden_dim();
-    let feedforward = command.act().feedforward_dim();
-    let hidden_squared = hidden.checked_mul(hidden)?;
-    let hidden_feedforward = hidden.checked_mul(feedforward)?;
-
-    // Encoder/CVAE encoder: one self-attention, one feed-forward pair, two
-    // norms. Decoder: self + cross attention, one feed-forward pair, 3 norms.
-    let encoder_parameters = hidden_squared
-        .checked_mul(4)?
-        .checked_add(hidden_feedforward.checked_mul(2)?)?
-        .checked_add(hidden.checked_mul(9)?)?
-        .checked_add(feedforward)?;
-    let decoder_parameters = hidden_squared
-        .checked_mul(8)?
-        .checked_add(hidden_feedforward.checked_mul(2)?)?
-        .checked_add(hidden.checked_mul(15)?)?
-        .checked_add(feedforward)?;
-    let encoder_count = command
-        .act()
-        .encoder_layers()
-        .checked_add(command.act().vae_encoder_layers())?;
-    let transformer_parameters = encoder_parameters
-        .checked_mul(encoder_count)?
-        .checked_add(decoder_parameters.checked_mul(command.act().decoder_layers())?)?
-        .checked_add(hidden.checked_mul(command.act().latent_dim())?)?
-        .checked_add(hidden.checked_mul(command.chunk_size())?)?;
-    let transformer_training_bytes =
-        transformer_parameters.checked_mul(ACT_TRAINING_BYTES_PER_TRANSFORMER_PARAMETER)?;
-    let image_runtime_bytes = runtime_image_bytes.checked_mul(ACT_IMAGE_RUNTIME_MULTIPLIER)?;
-    transformer_training_bytes
-        .checked_add(image_runtime_bytes)?
-        .checked_add(ACT_NON_TRANSFORMER_RESOURCE_RESERVE_BYTES)
-}
-
-fn enforce_act_training_resource_budget(estimate: Option<usize>) -> Result<(), OperationError> {
-    if estimate.is_none_or(|bytes| bytes > MAX_ACT_TRAINING_RESOURCE_BYTES) {
-        return invalid(format!(
-            "ACT model and optimizer may not exceed the {MAX_ACT_TRAINING_RESOURCE_BYTES}-byte remote compute-session budget. Reduce hidden size, feed-forward size, layer count, batch size, cameras, or image dimensions."
-        ));
-    }
-    Ok(())
 }
 
 impl RolloutRequest {
@@ -1245,24 +1282,24 @@ impl RolloutRequest {
         )
         .with_duration(self.duration_seconds());
         if command.run_id().is_empty() || command.robot().is_empty() {
-            return invalid("rollout requires a training run and target robot");
+            return Err(OperationError::invalid_input(
+                "rollout requires a training run and target robot",
+            ));
         }
         if command.checkpoint_step() == 0 {
-            return invalid("checkpoint step must be greater than zero");
+            return Err(OperationError::invalid_input(
+                "checkpoint step must be greater than zero",
+            ));
         }
         if RolloutDuration::new(command.duration_seconds()).is_none() {
-            return invalid(format!(
+            return Err(OperationError::invalid_input(format!(
                 "rollout duration_seconds must be between {} and {}",
                 spiral_robotics_core::operation::MIN_ROLLOUT_DURATION_SECONDS,
                 spiral_robotics_core::operation::MAX_ROLLOUT_DURATION_SECONDS,
-            ));
+            )));
         }
         Ok(command)
     }
-}
-
-fn invalid<T>(message: impl Into<String>) -> Result<T, OperationError> {
-    Err(OperationError::InvalidInput(message.into()))
 }
 
 #[cfg(test)]
@@ -1352,7 +1389,10 @@ mod tests {
     #[tokio::test]
     async fn training_validation_is_pure_and_normalizes_identifiers_before_delegating() {
         let training = training(None);
-        start_training(&training, training_command()).await.unwrap();
+        TrainingActions::new(&training)
+            .start(training_command())
+            .await
+            .unwrap();
         let starts = training.starts.lock().unwrap();
         assert_eq!(starts[0].run_name(), "act-run");
         assert_eq!(starts[0].dataset_id(), "demo");
@@ -1367,7 +1407,10 @@ mod tests {
         command.execution.device = " cuda:0 ".to_owned();
 
         let training = training(None);
-        start_training(&training, command).await.unwrap();
+        TrainingActions::new(&training)
+            .start(command)
+            .await
+            .unwrap();
 
         let starts = training.starts.lock().unwrap();
         assert_eq!(starts[0].device(), "cuda:0");
@@ -1395,7 +1438,7 @@ mod tests {
         let training = training(None);
         for command in commands {
             assert!(matches!(
-                start_training(&training, command).await,
+                TrainingActions::new(&training).start(command).await,
                 Err(OperationError::InvalidInput(_))
             ));
         }
@@ -1412,13 +1455,17 @@ mod tests {
         boundary.execution.act.input.image_height = 512;
         // 85 × 1 × 3 × 512 × 512 × 4 = 255 MiB, under the 256 MiB cap.
         let at_boundary = training(None);
-        start_training(&at_boundary, boundary.clone())
+        TrainingActions::new(&at_boundary)
+            .start(boundary.clone())
             .await
             .unwrap();
 
         boundary.execution.progress.batch_size = 86;
         let over_budget = training(None);
-        let error = start_training(&over_budget, boundary).await.unwrap_err();
+        let error = TrainingActions::new(&over_budget)
+            .start(boundary)
+            .await
+            .unwrap_err();
         assert!(error.message().contains("expanded f32 image batch"));
         assert!(over_budget.starts.lock().unwrap().is_empty());
 
@@ -1429,7 +1476,10 @@ mod tests {
         automatic.execution.act.input.image_width = 512;
         automatic.execution.act.input.image_height = 512;
         let training = training(None);
-        let error = start_training(&training, automatic).await.unwrap_err();
+        let error = TrainingActions::new(&training)
+            .start(automatic)
+            .await
+            .unwrap_err();
         assert!(error.message().contains("expanded f32 image batch"));
     }
 
@@ -1447,7 +1497,10 @@ mod tests {
         command.execution.act.model.feedforward_dim = 16_384;
 
         let training = training(None);
-        let error = start_training(&training, command).await.unwrap_err();
+        let error = TrainingActions::new(&training)
+            .start(command)
+            .await
+            .unwrap_err();
         assert!(error.message().contains("model and optimizer"));
         assert!(training.starts.lock().unwrap().is_empty());
     }
@@ -1455,20 +1508,23 @@ mod tests {
     #[test]
     fn aggregate_act_budget_is_inclusive_and_overflow_is_fail_closed() {
         assert!(
-            enforce_act_training_resource_budget(Some(MAX_ACT_TRAINING_RESOURCE_BYTES)).is_ok()
+            ActTrainingResourceEstimate(Some(MAX_ACT_TRAINING_RESOURCE_BYTES))
+                .enforce()
+                .is_ok()
         );
         assert!(
-            enforce_act_training_resource_budget(MAX_ACT_TRAINING_RESOURCE_BYTES.checked_add(1))
+            ActTrainingResourceEstimate(MAX_ACT_TRAINING_RESOURCE_BYTES.checked_add(1))
+                .enforce()
                 .is_err()
         );
-        assert!(enforce_act_training_resource_budget(None).is_err());
+        assert!(ActTrainingResourceEstimate(None).enforce().is_err());
 
         let mut overflow = training_command();
         overflow.execution.act.model.hidden_dim = usize::MAX;
         overflow.execution.act.model.feedforward_dim = usize::MAX;
         overflow.execution.act.layers.encoder_layers = usize::MAX;
         assert!(
-            estimate_act_training_resource_bytes(&overflow, usize::MAX).is_none(),
+            overflow.estimated_act_resource_bytes(usize::MAX).is_none(),
             "checked resource arithmetic must never wrap to an admitted estimate"
         );
     }
@@ -1483,7 +1539,7 @@ mod tests {
                 .with_duration(spiral_robotics_core::operation::MAX_ROLLOUT_DURATION_SECONDS + 1),
         ] {
             assert!(matches!(
-                admit_rollout(&training, command),
+                TrainingActions::new(&training).admit_rollout(command),
                 Err(OperationError::InvalidInput(_))
             ));
         }
@@ -1511,7 +1567,9 @@ mod tests {
             ),
         ] {
             let training = training(run);
-            let error = admit_rollout(&training, rollout_command()).unwrap_err();
+            let error = TrainingActions::new(&training)
+                .admit_rollout(rollout_command())
+                .unwrap_err();
             assert!(error.message().contains(expected));
         }
     }
@@ -1521,27 +1579,31 @@ mod tests {
         let training = training(run(false, 20_000, true));
         let command = rollout_command();
 
-        assert_eq!(admit_rollout(&training, command.clone()), Ok(command));
+        assert_eq!(
+            TrainingActions::new(&training).admit_rollout(command.clone()),
+            Ok(command)
+        );
     }
 
     #[tokio::test]
     async fn deleting_a_run_rejects_training_and_rollout_activity() {
         let command = || DeleteTrainingRunCommand::new("run-1");
         let active_training = training(run(true, 20_000, true));
-        let error = delete_training(&active_training, TrainingRunActivity::default(), command())
+        let error = TrainingActions::new(&active_training)
+            .delete(TrainingRunActivity::default(), command())
             .await
             .unwrap_err();
         assert!(matches!(error, OperationError::Conflict(_)));
         assert!(active_training.deletes.lock().unwrap().is_empty());
 
         let active_rollout = training(run(false, 20_000, true));
-        let error = delete_training(
-            &active_rollout,
-            TrainingRunActivity::new(Some("run-1".to_owned())),
-            command(),
-        )
-        .await
-        .unwrap_err();
+        let error = TrainingActions::new(&active_rollout)
+            .delete(
+                TrainingRunActivity::new(Some("run-1".to_owned())),
+                command(),
+            )
+            .await
+            .unwrap_err();
         assert!(matches!(error, OperationError::Conflict(_)));
         assert!(active_rollout.deletes.lock().unwrap().is_empty());
     }
@@ -1549,23 +1611,23 @@ mod tests {
     #[tokio::test]
     async fn deleting_a_missing_run_is_not_found_and_an_idle_run_delegates_once() {
         let missing = training(None);
-        let error = delete_training(
-            &missing,
-            TrainingRunActivity::default(),
-            DeleteTrainingRunCommand::new("run-1"),
-        )
-        .await
-        .unwrap_err();
+        let error = TrainingActions::new(&missing)
+            .delete(
+                TrainingRunActivity::default(),
+                DeleteTrainingRunCommand::new("run-1"),
+            )
+            .await
+            .unwrap_err();
         assert!(matches!(error, OperationError::NotFound(_)));
 
         let idle = training(run(false, 20_000, true));
-        delete_training(
-            &idle,
-            TrainingRunActivity::default(),
-            DeleteTrainingRunCommand::new("run-1"),
-        )
-        .await
-        .unwrap();
+        TrainingActions::new(&idle)
+            .delete(
+                TrainingRunActivity::default(),
+                DeleteTrainingRunCommand::new("run-1"),
+            )
+            .await
+            .unwrap();
         assert_eq!(idle.deletes.lock().unwrap().as_slice(), ["run-1"]);
     }
 }

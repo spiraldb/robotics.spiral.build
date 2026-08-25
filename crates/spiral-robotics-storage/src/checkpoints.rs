@@ -37,7 +37,7 @@ pub struct CheckpointArtifact {
 
 impl CheckpointArtifact {
     pub fn new(config_json: Vec<u8>, payload: Vec<u8>) -> Result<Self, String> {
-        validate_checkpoint_artifact_size(config_json.len(), payload.len())?;
+        Self::validate_size(config_json.len(), payload.len())?;
         Ok(Self {
             config_json,
             payload,
@@ -53,28 +53,25 @@ impl CheckpointArtifact {
     pub fn payload(&self) -> &[u8] {
         &self.payload
     }
-}
 
-/// Validate opaque artifact sizes before adapters copy or materialize them a
-/// second time. Overflow and oversized external rows fail closed.
-pub(crate) fn validate_checkpoint_artifact_size(
-    config_bytes: usize,
-    payload_bytes: usize,
-) -> Result<(), String> {
-    if config_bytes > MAX_CHECKPOINT_CONFIG_BYTES {
-        return Err(format!(
-            "checkpoint configuration exceeds the {MAX_CHECKPOINT_CONFIG_BYTES}-byte limit"
-        ));
+    /// Validate opaque artifact sizes before adapters copy or materialize them
+    /// a second time. Overflow and oversized external rows fail closed.
+    pub(crate) fn validate_size(config_bytes: usize, payload_bytes: usize) -> Result<(), String> {
+        if config_bytes > MAX_CHECKPOINT_CONFIG_BYTES {
+            return Err(format!(
+                "checkpoint configuration exceeds the {MAX_CHECKPOINT_CONFIG_BYTES}-byte limit"
+            ));
+        }
+        if payload_bytes > MAX_CHECKPOINT_ARTIFACT_BYTES {
+            return Err(format!(
+                "checkpoint exceeds the {MAX_CHECKPOINT_ARTIFACT_BYTES}-byte single-artifact limit"
+            ));
+        }
+        config_bytes
+            .checked_add(payload_bytes)
+            .ok_or_else(|| "checkpoint artifact size overflows usize".to_owned())?;
+        Ok(())
     }
-    if payload_bytes > MAX_CHECKPOINT_ARTIFACT_BYTES {
-        return Err(format!(
-            "checkpoint exceeds the {MAX_CHECKPOINT_ARTIFACT_BYTES}-byte single-artifact limit"
-        ));
-    }
-    config_bytes
-        .checked_add(payload_bytes)
-        .ok_or_else(|| "checkpoint artifact size overflows usize".to_owned())?;
-    Ok(())
 }
 
 pub type CheckpointFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
@@ -89,34 +86,31 @@ pub trait CheckpointStore: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        MAX_CHECKPOINT_ARTIFACT_BYTES, MAX_CHECKPOINT_CONFIG_BYTES,
-        validate_checkpoint_artifact_size,
-    };
+    use super::{CheckpointArtifact, MAX_CHECKPOINT_ARTIFACT_BYTES, MAX_CHECKPOINT_CONFIG_BYTES};
 
     #[test]
     fn checkpoint_size_limits_are_inclusive_and_fail_closed() {
         assert!(
-            validate_checkpoint_artifact_size(
+            CheckpointArtifact::validate_size(
                 MAX_CHECKPOINT_CONFIG_BYTES,
                 MAX_CHECKPOINT_ARTIFACT_BYTES
             )
             .is_ok()
         );
         assert!(
-            validate_checkpoint_artifact_size(
+            CheckpointArtifact::validate_size(
                 MAX_CHECKPOINT_CONFIG_BYTES + 1,
                 MAX_CHECKPOINT_ARTIFACT_BYTES
             )
             .is_err()
         );
         assert!(
-            validate_checkpoint_artifact_size(
+            CheckpointArtifact::validate_size(
                 MAX_CHECKPOINT_CONFIG_BYTES,
                 MAX_CHECKPOINT_ARTIFACT_BYTES + 1
             )
             .is_err()
         );
-        assert!(validate_checkpoint_artifact_size(usize::MAX, usize::MAX).is_err());
+        assert!(CheckpointArtifact::validate_size(usize::MAX, usize::MAX).is_err());
     }
 }

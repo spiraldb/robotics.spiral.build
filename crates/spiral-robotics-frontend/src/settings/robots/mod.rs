@@ -19,9 +19,9 @@ use spiral_robotics_api::robots::{
 };
 
 use crate::client::http as api;
-use crate::panels::scene::accent_css;
+use crate::panels::scene::ScenePalette;
 use crate::shell::state::{Selection, Studio, studio};
-use crate::tasks::single_flight;
+use crate::tasks::SingleFlight;
 
 mod calibration;
 mod delete;
@@ -47,7 +47,7 @@ pub(super) fn RobotPanel() -> Element {
                     RobotEntry {
                         key: "{robot.id()}",
                         focused: focused.as_ref().is_some_and(|chosen| chosen.id() == robot.id()),
-                        accent: accent_css(index),
+                        accent: ScenePalette::accent_css(index),
                         robot,
                     }
                 }
@@ -77,7 +77,7 @@ fn RobotEntry(robot: RobotSummary, focused: bool, accent: &'static str) -> Eleme
     let ready = robot.problem().is_none() && robot.port().is_some() && robot.calibrated();
     let mut open = use_signal(|| !ready || !robot.connection().connected());
     let id = robot.id().to_owned();
-    let role = robot_role(robot.robot_type());
+    let role = robot.robot_type().robot_role();
     let state = if robot.problem().is_some() {
         "Needs attention"
     } else if robot.port().is_none() {
@@ -160,9 +160,9 @@ fn NewRobotForm() -> Element {
         let request = CreateRobotRequest::new(name.clone(), Some(robot_type()));
         let selected_name = name.clone();
         studio.run_utility(format!("Created {name}."), async move {
-            let Some(result) = single_flight(
+            let Some(result) = SingleFlight::run(
                 creating,
-                api::send(Method::POST, "/api/robots", Some(&request)),
+                api::Http::send(Method::POST, "/api/robots", Some(&request)),
             )
             .await
             else {
@@ -260,12 +260,12 @@ fn ImportRobotConfiguration() -> Element {
             input: FileInput::new(".json,application/json", move |event: Event<FormData>| {
                 let Some(file) = event.files().first().cloned() else { return };
                 studio.run_utility("", async move {
-                    let Some(result) = single_flight(importing, async {
+                    let Some(result) = SingleFlight::run(importing, async {
                             let bytes = file
                                 .read_bytes()
                                 .await
                                 .map_err(|error| format!("Could not read {}: {error}", file.name()))?;
-                            api::upload_json::<RobotSummary>(
+                            api::Http::upload_json::<RobotSummary>(
                                 "/api/robots/import",
                                 &bytes,
                                 "application/json",
@@ -301,7 +301,7 @@ fn RobotSetup(robot: RobotSummary) -> Element {
     // One scan shared by the picker and the identify workflow, so they can
     // never disagree about which ports exist or which are already taken.
     let mut ports =
-        use_resource(|| async { api::get::<Vec<SerialPortSummary>>("/api/ports").await });
+        use_resource(|| async { api::Http::get::<Vec<SerialPortSummary>>("/api/ports").await });
     let scan = ports.read_unchecked().to_owned();
 
     rsx! {
@@ -323,7 +323,7 @@ fn RobotSetup(robot: RobotSummary) -> Element {
             }
             if let Some(error) = &robot.connection().error() {
                 {
-                    let message = friendly_connection_error(error);
+                    let message = error.friendly_connection_error();
                     rsx! {
                         div { class: "device-setup-alarm",
                             p { "{message}" }
@@ -368,24 +368,36 @@ fn RobotSetup(robot: RobotSummary) -> Element {
     }
 }
 
-fn robot_role(robot_type: Option<&str>) -> &'static str {
-    match robot_type {
-        Some(kind) if kind.contains("leader") => "Leader · hand-guided",
-        Some(kind) if kind.contains("follower") => "Follower · driven",
-        _ => "Robot arm",
+trait RobotTypePresentation {
+    fn robot_role(self) -> &'static str;
+}
+
+impl RobotTypePresentation for Option<&str> {
+    fn robot_role(self) -> &'static str {
+        match self {
+            Some(kind) if kind.contains("leader") => "Leader · hand-guided",
+            Some(kind) if kind.contains("follower") => "Follower · driven",
+            _ => "Robot arm",
+        }
     }
 }
 
-fn friendly_connection_error(error: &str) -> &'static str {
-    let lowered = error.to_ascii_lowercase();
-    if lowered.contains("device or resource busy") || lowered.contains("already in use") {
-        "This arm's serial port is already in use. Close the other connection, then try again."
-    } else if lowered.contains("no such file") || lowered.contains("not found") {
-        "The saved serial port is not available. Choose the connected device, then try again."
-    } else if lowered.contains("permission") || lowered.contains("access denied") {
-        "The studio cannot open this serial port. Check its permissions, then try again."
-    } else {
-        "This arm could not connect. Check its power and serial port, then try again."
+trait RobotConnectionErrorPresentation {
+    fn friendly_connection_error(&self) -> &'static str;
+}
+
+impl RobotConnectionErrorPresentation for str {
+    fn friendly_connection_error(&self) -> &'static str {
+        let lowered = self.to_ascii_lowercase();
+        if lowered.contains("device or resource busy") || lowered.contains("already in use") {
+            "This arm's serial port is already in use. Close the other connection, then try again."
+        } else if lowered.contains("no such file") || lowered.contains("not found") {
+            "The saved serial port is not available. Choose the connected device, then try again."
+        } else if lowered.contains("permission") || lowered.contains("access denied") {
+            "The studio cannot open this serial port. Check its permissions, then try again."
+        } else {
+            "This arm could not connect. Check its power and serial port, then try again."
+        }
     }
 }
 
@@ -425,7 +437,7 @@ fn ConnectionAction(robot: RobotSummary, sweeping: bool) -> Element {
                 let id = id.clone();
                 let action = if connected { "disconnect" } else { "connect" };
                 studio.run("", async move {
-                    single_flight(pending, api::post(&format!("/api/robots/{id}/{action}")))
+                    SingleFlight::run(pending, api::Http::post(&format!("/api/robots/{id}/{action}")))
                         .await
                         .unwrap_or(Ok(()))
                 });
@@ -512,9 +524,9 @@ fn PortSection(robot: RobotSummary, state: PortSectionState) -> Element {
                             return;
                         }
                         spawn(async move {
-                            let Some(result) = single_flight(
+                            let Some(result) = SingleFlight::run(
                                 starting_identify,
-                                api::get::<Vec<SerialPortSummary>>("/api/ports"),
+                                api::Http::get::<Vec<SerialPortSummary>>("/api/ports"),
                             )
                             .await
                             else {
@@ -617,7 +629,7 @@ impl Studio {
             assignment.baud_rate,
         ));
         self.run(format!("Assigned {}.", assignment.path), async move {
-            api::send(
+            api::Http::send(
                 Method::PATCH,
                 &format!("/api/robots/{}", assignment.robot_id),
                 Some(&request),
@@ -683,9 +695,9 @@ fn IdentifyPort(
                             }
                             let request = IdentifyPortRequest::new(before.clone());
                             spawn(async move {
-                                let Some(result) = single_flight(
+                                let Some(result) = SingleFlight::run(
                                     checking,
-                                    api::send_json::<_, IdentifyPortResponse>(
+                                    api::Http::send_json::<_, IdentifyPortResponse>(
                                         Method::POST, "/api/ports/identify", Some(&request)
                                     ),
                                 )
@@ -773,9 +785,9 @@ fn CameraSection(robot: RobotSummary) -> Element {
                             return;
                         }
                         spawn(async move {
-                            if let Some(Err(error)) = single_flight(
+                            if let Some(Err(error)) = SingleFlight::run(
                                 scanning,
-                                api::post("/api/cameras/refresh"),
+                                api::Http::post("/api/cameras/refresh"),
                             )
                             .await
                             {
@@ -852,7 +864,10 @@ fn CameraSection(robot: RobotSummary) -> Element {
                 div { class: "mt-1 overflow-hidden rounded border border-line",
                     img {
                         class: "aspect-video w-full bg-camera object-contain",
-                        src: api::camera_stream_url(camera.id()),
+                        src: {
+                            use crate::client::http::CameraApiPath;
+                            camera.id().camera_stream_url()
+                        },
                         alt: "Live preview from {camera.name()}",
                     }
                     div { class: "flex items-center gap-1 p-1",
@@ -913,9 +928,9 @@ impl Studio {
         }
         let request = UpdateRobotRequest::with_cameras(assignments.bindings);
         self.run("", async move {
-            single_flight(
+            SingleFlight::run(
                 assignments.saving,
-                api::send(
+                api::Http::send(
                     Method::PATCH,
                     &format!("/api/robots/{}", assignments.robot_id),
                     Some(&request),

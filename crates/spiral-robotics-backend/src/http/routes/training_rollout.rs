@@ -1,15 +1,20 @@
 use super::*;
 
-pub(super) fn router() -> Router<AppState> {
-    Router::new()
-        .route(
-            "/training/runs",
-            get(list_training_runs).post(start_training),
-        )
-        .route("/training/runs/{id}", delete(delete_training))
-        .route("/training/runs/{id}/stop", post(stop_training))
-        .route("/rollout", get(get_rollout).post(start_rollout))
-        .route("/rollout/stop", post(stop_rollout))
+impl AppState {
+    pub(super) fn training_rollout_router() -> Router<Self> {
+        Router::new()
+            .route(
+                "/training/runs",
+                get(Self::list_training_runs).post(Self::start_training_run),
+            )
+            .route("/training/runs/{id}", delete(Self::delete_training_run))
+            .route("/training/runs/{id}/stop", post(Self::stop_training_run))
+            .route(
+                "/rollout",
+                get(Self::rollout_state).post(Self::start_rollout),
+            )
+            .route("/rollout/stop", post(Self::stop_rollout))
+    }
 }
 
 impl TrainingPort for TrainingManager {
@@ -207,65 +212,71 @@ impl From<CapabilityRolloutSnapshot> for RolloutSnapshot {
     }
 }
 
-async fn list_training_runs(State(state): State<AppState>) -> Json<TrainingSnapshot> {
-    Json(training_application::list_training(state.training().as_ref()).into())
-}
+impl AppState {
+    async fn list_training_runs(State(state): State<Self>) -> Json<TrainingSnapshot> {
+        Json(
+            TrainingActions::new(state.training().as_ref())
+                .list()
+                .into(),
+        )
+    }
 
-async fn start_training(
-    State(state): State<AppState>,
-    Json(request): Json<StartTrainingRequest>,
-) -> Result<(StatusCode, Json<TrainingRun>), Failure> {
-    let run =
-        training_application::start_training(state.training().as_ref(), request.into()).await?;
-    Ok((StatusCode::CREATED, Json(run.into())))
-}
-
-async fn stop_training(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, Failure> {
-    training_application::stop_training(state.training().as_ref(), &id)?;
-    Ok(StatusCode::ACCEPTED)
-}
-
-async fn delete_training(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, Failure> {
-    let rollout = RolloutManager::snapshot(state.rollout().as_ref());
-    let activity = TrainingRunActivity::new(
-        rollout
-            .phase()
-            .active()
-            .then_some(rollout.run_id())
-            .flatten()
-            .map(str::to_owned),
-    );
-    training_application::delete_training(
-        state.training().as_ref(),
-        activity,
-        DeleteTrainingRunCommand::new(id),
-    )
-    .await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn get_rollout(State(state): State<AppState>) -> Json<RolloutSnapshot> {
-    Json(rollout_application::snapshot(&RolloutHttpAdapter::new(state.rollout().clone())).into())
-}
-
-async fn start_rollout(
-    State(state): State<AppState>,
-    Json(request): Json<StartRolloutRequest>,
-) -> Result<(StatusCode, Json<RolloutSnapshot>), Failure> {
-    let request = training_application::admit_rollout(state.training().as_ref(), request.into())?;
-    let snapshot =
-        rollout_application::start(&RolloutHttpAdapter::new(state.rollout().clone()), request)
+    async fn start_training_run(
+        State(state): State<Self>,
+        Json(request): Json<StartTrainingRequest>,
+    ) -> Result<(StatusCode, Json<TrainingRun>), Failure> {
+        let run = TrainingActions::new(state.training().as_ref())
+            .start(request.into())
             .await?;
-    Ok((StatusCode::ACCEPTED, Json(snapshot.into())))
-}
+        Ok((StatusCode::CREATED, Json(run.into())))
+    }
 
-async fn stop_rollout(State(state): State<AppState>) -> Result<StatusCode, Failure> {
-    rollout_application::stop(&RolloutHttpAdapter::new(state.rollout().clone())).await?;
-    Ok(StatusCode::ACCEPTED)
+    async fn stop_training_run(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+    ) -> Result<StatusCode, Failure> {
+        TrainingActions::new(state.training().as_ref()).stop(&id)?;
+        Ok(StatusCode::ACCEPTED)
+    }
+
+    async fn delete_training_run(
+        State(state): State<Self>,
+        Path(id): Path<String>,
+    ) -> Result<StatusCode, Failure> {
+        let rollout = RolloutManager::snapshot(state.rollout().as_ref());
+        let activity = TrainingRunActivity::new(
+            rollout
+                .phase()
+                .active()
+                .then_some(rollout.run_id())
+                .flatten()
+                .map(str::to_owned),
+        );
+        TrainingActions::new(state.training().as_ref())
+            .delete(activity, DeleteTrainingRunCommand::new(id))
+            .await?;
+        Ok(StatusCode::NO_CONTENT)
+    }
+
+    async fn rollout_state(State(state): State<Self>) -> Json<RolloutSnapshot> {
+        let adapter = RolloutHttpAdapter::new(state.rollout().clone());
+        Json(RolloutActions::new(&adapter).snapshot().into())
+    }
+
+    async fn start_rollout(
+        State(state): State<Self>,
+        Json(request): Json<StartRolloutRequest>,
+    ) -> Result<(StatusCode, Json<RolloutSnapshot>), Failure> {
+        let request =
+            TrainingActions::new(state.training().as_ref()).admit_rollout(request.into())?;
+        let adapter = RolloutHttpAdapter::new(state.rollout().clone());
+        let snapshot = RolloutActions::new(&adapter).start(request).await?;
+        Ok((StatusCode::ACCEPTED, Json(snapshot.into())))
+    }
+
+    async fn stop_rollout(State(state): State<Self>) -> Result<StatusCode, Failure> {
+        let adapter = RolloutHttpAdapter::new(state.rollout().clone());
+        RolloutActions::new(&adapter).stop().await?;
+        Ok(StatusCode::ACCEPTED)
+    }
 }

@@ -42,6 +42,27 @@ pub struct JointDefinition {
 }
 
 impl JointDefinition {
+    /// Look up a stock SO-101 joint by motor name.
+    pub fn so101(name: &str) -> Option<&'static Self> {
+        SO101_JOINTS.iter().find(|joint| joint.name == name)
+    }
+
+    /// Convert a signed encoder-count offset to degrees of shaft rotation.
+    pub fn degrees_from_encoder_counts(counts: i64) -> f64 {
+        counts as f64 * 360.0 / ENCODER_COUNTS_PER_TURN as f64
+    }
+
+    /// Convert degrees of shaft rotation to a signed encoder-count offset.
+    #[cfg(test)]
+    fn encoder_counts_from_degrees(degrees: f64) -> Option<i64> {
+        let counts = (degrees * ENCODER_COUNTS_PER_TURN as f64 / 360.0).round();
+        // `i64::MAX as f64` rounds up to 2^63, so the positive bound must be
+        // exclusive. The negative bound -2^63 is exactly representable.
+        const I64_EXCLUSIVE_UPPER: f64 = 9_223_372_036_854_775_808.0;
+        (counts.is_finite() && counts >= i64::MIN as f64 && counts < I64_EXCLUSIVE_UPPER)
+            .then_some(counts as i64)
+    }
+
     pub const fn name(self) -> &'static str {
         self.name
     }
@@ -94,41 +115,19 @@ pub const SO101_JOINTS: [JointDefinition; 6] = [
     },
 ];
 
-/// Look up a stock SO-101 joint by motor name.
-pub fn so101_joint(name: &str) -> Option<&'static JointDefinition> {
-    SO101_JOINTS.iter().find(|joint| joint.name == name)
-}
-
-/// Build the default motor map for a new SO-101 robot instance.
-pub fn so101_motor_specs() -> BTreeMap<String, MotorSpec> {
-    SO101_JOINTS
-        .iter()
-        .map(|joint| {
-            (
-                joint.name.to_owned(),
-                MotorSpec::new(joint.bus_id, MotorDirection::Normal).with_model(SO101_MOTOR_MODEL),
-            )
-        })
-        .collect()
-}
-
-/// Convert a signed encoder-count offset to degrees of shaft rotation.
-pub fn counts_to_degrees(counts: i64) -> f64 {
-    counts as f64 * 360.0 / ENCODER_COUNTS_PER_TURN as f64
-}
-
-/// Convert degrees of shaft rotation to a signed encoder-count offset.
-///
-/// Motion code must not turn an invalid angle into a plausible zero command,
-/// so non-finite and out-of-range inputs are rejected explicitly.
-#[cfg(test)]
-fn degrees_to_counts(degrees: f64) -> Option<i64> {
-    let counts = (degrees * ENCODER_COUNTS_PER_TURN as f64 / 360.0).round();
-    // `i64::MAX as f64` rounds up to 2^63, so the positive bound must be
-    // exclusive. The negative bound -2^63 is exactly representable.
-    const I64_EXCLUSIVE_UPPER: f64 = 9_223_372_036_854_775_808.0;
-    (counts.is_finite() && counts >= i64::MIN as f64 && counts < I64_EXCLUSIVE_UPPER)
-        .then_some(counts as i64)
+impl MotorSpec {
+    /// Build the default motor map for a new SO-101 robot instance.
+    pub fn so101_arm() -> BTreeMap<String, Self> {
+        SO101_JOINTS
+            .iter()
+            .map(|joint| {
+                (
+                    joint.name.to_owned(),
+                    Self::new(joint.bus_id, MotorDirection::Normal).with_model(SO101_MOTOR_MODEL),
+                )
+            })
+            .collect()
+    }
 }
 
 /// Joint angles relative to each joint's calibrated center.
@@ -148,6 +147,10 @@ pub struct JointAngles {
 }
 
 impl JointAngles {
+    fn finite_or_neutral(degrees: f64) -> f64 {
+        if degrees.is_finite() { degrees } else { 0.0 }
+    }
+
     pub const fn pan_degrees(self) -> f64 {
         self.pan_degrees
     }
@@ -173,27 +176,27 @@ impl JointAngles {
     }
 
     pub fn with_pan_degrees(mut self, degrees: f64) -> Self {
-        self.pan_degrees = finite_or_neutral(degrees);
+        self.pan_degrees = Self::finite_or_neutral(degrees);
         self
     }
 
     pub fn with_lift_degrees(mut self, degrees: f64) -> Self {
-        self.lift_degrees = finite_or_neutral(degrees);
+        self.lift_degrees = Self::finite_or_neutral(degrees);
         self
     }
 
     pub fn with_elbow_degrees(mut self, degrees: f64) -> Self {
-        self.elbow_degrees = finite_or_neutral(degrees);
+        self.elbow_degrees = Self::finite_or_neutral(degrees);
         self
     }
 
     pub fn with_wrist_flex_degrees(mut self, degrees: f64) -> Self {
-        self.wrist_flex_degrees = finite_or_neutral(degrees);
+        self.wrist_flex_degrees = Self::finite_or_neutral(degrees);
         self
     }
 
     pub fn with_wrist_roll_degrees(mut self, degrees: f64) -> Self {
-        self.wrist_roll_degrees = finite_or_neutral(degrees);
+        self.wrist_roll_degrees = Self::finite_or_neutral(degrees);
         self
     }
 
@@ -229,24 +232,24 @@ impl From<&BTreeMap<String, f64>> for JointAngles {
     fn from(named_degrees: &BTreeMap<String, f64>) -> Self {
         let mut angles = Self::default();
         for (name, degrees) in named_degrees {
-            let Some(joint) = so101_joint(name) else {
+            let Some(joint) = JointDefinition::so101(name) else {
                 continue;
             };
             match joint.role {
-                JointRole::Pan => angles.pan_degrees = finite_or_neutral(*degrees),
-                JointRole::Lift => angles.lift_degrees = finite_or_neutral(*degrees),
-                JointRole::Elbow => angles.elbow_degrees = finite_or_neutral(*degrees),
-                JointRole::WristFlex => angles.wrist_flex_degrees = finite_or_neutral(*degrees),
-                JointRole::WristRoll => angles.wrist_roll_degrees = finite_or_neutral(*degrees),
+                JointRole::Pan => angles.pan_degrees = Self::finite_or_neutral(*degrees),
+                JointRole::Lift => angles.lift_degrees = Self::finite_or_neutral(*degrees),
+                JointRole::Elbow => angles.elbow_degrees = Self::finite_or_neutral(*degrees),
+                JointRole::WristFlex => {
+                    angles.wrist_flex_degrees = Self::finite_or_neutral(*degrees);
+                }
+                JointRole::WristRoll => {
+                    angles.wrist_roll_degrees = Self::finite_or_neutral(*degrees);
+                }
                 JointRole::Gripper => {}
             }
         }
         angles
     }
-}
-
-fn finite_or_neutral(degrees: f64) -> f64 {
-    if degrees.is_finite() { degrees } else { 0.0 }
 }
 
 #[cfg(test)]
@@ -265,7 +268,7 @@ mod tests {
         assert_eq!(ids.len(), SO101_JOINTS.len(), "motor IDs must be unique");
         assert_eq!(ids, sorted, "joints must be listed in bus-ID order");
 
-        let specs = so101_motor_specs();
+        let specs = MotorSpec::so101_arm();
         assert_eq!(specs.len(), SO101_JOINTS.len());
         assert_eq!(specs["gripper"].id(), 6);
         assert_eq!(specs["gripper"].model(), Some(SO101_MOTOR_MODEL));
@@ -273,16 +276,30 @@ mod tests {
 
     #[test]
     fn count_and_degree_conversions_round_trip() {
-        assert_eq!(counts_to_degrees(ENCODER_COUNTS_PER_TURN), 360.0);
-        assert_eq!(counts_to_degrees(-1024), -90.0);
-        assert_eq!(degrees_to_counts(90.0), Some(1024));
-        assert_eq!(degrees_to_counts(-360.0), Some(-ENCODER_COUNTS_PER_TURN));
+        assert_eq!(
+            JointDefinition::degrees_from_encoder_counts(ENCODER_COUNTS_PER_TURN),
+            360.0
+        );
+        assert_eq!(JointDefinition::degrees_from_encoder_counts(-1024), -90.0);
+        assert_eq!(
+            JointDefinition::encoder_counts_from_degrees(90.0),
+            Some(1024)
+        );
+        assert_eq!(
+            JointDefinition::encoder_counts_from_degrees(-360.0),
+            Some(-ENCODER_COUNTS_PER_TURN)
+        );
         for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX] {
-            assert_eq!(degrees_to_counts(invalid), None);
+            assert_eq!(JointDefinition::encoder_counts_from_degrees(invalid), None);
         }
 
         for counts in [-2048, -7, 0, 3, 2048] {
-            assert_eq!(degrees_to_counts(counts_to_degrees(counts)), Some(counts));
+            assert_eq!(
+                JointDefinition::encoder_counts_from_degrees(
+                    JointDefinition::degrees_from_encoder_counts(counts)
+                ),
+                Some(counts)
+            );
         }
     }
 

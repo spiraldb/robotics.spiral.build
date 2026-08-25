@@ -12,8 +12,24 @@ pub enum OperationError {
 }
 
 impl OperationError {
+    pub fn invalid_input(message: impl Into<String>) -> Self {
+        Self::InvalidInput(message.into())
+    }
+
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::NotFound(message.into())
+    }
+
     pub fn conflict(message: impl Into<String>) -> Self {
         Self::Conflict(message.into())
+    }
+
+    pub fn external(message: impl Into<String>) -> Self {
+        Self::External(message.into())
+    }
+
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::Internal(message.into())
     }
 
     pub fn message(&self) -> &str {
